@@ -16,6 +16,9 @@
     "build:dev:android": "npm run build:preflight && npx eas-cli@20.1.0 build --profile development --platform android",
     "build:dev:ios": "npm run build:preflight && npx eas-cli@20.1.0 build --profile development --platform ios",
     "build:dev:all": "npm run build:preflight && npx eas-cli@20.1.0 build --profile development --platform all",
+    "build:preview:android": "npm run build:preflight && npx eas-cli@20.1.0 build --profile preview --platform android",
+    "build:preview:ios": "npm run build:preflight && npx eas-cli@20.1.0 build --profile preview --platform ios",
+    "build:preview:all": "npm run build:preflight && npx eas-cli@20.1.0 build --profile preview --platform all",
     "ios": "expo start --ios",
     "android": "expo start --android",
     "typecheck": "tsc --noEmit"
