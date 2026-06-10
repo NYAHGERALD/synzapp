@@ -1,5 +1,7 @@
 import Constants from 'expo-constants';
 
+const SYNZAPP_HOSTED_API_URL = 'https://synzapp-backend.onrender.com';
+
 interface ExpoHostConfig {
   expoConfig?: {
     hostUri?: string;
@@ -28,7 +30,7 @@ export function getSynzappApiBaseUrl(): string {
     return `http://${host}:4100`;
   }
 
-  return 'http://localhost:4100';
+  return SYNZAPP_HOSTED_API_URL;
 }
 
 export function normalizeSynzappApiUrl(pathOrUrl: string | null): string | null {
