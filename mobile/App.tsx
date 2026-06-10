@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -10,7 +10,6 @@ import {
   Text,
   View
 } from 'react-native';
-import { FirebaseRecaptchaVerifierModal } from 'expo-firebase-recaptcha';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AdminChatScreen } from './src/screens/AdminChatScreen';
@@ -19,7 +18,6 @@ import { OrgAdminCodeScreen } from './src/screens/OrgAdminCodeScreen';
 import { OrgAdminOnboardingScreen } from './src/screens/OrgAdminOnboardingScreen';
 import { OrgAdminPhoneScreen } from './src/screens/OrgAdminPhoneScreen';
 import { ProfileRoleSelectionScreen } from './src/screens/ProfileRoleSelectionScreen';
-import { firebaseConfig, isFirebaseConfigured } from './src/services/firebaseConfig';
 import { getUserAuthMessage } from './src/services/authErrors';
 import {
   ACCESS_DENIED_MESSAGE,
@@ -36,33 +34,14 @@ import {
 } from './src/types/auth';
 import { colors } from './src/theme/colors';
 
-const CENTER_RECAPTCHA_SCRIPT = `
-  (function() {
-    var style = document.createElement('style');
-    style.innerHTML = [
-      'html, body { height: 100%; margin: 0; padding: 0; }',
-      'body { align-items: center; background: #fff; display: flex; justify-content: center; min-height: 100vh; }',
-      '#recaptcha-cont { align-items: center; display: flex; justify-content: center; width: 100%; }'
-    ].join(' ');
-    document.head.appendChild(style);
-  })();
-  true;
-`;
-
 export default function App() {
-  const recaptchaVerifier = useRef<FirebaseRecaptchaVerifierModal>(null);
   const [step, setStep] = useState<AuthStep>('phone');
   const [phoneSession, setPhoneSession] = useState<FirebasePhoneSession | null>(null);
   const [verifiedAdmin, setVerifiedAdmin] = useState<VerifiedOrgAdmin | null>(null);
-  const [isRestoringSession, setIsRestoringSession] = useState(isFirebaseConfigured);
+  const [isRestoringSession, setIsRestoringSession] = useState(true);
   const [restoreError, setRestoreError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!isFirebaseConfigured) {
-      setIsRestoringSession(false);
-      return undefined;
-    }
-
     return subscribeToOrgAdminAuthState(
       (nextVerifiedAdmin) => {
         setIsRestoringSession(false);
@@ -159,16 +138,6 @@ export default function App() {
     <SafeAreaProvider style={styles.safeAreaProvider}>
       <SafeAreaView style={styles.safeArea}>
         <StatusBar style="dark" />
-        {isFirebaseConfigured ? (
-          <FirebaseRecaptchaVerifierModal
-            ref={recaptchaVerifier}
-            firebaseConfig={firebaseConfig}
-            title="Synzapp verification"
-            cancelLabel="Cancel"
-            attemptInvisibleVerification={false}
-            injectedJavaScript={CENTER_RECAPTCHA_SCRIPT}
-          />
-        ) : null}
 
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
@@ -196,7 +165,6 @@ export default function App() {
 
               {!isRestoringSession && step === 'phone' ? (
                 <OrgAdminPhoneScreen
-                  recaptchaVerifier={recaptchaVerifier}
                   onCodeSent={handleCodeSent}
                 />
               ) : null}

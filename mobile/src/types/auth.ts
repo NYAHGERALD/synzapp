@@ -1,10 +1,10 @@
-import type { User } from 'firebase/auth';
+import type { FirebaseAuthTypes } from '@react-native-firebase/auth';
 
 export type AuthStep = 'phone' | 'code' | 'role-select' | 'org-admin' | 'employee' | 'chat';
 export type ProfileRoleSelection = 'ORG_ADMIN' | 'EMPLOYEE';
 
 export interface FirebasePhoneSession {
-  verificationId: string;
+  confirmation: FirebaseAuthTypes.ConfirmationResult;
   phoneNumber: string;
 }
 
@@ -21,7 +21,7 @@ export interface EmployeeDraft {
 }
 
 export interface VerifiedOrgAdmin {
-  firebaseUser: User;
+  firebaseUser: FirebaseAuthTypes.User;
   idToken: string;
   phoneNumber: string;
   session: BackendAuthSession;

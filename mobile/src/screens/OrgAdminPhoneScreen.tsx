@@ -1,4 +1,4 @@
-import React, { RefObject, useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ActionSheetIOS,
   ActivityIndicator,
@@ -12,9 +12,7 @@ import {
   TextInput,
   View
 } from 'react-native';
-import type { FirebaseRecaptchaVerifierModal } from 'expo-firebase-recaptcha';
 import { DismissibleError } from '../components/DismissibleError';
-import { isFirebaseConfigured } from '../services/firebaseConfig';
 import { requestOtpPreflight } from '../services/backendAuth';
 import { getUserAuthMessage } from '../services/authErrors';
 import { sendOrgAdminPhoneCode } from '../services/phoneAuth';
@@ -70,11 +68,10 @@ const COUNTRY_OPTIONS: CountryOption[] = [
 const RESEND_COOLDOWN_SECONDS = 45;
 
 interface OrgAdminPhoneScreenProps {
-  recaptchaVerifier: RefObject<FirebaseRecaptchaVerifierModal | null>;
   onCodeSent: (session: FirebasePhoneSession) => void;
 }
 
-export function OrgAdminPhoneScreen({ recaptchaVerifier, onCodeSent }: OrgAdminPhoneScreenProps) {
+export function OrgAdminPhoneScreen({ onCodeSent }: OrgAdminPhoneScreenProps) {
   const [selectedCountry, setSelectedCountry] = useState<CountryOption>(COUNTRY_OPTIONS[0]);
   const [phoneNumber, setPhoneNumber] = useState('');
   const [isCountryPickerOpen, setIsCountryPickerOpen] = useState(false);
@@ -157,10 +154,7 @@ export function OrgAdminPhoneScreen({ recaptchaVerifier, onCodeSent }: OrgAdminP
 
       await requestOtpPreflight(phoneNumberForAuth);
 
-      const session = await sendOrgAdminPhoneCode(
-        phoneNumberForAuth,
-        recaptchaVerifier.current
-      );
+      const session = await sendOrgAdminPhoneCode(phoneNumberForAuth);
       setCooldownUntil(Date.now() + RESEND_COOLDOWN_SECONDS * 1000);
       onCodeSent(session);
     } catch (nextError) {
@@ -190,12 +184,6 @@ export function OrgAdminPhoneScreen({ recaptchaVerifier, onCodeSent }: OrgAdminP
         <View style={styles.header}>
           <Text style={styles.title}>Get started with your number</Text>
         </View>
-
-        {!isFirebaseConfigured ? (
-          <View style={styles.errorBox}>
-            <Text style={styles.errorText}>Secure sign-in is unavailable right now.</Text>
-          </View>
-        ) : null}
 
         <View style={styles.formGroup}>
           <View style={styles.phoneBox}>
@@ -234,12 +222,12 @@ export function OrgAdminPhoneScreen({ recaptchaVerifier, onCodeSent }: OrgAdminP
 
         <Pressable
           accessibilityRole="button"
-          disabled={isSending || !isFirebaseConfigured || !isPhoneNumberComplete || cooldownSeconds > 0}
+          disabled={isSending || !isPhoneNumberComplete || cooldownSeconds > 0}
           onPress={handleSendCode}
           style={({ pressed }) => [
             styles.sendButton,
             pressed && !isSending && styles.pressed,
-            (isSending || !isFirebaseConfigured || !isPhoneNumberComplete || cooldownSeconds > 0) && styles.disabled
+            (isSending || !isPhoneNumberComplete || cooldownSeconds > 0) && styles.disabled
           ]}
         >
           <Text style={styles.sendButtonText}>
@@ -496,20 +484,6 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: '400',
     minHeight: 54
-  },
-  errorBox: {
-    backgroundColor: 'rgba(254, 226, 226, 0.9)',
-    borderColor: 'rgba(185, 28, 28, 0.18)',
-    borderRadius: 10,
-    borderWidth: 1,
-    paddingHorizontal: 12,
-    paddingVertical: 10
-  },
-  errorText: {
-    color: colors.red,
-    fontSize: 14,
-    fontWeight: '500',
-    lineHeight: 19
   },
   sendButton: {
     alignItems: 'center',

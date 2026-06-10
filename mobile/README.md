@@ -51,19 +51,22 @@ npm run build:dev:ios
 
 For Android, EAS produces an installable APK link.
 
-For Android push notifications, also configure Firebase Cloud Messaging for `com.synzapp.mobile`:
+Native development builds use React Native Firebase for phone authentication and Firebase Cloud Messaging for push notifications. Add both Firebase mobile app config files before running EAS builds:
 
 1. In Firebase Console, add an Android app with package `com.synzapp.mobile`.
 2. Download `google-services.json` into `SYNZAPP/mobile/google-services.json`.
-3. Add `"googleServicesFile": "./google-services.json"` under `expo.android` in `app.json`.
-4. In Firebase Console > Project settings > Service accounts, generate a private key.
-5. Upload that service account key to EAS with `npm exec eas -- credentials`, then select Android and FCM V1 push credentials.
+3. In Firebase Console, add an iOS app with bundle ID `com.synzapp.mobile`.
+4. Download `GoogleService-Info.plist` into `SYNZAPP/mobile/GoogleService-Info.plist`.
+5. In Firebase Console > Project settings > Service accounts, generate a private key.
+6. Upload that service account key to EAS with `npx eas-cli@20.1.0 credentials`, then select Android and FCM V1 push credentials.
+
+The Firebase mobile config files are intentionally ignored by Git. They are not ignored by `.easignore`, so EAS can upload them from your local machine during a cloud build.
 
 For iOS real devices, register every tester device before the first iOS build:
 
 ```bash
 cd SYNZAPP/mobile
-npm exec eas -- device:create
+npx eas-cli@20.1.0 device:create
 ```
 
 Use the Apple Developer account when EAS asks for iOS signing credentials, and answer yes when prompted to set up push notifications / APNs.

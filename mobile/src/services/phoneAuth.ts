@@ -1,39 +1,24 @@
-import type { FirebaseRecaptchaVerifierModal } from 'expo-firebase-recaptcha';
 import {
-  getIdToken,
+  FirebaseAuthTypes,
   onAuthStateChanged,
-  PhoneAuthProvider,
-  signInWithCredential,
+  signInWithPhoneNumber,
   signOut,
-  User
-} from 'firebase/auth';
+  useDeviceLanguage
+} from '@react-native-firebase/auth';
 import { getFirebaseAuth } from './firebaseConfig';
 import { auditBackendLogout, verifyBackendAuthSession } from './backendAuth';
 import { FirebasePhoneSession, VerifiedOrgAdmin } from '../types/auth';
 
-type RecaptchaVerifierRef = FirebaseRecaptchaVerifierModal | null;
 type VerifiedOrgAdminHandler = (verifiedAdmin: VerifiedOrgAdmin | null) => void;
 type AuthErrorHandler = (error: Error) => void;
 
-export async function sendOrgAdminPhoneCode(
-  phoneNumber: string,
-  recaptchaVerifier: RecaptchaVerifierRef
-): Promise<FirebasePhoneSession> {
-  if (!recaptchaVerifier) {
-    throw new Error('reCAPTCHA verifier is not ready yet.');
-  }
-
+export async function sendOrgAdminPhoneCode(phoneNumber: string): Promise<FirebasePhoneSession> {
   const auth = getFirebaseAuth();
-  auth.useDeviceLanguage();
-
-  const provider = new PhoneAuthProvider(auth);
-  const verificationId = await provider.verifyPhoneNumber(
-    phoneNumber.trim(),
-    recaptchaVerifier
-  );
+  useDeviceLanguage(auth);
+  const confirmation = await signInWithPhoneNumber(auth, phoneNumber.trim());
 
   return {
-    verificationId,
+    confirmation,
     phoneNumber: phoneNumber.trim()
   };
 }
@@ -43,12 +28,16 @@ export async function verifyOrgAdminPhoneCode(
   code: string
 ): Promise<VerifiedOrgAdmin> {
   const auth = getFirebaseAuth();
-  const credential = PhoneAuthProvider.credential(phoneSession.verificationId, code.trim());
-  const credentialResult = await signInWithCredential(auth, credential);
+  const credentialResult = await phoneSession.confirmation.confirm(code.trim());
+  const user = credentialResult?.user || auth.currentUser;
+
+  if (!user) {
+    throw new Error('Unable to verify this phone session.');
+  }
 
   return getVerifiedOrgAdminFromUser(
-    credentialResult.user,
-    credentialResult.user.phoneNumber || phoneSession.phoneNumber,
+    user,
+    user.phoneNumber || phoneSession.phoneNumber,
     true,
     'login'
   );
@@ -67,22 +56,21 @@ export function subscribeToOrgAdminAuthState(
       }
 
       void getVerifiedOrgAdminFromUser(user, undefined, false, 'restore').then(onChange).catch(onError);
-    },
-    onError
+    }
   );
 }
 
 async function getVerifiedOrgAdminFromUser(
-  firebaseUser: User,
+  firebaseUser: FirebaseAuthTypes.User,
   fallbackPhoneNumber?: string,
   forceRefresh = false,
   event: 'login' | 'restore' = 'login'
 ): Promise<VerifiedOrgAdmin> {
-  let idToken = await getIdToken(firebaseUser, forceRefresh);
+  let idToken = await firebaseUser.getIdToken(forceRefresh);
   const session = await verifyBackendAuthSession(idToken, event);
 
   if (session.claimsRefreshed) {
-    idToken = await getIdToken(firebaseUser, true);
+    idToken = await firebaseUser.getIdToken(true);
   }
 
   return {
@@ -99,7 +87,7 @@ export async function signOutOrgAdmin(): Promise<void> {
 
   if (currentUser) {
     try {
-      const idToken = await getIdToken(currentUser);
+      const idToken = await currentUser.getIdToken();
       await auditBackendLogout(idToken);
     } catch {
       // Local sign-out must still succeed when the audit call cannot reach the backend.
