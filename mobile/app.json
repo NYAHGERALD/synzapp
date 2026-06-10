@@ -16,6 +16,10 @@
         "NSContactsUsageDescription": "Synzapp uses contacts you select to invite approved employees to your company workspace.",
         "NSMicrophoneUsageDescription": "Synzapp uses the microphone when you choose to record a voice note.",
         "NSPhotoLibraryUsageDescription": "Synzapp uses photos and videos you choose for your profile photo or chat messages.",
+        "UIBackgroundModes": [
+          "fetch",
+          "remote-notification"
+        ],
         "ITSAppUsesNonExemptEncryption": false
       }
     },

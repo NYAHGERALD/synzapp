@@ -31,16 +31,24 @@ export function getUserAuthMessage(error: unknown, fallback = 'We could not comp
     return 'That code has expired. Please request a new one.';
   }
 
-  if (/too-many-requests|quota|rate|429/.test(combined)) {
+  if (/too-many-requests|blocked all requests|unusual activity|rate|429/.test(combined)) {
     return 'Too many attempts. Please wait before trying again.';
+  }
+
+  if (/quota|billing|blaze|sms.*not.*available|sms.*not.*enabled/.test(combined)) {
+    return 'SMS verification is not available yet. Please contact support.';
   }
 
   if (/network|fetch|connection/.test(combined)) {
     return 'Network connection failed. Please check your connection and try again.';
   }
 
-  if (/app verification|required|app-check/.test(combined)) {
-    return 'Secure app verification failed. Please update the app and try again.';
+  if (/operation-not-allowed|phone.*provider|phone.*not.*enabled/.test(combined)) {
+    return 'Phone sign-in is not enabled yet. Please contact support.';
+  }
+
+  if (/app verification|required|app-check|app-not-authorized|invalid-app-credential|missing-client-identifier|captcha|unauthorized-domain/.test(combined)) {
+    return 'Secure phone verification could not be completed. Please contact support.';
   }
 
   if (/not active|deactivated|suspended|archived|deleted|access denied|contact/i.test(message)) {
