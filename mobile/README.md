@@ -25,6 +25,24 @@ PATH=/opt/homebrew/bin:$PATH npm run dev
 Configure Firebase Admin credentials with either `GOOGLE_APPLICATION_CREDENTIALS` or `FIREBASE_SERVICE_ACCOUNT_JSON`.
 For Expo development, the mobile app derives the backend URL from the Expo host and uses port `4100` unless `EXPO_PUBLIC_SYNZAPP_API_URL` is set.
 
+For installed preview builds, set `EXPO_PUBLIC_SYNZAPP_API_URL` to the hosted backend URL before publishing an update or building again:
+
+```bash
+cd SYNZAPP/mobile
+npx eas-cli@20.1.0 env:create preview \
+  --scope project \
+  --name EXPO_PUBLIC_SYNZAPP_API_URL \
+  --value https://YOUR_RENDER_BACKEND_URL \
+  --type string \
+  --visibility plaintext \
+  --force
+
+EXPO_PUBLIC_SYNZAPP_API_URL=https://YOUR_RENDER_BACKEND_URL \
+  npx eas-cli@20.1.0 update \
+  --channel preview \
+  --message "Point preview app to hosted backend"
+```
+
 ## Run On Your Phone
 
 Expo Go is still useful for quick UI checks, but Android remote push notifications are not supported in Expo Go on current Expo SDKs. Use a development build when testing chat push notifications.

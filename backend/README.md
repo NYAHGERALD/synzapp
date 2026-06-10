@@ -26,6 +26,18 @@ Firebase Admin must be configured with one of these:
 - `GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/service-account.json`
 - `FIREBASE_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}'`
 
+## Deploy On Render
+
+The repo root includes `render.yaml` for a free Render web service named `synzapp-backend`.
+
+1. Push the latest `main` branch to GitHub.
+2. In Render, create a new Blueprint from `NYAHGERALD/synzapp`.
+3. When Render prompts for `FIREBASE_SERVICE_ACCOUNT_JSON`, paste the full Firebase service-account JSON from Firebase Console > Project settings > Service accounts.
+4. Deploy the service.
+5. Confirm the public URL responds at `/health`.
+
+Free Render services are for testing and may sleep when idle. Use a paid always-on service before production chat launch.
+
 ## Security Audit
 
 ```bash

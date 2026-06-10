@@ -1,0 +1,35 @@
+services:
+  - type: web
+    runtime: node
+    name: synzapp-backend
+    plan: free
+    region: ohio
+    branch: main
+    buildCommand: cd backend && npm ci && npm run build
+    startCommand: cd backend && npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: FIREBASE_PROJECT_ID
+        value: synzapp-a7ee3
+      - key: FIREBASE_STORAGE_BUCKET
+        value: synzapp-a7ee3.firebasestorage.app
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: PHONE_HASH_SECRET
+        generateValue: true
+      - key: PHONE_ENCRYPTION_SECRET
+        generateValue: true
+      - key: CORS_ORIGIN
+        value: "*"
+      - key: SYNZAPP_REQUIRE_APP_CHECK
+        value: "false"
+      - key: AUTH_RATE_LIMIT_WINDOW_MS
+        value: "60000"
+      - key: AUTH_RATE_LIMIT_MAX
+        value: "20"
+      - key: OTP_RATE_LIMIT_WINDOW_MS
+        value: "900000"
+      - key: OTP_RATE_LIMIT_MAX
+        value: "5"
