@@ -12,9 +12,10 @@
     "start:dev": "expo start --dev-client",
     "start:clear": "expo start --clear",
     "start:dev:clear": "expo start --dev-client --clear",
-    "build:dev:android": "npx eas-cli@20.1.0 build --profile development --platform android",
-    "build:dev:ios": "npx eas-cli@20.1.0 build --profile development --platform ios",
-    "build:dev:all": "npx eas-cli@20.1.0 build --profile development --platform all",
+    "build:preflight": "node scripts/check-native-build-files.js",
+    "build:dev:android": "npm run build:preflight && npx eas-cli@20.1.0 build --profile development --platform android",
+    "build:dev:ios": "npm run build:preflight && npx eas-cli@20.1.0 build --profile development --platform ios",
+    "build:dev:all": "npm run build:preflight && npx eas-cli@20.1.0 build --profile development --platform all",
     "ios": "expo start --ios",
     "android": "expo start --android",
     "typecheck": "tsc --noEmit"
