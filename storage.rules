@@ -1,0 +1,46 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isActiveTenant(tenantId) {
+      return signedIn() &&
+        request.auth.token.tenantId == tenantId &&
+        request.auth.token.status == 'ACTIVE';
+    }
+
+    match /organizations/{tenantId}/company/logo/{fileName} {
+      allow read: if isActiveTenant(tenantId);
+      allow write: if false;
+    }
+
+    match /organizations/{tenantId}/users/{uid}/profile/{fileName} {
+      allow read: if isActiveTenant(tenantId);
+      allow write: if false;
+    }
+
+    match /organizations/{tenantId}/users/{uid}/chat-backups/{fileName} {
+      allow read: if isActiveTenant(tenantId) && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    match /tenants/{tenantId}/chats/{chatId}/messageEnvelopes/{messageId}/encryptedAttachments/{fileId} {
+      allow read, write: if false;
+    }
+
+    match /tenants/{tenantId}/workOrders/{workOrderId}/attachments/{fileId} {
+      allow read, write: if false;
+    }
+
+    match /tenants/{tenantId}/actionPlans/{actionPlanId}/attachments/{fileId} {
+      allow read, write: if false;
+    }
+
+    match /{path=**} {
+      allow read, write: if false;
+    }
+  }
+}

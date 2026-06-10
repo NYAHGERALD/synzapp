@@ -1,0 +1,45 @@
+# macOS
+.DS_Store
+
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.p8
+*.p12
+*.key
+*.pem
+*.mobileprovision
+*.keystore
+*.jks
+google-services.json
+GoogleService-Info.plist
+firebase-service-account.json
+*service-account*.json
+service-account*.json
+
+# Expo and React Native local state
+.expo/
+**/.expo/
+mobile/expo-qr*.png
+
+# Build outputs
+dist/
+build/
+coverage/
+web-build/
+
+# Logs and local process files
+*.log
+*.pid
+.backend.log
+.backend.pid
+
+# EAS local artifacts
+*.ipa
+*.apk
+*.aab

@@ -1,0 +1,38 @@
+{
+  "name": "synzapp-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20.19.4"
+  },
+  "scripts": {
+    "audit:security": "npm audit --audit-level=moderate",
+    "build": "tsc --project tsconfig.json",
+    "dev": "tsx watch src/server.ts",
+    "emulators:rules": "firebase emulators:exec --config ../firebase.json --project synzapp-rules-test --only firestore,storage \"npm run test:rules\"",
+    "start": "node dist/server.js",
+    "test": "node --import tsx --test test/*.test.ts",
+    "test:rules": "node --import tsx --test test/rules/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "firebase-admin": "^13.6.0",
+    "helmet": "^8.1.0",
+    "ws": "^8.21.0",
+    "zod": "^4.2.1"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.1",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.0.3",
+    "@types/ws": "^8.18.1",
+    "firebase-tools": "^15.19.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

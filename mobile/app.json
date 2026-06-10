@@ -1,0 +1,56 @@
+{
+  "expo": {
+    "name": "Synzapp",
+    "slug": "synzapp-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "scheme": "synzapp",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.synzapp.mobile",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Synzapp uses the camera when you choose to take a profile photo or send a chat photo.",
+        "NSContactsUsageDescription": "Synzapp uses contacts you select to invite approved employees to your company workspace.",
+        "NSMicrophoneUsageDescription": "Synzapp uses the microphone when you choose to record a voice note.",
+        "NSPhotoLibraryUsageDescription": "Synzapp uses photos and videos you choose for your profile photo or chat messages."
+      }
+    },
+    "android": {
+      "package": "com.synzapp.mobile",
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false,
+      "softwareKeyboardLayoutMode": "resize",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.READ_CONTACTS",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_VIDEO",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
+    },
+    "plugins": [
+      "expo-notifications",
+      "expo-document-picker",
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "Synzapp uses the camera when you choose to take a profile photo or send a chat photo.",
+          "photosPermission": "Synzapp uses photos and videos you choose for your profile photo or chat messages."
+        }
+      ],
+      "react-native-compressor",
+      "expo-secure-store",
+      "expo-audio"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "495fd669-3ddf-4062-adfd-5648dca501c8"
+      }
+    },
+    "owner": "geraldnyah"
+  }
+}

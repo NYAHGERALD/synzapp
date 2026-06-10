@@ -1,0 +1,188 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isActiveTenant(tenantId) {
+      return signedIn() &&
+        request.auth.token.tenantId == tenantId &&
+        request.auth.token.status == 'ACTIVE';
+    }
+
+    function hasPermission(permission) {
+      return signedIn() &&
+        request.auth.token.permissions is list &&
+        permission in request.auth.token.permissions;
+    }
+
+    function isOrgAdmin(tenantId) {
+      return isActiveTenant(tenantId) &&
+        request.auth.token.role == 'ORG_ADMIN';
+    }
+
+    function tenantUserPath(tenantId, uid) {
+      return /databases/$(database)/documents/organizations/$(tenantId)/users/$(uid);
+    }
+
+    function requesterProfile(tenantId) {
+      return get(tenantUserPath(tenantId, request.auth.uid)).data;
+    }
+
+    function requesterProfileIsActive(tenantId) {
+      return isActiveTenant(tenantId) &&
+        exists(tenantUserPath(tenantId, request.auth.uid)) &&
+        requesterProfile(tenantId).tenantId == tenantId &&
+        requesterProfile(tenantId).status == 'ACTIVE';
+    }
+
+    function isDepartmentAdminFor(tenantId, departmentId, permission) {
+      return requesterProfileIsActive(tenantId) &&
+        request.auth.token.role == 'DEPT_ADMIN' &&
+        hasPermission(permission) &&
+        requesterProfile(tenantId).role == 'DEPT_ADMIN' &&
+        requesterProfile(tenantId).departmentId == departmentId;
+    }
+
+    function canReadTenantUser(tenantId, userId) {
+      return requesterProfileIsActive(tenantId) &&
+        (
+          request.auth.uid == userId ||
+          (isOrgAdmin(tenantId) && (hasPermission('users.manage') || hasPermission('users.invite'))) ||
+          isDepartmentAdminFor(tenantId, resource.data.departmentId, 'users.invite')
+        );
+    }
+
+    function canReadApprovedPhone(tenantId) {
+      return requesterProfileIsActive(tenantId) &&
+        (
+          (isOrgAdmin(tenantId) && (hasPermission('users.manage') || hasPermission('users.invite'))) ||
+          isDepartmentAdminFor(tenantId, resource.data.departmentId, 'users.invite')
+        );
+    }
+
+    function isDirectChatParticipant(tenantId, chatId) {
+      return requesterProfileIsActive(tenantId) &&
+        exists(/databases/$(database)/documents/organizations/$(tenantId)/directChats/$(chatId)) &&
+        get(/databases/$(database)/documents/organizations/$(tenantId)/directChats/$(chatId)).data.tenantId == tenantId &&
+        get(/databases/$(database)/documents/organizations/$(tenantId)/directChats/$(chatId)).data.participantIds.hasAny([request.auth.uid]);
+    }
+
+    match /identityDirectory/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow create, update, delete: if false;
+    }
+
+    match /approvedPhoneDirectory/{phoneHash} {
+      allow read, write: if false;
+    }
+
+    match /auditLogs/{auditLogId} {
+      allow read, write: if false;
+    }
+
+    match /organizations/{tenantId} {
+      allow read: if requesterProfileIsActive(tenantId);
+      allow create, update, delete: if false;
+
+      match /users/{userId} {
+        allow get, list: if canReadTenantUser(tenantId, userId);
+        allow create, update, delete: if false;
+
+        match /devices/{deviceId} {
+          allow get, list: if requesterProfileIsActive(tenantId) && request.auth.uid == userId;
+          allow create, update, delete: if false;
+        }
+
+        match /chatBackups/{backupId} {
+          allow get, list: if requesterProfileIsActive(tenantId) && request.auth.uid == userId;
+          allow create, update, delete: if false;
+        }
+      }
+
+      match /approvedPhones/{phoneId} {
+        allow get, list: if canReadApprovedPhone(tenantId);
+        allow create, update, delete: if false;
+      }
+
+      match /departments/{departmentId} {
+        allow get, list: if requesterProfileIsActive(tenantId);
+        allow create, update, delete: if false;
+      }
+
+      match /roles/{roleId} {
+        allow get, list: if requesterProfileIsActive(tenantId);
+        allow create, update, delete: if false;
+      }
+
+      match /groups/{groupId} {
+        allow get, list: if requesterProfileIsActive(tenantId) &&
+          (
+            resource.data.scope == 'COMPANY' ||
+            resource.data.departmentId == requesterProfile(tenantId).departmentId ||
+            isOrgAdmin(tenantId)
+          );
+        allow create, update, delete: if false;
+
+        match /members/{memberUid} {
+          allow get, list: if requesterProfileIsActive(tenantId) &&
+            (request.auth.uid == memberUid || isOrgAdmin(tenantId));
+          allow create, update, delete: if false;
+        }
+      }
+
+      match /directChats/{chatId} {
+        allow get, list: if requesterProfileIsActive(tenantId) &&
+          resource.data.tenantId == tenantId &&
+          resource.data.participantIds.hasAny([request.auth.uid]);
+        allow create, update, delete: if false;
+
+        match /encryptedEnvelopes/{envelopeId} {
+          allow get, list: if isDirectChatParticipant(tenantId, chatId) &&
+            resource.data.tenantId == tenantId &&
+            (
+              resource.data.senderUid == request.auth.uid ||
+              resource.data.recipientUid == request.auth.uid
+            );
+          allow create, update, delete: if false;
+        }
+
+        match /receiptSummaries/{receiptId} {
+          allow get, list: if isDirectChatParticipant(tenantId, chatId);
+          allow create, update, delete: if false;
+        }
+      }
+
+      match /deviceKeys/{deviceId} {
+        allow get, list: if requesterProfileIsActive(tenantId);
+        allow create, update, delete: if false;
+      }
+
+      match /files/{fileId} {
+        allow read, write: if false;
+      }
+
+      match /announcements/{announcementId} {
+        allow read, write: if false;
+      }
+
+      match /workOrders/{workOrderId} {
+        allow read, write: if false;
+      }
+
+      match /actionPlans/{actionPlanId} {
+        allow read, write: if false;
+      }
+
+      match /auditLogs/{auditLogId} {
+        allow read, write: if false;
+      }
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
