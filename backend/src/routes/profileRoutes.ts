@@ -91,8 +91,8 @@ const revokeOwnDeviceBodySchema = z.object({
 const pushTokenBodySchema = z.object({
   deviceId: safeDeviceIdSchema,
   platform: devicePlatformSchema,
-  provider: z.literal('expo'),
-  token: z.string().trim().min(20).max(512)
+  provider: z.enum(['expo', 'fcm']),
+  token: z.string().trim().min(20).max(4096)
 });
 
 const encryptedNotificationPreviewSchema = z.object({

@@ -4,6 +4,7 @@ import { getSynzappApiBaseUrl } from './apiConfig';
 import { getRegisteredDeviceHeaders } from './deviceIdentity';
 
 type PushPlatform = 'android' | 'ios' | 'unknown';
+type PushProvider = 'expo' | 'fcm';
 type ExpoNotificationsModule = typeof import('expo-notifications');
 type NotificationSubscription = {
   remove: () => void;
@@ -78,7 +79,7 @@ export async function registerDevicePushNotifications(idToken: string): Promise<
     return false;
   }
 
-  const token = await getExpoPushToken(Notifications);
+  const pushToken = await getPushToken(Notifications);
   const deviceHeaders = await getRegisteredDeviceHeaders(idToken);
   const deviceId = deviceHeaders['X-Synzapp-Device-Id'];
 
@@ -90,8 +91,8 @@ export async function registerDevicePushNotifications(idToken: string): Promise<
     body: JSON.stringify({
       deviceId,
       platform: getPushPlatform(),
-      provider: 'expo',
-      token
+      provider: pushToken.provider,
+      token: pushToken.token
     }),
     headers: {
       Accept: 'application/json',
@@ -200,13 +201,28 @@ async function ensureNotificationPermission(Notifications: ExpoNotificationsModu
   return requestedPermission.status === 'granted';
 }
 
-async function getExpoPushToken(Notifications: ExpoNotificationsModule): Promise<string> {
+async function getPushToken(Notifications: ExpoNotificationsModule): Promise<{
+  provider: PushProvider;
+  token: string;
+}> {
+  if (Platform.OS === 'android') {
+    const tokenResponse = await Notifications.getDevicePushTokenAsync();
+
+    return {
+      provider: 'fcm',
+      token: String(tokenResponse.data)
+    };
+  }
+
   const projectId = getExpoProjectId();
   const tokenResponse = projectId
     ? await Notifications.getExpoPushTokenAsync({ projectId })
     : await Notifications.getExpoPushTokenAsync();
 
-  return tokenResponse.data;
+  return {
+    provider: 'expo',
+    token: tokenResponse.data
+  };
 }
 
 function getExpoProjectId(): string | undefined {

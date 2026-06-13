@@ -1,9 +1,10 @@
 import { DecodedIdToken } from 'firebase-admin/auth';
-import { fieldValue, firestore } from '../config/firebaseAdmin.js';
+import { getMessaging, type Message } from 'firebase-admin/messaging';
+import { adminApp, fieldValue, firestore } from '../config/firebaseAdmin.js';
 import { DevicePlatform, verifyActiveRegisteredDevice } from './deviceIdentityService.js';
 import type { EncryptedNotificationPreviewRecord } from './encryptedMessageEnvelopeService.js';
 
-type PushProvider = 'expo';
+type PushProvider = 'expo' | 'fcm';
 type PushTokenStatus = 'ACTIVE' | 'INACTIVE';
 
 interface RegisterPushTokenInput {
@@ -62,6 +63,12 @@ interface ExpoPushTicket {
   status?: 'error' | 'ok';
 }
 
+interface PushDeliveryTicket extends ExpoPushTicket {
+  deviceId: string;
+  platform?: DevicePlatform;
+  provider?: PushProvider;
+}
+
 interface ExpoPushResponse {
   data?: ExpoPushTicket[];
   errors?: unknown[];
@@ -70,6 +77,7 @@ interface ExpoPushResponse {
 const EXPO_PUSH_SEND_URL = 'https://exp.host/--/api/v2/push/send';
 const EXPO_PUSH_TOKEN_PATTERN = /^(Expo|Exponent)PushToken\[[A-Za-z0-9_-]+\]$/;
 const EXPO_PUSH_BATCH_SIZE = 100;
+const FCM_PUSH_BATCH_SIZE = 500;
 
 export async function registerCurrentUserPushToken(
   decodedToken: DecodedIdToken,
@@ -78,7 +86,10 @@ export async function registerCurrentUserPushToken(
   const activeDevice = await verifyActiveRegisteredDevice(decodedToken, input.deviceId);
   const safeToken = input.token.trim();
 
-  if (input.provider !== 'expo' || !EXPO_PUSH_TOKEN_PATTERN.test(safeToken)) {
+  if (
+    (input.provider === 'expo' && !EXPO_PUSH_TOKEN_PATTERN.test(safeToken)) ||
+    (input.provider === 'fcm' && !isValidFcmToken(safeToken))
+  ) {
     throw validationError('Push token is not valid.');
   }
 
@@ -188,7 +199,7 @@ export async function sendChatMessagePushNotification(
       ...(doc.data() as PushTokenRecord),
       deviceId: doc.id
     }))
-    .filter((record) => record.provider === 'expo' && record.token && EXPO_PUSH_TOKEN_PATTERN.test(record.token));
+    .filter((record) => isDeliverablePushToken(record));
 
   await eventRef.set({
     actorUid: input.senderUid,
@@ -211,10 +222,12 @@ export async function sendChatMessagePushNotification(
   }
 
   const senderName = getDisplayName(senderSnapshot.exists ? senderSnapshot.data() : null);
-  const messages = pushTokens.map((record) => {
+  const expoTargets: Array<{ message: ExpoPushMessage; record: PushTokenRecord & { deviceId: string } }> = [];
+  const fcmTargets: Array<{ message: Message; record: PushTokenRecord & { deviceId: string } }> = [];
+
+  for (const record of pushTokens) {
     const notificationPreview = getNotificationPreviewForDevice(input, record.deviceId || '');
     const title = senderName || 'Synzapp';
-    const shouldUseAndroidNativePreview = record.platform === 'android' && Boolean(notificationPreview);
     const baseData: Record<string, string> = {
       contactId: input.senderUid,
       conversationId: input.conversationId,
@@ -224,34 +237,57 @@ export async function sendChatMessagePushNotification(
       sentAt: input.sentAt,
       type: 'chat.message'
     };
+    const data = {
+      ...baseData,
+      ...(notificationPreview || {})
+    };
 
-    return {
-      ...(shouldUseAndroidNativePreview
-        ? {}
-        : {
-            body: notificationPreview ? 'New encrypted message' : 'New message',
-            channelId: 'chat-messages',
-            mutableContent: Boolean(notificationPreview),
-            sound: 'default',
-            title
-          }),
-      data: {
-        ...baseData,
-        ...(notificationPreview || {})
-      },
-      priority: 'high',
-      to: record.token || ''
-    } satisfies ExpoPushMessage;
-  });
-  const ticketResults: ExpoPushTicket[] = [];
+    if (record.provider === 'fcm') {
+      fcmTargets.push({
+        message: {
+          android: {
+            priority: 'high'
+          },
+          data,
+          token: record.token || ''
+        },
+        record
+      });
+    } else {
+      expoTargets.push({
+        message: {
+          body: notificationPreview ? 'New encrypted message' : 'New message',
+          channelId: 'chat-messages',
+          data,
+          mutableContent: record.platform === 'ios' && Boolean(notificationPreview),
+          priority: 'high',
+          sound: 'default',
+          title,
+          to: record.token || ''
+        },
+        record
+      });
+    }
+  }
 
-  for (let index = 0; index < messages.length; index += EXPO_PUSH_BATCH_SIZE) {
-    const messageBatch = messages.slice(index, index + EXPO_PUSH_BATCH_SIZE);
-    const tokenBatch = pushTokens.slice(index, index + EXPO_PUSH_BATCH_SIZE);
-    const tickets = await sendExpoPushBatch(messageBatch);
+  const ticketResults: PushDeliveryTicket[] = [];
 
-    ticketResults.push(...tickets);
-    await deactivateInvalidExpoPushTokens(input.tenantId, input.recipientUid, tokenBatch, tickets);
+  for (let index = 0; index < expoTargets.length; index += EXPO_PUSH_BATCH_SIZE) {
+    const targetBatch = expoTargets.slice(index, index + EXPO_PUSH_BATCH_SIZE);
+    const tickets = await sendExpoPushBatch(targetBatch.map((target) => target.message));
+    const annotatedTickets = annotatePushTickets(tickets, targetBatch.map((target) => target.record));
+
+    ticketResults.push(...annotatedTickets);
+    await deactivateInvalidPushTokens(input.tenantId, input.recipientUid, annotatedTickets);
+  }
+
+  for (let index = 0; index < fcmTargets.length; index += FCM_PUSH_BATCH_SIZE) {
+    const targetBatch = fcmTargets.slice(index, index + FCM_PUSH_BATCH_SIZE);
+    const tickets = await sendFcmPushBatch(targetBatch.map((target) => target.message));
+    const annotatedTickets = annotatePushTickets(tickets, targetBatch.map((target) => target.record));
+
+    ticketResults.push(...annotatedTickets);
+    await deactivateInvalidPushTokens(input.tenantId, input.recipientUid, annotatedTickets);
   }
 
   const errorCount = ticketResults.filter((ticket) => ticket.status === 'error').length;
@@ -264,8 +300,11 @@ export async function sendChatMessagePushNotification(
     status: errorCount && sentCount ? 'PARTIAL' : errorCount ? 'FAILED' : 'SENT',
     tickets: ticketResults.map((ticket) => ({
       details: ticket.details || null,
+      deviceId: ticket.deviceId,
       id: ticket.id || null,
       message: ticket.message || null,
+      platform: ticket.platform || null,
+      provider: ticket.provider || null,
       status: ticket.status || 'error'
     })),
     updatedAt: fieldValue.serverTimestamp()
@@ -311,16 +350,50 @@ async function sendExpoPushBatch(messages: ExpoPushMessage[]): Promise<ExpoPushT
   return body.data || [];
 }
 
-async function deactivateInvalidExpoPushTokens(
+async function sendFcmPushBatch(messages: Message[]): Promise<ExpoPushTicket[]> {
+  const response = await getMessaging(adminApp).sendEach(messages);
+
+  return response.responses.map((result) => (
+    result.success
+      ? {
+          id: result.messageId,
+          status: 'ok'
+        }
+      : {
+          details: {
+            error: getFcmTicketError(result.error?.code)
+          },
+          message: result.error?.message,
+          status: 'error'
+        }
+  ));
+}
+
+function annotatePushTickets(
+  tickets: ExpoPushTicket[],
+  records: Array<PushTokenRecord & { deviceId: string }>
+): PushDeliveryTicket[] {
+  return tickets.map((ticket, index) => {
+    const record = records[index];
+
+    return {
+      ...ticket,
+      deviceId: record?.deviceId || '',
+      platform: record?.platform,
+      provider: record?.provider
+    };
+  });
+}
+
+async function deactivateInvalidPushTokens(
   tenantId: string,
   uid: string,
-  pushTokens: Array<PushTokenRecord & { deviceId: string }>,
-  tickets: ExpoPushTicket[]
+  tickets: PushDeliveryTicket[]
 ): Promise<void> {
   const invalidDeviceIds = tickets
-    .map((ticket, index) => (
+    .map((ticket) => (
       ticket.status === 'error' && ticket.details?.error === 'DeviceNotRegistered'
-        ? pushTokens[index]?.deviceId || ''
+        ? ticket.deviceId || ''
         : ''
     ))
     .filter(Boolean);
@@ -337,6 +410,34 @@ async function deactivateInvalidExpoPushTokens(
       updatedAt: fieldValue.serverTimestamp()
     }, { merge: true })
   ));
+}
+
+function isDeliverablePushToken(record: PushTokenRecord): boolean {
+  if (!record.provider || !record.token) {
+    return false;
+  }
+
+  if (record.provider === 'expo') {
+    return EXPO_PUSH_TOKEN_PATTERN.test(record.token);
+  }
+
+  return record.provider === 'fcm' && isValidFcmToken(record.token);
+}
+
+function isValidFcmToken(token: string): boolean {
+  return token.length >= 20 && token.length <= 4096 && /^[A-Za-z0-9:_-]+$/.test(token);
+}
+
+function getFcmTicketError(code: string | undefined): string {
+  if (
+    code === 'messaging/registration-token-not-registered' ||
+    code === 'messaging/invalid-registration-token' ||
+    code === 'messaging/invalid-argument'
+  ) {
+    return 'DeviceNotRegistered';
+  }
+
+  return code || 'UnknownError';
 }
 
 function getUserPushTokenRef(tenantId: string, uid: string, deviceId: string) {
