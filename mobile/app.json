@@ -11,6 +11,13 @@
       "googleServicesFile": "./GoogleService-Info.plist",
       "supportsTablet": true,
       "bundleIdentifier": "com.synzapp.mobile",
+      "appleTeamId": "F9M458TK87",
+      "entitlements": {
+        "keychain-access-groups": [
+          "$(AppIdentifierPrefix)com.synzapp.mobile",
+          "$(AppIdentifierPrefix)com.synzapp.mobile.shared"
+        ]
+      },
       "infoPlist": {
         "NSCameraUsageDescription": "Synzapp uses the camera when you choose to take a profile photo or send a chat photo.",
         "NSContactsUsageDescription": "Synzapp uses contacts you select to invite approved employees to your company workspace.",
@@ -40,7 +47,9 @@
       ]
     },
     "plugins": [
+      "@bacons/apple-targets",
       "expo-notifications",
+      "./plugins/withSynzappAndroidNotificationPreview",
       "expo-document-picker",
       [
         "expo-image-picker",

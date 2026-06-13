@@ -1,4 +1,5 @@
 import { fromByteArray, toByteArray } from 'base64-js';
+import { gcm } from '@noble/ciphers/aes.js';
 import * as Crypto from 'expo-crypto';
 import nacl from 'tweetnacl';
 import type {
@@ -59,6 +60,13 @@ type EncryptedChatPayload =
   | EncryptedMediaPayload
   | EncryptedMediaGroupPayload;
 
+export interface EncryptedNotificationPreview {
+  algorithm: 'x25519-sha256-aes-256-gcm+synzapp-notification-preview-v1';
+  ciphertext: string;
+  nonce: string;
+  version: 1;
+}
+
 export interface EncryptedMessageBody {
   algorithm: 'nacl-secretbox+x25519-xsalsa20-poly1305';
   ciphertext: string;
@@ -66,9 +74,14 @@ export interface EncryptedMessageBody {
   encryptedKeysByDevice: Record<string, string>;
   keyVersion: number;
   nonce: string;
+  notificationPreviewByDevice?: Record<string, EncryptedNotificationPreview>;
   recipientDeviceIds: string[];
   senderDeviceId: string;
 }
+
+const NOTIFICATION_PREVIEW_ALGORITHM = 'x25519-sha256-aes-256-gcm+synzapp-notification-preview-v1';
+const NOTIFICATION_PREVIEW_DERIVATION_LABEL = 'Synzapp notification preview v1';
+const NOTIFICATION_PREVIEW_MAX_CHARS = 180;
 
 export async function encryptChatText(input: {
   forwarded?: boolean;
@@ -166,6 +179,13 @@ export async function encryptChatMessage(input: {
     encryptedKeysByDevice[device.deviceId] = JSON.stringify(payload);
   });
 
+  const notificationPreviewByDevice = await encryptNotificationPreviewsForDevices({
+    localDevicePrivateKey: localDevice.keyAgreementPrivateKey,
+    plaintext,
+    recipientDevices: input.recipientDevices,
+    senderKeyAgreementPublicKey: input.senderDevice.keyAgreementPublicKey
+  });
+
   return {
     algorithm: 'nacl-secretbox+x25519-xsalsa20-poly1305',
     ciphertext: fromByteArray(ciphertext),
@@ -173,6 +193,7 @@ export async function encryptChatMessage(input: {
     encryptedKeysByDevice,
     keyVersion: Math.max(input.senderDevice.keyVersion || 1, 1),
     nonce: fromByteArray(messageNonce),
+    notificationPreviewByDevice,
     recipientDeviceIds: input.recipientDevices.map((device) => device.deviceId),
     senderDeviceId: localDevice.deviceId
   };
@@ -421,6 +442,122 @@ function normalizeReplyReference(replyTo?: ChatReplyReference | null): ChatReply
     sentAt: replyTo.sentAt,
     text: text.slice(0, 500)
   };
+}
+
+async function encryptNotificationPreviewsForDevices(input: {
+  localDevicePrivateKey: Uint8Array;
+  plaintext: EncryptedChatPayload;
+  recipientDevices: EncryptionDevicePublicKey[];
+  senderKeyAgreementPublicKey: string;
+}): Promise<Record<string, EncryptedNotificationPreview>> {
+  const previewText = buildNotificationPreviewText(input.plaintext);
+
+  if (!previewText) {
+    return {};
+  }
+
+  const senderPublicKey = toByteArray(input.senderKeyAgreementPublicKey);
+  const previewsByDevice: Record<string, EncryptedNotificationPreview> = {};
+  const uniqueRecipientDevices = new Map<string, EncryptionDevicePublicKey>();
+
+  input.recipientDevices.forEach((device) => {
+    uniqueRecipientDevices.set(device.deviceId, device);
+  });
+
+  await Promise.all(Array.from(uniqueRecipientDevices.values()).map(async (device) => {
+    const recipientPublicKey = toByteArray(device.keyAgreementPublicKey);
+    const sharedSecret = nacl.scalarMult(input.localDevicePrivateKey, recipientPublicKey);
+    const keyMaterial = concatBytes(
+      utf8ToBytes(NOTIFICATION_PREVIEW_DERIVATION_LABEL),
+      sharedSecret,
+      senderPublicKey,
+      recipientPublicKey
+    );
+    const encryptionKey = new Uint8Array(await Crypto.digest(
+      Crypto.CryptoDigestAlgorithm.SHA256,
+      toArrayBuffer(keyMaterial)
+    ));
+    const nonce = Crypto.getRandomBytes(gcm.nonceLength);
+    const previewPayload = utf8ToBytes(JSON.stringify({
+      text: previewText,
+      type: 'chat.notificationPreview',
+      version: 1
+    }));
+    const ciphertext = gcm(encryptionKey, nonce).encrypt(previewPayload);
+
+    previewsByDevice[device.deviceId] = {
+      algorithm: NOTIFICATION_PREVIEW_ALGORITHM,
+      ciphertext: fromByteArray(ciphertext),
+      nonce: fromByteArray(nonce),
+      version: 1
+    };
+  }));
+
+  return previewsByDevice;
+}
+
+function buildNotificationPreviewText(payload: EncryptedChatPayload): string {
+  const text = collapseWhitespace(payload.text).slice(0, NOTIFICATION_PREVIEW_MAX_CHARS);
+
+  if (text) {
+    return text;
+  }
+
+  if (payload.type === 'mediaGroup') {
+    const count = payload.mediaItems.length;
+
+    return count > 1 ? `${count} attachments` : 'Attachment';
+  }
+
+  if (payload.type === 'image') {
+    return 'Photo';
+  }
+
+  if (payload.type === 'media') {
+    return getMediaPreviewLabel(payload.media);
+  }
+
+  return '';
+}
+
+function getMediaPreviewLabel(media: ChatMediaAttachment): string {
+  if (media.kind === 'audio') {
+    return 'Voice message';
+  }
+
+  if (media.kind === 'image') {
+    return 'Photo';
+  }
+
+  if (media.kind === 'video') {
+    return 'Video';
+  }
+
+  return 'File';
+}
+
+function collapseWhitespace(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function concatBytes(...parts: Uint8Array[]): Uint8Array {
+  const output = new Uint8Array(parts.reduce((total, part) => total + part.length, 0));
+  let offset = 0;
+
+  parts.forEach((part) => {
+    output.set(part, offset);
+    offset += part.length;
+  });
+
+  return output;
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+
+  copy.set(bytes);
+
+  return copy.buffer as ArrayBuffer;
 }
 
 function randomHex(byteCount: number): string {

@@ -2,8 +2,7 @@ import {
   FirebaseAuthTypes,
   onAuthStateChanged,
   signInWithPhoneNumber,
-  signOut,
-  useDeviceLanguage
+  signOut
 } from '@react-native-firebase/auth';
 import { getFirebaseAuth } from './firebaseConfig';
 import { auditBackendLogout, verifyBackendAuthSession } from './backendAuth';
@@ -14,7 +13,6 @@ type AuthErrorHandler = (error: Error) => void;
 
 export async function sendOrgAdminPhoneCode(phoneNumber: string): Promise<FirebasePhoneSession> {
   const auth = getFirebaseAuth();
-  useDeviceLanguage(auth);
   const confirmation = await signInWithPhoneNumber(auth, phoneNumber.trim());
 
   return {

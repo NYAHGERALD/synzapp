@@ -52,10 +52,17 @@ export interface LocalDeviceKeyMaterial {
 }
 
 const DEVICE_IDENTITY_STORAGE_KEY = 'synzapp.deviceIdentity.v1';
+const DEVICE_IDENTITY_KEYCHAIN_SERVICE = 'synzapp.device.identity.v1';
 const DEVICE_IDENTITY_PROTOCOL_VERSION = 'synzapp-device-identity-v1';
+const IOS_SHARED_KEYCHAIN_ACCESS_GROUP = 'F9M458TK87.com.synzapp.mobile.shared';
 const secureStoreOptions: SecureStore.SecureStoreOptions = {
+  ...(Platform.OS === 'ios' ? { accessGroup: IOS_SHARED_KEYCHAIN_ACCESS_GROUP } : {}),
+  keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
+  keychainService: DEVICE_IDENTITY_KEYCHAIN_SERVICE
+};
+const legacySecureStoreOptions: SecureStore.SecureStoreOptions = {
   keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
-  keychainService: 'synzapp.device.identity.v1'
+  keychainService: DEVICE_IDENTITY_KEYCHAIN_SERVICE
 };
 
 let isNaclPrngConfigured = false;
@@ -171,7 +178,29 @@ async function ensureLocalDeviceIdentity(): Promise<StoredDeviceIdentity> {
 
 async function readStoredDeviceIdentity(): Promise<StoredDeviceIdentity | null> {
   const storedValue = await SecureStore.getItemAsync(DEVICE_IDENTITY_STORAGE_KEY, secureStoreOptions);
+  const parsedIdentity = parseStoredDeviceIdentity(storedValue);
 
+  if (parsedIdentity) {
+    return parsedIdentity;
+  }
+
+  const legacyStoredValue = await SecureStore.getItemAsync(DEVICE_IDENTITY_STORAGE_KEY, legacySecureStoreOptions);
+  const legacyIdentity = parseStoredDeviceIdentity(legacyStoredValue);
+
+  if (legacyIdentity) {
+    await SecureStore.setItemAsync(
+      DEVICE_IDENTITY_STORAGE_KEY,
+      JSON.stringify(legacyIdentity),
+      secureStoreOptions
+    );
+
+    return legacyIdentity;
+  }
+
+  return null;
+}
+
+function parseStoredDeviceIdentity(storedValue: string | null): StoredDeviceIdentity | null {
   if (!storedValue) {
     return null;
   }

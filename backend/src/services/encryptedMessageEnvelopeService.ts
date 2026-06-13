@@ -16,8 +16,16 @@ export interface SendEncryptedDirectEnvelopeInput {
   encryptedKeysByDevice: Record<string, string>;
   keyVersion: number;
   nonce: string;
+  notificationPreviewByDevice?: Record<string, EncryptedNotificationPreviewRecord>;
   recipientDeviceIds: string[];
   senderDeviceId: string;
+}
+
+export interface EncryptedNotificationPreviewRecord {
+  algorithm: 'x25519-sha256-aes-256-gcm+synzapp-notification-preview-v1';
+  ciphertext: string;
+  nonce: string;
+  version: 1;
 }
 
 export interface EncryptedDirectEnvelopeResponse {
@@ -26,8 +34,10 @@ export interface EncryptedDirectEnvelopeResponse {
   conversationId: string;
   envelopeId: string;
   keyVersion: number;
+  notificationPreviewByDevice?: Record<string, EncryptedNotificationPreviewRecord>;
   recipientDeviceIds: string[];
   senderDeviceId: string;
+  senderKeyAgreementPublicKey: string;
   sentAt: string;
   tenantId: string;
 }
@@ -93,6 +103,7 @@ interface EncryptedEnvelopeRecord {
   expiresAtMs?: number;
   keyVersion?: number;
   nonce?: string;
+  notificationPreviewByDevice?: Record<string, EncryptedNotificationPreviewRecord>;
   readAtMsByDevice?: Record<string, number>;
   recipientDeviceIds?: string[];
   recipientUid?: string;
@@ -275,6 +286,10 @@ export async function sendEncryptedDirectEnvelope(
     if (!input.encryptedKeysByDevice[deviceId]) {
       throw validationError('Encrypted key material is missing for a recipient device.');
     }
+
+    if (input.notificationPreviewByDevice && !input.notificationPreviewByDevice[deviceId]) {
+      throw validationError('Encrypted notification preview is missing for a recipient device.');
+    }
   });
 
   const envelopeRef = context.chatRef.collection('encryptedEnvelopes').doc();
@@ -307,6 +322,9 @@ export async function sendEncryptedDirectEnvelope(
       expiresAtMs: sentAtMs + ENCRYPTED_ENVELOPE_TTL_MS,
       keyVersion: input.keyVersion,
       nonce: input.nonce,
+      ...(input.notificationPreviewByDevice
+        ? { notificationPreviewByDevice: input.notificationPreviewByDevice }
+        : {}),
       recipientDeviceIds: uniqueRecipientDeviceIds,
       recipientUid: context.contactId,
       senderDeviceId: input.senderDeviceId,
@@ -359,8 +377,10 @@ export async function sendEncryptedDirectEnvelope(
     conversationId: context.chatId,
     envelopeId: envelopeRef.id,
     keyVersion: input.keyVersion,
+    notificationPreviewByDevice: input.notificationPreviewByDevice,
     recipientDeviceIds: uniqueRecipientDeviceIds,
     senderDeviceId: input.senderDeviceId,
+    senderKeyAgreementPublicKey: senderDevice.keyAgreementPublicKey,
     sentAt: new Date(sentAtMs).toISOString(),
     tenantId: context.tenantId
   };

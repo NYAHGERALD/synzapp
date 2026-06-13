@@ -1,6 +1,7 @@
 import { DecodedIdToken } from 'firebase-admin/auth';
 import { fieldValue, firestore } from '../config/firebaseAdmin.js';
 import { DevicePlatform, verifyActiveRegisteredDevice } from './deviceIdentityService.js';
+import type { EncryptedNotificationPreviewRecord } from './encryptedMessageEnvelopeService.js';
 
 type PushProvider = 'expo';
 type PushTokenStatus = 'ACTIVE' | 'INACTIVE';
@@ -33,19 +34,22 @@ interface RegisteredPushTokenResponse {
 interface SendChatMessagePushNotificationInput {
   conversationId: string;
   envelopeId: string;
+  notificationPreviewByDevice?: Record<string, EncryptedNotificationPreviewRecord>;
   recipientUid: string;
   senderUid: string;
+  senderKeyAgreementPublicKey?: string;
   sentAt: string;
   tenantId: string;
 }
 
 interface ExpoPushMessage {
-  body: string;
-  channelId: string;
+  body?: string;
+  channelId?: string;
   data: Record<string, string>;
+  mutableContent?: boolean;
   priority: 'default' | 'high' | 'normal';
-  sound: 'default';
-  title: string;
+  sound?: 'default';
+  title?: string;
   to: string;
 }
 
@@ -192,6 +196,9 @@ export async function sendChatMessagePushNotification(
     conversationId: input.conversationId,
     createdAt: fieldValue.serverTimestamp(),
     envelopeId: input.envelopeId,
+    encryptedPreviewCount: input.notificationPreviewByDevice
+      ? Object.keys(input.notificationPreviewByDevice).length
+      : 0,
     recipientUid: input.recipientUid,
     status: pushTokens.length ? 'QUEUED' : 'NO_ACTIVE_TOKENS',
     tenantId: input.tenantId,
@@ -204,21 +211,38 @@ export async function sendChatMessagePushNotification(
   }
 
   const senderName = getDisplayName(senderSnapshot.exists ? senderSnapshot.data() : null);
-  const messages = pushTokens.map((record) => ({
-    body: 'New message',
-    channelId: 'chat-messages',
-    data: {
+  const messages = pushTokens.map((record) => {
+    const notificationPreview = getNotificationPreviewForDevice(input, record.deviceId || '');
+    const title = senderName || 'Synzapp';
+    const shouldUseAndroidNativePreview = record.platform === 'android' && Boolean(notificationPreview);
+    const baseData: Record<string, string> = {
       contactId: input.senderUid,
       conversationId: input.conversationId,
       envelopeId: input.envelopeId,
+      notificationFallbackBody: notificationPreview ? 'New encrypted message' : 'New message',
+      notificationTitle: title,
       sentAt: input.sentAt,
       type: 'chat.message'
-    },
-    priority: 'high',
-    sound: 'default',
-    title: senderName || 'Synzapp',
-    to: record.token || ''
-  } satisfies ExpoPushMessage));
+    };
+
+    return {
+      ...(shouldUseAndroidNativePreview
+        ? {}
+        : {
+            body: notificationPreview ? 'New encrypted message' : 'New message',
+            channelId: 'chat-messages',
+            mutableContent: Boolean(notificationPreview),
+            sound: 'default',
+            title
+          }),
+      data: {
+        ...baseData,
+        ...(notificationPreview || {})
+      },
+      priority: 'high',
+      to: record.token || ''
+    } satisfies ExpoPushMessage;
+  });
   const ticketResults: ExpoPushTicket[] = [];
 
   for (let index = 0; index < messages.length; index += EXPO_PUSH_BATCH_SIZE) {
@@ -246,6 +270,25 @@ export async function sendChatMessagePushNotification(
     })),
     updatedAt: fieldValue.serverTimestamp()
   }, { merge: true });
+}
+
+function getNotificationPreviewForDevice(
+  input: SendChatMessagePushNotificationInput,
+  deviceId: string
+): Record<string, string> | null {
+  const preview = input.notificationPreviewByDevice?.[deviceId];
+
+  if (!preview || !input.senderKeyAgreementPublicKey) {
+    return null;
+  }
+
+  return {
+    notificationPreviewAlgorithm: preview.algorithm,
+    notificationPreviewCiphertext: preview.ciphertext,
+    notificationPreviewNonce: preview.nonce,
+    notificationPreviewSenderKeyAgreementPublicKey: input.senderKeyAgreementPublicKey,
+    notificationPreviewVersion: String(preview.version)
+  };
 }
 
 async function sendExpoPushBatch(messages: ExpoPushMessage[]): Promise<ExpoPushTicket[]> {

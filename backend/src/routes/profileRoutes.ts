@@ -95,6 +95,13 @@ const pushTokenBodySchema = z.object({
   token: z.string().trim().min(20).max(512)
 });
 
+const encryptedNotificationPreviewSchema = z.object({
+  algorithm: z.literal('x25519-sha256-aes-256-gcm+synzapp-notification-preview-v1'),
+  ciphertext: z.string().trim().min(16).max(4000),
+  nonce: z.string().trim().min(8).max(256),
+  version: z.literal(1)
+});
+
 const encryptedEnvelopeBodySchema = z.object({
   algorithm: z.string().trim().min(2).max(80),
   ciphertext: z.string().trim().min(16).max(1_000_000),
@@ -105,6 +112,10 @@ const encryptedEnvelopeBodySchema = z.object({
   ),
   keyVersion: z.number().int().min(1).max(50),
   nonce: z.string().trim().min(8).max(256),
+  notificationPreviewByDevice: z.record(
+    safeDeviceIdSchema,
+    encryptedNotificationPreviewSchema
+  ).optional(),
   recipientDeviceIds: z.array(safeDeviceIdSchema).min(1).max(50),
   senderDeviceId: safeDeviceIdSchema
 });
@@ -404,8 +415,10 @@ profileRouter.post('/chat/conversations/:contactId/encrypted-messages', verifyAp
     void sendChatMessagePushNotification({
       conversationId: envelope.conversationId,
       envelopeId: envelope.envelopeId,
+      notificationPreviewByDevice: envelope.notificationPreviewByDevice,
       recipientUid: contactId,
       senderUid: decodedToken.uid,
+      senderKeyAgreementPublicKey: envelope.senderKeyAgreementPublicKey,
       sentAt: envelope.sentAt,
       tenantId: envelope.tenantId
     }).catch((error) => {
