@@ -475,7 +475,7 @@ async function encryptNotificationPreviewsForDevices(input: {
     );
     const encryptionKey = new Uint8Array(await Crypto.digest(
       Crypto.CryptoDigestAlgorithm.SHA256,
-      toArrayBuffer(keyMaterial)
+      toDigestBytes(keyMaterial)
     ));
     const nonce = Crypto.getRandomBytes(gcm.nonceLength);
     const previewPayload = utf8ToBytes(JSON.stringify({
@@ -552,12 +552,12 @@ function concatBytes(...parts: Uint8Array[]): Uint8Array {
   return output;
 }
 
-function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  const copy = new Uint8Array(bytes.byteLength);
+function toDigestBytes(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+  const copy: Uint8Array<ArrayBuffer> = new Uint8Array(bytes.byteLength);
 
   copy.set(bytes);
 
-  return copy.buffer as ArrayBuffer;
+  return copy;
 }
 
 function randomHex(byteCount: number): string {
