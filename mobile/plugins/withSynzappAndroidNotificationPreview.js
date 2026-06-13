@@ -8,6 +8,7 @@ const {
 } = require('expo/config-plugins');
 
 const SERVICE_CLASS = 'com.synzapp.mobile.notifications.SynzappFirebaseMessagingService';
+const LARGE_ICON_RESOURCE = 'notification_large_icon';
 const SERVICE_SOURCE = `package com.synzapp.mobile.notifications
 
 import android.app.NotificationChannel
@@ -16,6 +17,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
@@ -206,7 +208,13 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
 
   private fun loadLargeIcon(context: Context): Bitmap? {
     return try {
-      ContextCompat.getDrawable(context, context.applicationInfo.icon)?.toBitmap()
+      val largeIconResource = context.resources.getIdentifier("notification_large_icon", "drawable", context.packageName)
+
+      if (largeIconResource != 0) {
+        BitmapFactory.decodeResource(context.resources, largeIconResource)
+      } else {
+        ContextCompat.getDrawable(context, context.applicationInfo.icon)?.toBitmap()
+      }
     } catch (error: Exception) {
       Log.w(TAG, "Unable to load Synzapp notification large icon", error)
       null
@@ -258,6 +266,18 @@ module.exports = function withSynzappAndroidNotificationPreview(config) {
       fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
       fs.writeFileSync(sourcePath, SERVICE_SOURCE);
 
+      const largeIconSourcePath = path.join(config.modRequest.projectRoot, 'assets/notification-large-icon.png');
+      const largeIconOutputPath = path.join(
+        config.modRequest.platformProjectRoot,
+        'app/src/main/res/drawable-nodpi',
+        `${LARGE_ICON_RESOURCE}.png`
+      );
+
+      if (fs.existsSync(largeIconSourcePath)) {
+        fs.mkdirSync(path.dirname(largeIconOutputPath), { recursive: true });
+        fs.copyFileSync(largeIconSourcePath, largeIconOutputPath);
+      }
+
       return config;
     }
   ]);
@@ -297,6 +317,12 @@ module.exports = function withSynzappAndroidNotificationPreview(config) {
         }
       ]
     });
+    AndroidConfig.Manifest.addMetaDataItemToMainApplication(
+      application,
+      'expo.modules.notifications.large_notification_icon',
+      `@drawable/${LARGE_ICON_RESOURCE}`,
+      'resource'
+    );
 
     return config;
   });
