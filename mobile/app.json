@@ -7,9 +7,11 @@
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "scheme": "synzapp",
+    "icon": "./assets/icon.png",
     "ios": {
       "googleServicesFile": "./GoogleService-Info.plist",
       "supportsTablet": true,
+      "icon": "./assets/icon.png",
       "bundleIdentifier": "com.synzapp.mobile",
       "appleTeamId": "F9M458TK87",
       "entitlements": {
@@ -33,6 +35,11 @@
     "android": {
       "googleServicesFile": "./google-services.json",
       "package": "com.synzapp.mobile",
+      "icon": "./assets/icon.png",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#000000"
+      },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "softwareKeyboardLayoutMode": "resize",
@@ -46,9 +53,20 @@
         "android.permission.MODIFY_AUDIO_SETTINGS"
       ]
     },
+    "notification": {
+      "icon": "./assets/notification-icon.png",
+      "color": "#16A34A"
+    },
     "plugins": [
       "@bacons/apple-targets",
-      "expo-notifications",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#16A34A",
+          "defaultChannel": "chat-messages"
+        }
+      ],
       "./plugins/withSynzappAndroidNotificationPreview",
       "expo-document-picker",
       [

@@ -169,10 +169,11 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
       )
     }
-    val smallIcon = if (context.applicationInfo.icon != 0) {
-      context.applicationInfo.icon
-    } else {
-      android.R.drawable.sym_def_app_icon
+    val notificationIcon = context.resources.getIdentifier("notification_icon", "drawable", context.packageName)
+    val smallIcon = when {
+      notificationIcon != 0 -> notificationIcon
+      context.applicationInfo.icon != 0 -> context.applicationInfo.icon
+      else -> android.R.drawable.sym_def_app_icon
     }
     val notificationBuilder = NotificationCompat.Builder(context, CHANNEL_ID)
       .setAutoCancel(true)
