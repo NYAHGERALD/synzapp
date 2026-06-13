@@ -19,6 +19,7 @@ import android.os.Build
 import android.util.Base64
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import com.google.firebase.messaging.RemoteMessage
 import expo.modules.notifications.service.ExpoFirebaseMessagingService
 import org.bouncycastle.math.ec.rfc7748.X25519
@@ -46,8 +47,16 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
       return false
     }
 
-    val previewText = decryptPreview(data) ?: return false
-    showNotification(remoteMessage, previewText)
+    val previewText = decryptPreview(data)
+    val body = previewText
+      ?: data["notificationFallbackBody"]?.takeIf { it.isNotBlank() }
+      ?: "New message"
+
+    if (previewText == null && hasPreviewFields(data)) {
+      Log.w(TAG, "Showing fallback Synzapp notification because encrypted preview could not be decrypted")
+    }
+
+    showNotification(remoteMessage, body)
 
     return true
   }
@@ -125,7 +134,12 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
   }
 
   private fun showNotification(remoteMessage: RemoteMessage, body: String) {
-    val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    val context = applicationContext
+    val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+    if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) {
+      Log.w(TAG, "Synzapp notification was received but Android notifications are disabled for this app")
+    }
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       val existingChannel = notificationManager.getNotificationChannel(CHANNEL_ID)
@@ -139,7 +153,7 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
 
     val title = remoteMessage.data["notificationTitle"] ?: remoteMessage.notification?.title ?: "Synzapp"
     val notificationId = (remoteMessage.data["envelopeId"] ?: remoteMessage.messageId ?: body).hashCode()
-    val launchIntent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
+    val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
       flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
       putExtra("type", remoteMessage.data["type"])
       putExtra("contactId", remoteMessage.data["contactId"])
@@ -149,18 +163,18 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
     }
     val pendingIntent = launchIntent?.let {
       PendingIntent.getActivity(
-        this,
+        context,
         notificationId,
         it,
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
       )
     }
-    val smallIcon = if (applicationInfo.icon != 0) {
-      applicationInfo.icon
+    val smallIcon = if (context.applicationInfo.icon != 0) {
+      context.applicationInfo.icon
     } else {
       android.R.drawable.sym_def_app_icon
     }
-    val notificationBuilder = NotificationCompat.Builder(this, CHANNEL_ID)
+    val notificationBuilder = NotificationCompat.Builder(context, CHANNEL_ID)
       .setAutoCancel(true)
       .setCategory(NotificationCompat.CATEGORY_MESSAGE)
       .setContentText(body)
@@ -178,6 +192,12 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
   }
 
   private fun decodeBase64(value: String): ByteArray = Base64.decode(value, Base64.NO_WRAP)
+
+  private fun hasPreviewFields(data: Map<String, String>): Boolean {
+    return data.containsKey("notificationPreviewAlgorithm") ||
+      data.containsKey("notificationPreviewCiphertext") ||
+      data.containsKey("notificationPreviewNonce")
+  }
 
   companion object {
     private const val CHANNEL_ID = "chat-messages"
