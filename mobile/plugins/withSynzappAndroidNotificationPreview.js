@@ -256,6 +256,12 @@ module.exports = function withSynzappAndroidNotificationPreview(config) {
         "dependencies {\n    implementation 'org.bouncycastle:bcprov-jdk15to18:1.78.1'"
       );
     }
+    if (!config.modResults.contents.includes('com.google.firebase:firebase-messaging')) {
+      config.modResults.contents = config.modResults.contents.replace(
+        /dependencies\s*{/,
+        "dependencies {\n    implementation 'com.google.firebase:firebase-messaging:24.0.1'"
+      );
+    }
 
     return config;
   });
