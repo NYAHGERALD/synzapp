@@ -250,10 +250,10 @@ module.exports = function withSynzappAndroidNotificationPreview(config) {
       return config;
     }
 
-    if (!config.modResults.contents.includes('org.bouncycastle:bcprov-jdk18on')) {
+    if (!config.modResults.contents.includes('org.bouncycastle:bcprov-jdk15to18')) {
       config.modResults.contents = config.modResults.contents.replace(
         /dependencies\s*{/,
-        "dependencies {\n    implementation 'org.bouncycastle:bcprov-jdk18on:1.84'"
+        "dependencies {\n    implementation 'org.bouncycastle:bcprov-jdk15to18:1.78.1'"
       );
     }
 
