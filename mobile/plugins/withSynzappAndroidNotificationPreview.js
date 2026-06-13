@@ -15,9 +15,14 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
 import android.os.Build
 import android.util.Base64
 import android.util.Log
+import androidx.core.content.ContextCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.google.firebase.messaging.RemoteMessage
@@ -175,6 +180,7 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
       context.applicationInfo.icon != 0 -> context.applicationInfo.icon
       else -> android.R.drawable.sym_def_app_icon
     }
+    val largeIcon = loadLargeIcon(context)
     val notificationBuilder = NotificationCompat.Builder(context, CHANNEL_ID)
       .setAutoCancel(true)
       .setCategory(NotificationCompat.CATEGORY_MESSAGE)
@@ -185,6 +191,10 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
       .setSmallIcon(smallIcon)
       .setStyle(NotificationCompat.BigTextStyle().bigText(body))
 
+    if (largeIcon != null) {
+      notificationBuilder.setLargeIcon(largeIcon)
+    }
+
     if (pendingIntent != null) {
       notificationBuilder.setContentIntent(pendingIntent)
     }
@@ -193,6 +203,31 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
   }
 
   private fun decodeBase64(value: String): ByteArray = Base64.decode(value, Base64.NO_WRAP)
+
+  private fun loadLargeIcon(context: Context): Bitmap? {
+    return try {
+      ContextCompat.getDrawable(context, context.applicationInfo.icon)?.toBitmap()
+    } catch (error: Exception) {
+      Log.w(TAG, "Unable to load Synzapp notification large icon", error)
+      null
+    }
+  }
+
+  private fun Drawable.toBitmap(): Bitmap {
+    if (this is BitmapDrawable && bitmap != null) {
+      return bitmap
+    }
+
+    val width = if (intrinsicWidth > 0) intrinsicWidth else 96
+    val height = if (intrinsicHeight > 0) intrinsicHeight else 96
+    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+
+    setBounds(0, 0, canvas.width, canvas.height)
+    draw(canvas)
+
+    return bitmap
+  }
 
   private fun hasPreviewFields(data: Map<String, String>): Boolean {
     return data.containsKey("notificationPreviewAlgorithm") ||
