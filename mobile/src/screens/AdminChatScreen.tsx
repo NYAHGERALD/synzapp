@@ -85,6 +85,7 @@ import {
   ChatReplyReference,
   createGroupChat,
   decryptRealtimeEncryptedEnvelopes,
+  deleteChatMessageForMe,
   getChatMessages,
   listChatContacts,
   listGroupChatContacts,
@@ -118,9 +119,11 @@ import {
 } from '../services/profileApi';
 import {
   enqueuePendingChatMessage,
+  hideCachedChatMessagesForMe,
   listCachedChatConversations,
   listPendingChatMessages,
   loadCachedChatConversation,
+  loadHiddenChatMessageIds,
   removePendingChatMessage,
   saveCachedChatConversation,
   updatePendingChatMessage
@@ -1524,31 +1527,32 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           ...(cachedConversation?.messages || []),
           ...deliveredMessagesWithReactions
         ]);
+        const visibleMergedMessages = await filterHiddenMessagesForChat(nextContact.contactId, mergedMessages);
 
-        nextContact = applyLocalChatPreview(nextContact, mergedMessages);
+        nextContact = applyLocalChatPreview(nextContact, visibleMergedMessages);
 
         if (shouldMarkRead && selectedChatRef.current?.contactId === nextContact.contactId) {
           setMessageReactions(event.messageReactions);
-          setMessages(mergedMessages);
+          setMessages(visibleMergedMessages);
         }
 
         await saveCachedChatConversation({
           contact: nextContact,
           contactId: nextContact.contactId,
-          messages: mergedMessages,
+          messages: visibleMergedMessages,
           ownerUid: currentUid
         });
         queueEncryptedChatBackup();
-        queueMediaDownloadsForMessages(nextContact.contactId, mergedMessages, nextContact.chatType || 'DIRECT');
+        queueMediaDownloadsForMessages(nextContact.contactId, visibleMergedMessages, nextContact.chatType || 'DIRECT');
       } else if (shouldMarkRead) {
         const cachedConversation = await loadCachedChatConversation({
           contactId: nextContact.contactId,
           ownerUid: currentUid
         }).catch(() => null);
-        const reactedMessages = applyReactionMapToMessages(
+        const reactedMessages = await filterHiddenMessagesForChat(nextContact.contactId, applyReactionMapToMessages(
           cachedConversation?.messages || messagesRef.current,
           event.messageReactions
-        );
+        ));
 
         if (selectedChatRef.current?.contactId === nextContact.contactId) {
           setMessageReactions(event.messageReactions);
@@ -1606,8 +1610,9 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       const persistedMessagesWithReactions = event.type === 'conversationEncryptedEnvelopes'
         ? applyReactionMapToMessages(persistedMessages, eventReactionMap)
         : persistedMessages;
+      const visiblePersistedMessages = await filterHiddenMessagesForChat(event.contactId, persistedMessagesWithReactions);
       const nextMessages = uniqueChatMessages([
-        ...persistedMessagesWithReactions,
+        ...visiblePersistedMessages,
         ...pendingMessages.map((pendingMessage) => pendingMessage.message)
       ]);
       const contactWithLocalPreview = applyLocalChatPreview(cachedContact, nextMessages);
@@ -1624,7 +1629,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       await saveCachedChatConversation({
         contact: contactWithLocalPreview,
         contactId: event.contactId,
-        messages: persistedMessagesWithReactions,
+        messages: visiblePersistedMessages,
         ownerUid: currentUid
       });
       queueEncryptedChatBackup();
@@ -1896,6 +1901,21 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     return chatContactsRef.current.find((contact) => contact.contactId === contactId)?.chatType || 'DIRECT';
   }
 
+  async function filterHiddenMessagesForChat(contactId: string, messages: ChatMessage[]): Promise<ChatMessage[]> {
+    const hiddenMessageIds = await loadHiddenChatMessageIds({
+      contactId,
+      ownerUid: currentUid
+    }).catch(() => []);
+
+    if (!hiddenMessageIds.length) {
+      return messages;
+    }
+
+    const hiddenMessageIdSet = new Set(hiddenMessageIds);
+
+    return messages.filter((message) => !hiddenMessageIdSet.has(message.messageId));
+  }
+
   async function loadCachedMessagesForChat(chat: ChatItem, openRequestId?: number) {
     try {
       const [cachedConversation, pendingMessages] = await Promise.all([
@@ -1960,8 +1980,9 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         ...(cachedConversation?.messages || []),
         ...serverMessages
       ]), result.messageReactions);
+      const visiblePersistedMessages = await filterHiddenMessagesForChat(chat.contactId, persistedMessages);
       const nextMessages = uniqueChatMessages([
-        ...persistedMessages,
+        ...visiblePersistedMessages,
         ...pendingMessages.map((pendingMessage) => pendingMessage.message)
       ]);
       const contactWithLocalPreview = applyLocalChatPreview(cachedContact, nextMessages);
@@ -1981,7 +2002,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       await saveCachedChatConversation({
         contact: contactWithLocalPreview,
         contactId: chat.contactId,
-        messages: persistedMessages,
+        messages: visiblePersistedMessages,
         ownerUid: currentUid
       });
       queueEncryptedChatBackup();
@@ -3188,40 +3209,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         },
         {
           onPress: () => {
-            const nextMessages = messages.filter((currentMessage) => currentMessage.messageId !== message.messageId);
-            const contact = chatContacts.find((currentContact) => currentContact.contactId === chat.contactId) || null;
-            const refreshedContact = contact
-              ? applyLocalChatPreview({
-                  ...contact,
-                  lastMessageAt: null,
-                  preview: ''
-                }, nextMessages)
-              : null;
-
-            setMessages(nextMessages);
-            setMessageReactions((currentReactions) => omitRecordKey(currentReactions, message.messageId));
-            setStarredMessageIds((currentStarredMessageIds) => omitRecordKey(currentStarredMessageIds, message.messageId));
-
-            if (message.deliveryStatus === 'queued') {
-              void removePendingChatMessage({
-                ownerUid: currentUid,
-                queueId: message.messageId
-              });
-            }
-
-            void saveCachedChatConversation({
-              contact: refreshedContact,
-              contactId: chat.contactId,
-              messages: nextMessages.filter((currentMessage) => currentMessage.deliveryStatus !== 'queued'),
-              ownerUid: currentUid
-            }).then(() => {
-              queueEncryptedChatBackup();
-            });
-
-            if (refreshedContact && selectedChatRef.current?.contactId === chat.contactId) {
-              setSelectedChat(mapChatContactToChatItem(refreshedContact));
-              setChatContacts((currentContacts) => upsertChatContact(currentContacts, refreshedContact));
-            }
+            void deleteMessageForMe(chat, message);
           },
           style: 'destructive',
           text: 'Delete'
@@ -3229,6 +3217,84 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       ]
     );
     setMessageActionTarget(null);
+  }
+
+  async function deleteMessageForMe(chat: ChatItem, message: ChatMessage) {
+    const nextMessages = messagesRef.current.filter((currentMessage) => currentMessage.messageId !== message.messageId);
+    const contact = chatContactsRef.current.find((currentContact) => currentContact.contactId === chat.contactId) || null;
+    let hiddenMessageIds = [message.messageId];
+    let refreshedContact = contact
+      ? applyLocalChatPreview({
+          ...contact,
+          lastMessageAt: null,
+          preview: ''
+        }, nextMessages)
+      : null;
+
+    setMessages(nextMessages);
+    setMessageReactions((currentReactions) => omitRecordKey(currentReactions, message.messageId));
+    setStarredMessageIds((currentStarredMessageIds) => omitRecordKey(currentStarredMessageIds, message.messageId));
+
+    if (message.deliveryStatus === 'queued') {
+      await removePendingChatMessage({
+        ownerUid: currentUid,
+        queueId: message.messageId
+      }).catch(() => undefined);
+    }
+
+    await hideCachedChatMessagesForMe({
+      contactId: chat.contactId,
+      messageIds: hiddenMessageIds,
+      ownerUid: currentUid
+    }).catch(() => undefined);
+
+    if (chat.chatType === 'GROUP' && message.deliveryStatus !== 'queued') {
+      try {
+        const idToken = await getIdToken();
+        const result = await deleteChatMessageForMe({
+          chatType: chat.chatType,
+          contactId: chat.contactId,
+          idToken,
+          messageId: message.messageId
+        });
+
+        hiddenMessageIds = result.hiddenMessageIds.length ? result.hiddenMessageIds : hiddenMessageIds;
+
+        if (result.contact) {
+          setProfilePhotoAuthToken(idToken);
+          refreshedContact = applyLocalChatPreview(
+            await cacheChatContactPhoto(result.contact, idToken),
+            nextMessages
+          );
+        }
+
+        await hideCachedChatMessagesForMe({
+          contactId: chat.contactId,
+          messageIds: hiddenMessageIds,
+          ownerUid: currentUid
+        }).catch(() => undefined);
+      } catch (nextError) {
+        setError(getErrorMessage(
+          nextError,
+          'Message was removed locally, but Synzapp could not sync that delete to the server.'
+        ));
+      }
+    }
+
+    await saveCachedChatConversation({
+      contact: refreshedContact,
+      contactId: chat.contactId,
+      hiddenMessageIds,
+      messages: nextMessages.filter((currentMessage) => currentMessage.deliveryStatus !== 'queued'),
+      ownerUid: currentUid
+    }).then(() => {
+      queueEncryptedChatBackup();
+    }).catch(() => undefined);
+
+    if (refreshedContact && selectedChatRef.current?.contactId === chat.contactId) {
+      setSelectedChat(mapChatContactToChatItem(refreshedContact));
+      setChatContacts((currentContacts) => upsertChatContact(currentContacts, refreshedContact));
+    }
   }
 
   function handleSelectFooterTab(tab: FooterTab) {

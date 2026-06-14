@@ -38,12 +38,13 @@ interface ChatMediaRecord {
   chatType?: ChatMediaScope;
   contentType?: string;
   encryptedSizeBytes?: number;
-  expiresAtMs?: number;
+  expiresAtMs?: number | null;
   fileName?: string;
   groupId?: string;
   kind?: ChatMediaKind;
   participantIds?: string[];
   recipientUid?: string;
+  retentionPolicy?: 'DIRECT_TEMPORARY' | 'DURABLE_GROUP_HISTORY';
   status?: string;
   storagePath?: string;
   tenantId?: string;
@@ -163,11 +164,24 @@ export async function markEncryptedChatMediaUploaded(
     throw validationError('Encrypted media upload has not finished yet.');
   }
 
-  await mediaRef.set({
+  const update: {
+    expiresAtMs?: null;
+    retentionPolicy?: 'DURABLE_GROUP_HISTORY';
+    status: 'AVAILABLE';
+    updatedAt: FirebaseFirestore.FieldValue;
+    uploadedAt: FirebaseFirestore.FieldValue;
+  } = {
     status: 'AVAILABLE',
     updatedAt: fieldValue.serverTimestamp(),
     uploadedAt: fieldValue.serverTimestamp()
-  }, { merge: true });
+  };
+
+  if (chatType === 'GROUP') {
+    update.expiresAtMs = null;
+    update.retentionPolicy = 'DURABLE_GROUP_HISTORY';
+  }
+
+  await mediaRef.set(update, { merge: true });
 
   return {
     mediaId,
@@ -222,6 +236,9 @@ async function getAuthorizedMediaRecord(
   }
 
   const record = mediaSnapshot.data() as ChatMediaRecord;
+  const expiresAtMs = typeof record.expiresAtMs === 'number' ? record.expiresAtMs : null;
+  const isExpired = expiresAtMs !== null && expiresAtMs <= Date.now();
+  const isMissingRequiredExpiry = context.chatType === 'DIRECT' && expiresAtMs === null;
 
   if (
     record.tenantId !== context.tenantId ||
@@ -229,7 +246,8 @@ async function getAuthorizedMediaRecord(
     (record.chatType || 'DIRECT') !== context.chatType ||
     !Array.isArray(record.participantIds) ||
     !record.participantIds.includes(decodedToken.uid) ||
-    (record.expiresAtMs || 0) <= Date.now()
+    isMissingRequiredExpiry ||
+    isExpired
   ) {
     throw notFoundError('Media was not found.');
   }

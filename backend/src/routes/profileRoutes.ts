@@ -36,6 +36,7 @@ import {
   getGroupChatMemberProfilePhoto,
   getGroupChatMessageReactions,
   getGroupEncryptionContext,
+  hideGroupChatMessageForCurrentUser,
   listCurrentUserGroupChatContacts,
   listEncryptedGroupEnvelopesForDevice,
   sendEncryptedGroupEnvelope,
@@ -523,6 +524,44 @@ profileRouter.put('/chat/groups/:groupId/messages/:messageId/reaction', verifyAp
     await writeAuditEvent({
       action: 'GROUP_CHAT_REACTION_UPDATED',
       reason: error instanceof Error ? error.message : 'Group message reaction failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
+profileRouter.delete('/chat/groups/:groupId/messages/:messageId', verifyAppCheck, async (req, res, next) => {
+  const groupId = Array.isArray(req.params.groupId)
+    ? req.params.groupId[0] || ''
+    : req.params.groupId || '';
+  const messageId = Array.isArray(req.params.messageId)
+    ? req.params.messageId[0] || ''
+    : req.params.messageId || '';
+
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const result = await hideGroupChatMessageForCurrentUser(decodedToken, groupId, messageId);
+
+    await writeAuditEvent({
+      action: 'GROUP_CHAT_MESSAGE_HIDDEN_FOR_USER',
+      metadata: {
+        groupId,
+        messageId
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: result.contact.tenantId,
+      uid: decodedToken.uid
+    });
+
+    res.json(result);
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'GROUP_CHAT_MESSAGE_HIDDEN_FOR_USER',
+      reason: error instanceof Error ? error.message : 'Group message delete-for-me failed',
       req,
       status: 'FAILED'
     }).catch(() => undefined);

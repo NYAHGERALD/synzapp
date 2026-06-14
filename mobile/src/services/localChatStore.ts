@@ -14,6 +14,7 @@ interface EncryptedPayload {
 export interface LocalConversationRecord {
   contact: ChatContact | null;
   contactId: string;
+  hiddenMessageIds?: string[];
   messages: ChatMessage[];
   ownerUid: string;
   updatedAt: string;
@@ -35,6 +36,8 @@ export interface PendingChatMessage {
 }
 
 const LOCAL_CHAT_KEY_STORAGE_KEY = 'synzapp.localChatKey.v1';
+const LOCAL_CACHED_MESSAGE_LIMIT = 1000;
+const LOCAL_HIDDEN_MESSAGE_LIMIT = 5000;
 const localChatSecureStoreOptions: SecureStore.SecureStoreOptions = {
   keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
   keychainService: 'synzapp.local.chat.v1'
@@ -44,34 +47,34 @@ export async function loadCachedChatConversation(input: {
   contactId: string;
   ownerUid: string;
 }): Promise<LocalConversationRecord | null> {
-  const encryptedValue = await AsyncStorage.getItem(getConversationStorageKey(input.ownerUid, input.contactId));
+  const record = await loadRawCachedChatConversation(input);
 
-  if (!encryptedValue) {
-    return null;
-  }
-
-  const record = await decryptJson<LocalConversationRecord>(encryptedValue);
-
-  if (!record || record.version !== 1 || record.ownerUid !== input.ownerUid || record.contactId !== input.contactId) {
-    return null;
-  }
-
-  return {
-    ...record,
-    messages: uniqueMessages(record.messages || [])
-  };
+  return record ? filterHiddenMessagesInRecord(record) : null;
 }
 
 export async function saveCachedChatConversation(input: {
   contact: ChatContact | null;
   contactId: string;
+  hiddenMessageIds?: string[];
   messages: ChatMessage[];
   ownerUid: string;
 }): Promise<void> {
+  const existingRecord = await loadRawCachedChatConversation({
+    contactId: input.contactId,
+    ownerUid: input.ownerUid
+  });
+  const hiddenMessageIds = normalizeHiddenMessageIds([
+    ...(existingRecord?.hiddenMessageIds || []),
+    ...(input.hiddenMessageIds || [])
+  ]);
+  const hiddenMessageIdSet = new Set(hiddenMessageIds);
   const record: LocalConversationRecord = {
     contact: input.contact,
     contactId: input.contactId,
-    messages: uniqueMessages(input.messages).slice(-200),
+    hiddenMessageIds,
+    messages: uniqueMessages(input.messages)
+      .filter((message) => !hiddenMessageIdSet.has(message.messageId))
+      .slice(-LOCAL_CACHED_MESSAGE_LIMIT),
     ownerUid: input.ownerUid,
     updatedAt: new Date().toISOString(),
     version: 1
@@ -104,10 +107,7 @@ export async function listCachedChatConversations(input: {
           return null;
         }
 
-        return {
-          ...record,
-          messages: uniqueMessages(record.messages || [])
-        };
+        return filterHiddenMessagesInRecord(normalizeCachedConversationRecord(record));
       })
   );
 
@@ -128,12 +128,13 @@ export async function restoreCachedChatConversations(input: {
   let messageCount = 0;
 
   await Promise.all(safeConversations.map(async (conversation) => {
-    const messages = uniqueMessages(conversation.messages || []).slice(-200);
+    const messages = uniqueMessages(conversation.messages || []).slice(-LOCAL_CACHED_MESSAGE_LIMIT);
 
     messageCount += messages.length;
     await saveCachedChatConversation({
       contact: conversation.contact,
       contactId: conversation.contactId,
+      hiddenMessageIds: conversation.hiddenMessageIds,
       messages,
       ownerUid: input.ownerUid
     });
@@ -143,6 +144,49 @@ export async function restoreCachedChatConversations(input: {
     conversationCount: safeConversations.length,
     messageCount
   };
+}
+
+export async function loadHiddenChatMessageIds(input: {
+  contactId: string;
+  ownerUid: string;
+}): Promise<string[]> {
+  const record = await loadRawCachedChatConversation(input);
+
+  return record?.hiddenMessageIds || [];
+}
+
+export async function hideCachedChatMessagesForMe(input: {
+  contactId: string;
+  messageIds: string[];
+  ownerUid: string;
+}): Promise<LocalConversationRecord | null> {
+  const existingRecord = await loadRawCachedChatConversation({
+    contactId: input.contactId,
+    ownerUid: input.ownerUid
+  });
+  const hiddenMessageIds = normalizeHiddenMessageIds([
+    ...(existingRecord?.hiddenMessageIds || []),
+    ...input.messageIds
+  ]);
+  const hiddenMessageIdSet = new Set(hiddenMessageIds);
+  const nextRecord: LocalConversationRecord = {
+    contact: existingRecord?.contact || null,
+    contactId: input.contactId,
+    hiddenMessageIds,
+    messages: uniqueMessages(existingRecord?.messages || [])
+      .filter((message) => !hiddenMessageIdSet.has(message.messageId))
+      .slice(-LOCAL_CACHED_MESSAGE_LIMIT),
+    ownerUid: input.ownerUid,
+    updatedAt: new Date().toISOString(),
+    version: 1
+  };
+
+  await AsyncStorage.setItem(
+    getConversationStorageKey(input.ownerUid, input.contactId),
+    await encryptJson(nextRecord)
+  );
+
+  return filterHiddenMessagesInRecord(nextRecord);
 }
 
 export async function listPendingChatMessages(input: {
@@ -268,6 +312,25 @@ async function savePendingChatMessages(ownerUid: string, messages: PendingChatMe
   );
 }
 
+async function loadRawCachedChatConversation(input: {
+  contactId: string;
+  ownerUid: string;
+}): Promise<LocalConversationRecord | null> {
+  const encryptedValue = await AsyncStorage.getItem(getConversationStorageKey(input.ownerUid, input.contactId));
+
+  if (!encryptedValue) {
+    return null;
+  }
+
+  const record = await decryptJson<LocalConversationRecord>(encryptedValue);
+
+  if (!record || record.version !== 1 || record.ownerUid !== input.ownerUid || record.contactId !== input.contactId) {
+    return null;
+  }
+
+  return normalizeCachedConversationRecord(record);
+}
+
 async function encryptJson(value: unknown): Promise<string> {
   const key = await getOrCreateLocalChatKey();
   const nonce = Crypto.getRandomBytes(nacl.secretbox.nonceLength);
@@ -348,6 +411,42 @@ function getOutboxStorageKey(ownerUid: string): string {
 
 function sanitizeStorageKey(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120);
+}
+
+function normalizeCachedConversationRecord(record: LocalConversationRecord): LocalConversationRecord {
+  return {
+    ...record,
+    hiddenMessageIds: normalizeHiddenMessageIds(record.hiddenMessageIds),
+    messages: uniqueMessages(record.messages || [])
+  };
+}
+
+function filterHiddenMessagesInRecord(record: LocalConversationRecord): LocalConversationRecord {
+  const hiddenMessageIds = normalizeHiddenMessageIds(record.hiddenMessageIds);
+  const hiddenMessageIdSet = new Set(hiddenMessageIds);
+
+  return {
+    ...record,
+    hiddenMessageIds,
+    messages: uniqueMessages(record.messages || [])
+      .filter((message) => !hiddenMessageIdSet.has(message.messageId))
+  };
+}
+
+function normalizeHiddenMessageIds(messageIds?: string[]): string[] {
+  const seenMessageIds = new Set<string>();
+  const hiddenMessageIds: string[] = [];
+
+  (messageIds || []).forEach((messageId) => {
+    const safeMessageId = typeof messageId === 'string' ? messageId.trim() : '';
+
+    if (safeMessageId && !seenMessageIds.has(safeMessageId)) {
+      seenMessageIds.add(safeMessageId);
+      hiddenMessageIds.push(safeMessageId);
+    }
+  });
+
+  return hiddenMessageIds.slice(-LOCAL_HIDDEN_MESSAGE_LIMIT);
 }
 
 function uniqueMessages(messages: ChatMessage[]): ChatMessage[] {

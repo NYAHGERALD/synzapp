@@ -312,6 +312,52 @@ export async function updateChatMessageReaction(input: {
   };
 }
 
+export async function deleteChatMessageForMe(input: {
+  chatType?: 'DIRECT' | 'GROUP';
+  contactId: string;
+  idToken: string;
+  messageId: string;
+}): Promise<{
+  contact: ChatContact | null;
+  hiddenMessageIds: string[];
+}> {
+  if (input.chatType !== 'GROUP') {
+    return {
+      contact: null,
+      hiddenMessageIds: [input.messageId]
+    };
+  }
+
+  const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
+  const response = await fetch(
+    `${getSynzappApiBaseUrl()}/api/profile/chat/groups/${encodeURIComponent(input.contactId)}/messages/${encodeURIComponent(input.messageId)}`,
+    {
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${input.idToken}`,
+        ...deviceHeaders
+      },
+      method: 'DELETE'
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  const body = await response.json() as {
+    contact?: ChatContact;
+    hiddenMessageIds?: string[];
+  };
+
+  return {
+    contact: body.contact ? normalizeChatContact(body.contact) : null,
+    hiddenMessageIds: Array.isArray(body.hiddenMessageIds)
+      ? body.hiddenMessageIds.filter((messageId) => typeof messageId === 'string' && messageId)
+      : [input.messageId]
+  };
+}
+
 export async function sendChatMessage(input: {
   chatType?: 'DIRECT' | 'GROUP';
   contactId: string;

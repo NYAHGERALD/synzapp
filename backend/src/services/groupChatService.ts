@@ -18,9 +18,7 @@ import type {
   ChatMessageReactionMap
 } from './userProfileService.js';
 
-const ENCRYPTED_ENVELOPE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const READ_ENVELOPE_RECEIPT_GRACE_MS = 5 * 60 * 1000;
-const DELIVERED_ENVELOPE_RETENTION_MS = 24 * 60 * 60 * 1000;
+const GROUP_HIDDEN_MESSAGE_LIMIT = 5000;
 
 export interface CreateGroupChatInput {
   memberIds: string[];
@@ -179,7 +177,7 @@ interface EncryptedGroupEnvelopeRecord {
   deliveredAtMsByDevice?: Record<string, number>;
   encryptedKeysByDevice?: Record<string, string>;
   envelopeId?: string;
-  expiresAtMs?: number;
+  expiresAtMs?: number | null;
   keyVersion?: number;
   nonce?: string;
   notificationPreviewByDevice?: Record<string, EncryptedNotificationPreviewRecord>;
@@ -190,6 +188,14 @@ interface EncryptedGroupEnvelopeRecord {
   senderKeyAgreementPublicKey?: string;
   senderUid?: string;
   sentAtMs?: number;
+}
+
+interface GroupHiddenMessageRecord {
+  groupId?: string;
+  hiddenAtMs?: number;
+  messageId?: string;
+  tenantId?: string;
+  uid?: string;
 }
 
 interface GroupChatReactionRecord {
@@ -417,13 +423,14 @@ export async function listEncryptedGroupEnvelopesForDevice(
   const shouldMarkDelivered = options.markAsDelivered !== false;
   const shouldMarkRead = options.markAsRead !== false;
 
-  await cleanupRetainedEncryptedEnvelopes(context.groupRef);
-
-  const envelopesSnapshot = await context.groupRef
-    .collection('encryptedEnvelopes')
-    .orderBy('sentAtMs', 'asc')
-    .limit(options.limit || 100)
-    .get();
+  const [envelopesSnapshot, hiddenMessageIds] = await Promise.all([
+    context.groupRef
+      .collection('encryptedEnvelopes')
+      .orderBy('sentAtMs', 'asc')
+      .limit(options.limit || 500)
+      .get(),
+    getHiddenGroupMessageIds(context.groupRef, context.tenantId, decodedToken.uid)
+  ]);
   const nowMs = Date.now();
   const batch = firestore.batch();
   let hasBatchUpdates = false;
@@ -431,6 +438,10 @@ export async function listEncryptedGroupEnvelopesForDevice(
     .map((doc) => {
       const record = doc.data() as EncryptedGroupEnvelopeRecord;
       const encryptedKeyForDevice = record.encryptedKeysByDevice?.[deviceId];
+
+      if (hiddenMessageIds.has(record.envelopeId || doc.id)) {
+        return null;
+      }
 
       if (!encryptedKeyForDevice) {
         return null;
@@ -490,8 +501,6 @@ export async function listEncryptedGroupEnvelopesForDevice(
       updatedAt: fieldValue.serverTimestamp()
     }, { merge: true });
   }
-
-  await cleanupRetainedEncryptedEnvelopes(context.groupRef);
 
   return envelopes;
 }
@@ -555,8 +564,9 @@ export async function sendEncryptedGroupEnvelope(
       createdAt: fieldValue.serverTimestamp(),
       encryptedKeysByDevice: input.encryptedKeysByDevice,
       envelopeId: envelopeRef.id,
-      expiresAtMs: sentAtMs + ENCRYPTED_ENVELOPE_TTL_MS,
+      expiresAtMs: null,
       groupId: context.groupId,
+      historyRetentionPolicy: 'DURABLE_GROUP_HISTORY',
       keyVersion: input.keyVersion,
       nonce: input.nonce,
       ...(input.notificationPreviewByDevice
@@ -595,7 +605,7 @@ export async function sendEncryptedGroupEnvelope(
       lastMessageSenderUid: decodedToken.uid,
       lastMessageSentAtMs: sentAtMs,
       lastMessageText: null,
-      serverEnvelopeExpiresAtMs: sentAtMs + ENCRYPTED_ENVELOPE_TTL_MS,
+      serverEnvelopeExpiresAtMs: null,
       unreadCounts,
       updatedAt: fieldValue.serverTimestamp()
     }, { merge: true });
@@ -654,12 +664,8 @@ export async function updateGroupChatMessageReaction(
   emoji: string
 ): Promise<{ contact: GroupChatContact; messageReactions: ChatMessageReactionMap }> {
   const context = await getGroupChatContext(decodedToken, groupId);
-  const safeMessageId = messageId.trim();
+  const safeMessageId = normalizeGroupMessageId(messageId);
   const safeEmoji = emoji.trim();
-
-  if (!safeMessageId || !/^[A-Za-z0-9_-]{8,160}$/.test(safeMessageId)) {
-    throw notFoundError('Message was not found.');
-  }
 
   if (safeEmoji.length > 16) {
     throw validationError('Reaction is not valid.');
@@ -771,6 +777,69 @@ export async function updateGroupChatMessageReaction(
   return {
     contact: await getGroupChatContact(decodedToken, context.groupId),
     messageReactions: mapGroupChatMessageReactions(nextGroup || context.group)
+  };
+}
+
+export async function hideGroupChatMessageForCurrentUser(
+  decodedToken: DecodedIdToken,
+  groupId: string,
+  messageId: string
+): Promise<{ contact: GroupChatContact; hiddenMessageIds: string[] }> {
+  const context = await getGroupChatContext(decodedToken, groupId);
+  const safeMessageId = normalizeGroupMessageId(messageId);
+  const messageEnvelopeRef = context.groupRef.collection('encryptedEnvelopes').doc(safeMessageId);
+  const messageMetadataRef = context.groupRef.collection('messageMetadata').doc(safeMessageId);
+  const hiddenMessageRef = context.groupRef
+    .collection('memberMessageVisibility')
+    .doc(decodedToken.uid)
+    .collection('hiddenMessages')
+    .doc(safeMessageId);
+  const nowMs = Date.now();
+
+  await firestore.runTransaction(async (transaction) => {
+    const [messageEnvelopeSnapshot, messageMetadataSnapshot] = await Promise.all([
+      transaction.get(messageEnvelopeRef),
+      transaction.get(messageMetadataRef)
+    ]);
+
+    if (!messageEnvelopeSnapshot.exists && !messageMetadataSnapshot.exists) {
+      throw notFoundError('Message was not found.');
+    }
+
+    if (messageMetadataSnapshot.exists) {
+      const messageMetadata = messageMetadataSnapshot.data() as GroupChatMessageMetadataRecord;
+
+      if (
+        messageMetadata.tenantId !== context.tenantId ||
+        messageMetadata.groupId !== context.groupId ||
+        (
+          Array.isArray(messageMetadata.memberIds) &&
+          !messageMetadata.memberIds.includes(decodedToken.uid)
+        ) ||
+        (
+          messageMetadata.status &&
+          messageMetadata.status !== 'ACTIVE'
+        )
+      ) {
+        throw notFoundError('Message was not found.');
+      }
+    }
+
+    transaction.set(hiddenMessageRef, {
+      createdAt: fieldValue.serverTimestamp(),
+      groupId: context.groupId,
+      hiddenAt: fieldValue.serverTimestamp(),
+      hiddenAtMs: nowMs,
+      messageId: safeMessageId,
+      tenantId: context.tenantId,
+      uid: decodedToken.uid,
+      updatedAt: fieldValue.serverTimestamp()
+    });
+  });
+
+  return {
+    contact: await getGroupChatContact(decodedToken, context.groupId),
+    hiddenMessageIds: [safeMessageId]
   };
 }
 
@@ -1082,72 +1151,39 @@ async function getActiveDevice(
   };
 }
 
-async function cleanupRetainedEncryptedEnvelopes(groupRef: DocumentReference): Promise<void> {
-  const nowMs = Date.now();
-  const expiredSnapshot = await groupRef
-    .collection('encryptedEnvelopes')
-    .where('expiresAtMs', '<=', nowMs)
-    .limit(50)
+async function getHiddenGroupMessageIds(
+  groupRef: DocumentReference,
+  tenantId: string,
+  uid: string
+): Promise<Set<string>> {
+  const snapshot = await groupRef
+    .collection('memberMessageVisibility')
+    .doc(uid)
+    .collection('hiddenMessages')
+    .limit(GROUP_HIDDEN_MESSAGE_LIMIT)
     .get();
-  const recentSnapshot = await groupRef
-    .collection('encryptedEnvelopes')
-    .orderBy('sentAtMs', 'asc')
-    .limit(100)
-    .get();
-  const refsToDelete = new Map<string, DocumentReference>();
+  const hiddenMessageIds = new Set<string>();
 
-  expiredSnapshot.docs.forEach((doc) => {
-    refsToDelete.set(doc.ref.path, doc.ref);
-  });
-  recentSnapshot.docs.forEach((doc) => {
-    const record = doc.data() as EncryptedGroupEnvelopeRecord;
+  snapshot.docs.forEach((doc) => {
+    const record = doc.data() as GroupHiddenMessageRecord;
+    const messageId = record.messageId || doc.id;
 
-    if (shouldDeleteRetainedEnvelope(record, nowMs)) {
-      refsToDelete.set(doc.ref.path, doc.ref);
+    if (record.tenantId === tenantId && record.uid === uid && messageId) {
+      hiddenMessageIds.add(messageId);
     }
   });
 
-  if (!refsToDelete.size) {
-    return;
-  }
-
-  const batch = firestore.batch();
-
-  refsToDelete.forEach((ref) => {
-    batch.delete(ref);
-  });
-
-  await batch.commit();
+  return hiddenMessageIds;
 }
 
-function shouldDeleteRetainedEnvelope(record: EncryptedGroupEnvelopeRecord, nowMs: number): boolean {
-  if (record.expiresAtMs && record.expiresAtMs <= nowMs) {
-    return true;
+function normalizeGroupMessageId(messageId: string): string {
+  const safeMessageId = messageId.trim();
+
+  if (!safeMessageId || !/^[A-Za-z0-9_-]{8,160}$/.test(safeMessageId)) {
+    throw notFoundError('Message was not found.');
   }
 
-  const recipientDeviceIds = record.recipientDeviceIds || [];
-
-  if (!recipientDeviceIds.length) {
-    return false;
-  }
-
-  const readAtMsByDevice = record.readAtMsByDevice || {};
-  const readTimes = recipientDeviceIds.map((deviceId) => readAtMsByDevice[deviceId] || 0);
-
-  if (
-    readTimes.every(Boolean) &&
-    Math.max(...readTimes) + READ_ENVELOPE_RECEIPT_GRACE_MS <= nowMs
-  ) {
-    return true;
-  }
-
-  const deliveredAtMsByDevice = record.deliveredAtMsByDevice || {};
-  const deliveredTimes = recipientDeviceIds.map((deviceId) => deliveredAtMsByDevice[deviceId] || 0);
-
-  return (
-    deliveredTimes.every(Boolean) &&
-    Math.max(...deliveredTimes) + DELIVERED_ENVELOPE_RETENTION_MS <= nowMs
-  );
+  return safeMessageId;
 }
 
 async function buildHydratedGroupChatContact(
