@@ -82,9 +82,11 @@ import {
   ChatMessageReaction,
   ChatMessageReactionMap,
   ChatReplyReference,
+  createGroupChat,
   decryptRealtimeEncryptedEnvelopes,
   getChatMessages,
   listChatContacts,
+  listGroupChatContacts,
   openChatRealtimeSocket,
   parseChatRealtimeEvent,
   sendRealtimePresenceHeartbeat,
@@ -154,6 +156,7 @@ interface AdminChatScreenProps {
 }
 
 interface ChatItem {
+  chatType: 'DIRECT' | 'GROUP';
   contactId: string;
   hasActiveDevice: boolean;
   id: string;
@@ -497,6 +500,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     ? ['Chats', 'Groups', 'Employees', 'Settings', 'You']
     : ['Chats', 'Groups', 'Settings', 'You'];
   const chatItems = chatContacts.map(mapChatContactToChatItem);
+  const directChatContacts = chatContacts.filter((contact) => (contact.chatType || 'DIRECT') !== 'GROUP');
   const selectedForwardMessageCount = Object.values(forwardSelectedMessageIds).filter(Boolean).length;
   const selectedForwardRecipientCount = Object.values(forwardRecipientIds).filter(Boolean).length;
   const employeeItems = approvedEmployees.map(mapApprovedEmployeeToListItem);
@@ -519,7 +523,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       }
     : undefined;
   const filteredChatItems = filterChatItems(chatItems, chatSearch);
-  const selectedNewGroupMembers = chatContacts.filter((contact) => selectedNewGroupMemberIds[contact.contactId]);
+  const selectedNewGroupMembers = directChatContacts.filter((contact) => selectedNewGroupMemberIds[contact.contactId]);
 
   useEffect(() => {
     void configureSynzappNotificationHandling();
@@ -1392,7 +1396,11 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       }
 
       const idToken = await getIdToken();
-      const contacts = await listChatContacts(idToken);
+      const [directContacts, groupContacts] = await Promise.all([
+        listChatContacts(idToken),
+        listGroupChatContacts(idToken)
+      ]);
+      const contacts = [...directContacts, ...groupContacts];
       const contactsWithLocalPreviews = applyLocalChatPreviewsToContacts(
         contacts,
         cachedConversations,
@@ -1639,6 +1647,11 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     }
 
     if (selectedChatRef.current) {
+      if (selectedChatRef.current.chatType === 'GROUP') {
+        unsubscribeRealtimeConversation(socket);
+        return;
+      }
+
       subscribeRealtimeConversation(socket, selectedChatRef.current.contactId);
       return;
     }
@@ -1770,6 +1783,10 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   }
 
   async function handleCreateGroupChatDraft() {
+    if (isSavingGroup) {
+      return;
+    }
+
     const groupName = newGroupNameDraft.trim();
 
     if (!groupName) {
@@ -1782,11 +1799,39 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       return;
     }
 
-    handleCloseNewChatModal();
-    Alert.alert(
-      'Group chat ready',
-      `${groupName} is ready for the encrypted group-chat backend. The selected members and permissions flow is now in place.`
-    );
+    const unavailableMember = selectedNewGroupMembers.find((member) => !member.hasActiveDevice);
+
+    if (unavailableMember) {
+      Alert.alert(
+        'Secure device needed',
+        getRecipientDeviceNotReadyMessage(unavailableMember.displayName)
+      );
+      return;
+    }
+
+    setIsSavingGroup(true);
+    setError(null);
+
+    try {
+      const idToken = await getIdToken();
+      const groupContact = await createGroupChat({
+        idToken,
+        memberIds: selectedNewGroupMembers.map((member) => member.contactId),
+        messagePermissionMode: newGroupPermissionMode,
+        name: groupName
+      });
+      const cachedContact = await cacheChatContactPhoto(groupContact, idToken);
+
+      setProfilePhotoAuthToken(idToken);
+      setChatContacts((currentContacts) => upsertChatContact(currentContacts, cachedContact));
+      setActiveTab('Chats');
+      handleCloseNewChatModal();
+      await handleOpenChat(mapChatContactToChatItem(cachedContact));
+    } catch (nextError) {
+      setError(getErrorMessage(nextError, 'Unable to create group chat.'));
+    } finally {
+      setIsSavingGroup(false);
+    }
   }
 
   async function openChatFromPushNotification(data: ChatPushNotificationData) {
@@ -1855,6 +1900,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     try {
       const idToken = await getIdToken();
       const result = await getChatMessages({
+        chatType: chat.chatType,
         contactId: chat.contactId,
         currentUid,
         idToken
@@ -1963,6 +2009,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
               })
             : null;
           const result = await sendChatMessage({
+            chatType: pendingMessage.chatType || 'DIRECT',
             contactId,
             currentUid,
             idToken,
@@ -2288,7 +2335,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     }
 
     if (!activeChat.hasActiveDevice) {
-      setError(getRecipientDeviceNotReadyMessage(activeChat.title));
+      setError(getChatDeviceNotReadyMessage(activeChat));
       return;
     }
 
@@ -2311,8 +2358,13 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
     const activeChat = selectedChat;
 
+    if (isGroupChatItem(activeChat)) {
+      Alert.alert('Group attachments coming next', 'This first group-chat update supports encrypted text messages. Group media is next.');
+      return;
+    }
+
     if (!activeChat.hasActiveDevice) {
-      setError(getRecipientDeviceNotReadyMessage(activeChat.title));
+      setError(getChatDeviceNotReadyMessage(activeChat));
       return;
     }
 
@@ -2375,8 +2427,13 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     const activeChat = selectedChat;
     const caption = mediaReviewCaption.trim();
 
+    if (isGroupChatItem(activeChat)) {
+      Alert.alert('Group attachments coming next', 'This first group-chat update supports encrypted text messages. Group media is next.');
+      return;
+    }
+
     if (!activeChat.hasActiveDevice) {
-      setError(getRecipientDeviceNotReadyMessage(activeChat.title));
+      setError(getChatDeviceNotReadyMessage(activeChat));
       return;
     }
 
@@ -2423,8 +2480,13 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
     const activeChat = selectedChat;
 
+    if (isGroupChatItem(activeChat)) {
+      Alert.alert('Group files coming next', 'This first group-chat update supports encrypted text messages. Group files are next.');
+      return;
+    }
+
     if (!activeChat.hasActiveDevice) {
-      setError(getRecipientDeviceNotReadyMessage(activeChat.title));
+      setError(getChatDeviceNotReadyMessage(activeChat));
       return;
     }
 
@@ -2457,8 +2519,13 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
     const activeChat = selectedChat;
 
+    if (isGroupChatItem(activeChat)) {
+      Alert.alert('Group voice notes coming next', 'This first group-chat update supports encrypted text messages. Group voice notes are next.');
+      return;
+    }
+
     if (!activeChat.hasActiveDevice) {
-      setError(getRecipientDeviceNotReadyMessage(activeChat.title));
+      setError(getChatDeviceNotReadyMessage(activeChat));
       return;
     }
 
@@ -2495,6 +2562,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     try {
       pendingMessage = await enqueuePendingChatMessage({
         contactId: activeChat.contactId,
+        chatType: activeChat.chatType,
         media: media
           ? {
               ...media,
@@ -2570,6 +2638,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           })
         : null;
       const result = await sendChatMessage({
+        chatType: activeChat.chatType,
         contactId: activeChat.contactId,
         currentUid,
         idToken,
@@ -2607,7 +2676,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
             ? { ...contact, hasActiveDevice: false }
             : contact
         ));
-        setError(getRecipientDeviceNotReadyMessage(activeChat.title));
+        setError(getChatDeviceNotReadyMessage(activeChat));
         return;
       }
 
@@ -2704,6 +2773,12 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
   async function handleReactToMessage(message: ChatMessage, reaction: string) {
     if (!selectedChat) {
+      return;
+    }
+
+    if (isGroupChatItem(selectedChat)) {
+      Alert.alert('Group reactions coming next', 'This first group-chat update supports encrypted text messages. Group reactions are next.');
+      setMessageActionTarget(null);
       return;
     }
 
@@ -2927,7 +3002,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   }
 
   function getSelectedForwardRecipients(): ChatContact[] {
-    return chatContacts.filter((contact) => forwardRecipientIds[contact.contactId]);
+    return directChatContacts.filter((contact) => forwardRecipientIds[contact.contactId]);
   }
 
   async function handleConfirmForwardMessages() {
@@ -4767,7 +4842,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       />
 
       <ForwardRecipientModal
-        contacts={chatContacts}
+        contacts={directChatContacts}
         isForwarding={isForwardingMessages}
         isOpen={isForwardRecipientModalOpen}
         onCancel={() => setIsForwardRecipientModalOpen(false)}
@@ -4781,7 +4856,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       />
 
       <NewChatModal
-        contacts={chatContacts}
+        contacts={directChatContacts}
         isOpen={isNewChatModalOpen}
         onCancel={handleCloseNewChatModal}
         onOpenAddMembers={handleOpenAddMembersModal}
@@ -4794,7 +4869,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       />
 
       <AddMembersModal
-        contacts={chatContacts}
+        contacts={directChatContacts}
         isOpen={isAddMembersModalOpen}
         onBack={handleReturnToNewChatModal}
         onNext={handleOpenGroupDetailsModal}
@@ -10422,7 +10497,7 @@ function omitRecordKey<T>(record: Record<string, T>, key: string): Record<string
 
 function isRecipientDeviceNotReadyError(error: unknown): boolean {
   return error instanceof Error &&
-    /recipient.*active device|does not have an active device/i.test(error.message);
+    /recipient.*active device|does not have an active device|group members need to open synzapp/i.test(error.message);
 }
 
 function isNetworkUnavailableError(error: unknown): boolean {
@@ -10432,6 +10507,14 @@ function isNetworkUnavailableError(error: unknown): boolean {
 
 function getRecipientDeviceNotReadyMessage(name: string): string {
   return `${name} needs to open Synzapp once before encrypted chat is available.`;
+}
+
+function getChatDeviceNotReadyMessage(chat: ChatItem): string {
+  if (chat.chatType === 'GROUP') {
+    return `Group members need to open Synzapp once before encrypted chat is available in ${chat.title}.`;
+  }
+
+  return getRecipientDeviceNotReadyMessage(chat.title);
 }
 
 function isRealtimeSessionVerificationError(message: string): boolean {
@@ -11173,9 +11256,10 @@ function mapApprovedEmployeeToListItem(employee: ApprovedEmployee): EmployeeList
 
 function mapChatContactToChatItem(contact: ChatContact): ChatItem {
   return {
+    chatType: contact.chatType === 'GROUP' ? 'GROUP' : 'DIRECT',
     contactId: contact.contactId,
     hasActiveDevice: contact.hasActiveDevice,
-    id: `contact-${contact.contactId}`,
+    id: `${contact.chatType === 'GROUP' ? 'group' : 'contact'}-${contact.contactId}`,
     isOnline: contact.isOnline === true,
     lastMessageAt: contact.lastMessageAt,
     lastSeenAt: contact.lastSeenAt,
@@ -11184,6 +11268,10 @@ function mapChatContactToChatItem(contact: ChatContact): ChatItem {
     title: contact.displayName,
     unreadCount: contact.unreadCount || 0
   };
+}
+
+function isGroupChatItem(chat: ChatItem): boolean {
+  return chat.chatType === 'GROUP';
 }
 
 function filterChatItems(chats: ChatItem[], search: string): ChatItem[] {

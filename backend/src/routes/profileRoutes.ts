@@ -31,6 +31,14 @@ import {
   sendEncryptedDirectEnvelope
 } from '../services/encryptedMessageEnvelopeService.js';
 import {
+  createGroupChat,
+  getGroupChatContact,
+  getGroupEncryptionContext,
+  listCurrentUserGroupChatContacts,
+  listEncryptedGroupEnvelopesForDevice,
+  sendEncryptedGroupEnvelope
+} from '../services/groupChatService.js';
+import {
   getLatestEncryptedChatBackup,
   saveEncryptedChatBackup
 } from '../services/chatBackupService.js';
@@ -118,6 +126,12 @@ const encryptedEnvelopeBodySchema = z.object({
   ).optional(),
   recipientDeviceIds: z.array(safeDeviceIdSchema).min(1).max(50),
   senderDeviceId: safeDeviceIdSchema
+});
+
+const groupChatBodySchema = z.object({
+  memberIds: z.array(z.string().trim().min(1).max(128)).min(1).max(49),
+  messagePermissionMode: z.enum(['ADMINS', 'ALL_MEMBERS']).optional(),
+  name: z.string().trim().min(1).max(120)
 });
 
 const encryptedMediaUploadBodySchema = z.object({
@@ -302,6 +316,52 @@ profileRouter.get('/chat/contacts', verifyAppCheck, async (req, res, next) => {
   }
 });
 
+profileRouter.get('/chat/groups', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const contacts = await listCurrentUserGroupChatContacts(decodedToken);
+
+    res.json({ contacts });
+  } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.post('/chat/groups', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const body = groupChatBodySchema.parse(req.body);
+    const contact = await createGroupChat(decodedToken, body);
+
+    await writeAuditEvent({
+      action: 'GROUP_CHAT_CREATED',
+      metadata: {
+        groupId: contact.contactId,
+        memberCount: contact.memberCount,
+        messagePermissionMode: contact.messagePermissionMode,
+        name: contact.displayName
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: contact.tenantId,
+      uid: decodedToken.uid
+    });
+
+    res.status(201).json({ contact });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'GROUP_CHAT_CREATED',
+      reason: error instanceof Error ? error.message : 'Group chat creation failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
 profileRouter.get('/groups', verifyAppCheck, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
@@ -310,6 +370,86 @@ profileRouter.get('/groups', verifyAppCheck, async (req, res, next) => {
 
     res.json({ groups });
   } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.get('/chat/groups/:groupId/encryption-context', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    const groupId = Array.isArray(req.params.groupId)
+      ? req.params.groupId[0] || ''
+      : req.params.groupId || '';
+    const context = await getGroupEncryptionContext(decodedToken, groupId, activeDevice.deviceId);
+
+    res.json({ context });
+  } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.get('/chat/groups/:groupId/encrypted-messages', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    const groupId = Array.isArray(req.params.groupId)
+      ? req.params.groupId[0] || ''
+      : req.params.groupId || '';
+    const envelopes = await listEncryptedGroupEnvelopesForDevice(
+      decodedToken,
+      groupId,
+      activeDevice.deviceId
+    );
+    const contact = await getGroupChatContact(decodedToken, groupId);
+
+    res.json({ contact, envelopes, messageReactions: {} });
+  } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.post('/chat/groups/:groupId/encrypted-messages', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    const groupId = Array.isArray(req.params.groupId)
+      ? req.params.groupId[0] || ''
+      : req.params.groupId || '';
+    const body = encryptedEnvelopeBodySchema.parse(req.body);
+
+    if (body.senderDeviceId !== activeDevice.deviceId) {
+      throw authorizationError('This device is not authorized to send that message.');
+    }
+
+    const envelope = await sendEncryptedGroupEnvelope(decodedToken, groupId, body);
+    const contact = await getGroupChatContact(decodedToken, groupId);
+
+    await writeAuditEvent({
+      action: 'ENCRYPTED_GROUP_CHAT_ENVELOPE_SENT',
+      metadata: {
+        envelopeId: envelope.envelopeId,
+        groupId,
+        keyVersion: envelope.keyVersion,
+        recipientDeviceCount: envelope.recipientDeviceIds.length,
+        recipientUserCount: envelope.recipientUids.length,
+        senderDeviceId: envelope.senderDeviceId
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: envelope.tenantId,
+      uid: decodedToken.uid
+    });
+
+    res.status(201).json({ contact, envelope });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'ENCRYPTED_GROUP_CHAT_ENVELOPE_SENT',
+      reason: error instanceof Error ? error.message : 'Encrypted group message failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
     next(error);
   }
 });

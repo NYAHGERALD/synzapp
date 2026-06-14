@@ -27,6 +27,16 @@ export interface DirectEnvelopePolicyInput extends DirectChatPolicyInput {
   senderUid?: string | null;
 }
 
+export interface GroupChatPolicyInput extends TenantResourcePolicyInput {
+  memberIds?: string[];
+  requesterUid?: string | null;
+}
+
+export interface GroupEnvelopePolicyInput extends GroupChatPolicyInput {
+  recipientUids?: string[];
+  senderUid?: string | null;
+}
+
 export interface OwnResourcePolicyInput extends TenantResourcePolicyInput {
   ownerUid?: string | null;
   requesterUid?: string | null;
@@ -122,6 +132,26 @@ export function canReadDirectEnvelope(input: DirectEnvelopePolicyInput): boolean
     (
       input.senderUid === input.requesterUid ||
       input.recipientUid === input.requesterUid
+    )
+  );
+}
+
+export function canReadGroupChat(input: GroupChatPolicyInput): boolean {
+  return (
+    canAccessTenantResource(defaultResourceTenant(input)) &&
+    hasText(input.requesterUid) &&
+    Array.isArray(input.memberIds) &&
+    input.memberIds.includes(input.requesterUid)
+  );
+}
+
+export function canReadGroupEnvelope(input: GroupEnvelopePolicyInput): boolean {
+  return (
+    canReadGroupChat(input) &&
+    hasText(input.requesterUid) &&
+    (
+      input.senderUid === input.requesterUid ||
+      Boolean(input.recipientUids?.includes(input.requesterUid))
     )
   );
 }

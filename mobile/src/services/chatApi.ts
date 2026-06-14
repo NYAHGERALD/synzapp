@@ -10,6 +10,7 @@ import {
 } from './chatEncryption';
 
 export interface ChatContact {
+  chatType?: 'DIRECT' | 'GROUP';
   contactId: string;
   conversationId: string;
   displayName: string;
@@ -18,6 +19,8 @@ export interface ChatContact {
   isOnline: boolean;
   lastMessageAt: string | null;
   lastSeenAt: string | null;
+  memberCount?: number;
+  messagePermissionMode?: 'ADMINS' | 'ALL_MEMBERS';
   preview: string;
   profilePhotoCacheKey: string | null;
   profilePhotoUrl: string | null;
@@ -157,14 +160,69 @@ export async function listChatContacts(idToken: string): Promise<ChatContact[]> 
   return (body.contacts || []).map(normalizeChatContact);
 }
 
+export async function listGroupChatContacts(idToken: string): Promise<ChatContact[]> {
+  const deviceHeaders = await getRegisteredDeviceHeaders(idToken);
+  const response = await fetch(`${getSynzappApiBaseUrl()}/api/profile/chat/groups`, {
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${idToken}`,
+      ...deviceHeaders
+    },
+    method: 'GET'
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  const body = await response.json() as { contacts?: ChatContact[] };
+
+  return (body.contacts || []).map(normalizeChatContact);
+}
+
+export async function createGroupChat(input: {
+  idToken: string;
+  memberIds: string[];
+  messagePermissionMode: 'ADMINS' | 'ALL_MEMBERS';
+  name: string;
+}): Promise<ChatContact> {
+  const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
+  const response = await fetch(`${getSynzappApiBaseUrl()}/api/profile/chat/groups`, {
+    body: JSON.stringify({
+      memberIds: input.memberIds,
+      messagePermissionMode: input.messagePermissionMode,
+      name: input.name
+    }),
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${input.idToken}`,
+      'Content-Type': 'application/json',
+      ...deviceHeaders
+    },
+    method: 'POST'
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  const body = await response.json() as { contact: ChatContact };
+
+  return normalizeChatContact(body.contact);
+}
+
 export async function getChatMessages(input: {
+  chatType?: 'DIRECT' | 'GROUP';
   contactId: string;
   currentUid: string;
   idToken: string;
 }): Promise<ChatThreadResponse> {
   const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
+  const path = input.chatType === 'GROUP'
+    ? `/api/profile/chat/groups/${encodeURIComponent(input.contactId)}/encrypted-messages`
+    : `/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/encrypted-messages`;
   const response = await fetch(
-    `${getSynzappApiBaseUrl()}/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/encrypted-messages`,
+    `${getSynzappApiBaseUrl()}${path}`,
     {
       headers: {
         Accept: 'application/json',
@@ -191,12 +249,12 @@ export async function getChatMessages(input: {
     idToken: input.idToken
   });
 
-	  return {
-	    contact: normalizeChatContact(body.contact),
-	    messageReactions,
-	    messages: applyMessageReactionMap(messages.map(normalizeChatMessage), messageReactions)
-	  };
-	}
+  return {
+    contact: normalizeChatContact(body.contact),
+    messageReactions,
+    messages: applyMessageReactionMap(messages.map(normalizeChatMessage), messageReactions)
+  };
+}
 
 export async function updateChatMessageReaction(input: {
   contactId: string;
@@ -238,6 +296,7 @@ export async function updateChatMessageReaction(input: {
 }
 
 export async function sendChatMessage(input: {
+  chatType?: 'DIRECT' | 'GROUP';
   contactId: string;
   currentUid: string;
   forwarded?: boolean;
@@ -260,6 +319,7 @@ export async function sendChatMessage(input: {
 
   const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
   const context = await getChatEncryptionContext({
+    chatType: input.chatType,
     contactId: input.contactId,
     idToken: input.idToken
   });
@@ -273,8 +333,11 @@ export async function sendChatMessage(input: {
     senderDevice: context.senderDevice,
     text
   });
+  const path = input.chatType === 'GROUP'
+    ? `/api/profile/chat/groups/${encodeURIComponent(input.contactId)}/encrypted-messages`
+    : `/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/encrypted-messages`;
   const response = await fetch(
-    `${getSynzappApiBaseUrl()}/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/encrypted-messages`,
+    `${getSynzappApiBaseUrl()}${path}`,
     {
       body: JSON.stringify(encryptedBody),
       headers: {
@@ -299,9 +362,9 @@ export async function sendChatMessage(input: {
     };
   };
 
-	  return {
-	    contact: normalizeChatContact(body.contact),
-	    message: normalizeChatMessage({
+  return {
+    contact: normalizeChatContact(body.contact),
+    message: normalizeChatMessage({
         deliveryStatus: 'sent',
         forwarded: Boolean(input.forwarded),
         image: primaryMedia?.kind === 'image' ? primaryMedia as ChatImageAttachment : null,
@@ -313,9 +376,9 @@ export async function sendChatMessage(input: {
         senderUid: input.currentUid,
         sentAt: body.envelope.sentAt,
         text
-      })
-	  };
-	}
+    })
+  };
+}
 
 export async function decryptRealtimeEncryptedEnvelopes(input: {
   currentUid: string;
@@ -440,12 +503,16 @@ export function parseChatRealtimeEvent(payload: string): ChatRealtimeEvent | nul
 }
 
 async function getChatEncryptionContext(input: {
+  chatType?: 'DIRECT' | 'GROUP';
   contactId: string;
   idToken: string;
 }): Promise<ChatEncryptionContext> {
   const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
+  const path = input.chatType === 'GROUP'
+    ? `/api/profile/chat/groups/${encodeURIComponent(input.contactId)}/encryption-context`
+    : `/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/encryption-context`;
   const response = await fetch(
-    `${getSynzappApiBaseUrl()}/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/encryption-context`,
+    `${getSynzappApiBaseUrl()}${path}`,
     {
       headers: {
         Accept: 'application/json',
@@ -468,9 +535,12 @@ async function getChatEncryptionContext(input: {
 function normalizeChatContact(contact: ChatContact): ChatContact {
   return {
     ...contact,
+    chatType: contact.chatType === 'GROUP' ? 'GROUP' : 'DIRECT',
     hasActiveDevice: contact.hasActiveDevice !== false,
     isOnline: contact.isOnline === true,
     lastSeenAt: typeof contact.lastSeenAt === 'string' ? contact.lastSeenAt : null,
+    memberCount: Number.isFinite(contact.memberCount) ? Math.max(Math.round(contact.memberCount || 0), 0) : undefined,
+    messagePermissionMode: contact.messagePermissionMode === 'ADMINS' ? 'ADMINS' : contact.messagePermissionMode === 'ALL_MEMBERS' ? 'ALL_MEMBERS' : undefined,
     profilePhotoUrl: normalizeSynzappApiUrl(contact.profilePhotoUrl)
   };
 }

@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   canAccessOwnResource,
+  canReadGroupChat,
+  canReadGroupEnvelope,
   canReadDirectChat,
   canReadDirectEnvelope
 } from '../src/services/authorizationPolicy.ts';
@@ -98,6 +100,66 @@ describe('mocked token and resource authorization policy', () => {
         recipientUid: 'user_c',
         resourceTenantId: 'tenant_a',
         senderUid: 'user_b'
+      }),
+      false
+    );
+  });
+
+  it('allows group-chat reads only for same-tenant members', () => {
+    assert.equal(
+      canReadGroupChat({
+        ...activeEmployee,
+        memberIds: ['user_a', 'user_b', 'user_c'],
+        resourceTenantId: 'tenant_a'
+      }),
+      true
+    );
+    assert.equal(
+      canReadGroupChat({
+        ...activeEmployee,
+        memberIds: ['user_b', 'user_c'],
+        resourceTenantId: 'tenant_a'
+      }),
+      false
+    );
+    assert.equal(
+      canReadGroupChat({
+        ...activeEmployee,
+        memberIds: ['user_a', 'user_b'],
+        resourceTenantId: 'tenant_b'
+      }),
+      false
+    );
+  });
+
+  it('allows group envelope reads only for sender or recipient members', () => {
+    assert.equal(
+      canReadGroupEnvelope({
+        ...activeEmployee,
+        memberIds: ['user_a', 'user_b', 'user_c'],
+        recipientUids: ['user_b', 'user_c'],
+        resourceTenantId: 'tenant_a',
+        senderUid: 'user_a'
+      }),
+      true
+    );
+    assert.equal(
+      canReadGroupEnvelope({
+        ...activeEmployee,
+        memberIds: ['user_a', 'user_b', 'user_c'],
+        recipientUids: ['user_c'],
+        resourceTenantId: 'tenant_a',
+        senderUid: 'user_b'
+      }),
+      false
+    );
+    assert.equal(
+      canReadGroupEnvelope({
+        ...activeEmployee,
+        memberIds: ['user_a', 'user_b'],
+        recipientUids: ['user_b'],
+        resourceTenantId: 'tenant_b',
+        senderUid: 'user_a'
       }),
       false
     );

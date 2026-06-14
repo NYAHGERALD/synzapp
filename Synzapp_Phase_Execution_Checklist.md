@@ -553,7 +553,8 @@ Build secure tenant-scoped workplace communication on a mobile-first E2EE founda
 - [x] Direct message screen opens from a chat contact and sends real messages.
 - [x] Direct message screen sends encrypted photo, video, and file attachments through temporary server ciphertext relay.
 - [x] Received media auto-downloads into local encrypted/offline chat cache by default.
-- [ ] Add secure E2EE group chat backend creation for selected tenant members.
+- [x] Add first secure E2EE group-chat text slice for selected tenant members: backend group creation, explicit member records, group encryption context, encrypted text envelope send/load, and mobile local-cache reuse.
+- [x] Add secure E2EE group chat backend creation for selected tenant members.
 - [ ] Persist group chat metadata, group photo reference, member list, and permissions without exposing message plaintext.
 - [ ] Enforce group membership authorization in backend APIs, realtime listeners, local restore, and push notification routing.
 - [ ] Add encrypted group message send, delivery, receipt, reaction, reply, forward, attachment, and local backup support.

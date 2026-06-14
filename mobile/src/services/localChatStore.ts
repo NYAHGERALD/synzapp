@@ -22,6 +22,7 @@ export interface LocalConversationRecord {
 
 export interface PendingChatMessage {
   attempts: number;
+  chatType?: 'DIRECT' | 'GROUP';
   contactId: string;
   createdAt: string;
   lastError: string | null;
@@ -170,6 +171,7 @@ export async function listPendingChatMessages(input: {
 }
 
 export async function enqueuePendingChatMessage(input: {
+  chatType?: 'DIRECT' | 'GROUP';
   contactId: string;
   image?: ChatMessage['image'];
   media?: ChatMessage['media'];
@@ -186,6 +188,7 @@ export async function enqueuePendingChatMessage(input: {
   const media = input.media || input.image || null;
   const pendingMessage: PendingChatMessage = {
     attempts: 0,
+    chatType: input.chatType === 'GROUP' ? 'GROUP' : 'DIRECT',
     contactId: input.contactId,
     createdAt,
     lastError: null,
