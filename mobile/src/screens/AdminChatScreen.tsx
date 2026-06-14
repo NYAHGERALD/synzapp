@@ -7207,6 +7207,13 @@ function MessageBubble({
           </Animated.View>
         ) : null}
 
+        {isGroupChat && !message.isMine ? (
+          <GroupMessageSenderAvatar
+            member={senderMember || null}
+            placement="left"
+            profilePhotoHeaders={profilePhotoHeaders}
+          />
+        ) : null}
         <Animated.View
           style={[
             styles.messageBubbleMotionWrap,
@@ -7301,9 +7308,10 @@ function MessageBubble({
             ) : null}
           </Pressable>
         </Animated.View>
-        {isGroupChat ? (
+        {isGroupChat && message.isMine ? (
           <GroupMessageSenderAvatar
             member={senderMember || null}
+            placement="right"
             profilePhotoHeaders={profilePhotoHeaders}
           />
         ) : null}
@@ -7314,12 +7322,17 @@ function MessageBubble({
 
 function GroupMessageSenderAvatar({
   member,
+  placement,
   profilePhotoHeaders
 }: {
   member: ChatGroupMember | null;
+  placement: 'left' | 'right';
   profilePhotoHeaders?: Record<string, string>;
 }) {
   const initials = member?.initials || getInitials(member?.displayName || 'Member');
+  const placementStyle = placement === 'left'
+    ? styles.groupMessageAvatarLeft
+    : styles.groupMessageAvatarRight;
 
   if (member?.profilePhotoUrl) {
     return (
@@ -7329,13 +7342,13 @@ function GroupMessageSenderAvatar({
           headers: profilePhotoHeaders,
           uri: member.profilePhotoUrl
         }}
-        style={styles.groupMessageAvatarImage}
+        style={[styles.groupMessageAvatarImage, placementStyle]}
       />
     );
   }
 
   return (
-    <View style={styles.groupMessageAvatarFallback}>
+    <View style={[styles.groupMessageAvatarFallback, placementStyle]}>
       <Text numberOfLines={1} style={styles.groupMessageAvatarText}>{initials}</Text>
     </View>
   );
@@ -12491,7 +12504,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     height: 28,
     justifyContent: 'center',
-    marginLeft: 6,
     width: 28
   },
   groupMessageAvatarImage: {
@@ -12501,8 +12513,13 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     borderWidth: 1,
     height: 28,
-    marginLeft: 6,
     width: 28
+  },
+  groupMessageAvatarLeft: {
+    marginRight: 6
+  },
+  groupMessageAvatarRight: {
+    marginLeft: 6
   },
   groupMessageAvatarText: {
     color: '#FFFFFF',
