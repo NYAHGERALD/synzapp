@@ -95,7 +95,11 @@ async function cacheNotificationAvatarThumbnail(
   cacheKey?: string | null,
   profilePhotoUri?: string | null
 ): Promise<void> {
-  if (Platform.OS !== 'ios' || !cacheKey || !profilePhotoUri) {
+  if (
+    (Platform.OS !== 'ios' && Platform.OS !== 'android') ||
+    !cacheKey ||
+    !profilePhotoUri
+  ) {
     return;
   }
 

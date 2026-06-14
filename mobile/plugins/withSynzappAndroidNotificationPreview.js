@@ -108,36 +108,10 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
   }
 
   private fun readStoredDeviceIdentity(): JSONObject? {
-    val preferences = getSharedPreferences("SecureStore", Context.MODE_PRIVATE)
-    val encryptedValue = preferences.getString("$SECURE_STORE_SERVICE-$SECURE_STORE_KEY", null)
-      ?: preferences.getString(SECURE_STORE_KEY, null)
+    val storedIdentity = readSecureStoreString(applicationContext, SECURE_STORE_KEY, SECURE_STORE_SERVICE)
       ?: return null
-    val encryptedItem = JSONObject(encryptedValue)
 
-    if (encryptedItem.optString("scheme") != "aes") {
-      return null
-    }
-
-    val keyStore = KeyStore.getInstance("AndroidKeyStore")
-    keyStore.load(null)
-
-    val alias = if (encryptedItem.optBoolean("usesKeystoreSuffix", false)) {
-      "AES/GCM/NoPadding:$SECURE_STORE_SERVICE:keystoreUnauthenticated"
-    } else {
-      "AES/GCM/NoPadding:$SECURE_STORE_SERVICE"
-    }
-    val secretKeyEntry = keyStore.getEntry(alias, null) as? KeyStore.SecretKeyEntry ?: return null
-    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-    val ciphertext = decodeBase64(encryptedItem.getString("ct"))
-    val iv = decodeBase64(encryptedItem.getString("iv"))
-
-    cipher.init(
-      Cipher.DECRYPT_MODE,
-      secretKeyEntry.secretKey,
-      GCMParameterSpec(encryptedItem.getInt("tlen"), iv)
-    )
-
-    return JSONObject(String(cipher.doFinal(ciphertext), StandardCharsets.UTF_8))
+    return JSONObject(storedIdentity)
   }
 
   private fun showNotification(remoteMessage: RemoteMessage, body: String) {
@@ -186,7 +160,7 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
       context.applicationInfo.icon != 0 -> context.applicationInfo.icon
       else -> android.R.drawable.sym_def_app_icon
     }
-    val largeIcon = loadLargeIcon(context)
+    val largeIcon = loadSenderAvatarLargeIcon(context, remoteMessage.data)
     val notificationBuilder = NotificationCompat.Builder(context, CHANNEL_ID)
       .setAutoCancel(true)
       .setCategory(NotificationCompat.CATEGORY_MESSAGE)
@@ -199,7 +173,7 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
 
     if (badgeCount != null) {
       notificationBuilder
-        .setBadgeIconType(NotificationCompat.BADGE_ICON_LARGE)
+        .setBadgeIconType(if (largeIcon != null) NotificationCompat.BADGE_ICON_LARGE else NotificationCompat.BADGE_ICON_SMALL)
         .setNumber(badgeCount)
     }
 
@@ -215,6 +189,83 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
   }
 
   private fun decodeBase64(value: String): ByteArray = Base64.decode(value, Base64.NO_WRAP)
+
+  private fun loadSenderAvatarLargeIcon(context: Context, data: Map<String, String>): Bitmap? {
+    val primaryCacheKey = data["notificationSenderProfilePhotoCacheKey"]
+    val fallbackCacheKey = data["notificationSenderFallbackProfilePhotoCacheKey"]
+
+    return decodeSenderAvatarBitmap(context, primaryCacheKey)
+      ?: decodeSenderAvatarBitmap(context, fallbackCacheKey)
+  }
+
+  private fun decodeSenderAvatarBitmap(context: Context, cacheKey: String?): Bitmap? {
+    val safeCacheKey = cacheKey?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    val storedAvatar = readSecureStoreString(
+      context,
+      "$NOTIFICATION_AVATAR_STORAGE_PREFIX$safeCacheKey",
+      NOTIFICATION_AVATAR_SECURE_STORE_SERVICE
+    ) ?: return null
+
+    return try {
+      val avatar = JSONObject(storedAvatar)
+
+      if (avatar.optInt("version") != 1) {
+        return null
+      }
+
+      val avatarBytes = decodeBase64(avatar.optString("base64"))
+
+      if (avatarBytes.isEmpty() || avatarBytes.size > MAX_AVATAR_BYTE_COUNT) {
+        return null
+      }
+
+      BitmapFactory
+        .decodeByteArray(avatarBytes, 0, avatarBytes.size)
+        ?.toNotificationLargeIcon()
+    } catch (error: Exception) {
+      Log.w(TAG, "Unable to load sender avatar notification icon", error)
+      null
+    }
+  }
+
+  private fun readSecureStoreString(context: Context, key: String, service: String): String? {
+    return try {
+      val preferences = context.getSharedPreferences("SecureStore", Context.MODE_PRIVATE)
+      val encryptedValue = preferences.getString("$service-$key", null)
+        ?: preferences.getString(key, null)
+        ?: return null
+      val encryptedItem = JSONObject(encryptedValue)
+
+      if (encryptedItem.optString("scheme") != "aes") {
+        return null
+      }
+
+      val keyStore = KeyStore.getInstance("AndroidKeyStore")
+      keyStore.load(null)
+
+      val keyStoreAlias = encryptedItem.optString("keystoreAlias").takeIf { it.isNotBlank() } ?: service
+      val alias = if (encryptedItem.optBoolean("usesKeystoreSuffix", false)) {
+        "AES/GCM/NoPadding:$keyStoreAlias:keystoreUnauthenticated"
+      } else {
+        "AES/GCM/NoPadding:$keyStoreAlias"
+      }
+      val secretKeyEntry = keyStore.getEntry(alias, null) as? KeyStore.SecretKeyEntry ?: return null
+      val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+      val ciphertext = decodeBase64(encryptedItem.getString("ct"))
+      val iv = decodeBase64(encryptedItem.getString("iv"))
+
+      cipher.init(
+        Cipher.DECRYPT_MODE,
+        secretKeyEntry.secretKey,
+        GCMParameterSpec(encryptedItem.getInt("tlen"), iv)
+      )
+
+      String(cipher.doFinal(ciphertext), StandardCharsets.UTF_8)
+    } catch (error: Exception) {
+      Log.w(TAG, "Unable to read Synzapp secure notification value", error)
+      null
+    }
+  }
 
   private fun loadLargeIcon(context: Context): Bitmap? {
     return try {
@@ -247,6 +298,19 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
     return bitmap
   }
 
+  private fun Bitmap.toNotificationLargeIcon(): Bitmap {
+    val sourceSize = minOf(width, height)
+    val offsetX = ((width - sourceSize) / 2).coerceAtLeast(0)
+    val offsetY = ((height - sourceSize) / 2).coerceAtLeast(0)
+    val squareBitmap = Bitmap.createBitmap(this, offsetX, offsetY, sourceSize, sourceSize)
+
+    return if (squareBitmap.width == LARGE_ICON_SIZE && squareBitmap.height == LARGE_ICON_SIZE) {
+      squareBitmap
+    } else {
+      Bitmap.createScaledBitmap(squareBitmap, LARGE_ICON_SIZE, LARGE_ICON_SIZE, true)
+    }
+  }
+
   private fun hasPreviewFields(data: Map<String, String>): Boolean {
     return data.containsKey("notificationPreviewAlgorithm") ||
       data.containsKey("notificationPreviewCiphertext") ||
@@ -256,6 +320,10 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
   companion object {
     private const val CHANNEL_ID = "chat-messages"
     private const val DERIVATION_LABEL = "Synzapp notification preview v1"
+    private const val LARGE_ICON_SIZE = 128
+    private const val MAX_AVATAR_BYTE_COUNT = 64 * 1024
+    private const val NOTIFICATION_AVATAR_SECURE_STORE_SERVICE = "synzapp.notification.avatar.v1"
+    private const val NOTIFICATION_AVATAR_STORAGE_PREFIX = "synzapp.notificationAvatar.v1:"
     private const val NOTIFICATION_PREVIEW_ALGORITHM = "x25519-sha256-aes-256-gcm+synzapp-notification-preview-v1"
     private const val SECURE_STORE_KEY = "synzapp.deviceIdentity.v1"
     private const val SECURE_STORE_SERVICE = "synzapp.device.identity.v1"

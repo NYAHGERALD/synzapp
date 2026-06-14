@@ -11,7 +11,6 @@ module.exports = (config) => ({
   },
   frameworks: [
     'CryptoKit',
-    'Intents',
     'Security',
     'UserNotifications'
   ],

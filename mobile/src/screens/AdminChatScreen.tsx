@@ -11892,14 +11892,36 @@ async function cacheChatContactPhoto(
   contact: ChatContact,
   idToken: string
 ): Promise<ChatContact> {
-  return {
-    ...contact,
-    profilePhotoUrl: await getCachedProfilePhotoUri({
+  const [profilePhotoUrl, members] = await Promise.all([
+    getCachedProfilePhotoUri({
       cacheKey: contact.profilePhotoCacheKey,
       idToken,
       profilePhotoUrl: contact.profilePhotoUrl
-    })
+    }),
+    contact.members
+      ? cacheChatGroupMemberPhotos(contact.members, idToken)
+      : Promise.resolve(contact.members)
+  ]);
+
+  return {
+    ...contact,
+    members,
+    profilePhotoUrl
   };
+}
+
+async function cacheChatGroupMemberPhotos(
+  members: ChatGroupMember[],
+  idToken: string
+): Promise<ChatGroupMember[]> {
+  return Promise.all(members.map(async (member) => ({
+    ...member,
+    profilePhotoUrl: await getCachedProfilePhotoUri({
+      cacheKey: member.profilePhotoCacheKey,
+      idToken,
+      profilePhotoUrl: member.profilePhotoUrl
+    })
+  })));
 }
 
 function mapApprovedEmployeeToListItem(employee: ApprovedEmployee): EmployeeListItem {
