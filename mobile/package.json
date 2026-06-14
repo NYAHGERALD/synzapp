@@ -19,12 +19,14 @@
     "build:preview:android": "npm run build:preflight && npx eas-cli@20.1.0 build --profile preview --platform android",
     "build:preview:ios": "npm run build:preflight && npx eas-cli@20.1.0 build --profile preview --platform ios",
     "build:preview:all": "npm run build:preflight && npx eas-cli@20.1.0 build --profile preview --platform all",
+    "eas-build-post-install": "node scripts/patch-ios-notification-service-icon.js",
     "ios": "expo start --ios",
     "android": "expo start --android",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@bacons/apple-targets": "^4.0.7",
+    "@bacons/xcode": "^1.0.0-alpha.32",
     "@expo/prebuild-config": "^54.0.8",
     "@expo/vector-icons": "^15.1.1",
     "@noble/ciphers": "^2.2.0",
