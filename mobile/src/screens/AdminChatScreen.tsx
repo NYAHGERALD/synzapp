@@ -142,7 +142,8 @@ import {
   addChatPushNotificationListeners,
   ChatPushNotificationData,
   configureSynzappNotificationHandling,
-  registerDevicePushNotifications
+  registerDevicePushNotifications,
+  syncSynzappUnreadBadgeCount
 } from '../services/pushNotifications';
 import { VerifiedOrgAdmin } from '../types/auth';
 import { colors } from '../theme/colors';
@@ -648,6 +649,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
   useEffect(() => {
     chatContactsRef.current = chatContacts;
+    void syncSynzappUnreadBadgeCount(chatContacts).catch(() => undefined);
   }, [chatContacts]);
 
   useEffect(() => {
@@ -1650,6 +1652,11 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     chatOpenRequestIdRef.current = openRequestId;
     selectedChatRef.current = chat;
     setSelectedChat(chat);
+    setChatContacts((currentContacts) => currentContacts.map((contact) =>
+      contact.contactId === chat.contactId
+        ? { ...contact, unreadCount: 0 }
+        : contact
+    ));
     setMessageDraft('');
     setReplyTarget(null);
     resetForwardMode();
@@ -10466,7 +10473,7 @@ function formatMessageTime(value: string): string {
 
 function formatMessageDeliveryStatus(status: ChatDeliveryStatus | null): string {
   if (status === 'read') {
-    return 'Read';
+    return 'Seen';
   }
 
   if (status === 'delivered') {

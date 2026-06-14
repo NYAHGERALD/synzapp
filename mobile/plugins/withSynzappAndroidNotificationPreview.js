@@ -152,13 +152,17 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
       val existingChannel = notificationManager.getNotificationChannel(CHANNEL_ID)
 
       if (existingChannel == null) {
-        notificationManager.createNotificationChannel(
-          NotificationChannel(CHANNEL_ID, "Chat messages", NotificationManager.IMPORTANCE_HIGH)
-        )
+        val channel = NotificationChannel(CHANNEL_ID, "Chat messages", NotificationManager.IMPORTANCE_HIGH)
+        channel.setShowBadge(true)
+        notificationManager.createNotificationChannel(channel)
+      } else if (!existingChannel.canShowBadge()) {
+        existingChannel.setShowBadge(true)
+        notificationManager.createNotificationChannel(existingChannel)
       }
     }
 
     val title = remoteMessage.data["notificationTitle"] ?: remoteMessage.notification?.title ?: "Synzapp"
+    val badgeCount = remoteMessage.data["badgeCount"]?.toIntOrNull()?.coerceAtLeast(0)
     val notificationId = (remoteMessage.data["envelopeId"] ?: remoteMessage.messageId ?: body).hashCode()
     val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
       flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -192,6 +196,12 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
       .setPriority(NotificationCompat.PRIORITY_HIGH)
       .setSmallIcon(smallIcon)
       .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+
+    if (badgeCount != null) {
+      notificationBuilder
+        .setBadgeIconType(NotificationCompat.BADGE_ICON_LARGE)
+        .setNumber(badgeCount)
+    }
 
     if (largeIcon != null) {
       notificationBuilder.setLargeIcon(largeIcon)

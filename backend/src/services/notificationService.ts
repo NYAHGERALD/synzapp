@@ -36,6 +36,7 @@ interface SendChatMessagePushNotificationInput {
   conversationId: string;
   envelopeId: string;
   notificationPreviewByDevice?: Record<string, EncryptedNotificationPreviewRecord>;
+  recipientBadgeCount?: number;
   recipientUid: string;
   senderUid: string;
   senderKeyAgreementPublicKey?: string;
@@ -44,6 +45,7 @@ interface SendChatMessagePushNotificationInput {
 }
 
 interface ExpoPushMessage {
+  badge?: number;
   body?: string;
   channelId?: string;
   data: Record<string, string>;
@@ -78,6 +80,7 @@ const EXPO_PUSH_SEND_URL = 'https://exp.host/--/api/v2/push/send';
 const EXPO_PUSH_TOKEN_PATTERN = /^(Expo|Exponent)PushToken\[[A-Za-z0-9_-]+\]$/;
 const EXPO_PUSH_BATCH_SIZE = 100;
 const FCM_PUSH_BATCH_SIZE = 500;
+const MAX_PUSH_BADGE_COUNT = 9999;
 
 export async function registerCurrentUserPushToken(
   decodedToken: DecodedIdToken,
@@ -185,14 +188,17 @@ export async function sendChatMessagePushNotification(
 ): Promise<void> {
   const organizationRef = firestore.collection('organizations').doc(input.tenantId);
   const eventRef = organizationRef.collection('notificationEvents').doc();
-  const [senderSnapshot, pushTokensSnapshot] = await Promise.all([
+  const [senderSnapshot, pushTokensSnapshot, unreadBadgeCount] = await Promise.all([
     organizationRef.collection('users').doc(input.senderUid).get(),
     organizationRef
       .collection('users')
       .doc(input.recipientUid)
       .collection('pushTokens')
       .where('status', '==', 'ACTIVE')
-      .get()
+      .get(),
+    input.recipientBadgeCount === undefined
+      ? getUnreadChatBadgeCount(input.tenantId, input.recipientUid)
+      : Promise.resolve(normalizeBadgeCount(input.recipientBadgeCount))
   ]);
   const pushTokens = pushTokensSnapshot.docs
     .map((doc) => ({
@@ -211,6 +217,7 @@ export async function sendChatMessagePushNotification(
       ? Object.keys(input.notificationPreviewByDevice).length
       : 0,
     recipientUid: input.recipientUid,
+    recipientBadgeCount: unreadBadgeCount,
     status: pushTokens.length ? 'QUEUED' : 'NO_ACTIVE_TOKENS',
     tenantId: input.tenantId,
     tokenCount: pushTokens.length,
@@ -232,6 +239,7 @@ export async function sendChatMessagePushNotification(
       contactId: input.senderUid,
       conversationId: input.conversationId,
       envelopeId: input.envelopeId,
+      badgeCount: String(unreadBadgeCount),
       notificationFallbackBody: notificationPreview ? 'New encrypted message' : 'New message',
       notificationTitle: title,
       sentAt: input.sentAt,
@@ -256,6 +264,7 @@ export async function sendChatMessagePushNotification(
     } else {
       expoTargets.push({
         message: {
+          badge: unreadBadgeCount,
           body: notificationPreview ? 'New encrypted message' : 'New message',
           channelId: 'chat-messages',
           data,
@@ -309,6 +318,31 @@ export async function sendChatMessagePushNotification(
     })),
     updatedAt: fieldValue.serverTimestamp()
   }, { merge: true });
+}
+
+async function getUnreadChatBadgeCount(tenantId: string, uid: string): Promise<number> {
+  const snapshot = await firestore
+    .collection('organizations')
+    .doc(tenantId)
+    .collection('directChats')
+    .where('participantIds', 'array-contains', uid)
+    .get();
+  const unreadCount = snapshot.docs.reduce((total, doc) => {
+    const unreadCounts = doc.data().unreadCounts as Record<string, unknown> | undefined;
+    const count = unreadCounts?.[uid];
+
+    return total + (typeof count === 'number' && Number.isFinite(count) ? Math.max(0, count) : 0);
+  }, 0);
+
+  return normalizeBadgeCount(unreadCount);
+}
+
+function normalizeBadgeCount(count: number): number {
+  if (!Number.isFinite(count)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(MAX_PUSH_BADGE_COUNT, Math.floor(count)));
 }
 
 function getNotificationPreviewForDevice(

@@ -14,6 +14,7 @@ module.exports = (config) => ({
     'Security',
     'UserNotifications'
   ],
+  icon: './assets/notification-logo.png',
   name: 'SynzappNotificationService',
   type: 'notification-service'
 });

@@ -1,6 +1,7 @@
 import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 import { getSynzappApiBaseUrl } from './apiConfig';
+import type { ChatContact } from './chatApi';
 import { getRegisteredDeviceHeaders } from './deviceIdentity';
 
 type PushPlatform = 'android' | 'ios' | 'unknown';
@@ -25,6 +26,7 @@ interface ExpoProjectConfig {
 }
 
 const CHAT_MESSAGES_CHANNEL_ID = 'chat-messages';
+const MAX_APP_BADGE_COUNT = 9999;
 let notificationHandlerConfigured = false;
 let notificationsModulePromise: Promise<ExpoNotificationsModule> | null = null;
 
@@ -110,6 +112,34 @@ export async function registerDevicePushNotifications(idToken: string): Promise<
   return true;
 }
 
+export async function syncSynzappUnreadBadgeCount(
+  contacts: Array<Pick<ChatContact, 'unreadCount'>>
+): Promise<void> {
+  await setSynzappAppBadgeCount(getSynzappUnreadBadgeCount(contacts));
+}
+
+export async function setSynzappAppBadgeCount(count: number): Promise<void> {
+  if (Platform.OS === 'web') {
+    return;
+  }
+
+  const Notifications = await getNotificationsModule();
+
+  if (!Notifications || typeof Notifications.setBadgeCountAsync !== 'function') {
+    return;
+  }
+
+  await Notifications.setBadgeCountAsync(normalizeBadgeCount(count));
+}
+
+export function getSynzappUnreadBadgeCount(
+  contacts: Array<Pick<ChatContact, 'unreadCount'>>
+): number {
+  const count = contacts.reduce((total, contact) => total + normalizeUnreadCount(contact.unreadCount), 0);
+
+  return normalizeBadgeCount(count);
+}
+
 export function addChatPushNotificationListeners(handlers: {
   onReceived?: (data: ChatPushNotificationData) => void;
   onResponse?: (data: ChatPushNotificationData) => void;
@@ -160,6 +190,20 @@ export function addChatPushNotificationListeners(handlers: {
   };
 }
 
+function normalizeUnreadCount(count: number | null | undefined): number {
+  return typeof count === 'number' && Number.isFinite(count)
+    ? Math.max(0, Math.floor(count))
+    : 0;
+}
+
+function normalizeBadgeCount(count: number): number {
+  if (!Number.isFinite(count)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(MAX_APP_BADGE_COUNT, Math.floor(count)));
+}
+
 async function getNotificationsModule(): Promise<ExpoNotificationsModule | null> {
   if (isAndroidExpoGo()) {
     return null;
@@ -192,13 +236,23 @@ async function ensureChatNotificationChannel(Notifications: ExpoNotificationsMod
 async function ensureNotificationPermission(Notifications: ExpoNotificationsModule): Promise<boolean> {
   const currentPermission = await Notifications.getPermissionsAsync();
 
-  if (currentPermission.status === 'granted') {
+  if (
+    currentPermission.status === 'granted' &&
+    (Platform.OS !== 'ios' || currentPermission.ios?.allowsBadge !== false)
+  ) {
     return true;
   }
 
-  const requestedPermission = await Notifications.requestPermissionsAsync();
+  const requestedPermission = await Notifications.requestPermissionsAsync({
+    ios: {
+      allowAlert: true,
+      allowBadge: true,
+      allowSound: true
+    }
+  });
 
-  return requestedPermission.status === 'granted';
+  return requestedPermission.status === 'granted' &&
+    (Platform.OS !== 'ios' || requestedPermission.ios?.allowsBadge !== false);
 }
 
 async function getPushToken(Notifications: ExpoNotificationsModule): Promise<{

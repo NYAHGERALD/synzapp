@@ -555,11 +555,11 @@ function getEnvelopeDeliveryStatus(
   const readByDevice = record.readAtMsByDevice || {};
   const deliveredByDevice = record.deliveredAtMsByDevice || {};
 
-  if (recipientDeviceIds.every((recipientDeviceId) => Boolean(readByDevice[recipientDeviceId]))) {
+  if (recipientDeviceIds.some((recipientDeviceId) => Boolean(readByDevice[recipientDeviceId]))) {
     return 'read';
   }
 
-  if (recipientDeviceIds.every((recipientDeviceId) => Boolean(deliveredByDevice[recipientDeviceId]))) {
+  if (recipientDeviceIds.some((recipientDeviceId) => Boolean(deliveredByDevice[recipientDeviceId]))) {
     return 'delivered';
   }
 

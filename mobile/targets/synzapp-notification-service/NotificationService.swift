@@ -23,6 +23,8 @@ final class NotificationService: UNNotificationServiceExtension {
       bestAttemptContent.body = previewText
     }
 
+    SynzappNotificationLogoAttachment.attach(to: bestAttemptContent)
+
     contentHandler(bestAttemptContent)
   }
 
@@ -30,6 +32,43 @@ final class NotificationService: UNNotificationServiceExtension {
     if let contentHandler, let bestAttemptContent {
       contentHandler(bestAttemptContent)
     }
+  }
+}
+
+private enum SynzappNotificationLogoAttachment {
+  private static let attachmentIdentifier = "synzapp-notification-logo"
+  private static let resourceName = "notification-logo"
+  private static let resourceExtension = "png"
+
+  static func attach(to content: UNMutableNotificationContent) {
+    guard let sourceUrl = logoResourceUrl() else {
+      return
+    }
+
+    let temporaryUrl = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+      .appendingPathComponent("\(attachmentIdentifier)-\(UUID().uuidString).png")
+
+    do {
+      try FileManager.default.copyItem(at: sourceUrl, to: temporaryUrl)
+      let attachment = try UNNotificationAttachment(
+        identifier: attachmentIdentifier,
+        url: temporaryUrl,
+        options: nil
+      )
+
+      content.attachments = [attachment] + content.attachments
+    } catch {
+      return
+    }
+  }
+
+  private static func logoResourceUrl() -> URL? {
+    Bundle.main.url(forResource: resourceName, withExtension: resourceExtension) ??
+      Bundle.main.url(
+        forResource: resourceName,
+        withExtension: resourceExtension,
+        subdirectory: "assets"
+      )
   }
 }
 
