@@ -1682,6 +1682,40 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     await loadMessagesForChat(chat, true, openRequestId);
   }
 
+  async function handleOpenGroupFromGroupsTab(group: TenantGroup) {
+    setError(null);
+    setActiveTab('Chats');
+    setSettingsScreen('list');
+
+    const existingContact = chatContactsRef.current.find((contact) =>
+      contact.chatType === 'GROUP' &&
+      contact.contactId === group.groupId
+    );
+
+    if (existingContact) {
+      await handleOpenChat(mapChatContactToChatItem(existingContact));
+      return;
+    }
+
+    try {
+      const idToken = await getIdToken();
+      const groupContacts = await listGroupChatContacts(idToken);
+      const groupContact = groupContacts.find((contact) => contact.contactId === group.groupId);
+
+      if (!groupContact) {
+        throw new Error('This group chat is not available for your account yet.');
+      }
+
+      const cachedContact = await cacheChatContactPhoto(groupContact, idToken);
+
+      setProfilePhotoAuthToken(idToken);
+      setChatContacts((currentContacts) => upsertChatContact(currentContacts, cachedContact));
+      await handleOpenChat(mapChatContactToChatItem(cachedContact));
+    } catch (nextError) {
+      setError(getErrorMessage(nextError, 'Unable to open group chat.'));
+    }
+  }
+
   function handleOpenNewChatModal() {
     setNewChatSearch('');
     setIsNewChatModalOpen(true);
@@ -4594,6 +4628,9 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
             <GroupsTab
               groups={groups}
               isLoading={isLoadingGroups}
+              onOpenGroup={(group) => {
+                void handleOpenGroupFromGroupsTab(group);
+              }}
             />
           ) : null}
 
@@ -9532,10 +9569,12 @@ function GroupsSettings({
 
 function GroupsTab({
   groups,
-  isLoading
+  isLoading,
+  onOpenGroup
 }: {
   groups: TenantGroup[];
   isLoading: boolean;
+  onOpenGroup: (group: TenantGroup) => void;
 }) {
   if (isLoading && !groups.length) {
     return (
@@ -9556,7 +9595,13 @@ function GroupsTab({
   return (
     <View style={styles.groupList}>
       {groups.map((group) => (
-        <View style={styles.groupRow} key={group.groupId}>
+        <Pressable
+          accessibilityLabel={`Open ${group.name} group chat`}
+          accessibilityRole="button"
+          key={group.groupId}
+          onPress={() => onOpenGroup(group)}
+          style={({ pressed }) => [styles.groupRow, pressed && styles.pressed]}
+        >
           <View style={styles.groupIcon}>
             <Ionicons color={colors.primary} name="people" size={20} />
           </View>
@@ -9569,7 +9614,7 @@ function GroupsTab({
           <Text numberOfLines={1} style={styles.groupMeta}>
             {group.memberCount === 1 ? '1 member' : `${group.memberCount} members`}
           </Text>
-        </View>
+        </Pressable>
       ))}
     </View>
   );

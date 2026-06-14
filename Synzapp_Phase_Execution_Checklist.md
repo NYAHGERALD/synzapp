@@ -561,6 +561,9 @@ Build secure tenant-scoped workplace communication on a mobile-first E2EE founda
 - [x] Enforce group membership authorization in backend APIs, realtime listeners, media routes, and push notification routing.
 - [x] Add encrypted group message send, delivery/read receipt, reaction, reply, forward, attachment, media/file/voice-note upload and download, and local backup reuse support.
 - [x] Group chat bubbles show the sender profile photo or initials avatar on the right side of the bubble.
+- [ ] Add durable encrypted group history storage and pagination so authorized members can load server conversations missing from their device cache.
+- [ ] Add group history visibility and client-side key rewrap flow for newly added members who are allowed to see past encrypted conversations.
+- [ ] Add delete-for-me tombstones for text, media, voice notes, and files so deleted items stay hidden on that user's devices without affecting other group members.
 - [ ] Department channels.
 - [ ] Announcement channels.
 - [x] Chat list with message previews.
