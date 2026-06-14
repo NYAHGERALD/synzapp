@@ -76,6 +76,7 @@ import {
 import {
   ChatContact,
   ChatDeliveryStatus,
+  ChatGroupMember,
   ChatImageAttachment,
   ChatMediaAttachment,
   ChatMessage,
@@ -163,6 +164,7 @@ interface ChatItem {
   isOnline: boolean;
   lastMessageAt: string | null;
   lastSeenAt: string | null;
+  members?: ChatGroupMember[];
   profilePhotoUrl?: string | null;
   preview: string;
   title: string;
@@ -661,8 +663,8 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       return;
     }
 
-    queueMediaDownloadsForMessages(selectedChat.contactId, messages);
-  }, [messages, selectedChat?.contactId]);
+    queueMediaDownloadsForMessages(selectedChat.contactId, messages, selectedChat.chatType);
+  }, [messages, selectedChat?.chatType, selectedChat?.contactId]);
 
   useEffect(() => () => {
     if (backupSyncTimerRef.current) {
@@ -1537,7 +1539,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           ownerUid: currentUid
         });
         queueEncryptedChatBackup();
-        queueMediaDownloadsForMessages(nextContact.contactId, mergedMessages);
+        queueMediaDownloadsForMessages(nextContact.contactId, mergedMessages, nextContact.chatType || 'DIRECT');
       } else if (shouldMarkRead) {
         const cachedConversation = await loadCachedChatConversation({
           contactId: nextContact.contactId,
@@ -1626,7 +1628,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         ownerUid: currentUid
       });
       queueEncryptedChatBackup();
-      queueMediaDownloadsForMessages(event.contactId, nextMessages);
+      queueMediaDownloadsForMessages(event.contactId, nextMessages, event.contact.chatType || 'DIRECT');
       void syncPendingMessagesForChat(event.contactId);
     }
   }
@@ -1647,11 +1649,6 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     }
 
     if (selectedChatRef.current) {
-      if (selectedChatRef.current.chatType === 'GROUP') {
-        unsubscribeRealtimeConversation(socket);
-        return;
-      }
-
       subscribeRealtimeConversation(socket, selectedChatRef.current.contactId);
       return;
     }
@@ -1857,6 +1854,14 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       (chatOpenRequestIdRef.current === openRequestId && selectedChatRef.current?.contactId === contactId);
   }
 
+  function getChatTypeForContactId(contactId: string): 'DIRECT' | 'GROUP' {
+    if (selectedChatRef.current?.contactId === contactId) {
+      return selectedChatRef.current.chatType;
+    }
+
+    return chatContactsRef.current.find((contact) => contact.contactId === contactId)?.chatType || 'DIRECT';
+  }
+
   async function loadCachedMessagesForChat(chat: ChatItem, openRequestId?: number) {
     try {
       const [cachedConversation, pendingMessages] = await Promise.all([
@@ -1993,6 +1998,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           const pendingMediaItems = getMessageMediaItems(pendingMessage.message);
           const sendMediaItems = pendingMediaItems.length > 1
             ? await Promise.all(pendingMediaItems.map((mediaItem, index) => uploadMediaForMessage({
+                chatType: pendingMessage.chatType || 'DIRECT',
                 contactId,
                 idToken,
                 media: mediaItem,
@@ -2002,6 +2008,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
             : [];
           const sendMedia = pendingMedia && !sendMediaItems.length
             ? await uploadMediaForMessage({
+                chatType: pendingMessage.chatType || 'DIRECT',
                 contactId,
                 idToken,
                 media: pendingMedia,
@@ -2163,6 +2170,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   }
 
   async function uploadMediaForMessage(input: {
+    chatType: 'DIRECT' | 'GROUP';
     contactId: string;
     idToken: string;
     media: ChatMediaAttachment;
@@ -2179,17 +2187,18 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
     const localMedia = toLocalChatMediaInput(input.media);
     const uploadedMedia = await uploadEncryptedChatMedia({
+      chatType: input.chatType,
       contactId: input.contactId,
       idToken: input.idToken,
-        media: localMedia,
-        onProgress: (progress) => {
-          updateVisibleMessageMedia(input.contactId, input.messageId, {
-            ...input.media,
-            transferProgress: progress,
-            transferStatus: 'uploading'
-          }, input.mediaIndex);
-        }
-      });
+      media: localMedia,
+      onProgress: (progress) => {
+        updateVisibleMessageMedia(input.contactId, input.messageId, {
+          ...input.media,
+          transferProgress: progress,
+          transferStatus: 'uploading'
+        }, input.mediaIndex);
+      }
+    });
 
     const availableMedia: ChatMediaAttachment = {
       ...uploadedMedia,
@@ -2204,6 +2213,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
   async function downloadMediaForMessage(
     contactId: string,
+    chatType: 'DIRECT' | 'GROUP',
     messageId: string,
     media: ChatMediaAttachment,
     mediaIndex?: number
@@ -2227,6 +2237,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       try {
         const idToken = await getIdToken();
         const localUri = await downloadAndDecryptChatMedia({
+          chatType,
           contactId,
           idToken,
           media,
@@ -2272,7 +2283,11 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     return downloadPromise;
   }
 
-  function queueMediaDownloadsForMessages(contactId: string, nextMessages: ChatMessage[]) {
+  function queueMediaDownloadsForMessages(
+    contactId: string,
+    nextMessages: ChatMessage[],
+    chatType = getChatTypeForContactId(contactId)
+  ) {
     nextMessages.forEach((message) => {
       const mediaItems = getMessageMediaItems(message);
 
@@ -2290,7 +2305,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           return;
         }
 
-        void downloadMediaForMessage(contactId, message.messageId, media, index);
+        void downloadMediaForMessage(contactId, chatType, message.messageId, media, index);
       });
     });
   }
@@ -2358,11 +2373,6 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
     const activeChat = selectedChat;
 
-    if (isGroupChatItem(activeChat)) {
-      Alert.alert('Group attachments coming next', 'This first group-chat update supports encrypted text messages. Group media is next.');
-      return;
-    }
-
     if (!activeChat.hasActiveDevice) {
       setError(getChatDeviceNotReadyMessage(activeChat));
       return;
@@ -2427,11 +2437,6 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     const activeChat = selectedChat;
     const caption = mediaReviewCaption.trim();
 
-    if (isGroupChatItem(activeChat)) {
-      Alert.alert('Group attachments coming next', 'This first group-chat update supports encrypted text messages. Group media is next.');
-      return;
-    }
-
     if (!activeChat.hasActiveDevice) {
       setError(getChatDeviceNotReadyMessage(activeChat));
       return;
@@ -2480,11 +2485,6 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
     const activeChat = selectedChat;
 
-    if (isGroupChatItem(activeChat)) {
-      Alert.alert('Group files coming next', 'This first group-chat update supports encrypted text messages. Group files are next.');
-      return;
-    }
-
     if (!activeChat.hasActiveDevice) {
       setError(getChatDeviceNotReadyMessage(activeChat));
       return;
@@ -2518,11 +2518,6 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     }
 
     const activeChat = selectedChat;
-
-    if (isGroupChatItem(activeChat)) {
-      Alert.alert('Group voice notes coming next', 'This first group-chat update supports encrypted text messages. Group voice notes are next.');
-      return;
-    }
 
     if (!activeChat.hasActiveDevice) {
       setError(getChatDeviceNotReadyMessage(activeChat));
@@ -2622,6 +2617,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       const idToken = await getIdToken();
       const sendMediaItems = mediaItems.length > 1
         ? await Promise.all(mediaItems.map((mediaItem, index) => uploadMediaForMessage({
+            chatType: activeChat.chatType,
             contactId: activeChat.contactId,
             idToken,
             media: mediaItem,
@@ -2631,6 +2627,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         : [];
       const sendMedia = media && !sendMediaItems.length
         ? await uploadMediaForMessage({
+            chatType: activeChat.chatType,
             contactId: activeChat.contactId,
             idToken,
             media,
@@ -2776,12 +2773,6 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       return;
     }
 
-    if (isGroupChatItem(selectedChat)) {
-      Alert.alert('Group reactions coming next', 'This first group-chat update supports encrypted text messages. Group reactions are next.');
-      setMessageActionTarget(null);
-      return;
-    }
-
     if (message.messageId.startsWith('queued_')) {
       Alert.alert('Reaction not sent', 'This message has not been sent yet.');
       setMessageActionTarget(null);
@@ -2804,6 +2795,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     try {
       const idToken = await getIdToken();
       const result = await updateChatMessageReaction({
+        chatType: activeChat.chatType,
         contactId: activeChat.contactId,
         emoji: reaction,
         idToken,
@@ -2908,7 +2900,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       return null;
     }
 
-    return downloadMediaForMessage(activeChat.contactId, message.messageId, media, activeIndex);
+    return downloadMediaForMessage(activeChat.contactId, activeChat.chatType, message.messageId, media, activeIndex);
   }
 
   async function handleOpenFileAttachment(message: ChatMessage, activeIndex: number) {
@@ -3002,7 +2994,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   }
 
   function getSelectedForwardRecipients(): ChatContact[] {
-    return directChatContacts.filter((contact) => forwardRecipientIds[contact.contactId]);
+    return chatContacts.filter((contact) => forwardRecipientIds[contact.contactId]);
   }
 
   async function handleConfirmForwardMessages() {
@@ -3033,6 +3025,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           const sourceMediaItems = getMessageMediaItems(message);
           const forwardMediaItems = sourceMediaItems.length > 1
             ? await Promise.all(sourceMediaItems.map((sourceMedia) => uploadEncryptedChatMedia({
+                chatType: recipient.chatType,
                 contactId: recipient.contactId,
                 idToken,
                 media: toLocalChatMediaInput(sourceMedia)
@@ -3041,12 +3034,14 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           const sourceMedia = sourceMediaItems[0] || getMessageMedia(message);
           const forwardMedia = sourceMedia && !forwardMediaItems.length
             ? await uploadEncryptedChatMedia({
+                chatType: recipient.chatType,
                 contactId: recipient.contactId,
                 idToken,
                 media: toLocalChatMediaInput(sourceMedia)
               })
             : null;
           const result = await sendChatMessage({
+            chatType: recipient.chatType,
             contactId: recipient.contactId,
             currentUid,
             forwarded: true,
@@ -4543,6 +4538,8 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           contactProfilePhotoUrl={selectedChat.profilePhotoUrl || null}
           currentUid={currentUid}
           draft={messageDraft}
+          groupMembers={selectedChat.members || []}
+          isGroupChat={selectedChat.chatType === 'GROUP'}
           isCompactAndroid={isCompactAndroid}
           isForwardMode={isForwardMode}
           isLoading={isLoadingMessages}
@@ -4795,6 +4792,8 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       <MessageActionOverlay
         contactName={selectedChat?.title || ''}
         currentUid={currentUid}
+        groupMembers={selectedChat?.members || []}
+        isGroupChat={selectedChat?.chatType === 'GROUP'}
         message={messageActionTarget}
         onCopy={(message) => {
           void handleCopyMessage(message);
@@ -4806,6 +4805,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         onReact={handleReactToMessage}
         onReply={handleReplyToMessage}
         onStar={handleToggleMessageStar}
+        profilePhotoHeaders={profilePhotoHeaders}
         currentUserReactions={messageActionTarget
           ? getCurrentUserReactionEmojis(
               messageReactions[messageActionTarget.messageId] || messageActionTarget.reactions,
@@ -4842,7 +4842,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       />
 
       <ForwardRecipientModal
-        contacts={directChatContacts}
+        contacts={chatContacts}
         isForwarding={isForwardingMessages}
         isOpen={isForwardRecipientModalOpen}
         onCancel={() => setIsForwardRecipientModalOpen(false)}
@@ -5836,6 +5836,8 @@ function MessageThread({
   contactProfilePhotoUrl,
   currentUid,
   draft,
+  groupMembers,
+  isGroupChat,
   isCompactAndroid,
   isForwardMode,
   isLoading,
@@ -5864,6 +5866,8 @@ function MessageThread({
   contactProfilePhotoUrl: string | null;
   currentUid: string;
   draft: string;
+  groupMembers: ChatGroupMember[];
+  isGroupChat: boolean;
   isCompactAndroid: boolean;
   isForwardMode: boolean;
   isLoading: boolean;
@@ -5899,6 +5903,7 @@ function MessageThread({
   const [activeAudioPlaybackId, setActiveAudioPlaybackId] = useState<string | null>(null);
   const canSend = canChat && draft.trim().length > 0 && !isSending && !isVoiceRecording;
   const threadItems = buildMessageThreadItems(uniqueChatMessages(messages));
+  const groupMemberByUid = useMemo(() => new Map(groupMembers.map((member) => [member.uid, member])), [groupMembers]);
   const inputRef = useRef<TextInput | null>(null);
   const activeVoiceRecordingUriRef = useRef<string | null>(null);
   const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -6241,6 +6246,7 @@ function MessageThread({
               key={item.id}
               highlighted={highlightedMessageId === item.message.messageId}
               message={item.message}
+              isGroupChat={isGroupChat}
               onLayout={handleMessageLayout}
               onLongPress={isForwardMode ? undefined : onMessageLongPress}
               onOpenMedia={isForwardMode ? undefined : onOpenMedia}
@@ -6257,6 +6263,7 @@ function MessageThread({
               }}
               profilePhotoHeaders={profilePhotoHeaders}
               reactions={messageReactions[item.message.messageId] || item.message.reactions || []}
+              senderMember={isGroupChat ? groupMemberByUid.get(item.message.senderUid) || null : null}
               starred={Boolean(starredMessageIds[item.message.messageId])}
             />
           )
@@ -7022,6 +7029,7 @@ function MessageBubble({
   contactProfilePhotoUrl,
   currentUid,
   highlighted = false,
+  isGroupChat = false,
   isSelectable = false,
   isSelected = false,
   message,
@@ -7036,6 +7044,7 @@ function MessageBubble({
   onToggleSelect,
   profilePhotoHeaders,
   reactions = [],
+  senderMember,
   starred
 }: {
   activeAudioPlaybackId?: string | null;
@@ -7043,6 +7052,7 @@ function MessageBubble({
   contactProfilePhotoUrl?: string | null;
   currentUid?: string;
   highlighted?: boolean;
+  isGroupChat?: boolean;
   isSelectable?: boolean;
   isSelected?: boolean;
   message: ChatMessage;
@@ -7057,6 +7067,7 @@ function MessageBubble({
   onToggleSelect?: (message: ChatMessage) => void;
   profilePhotoHeaders?: Record<string, string>;
   reactions?: ChatMessageReaction[];
+  senderMember?: ChatGroupMember | null;
   starred?: boolean;
 }) {
   const deliveryStatusLabel = message.isMine
@@ -7199,6 +7210,7 @@ function MessageBubble({
         <Animated.View
           style={[
             styles.messageBubbleMotionWrap,
+            isGroupChat && styles.messageBubbleMotionWrapWithGroupAvatar,
             hasRichBubbleContent && styles.messageBubbleMotionWrapRich,
             { transform: [{ translateX: swipeTranslateX }] }
           ]}
@@ -7289,7 +7301,42 @@ function MessageBubble({
             ) : null}
           </Pressable>
         </Animated.View>
+        {isGroupChat ? (
+          <GroupMessageSenderAvatar
+            member={senderMember || null}
+            profilePhotoHeaders={profilePhotoHeaders}
+          />
+        ) : null}
       </View>
+    </View>
+  );
+}
+
+function GroupMessageSenderAvatar({
+  member,
+  profilePhotoHeaders
+}: {
+  member: ChatGroupMember | null;
+  profilePhotoHeaders?: Record<string, string>;
+}) {
+  const initials = member?.initials || getInitials(member?.displayName || 'Member');
+
+  if (member?.profilePhotoUrl) {
+    return (
+      <Image
+        accessibilityLabel={`${member.displayName} profile photo`}
+        source={{
+          headers: profilePhotoHeaders,
+          uri: member.profilePhotoUrl
+        }}
+        style={styles.groupMessageAvatarImage}
+      />
+    );
+  }
+
+  return (
+    <View style={styles.groupMessageAvatarFallback}>
+      <Text numberOfLines={1} style={styles.groupMessageAvatarText}>{initials}</Text>
     </View>
   );
 }
@@ -7298,6 +7345,8 @@ function MessageActionOverlay({
   contactName,
   currentUid,
   currentUserReactions,
+  groupMembers,
+  isGroupChat,
   message,
   onCopy,
   onDelete,
@@ -7307,12 +7356,15 @@ function MessageActionOverlay({
   onReact,
   onReply,
   onStar,
+  profilePhotoHeaders,
   reactions = [],
   starred
 }: {
   contactName: string;
   currentUid: string;
   currentUserReactions: string[];
+  groupMembers: ChatGroupMember[];
+  isGroupChat: boolean;
   message: ChatMessage | null;
   onCopy: (message: ChatMessage) => void;
   onDelete: (message: ChatMessage) => void;
@@ -7322,6 +7374,7 @@ function MessageActionOverlay({
   onReact: (message: ChatMessage, reaction: string) => void;
   onReply: (message: ChatMessage) => void;
   onStar: (message: ChatMessage) => void;
+  profilePhotoHeaders?: Record<string, string>;
   reactions?: ChatMessageReaction[];
   starred: boolean;
 }) {
@@ -7330,6 +7383,7 @@ function MessageActionOverlay({
     [...MESSAGE_REACTIONS, 'more'].map(() => new Animated.Value(0))
   ).current;
   const [isEmojiPickerOpen, setIsEmojiPickerOpen] = useState(false);
+  const groupMemberByUid = useMemo(() => new Map(groupMembers.map((member) => [member.uid, member])), [groupMembers]);
 
   useEffect(() => {
     if (!message) {
@@ -7488,8 +7542,11 @@ function MessageActionOverlay({
               <MessageBubble
                 contactName={contactName}
                 currentUid={currentUid}
+                isGroupChat={isGroupChat}
                 message={message}
+                profilePhotoHeaders={profilePhotoHeaders}
                 reactions={reactions}
+                senderMember={isGroupChat ? groupMemberByUid.get(message.senderUid) || null : null}
                 starred={starred}
               />
             </View>
@@ -11263,15 +11320,12 @@ function mapChatContactToChatItem(contact: ChatContact): ChatItem {
     isOnline: contact.isOnline === true,
     lastMessageAt: contact.lastMessageAt,
     lastSeenAt: contact.lastSeenAt,
+    members: contact.members,
     preview: contact.preview,
     profilePhotoUrl: contact.profilePhotoUrl,
     title: contact.displayName,
     unreadCount: contact.unreadCount || 0
   };
-}
-
-function isGroupChatItem(chat: ChatItem): boolean {
-  return chat.chatType === 'GROUP';
 }
 
 function filterChatItems(chats: ChatItem[], search: string): ChatItem[] {
@@ -12409,6 +12463,7 @@ const styles = StyleSheet.create({
     borderColor: colors.primary
   },
   messageBubbleRow: {
+    alignItems: 'flex-end',
     flexDirection: 'row'
   },
   messageBubbleRowMine: {
@@ -12423,6 +12478,37 @@ const styles = StyleSheet.create({
   messageBubbleMotionWrap: {
     maxWidth: '82%',
     minWidth: 104
+  },
+  messageBubbleMotionWrapWithGroupAvatar: {
+    maxWidth: '74%'
+  },
+  groupMessageAvatarFallback: {
+    alignItems: 'center',
+    alignSelf: 'flex-end',
+    backgroundColor: colors.primary,
+    borderColor: 'rgba(255, 255, 255, 0.9)',
+    borderRadius: 14,
+    borderWidth: 1,
+    height: 28,
+    justifyContent: 'center',
+    marginLeft: 6,
+    width: 28
+  },
+  groupMessageAvatarImage: {
+    alignSelf: 'flex-end',
+    backgroundColor: '#D7DEE8',
+    borderColor: 'rgba(255, 255, 255, 0.9)',
+    borderRadius: 14,
+    borderWidth: 1,
+    height: 28,
+    marginLeft: 6,
+    width: 28
+  },
+  groupMessageAvatarText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '600',
+    lineHeight: 13
   },
   messageBubbleMotionWrapRich: {
     minWidth: 148

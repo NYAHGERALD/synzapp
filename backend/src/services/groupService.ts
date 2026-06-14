@@ -174,8 +174,9 @@ export async function createTenantGroup(
       departmentName = department.name || 'Department';
     }
 
-	    transaction.set(groupRef, {
+    transaction.set(groupRef, {
       autoMembershipDepartmentId: null,
+      chatType: 'GROUP_CHAT',
       createdAt: fieldValue.serverTimestamp(),
       createdBy: context.uid,
       departmentId,
@@ -185,6 +186,7 @@ export async function createTenantGroup(
       isDepartmentDefault: false,
       memberCount: 1,
       memberPolicy: 'EXPLICIT',
+      messagePermissionMode: 'ALL_MEMBERS',
       name,
       scope,
       status: 'ACTIVE',
@@ -202,22 +204,22 @@ export async function createTenantGroup(
     });
   });
 
-	  return {
-	    group: {
+  return {
+    group: {
       autoMembershipDepartmentId: null,
-	      departmentId,
-	      departmentName,
-	      description,
-	      groupId,
+      departmentId,
+      departmentName,
+      description,
+      groupId,
       isDepartmentDefault: false,
-	      memberCount: 1,
+      memberCount: 1,
       memberPolicy: 'EXPLICIT',
-	      name,
-	      scope,
-	      status: 'ACTIVE',
+      name,
+      scope,
+      status: 'ACTIVE',
       systemManaged: false,
-	      tenantId: context.tenantId
-	    },
+      tenantId: context.tenantId
+    },
     tenantId: context.tenantId
   };
 }
@@ -237,6 +239,7 @@ export function buildDepartmentSystemGroupRecord(input: {
 
   return {
     autoMembershipDepartmentId: input.departmentId,
+    chatType: 'GROUP_CHAT',
     createdAt: fieldValue.serverTimestamp(),
     createdBy: input.createdBy,
     createdReason: 'DEPARTMENT_CREATED',
@@ -247,6 +250,7 @@ export function buildDepartmentSystemGroupRecord(input: {
     isDepartmentDefault: true,
     memberCount: 0,
     memberPolicy: 'DEPARTMENT_PLUS_EXPLICIT',
+    messagePermissionMode: 'ALL_MEMBERS',
     name: input.departmentName,
     scope: 'DEPARTMENT',
     status: 'ACTIVE',

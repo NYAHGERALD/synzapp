@@ -48,6 +48,7 @@ const chatMediaCacheDirectory = FileSystem.documentDirectory
     : null;
 
 export async function uploadEncryptedChatMedia(input: {
+  chatType?: 'DIRECT' | 'GROUP';
   contactId: string;
   idToken: string;
   media: LocalChatMediaInput;
@@ -59,6 +60,7 @@ export async function uploadEncryptedChatMedia(input: {
 
   input.onProgress?.(0.42);
   const session = await createMediaUploadSession({
+    chatType: input.chatType,
     contactId: input.contactId,
     contentType: input.media.contentType,
     encryptedSizeBytes: encryptedMedia.encryptedSizeBytes,
@@ -74,6 +76,7 @@ export async function uploadEncryptedChatMedia(input: {
     uploadUrl: session.uploadUrl
   });
   await completeMediaUpload({
+    chatType: input.chatType,
     contactId: input.contactId,
     idToken: input.idToken,
     mediaId: session.mediaId
@@ -99,6 +102,7 @@ export async function uploadEncryptedChatMedia(input: {
 }
 
 export async function downloadAndDecryptChatMedia(input: {
+  chatType?: 'DIRECT' | 'GROUP';
   contactId: string;
   idToken: string;
   media: ChatMediaAttachment;
@@ -124,6 +128,7 @@ export async function downloadAndDecryptChatMedia(input: {
   }
 
   const session = await getMediaDownloadSession({
+    chatType: input.chatType,
     contactId: input.contactId,
     idToken: input.idToken,
     mediaId: input.media.mediaId
@@ -183,6 +188,7 @@ function ensureMediaSize(kind: ChatMediaKind, sizeBytes: number): void {
 }
 
 async function createMediaUploadSession(input: {
+  chatType?: 'DIRECT' | 'GROUP';
   contactId: string;
   contentType: string;
   encryptedSizeBytes: number;
@@ -191,8 +197,11 @@ async function createMediaUploadSession(input: {
   kind: ChatMediaKind;
   originalSizeBytes: number;
 }): Promise<MediaUploadSession> {
+  const path = input.chatType === 'GROUP'
+    ? `/api/profile/chat/groups/${encodeURIComponent(input.contactId)}/media/upload-session`
+    : `/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/media/upload-session`;
   const response = await fetch(
-    `${getSynzappApiBaseUrl()}/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/media/upload-session`,
+    `${getSynzappApiBaseUrl()}${path}`,
     {
       body: JSON.stringify({
         contentType: input.contentType,
@@ -221,12 +230,16 @@ async function createMediaUploadSession(input: {
 }
 
 async function completeMediaUpload(input: {
+  chatType?: 'DIRECT' | 'GROUP';
   contactId: string;
   idToken: string;
   mediaId: string;
 }): Promise<void> {
+  const path = input.chatType === 'GROUP'
+    ? `/api/profile/chat/groups/${encodeURIComponent(input.contactId)}/media/${encodeURIComponent(input.mediaId)}/complete`
+    : `/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/media/${encodeURIComponent(input.mediaId)}/complete`;
   const response = await fetch(
-    `${getSynzappApiBaseUrl()}/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/media/${encodeURIComponent(input.mediaId)}/complete`,
+    `${getSynzappApiBaseUrl()}${path}`,
     {
       headers: {
         Accept: 'application/json',
@@ -243,12 +256,16 @@ async function completeMediaUpload(input: {
 }
 
 async function getMediaDownloadSession(input: {
+  chatType?: 'DIRECT' | 'GROUP';
   contactId: string;
   idToken: string;
   mediaId: string;
 }): Promise<MediaDownloadSession> {
+  const path = input.chatType === 'GROUP'
+    ? `/api/profile/chat/groups/${encodeURIComponent(input.contactId)}/media/${encodeURIComponent(input.mediaId)}/download`
+    : `/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/media/${encodeURIComponent(input.mediaId)}/download`;
   const response = await fetch(
-    `${getSynzappApiBaseUrl()}/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/media/${encodeURIComponent(input.mediaId)}/download`,
+    `${getSynzappApiBaseUrl()}${path}`,
     {
       headers: {
         Accept: 'application/json',

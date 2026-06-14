@@ -481,9 +481,10 @@ Allow Org Admin to manage the company workspace safely.
 - [x] Department Admin cannot deactivate, archive, delete, or anonymize employees.
 - [x] Group creation foundation for tenant-scoped company and department groups.
 - [x] Department creation automatically creates a system-managed department group with backend-owned visibility.
+- [x] Department system groups and normal user-created groups use the same encrypted group-chat feature set.
 - [x] Groups footer tab lists only backend-authorized groups for Org Admin, Department Admin, and Employee users.
 - [ ] Group member management for adding or removing external employees and external Department Admins from department groups.
-- [ ] Encrypted group-chat messaging for department and custom groups.
+- [x] Encrypted group-chat messaging for department and custom groups.
 - [x] Role assignment.
 - [x] Permission assignment.
 - [x] Department Admin permission settings catalog and mobile settings screen for invite users, department groups, announcements, work orders, action plans, and department activity.
@@ -555,9 +556,11 @@ Build secure tenant-scoped workplace communication on a mobile-first E2EE founda
 - [x] Received media auto-downloads into local encrypted/offline chat cache by default.
 - [x] Add first secure E2EE group-chat text slice for selected tenant members: backend group creation, explicit member records, group encryption context, encrypted text envelope send/load, and mobile local-cache reuse.
 - [x] Add secure E2EE group chat backend creation for selected tenant members.
-- [ ] Persist group chat metadata, group photo reference, member list, and permissions without exposing message plaintext.
-- [ ] Enforce group membership authorization in backend APIs, realtime listeners, local restore, and push notification routing.
-- [ ] Add encrypted group message send, delivery, receipt, reaction, reply, forward, attachment, and local backup support.
+- [x] Persist group chat metadata, member list, and permissions without exposing message plaintext.
+- [ ] Add group photo reference and group avatar management.
+- [x] Enforce group membership authorization in backend APIs, realtime listeners, media routes, and push notification routing.
+- [x] Add encrypted group message send, delivery/read receipt, reaction, reply, forward, attachment, media/file/voice-note upload and download, and local backup reuse support.
+- [x] Group chat bubbles show the sender profile photo or initials avatar on the right side of the bubble.
 - [ ] Department channels.
 - [ ] Announcement channels.
 - [x] Chat list with message previews.

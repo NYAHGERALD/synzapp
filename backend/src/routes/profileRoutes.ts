@@ -33,10 +33,13 @@ import {
 import {
   createGroupChat,
   getGroupChatContact,
+  getGroupChatMemberProfilePhoto,
+  getGroupChatMessageReactions,
   getGroupEncryptionContext,
   listCurrentUserGroupChatContacts,
   listEncryptedGroupEnvelopesForDevice,
-  sendEncryptedGroupEnvelope
+  sendEncryptedGroupEnvelope,
+  updateGroupChatMessageReaction
 } from '../services/groupChatService.js';
 import {
   getLatestEncryptedChatBackup,
@@ -52,7 +55,8 @@ import { listCurrentUserGroups } from '../services/groupService.js';
 import {
   deactivateCurrentUserPushToken,
   registerCurrentUserPushToken,
-  sendChatMessagePushNotification
+  sendChatMessagePushNotification,
+  sendGroupChatMessagePushNotifications
 } from '../services/notificationService.js';
 import { writeAuditEvent } from '../services/auditService.js';
 
@@ -362,6 +366,38 @@ profileRouter.post('/chat/groups', verifyAppCheck, async (req, res, next) => {
   }
 });
 
+profileRouter.get('/chat/groups/:groupId/members/:memberUid/photo', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const groupId = Array.isArray(req.params.groupId)
+      ? req.params.groupId[0] || ''
+      : req.params.groupId || '';
+    const memberUid = Array.isArray(req.params.memberUid)
+      ? req.params.memberUid[0] || ''
+      : req.params.memberUid || '';
+    const profilePhoto = await getGroupChatMemberProfilePhoto(decodedToken, groupId, memberUid);
+    const etag = `"${profilePhoto.cacheKey}"`;
+
+    res.setHeader('Cache-Control', 'private, max-age=86400, stale-while-revalidate=604800');
+    res.setHeader('Content-Type', profilePhoto.contentType);
+    res.setHeader('ETag', etag);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+
+    if (req.header('If-None-Match') === etag) {
+      res.status(304).end();
+      return;
+    }
+
+    profilePhoto.file
+      .createReadStream()
+      .on('error', next)
+      .pipe(res);
+  } catch (error) {
+    next(error);
+  }
+});
+
 profileRouter.get('/groups', verifyAppCheck, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
@@ -401,10 +437,96 @@ profileRouter.get('/chat/groups/:groupId/encrypted-messages', verifyAppCheck, as
       groupId,
       activeDevice.deviceId
     );
-    const contact = await getGroupChatContact(decodedToken, groupId);
+    const [contact, messageReactions] = await Promise.all([
+      getGroupChatContact(decodedToken, groupId),
+      getGroupChatMessageReactions(decodedToken, groupId)
+    ]);
 
-    res.json({ contact, envelopes, messageReactions: {} });
+    res.json({ contact, envelopes, messageReactions });
   } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.post('/chat/groups/:groupId/media/upload-session', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    const groupId = Array.isArray(req.params.groupId)
+      ? req.params.groupId[0] || ''
+      : req.params.groupId || '';
+    const body = encryptedMediaUploadBodySchema.parse(req.body);
+    const session = await createEncryptedChatMediaUploadSession(decodedToken, activeDevice, groupId, body, 'GROUP');
+
+    res.status(201).json({ session });
+  } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.post('/chat/groups/:groupId/media/:mediaId/complete', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const groupId = Array.isArray(req.params.groupId)
+      ? req.params.groupId[0] || ''
+      : req.params.groupId || '';
+    const mediaId = Array.isArray(req.params.mediaId)
+      ? req.params.mediaId[0] || ''
+      : req.params.mediaId || '';
+    const result = await markEncryptedChatMediaUploaded(decodedToken, groupId, mediaId, 'GROUP');
+
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.get('/chat/groups/:groupId/media/:mediaId/download', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const groupId = Array.isArray(req.params.groupId)
+      ? req.params.groupId[0] || ''
+      : req.params.groupId || '';
+    const mediaId = Array.isArray(req.params.mediaId)
+      ? req.params.mediaId[0] || ''
+      : req.params.mediaId || '';
+    const session = await createEncryptedChatMediaDownloadSession(decodedToken, groupId, mediaId, 'GROUP');
+
+    res.json({ session });
+  } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.put('/chat/groups/:groupId/messages/:messageId/reaction', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const groupId = Array.isArray(req.params.groupId)
+      ? req.params.groupId[0] || ''
+      : req.params.groupId || '';
+    const messageId = Array.isArray(req.params.messageId)
+      ? req.params.messageId[0] || ''
+      : req.params.messageId || '';
+    const body = chatMessageReactionBodySchema.parse(req.body);
+    const result = await updateGroupChatMessageReaction(
+      decodedToken,
+      groupId,
+      messageId,
+      body.emoji
+    );
+
+    res.json(result);
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'GROUP_CHAT_REACTION_UPDATED',
+      reason: error instanceof Error ? error.message : 'Group message reaction failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
     next(error);
   }
 });
@@ -439,6 +561,19 @@ profileRouter.post('/chat/groups/:groupId/encrypted-messages', verifyAppCheck, a
       status: 'SUCCESS',
       tenantId: envelope.tenantId,
       uid: decodedToken.uid
+    });
+    void sendGroupChatMessagePushNotifications({
+      conversationId: envelope.conversationId,
+      envelopeId: envelope.envelopeId,
+      groupId,
+      notificationPreviewByDevice: envelope.notificationPreviewByDevice,
+      recipientUids: envelope.recipientUids,
+      senderKeyAgreementPublicKey: envelope.senderKeyAgreementPublicKey,
+      senderUid: decodedToken.uid,
+      sentAt: envelope.sentAt,
+      tenantId: envelope.tenantId
+    }).catch((error) => {
+      console.warn('Group chat push notification failed:', error instanceof Error ? error.message : error);
     });
 
     res.status(201).json({ contact, envelope });

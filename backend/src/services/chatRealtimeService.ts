@@ -19,6 +19,14 @@ import {
   markEncryptedDirectEnvelopesDeliveredForDevice
 } from './encryptedMessageEnvelopeService.js';
 import {
+  type GroupChatContact,
+  getGroupChatContact,
+  getGroupChatMessageReactions,
+  getGroupChatRealtimeContext,
+  listCurrentUserGroupChatContacts,
+  listEncryptedGroupEnvelopesForDevice
+} from './groupChatService.js';
+import {
   markChatUserOffline,
   markChatUserOnline,
   subscribeChatPresenceUpdates,
@@ -193,25 +201,49 @@ class ChatRealtimeConnection {
     this.unsubscribeContactSummaries();
 
     try {
-      const contacts = await listCurrentUserChatContacts(this.decodedToken);
+      const [contacts, groupContacts] = await Promise.all([
+        listCurrentUserChatContacts(this.decodedToken),
+        listCurrentUserGroupChatContacts(this.decodedToken)
+      ]);
 
-      this.visibleContactIds = new Set(contacts.map((contact) => contact.contactId));
-      this.contactSummaryUnsubscribes = contacts.map((contact) =>
-        firestore
-          .collection('organizations')
-          .doc(this.tenantId!)
-          .collection('directChats')
-          .doc(contact.conversationId)
-          .onSnapshot((snapshot) => {
-            if (!snapshot.exists) {
-              return;
-            }
+      this.visibleContactIds = new Set([
+        ...contacts.map((contact) => contact.contactId),
+        ...groupContacts.map((contact) => contact.contactId)
+      ]);
+      this.contactSummaryUnsubscribes = [
+        ...contacts.map((contact) =>
+          firestore
+            .collection('organizations')
+            .doc(this.tenantId!)
+            .collection('directChats')
+            .doc(contact.conversationId)
+            .onSnapshot((snapshot) => {
+              if (!snapshot.exists) {
+                return;
+              }
 
-            void this.sendContactSummary(contact.contactId, snapshot.data() as DirectChatRecord);
-          }, () => {
+              void this.sendDirectContactSummary(contact.contactId, snapshot.data() as DirectChatRecord);
+            }, () => {
               this.sendError('Realtime chat updates are temporarily unavailable.');
-          })
-      );
+            })
+        ),
+        ...groupContacts.map((contact) =>
+          firestore
+            .collection('organizations')
+            .doc(this.tenantId!)
+            .collection('groups')
+            .doc(contact.contactId)
+            .onSnapshot((snapshot) => {
+              if (!snapshot.exists) {
+                return;
+              }
+
+              void this.sendGroupContactSummary(contact.contactId);
+            }, () => {
+              this.sendError('Realtime group chat updates are temporarily unavailable.');
+            })
+        )
+      ];
       contacts.forEach((contact) => {
         this.sendJson({
           contactId: contact.contactId,
@@ -262,7 +294,7 @@ class ChatRealtimeConnection {
     this.presenceUnsubscribe = null;
   }
 
-  private async sendContactSummary(contactId: string, directChat: DirectChatRecord): Promise<void> {
+  private async sendDirectContactSummary(contactId: string, directChat: DirectChatRecord): Promise<void> {
     if (!this.decodedToken || !this.deviceId) {
       return;
     }
@@ -291,6 +323,39 @@ class ChatRealtimeConnection {
     }
   }
 
+  private async sendGroupContactSummary(groupId: string): Promise<void> {
+    if (!this.decodedToken || !this.deviceId) {
+      return;
+    }
+
+    try {
+      const isSessionActive = await this.ensureRealtimeSessionStillActive();
+
+      if (!isSessionActive) {
+        return;
+      }
+
+      const [envelopes, contact, messageReactions] = await Promise.all([
+        listEncryptedGroupEnvelopesForDevice(this.decodedToken, groupId, this.deviceId, {
+          limit: 50,
+          markAsDelivered: true,
+          markAsRead: false
+        }),
+        getGroupChatContact(this.decodedToken, groupId),
+        getGroupChatMessageReactions(this.decodedToken, groupId)
+      ]);
+
+      this.sendJson({
+        contact,
+        envelopes,
+        messageReactions,
+        type: 'chatContactUpdated'
+      });
+    } catch {
+      // The group may have been deactivated or become invisible to this user.
+    }
+  }
+
   private async subscribeConversation(contactId: string): Promise<void> {
     if (!this.decodedToken) {
       this.sendError('Realtime session is not authenticated.');
@@ -300,6 +365,11 @@ class ChatRealtimeConnection {
     this.unsubscribeConversation();
 
     try {
+      if (contactId.startsWith('group_')) {
+        await this.subscribeGroupConversation(contactId);
+        return;
+      }
+
       const isSessionActive = await this.ensureRealtimeSessionStillActive();
 
       if (!isSessionActive) {
@@ -324,6 +394,36 @@ class ChatRealtimeConnection {
     } catch {
       this.sendError('Unable to open realtime messages for this chat.');
     }
+  }
+
+  private async subscribeGroupConversation(groupId: string): Promise<void> {
+    if (!this.decodedToken) {
+      this.sendError('Realtime session is not authenticated.');
+      return;
+    }
+
+    const isSessionActive = await this.ensureRealtimeSessionStillActive();
+
+    if (!isSessionActive) {
+      return;
+    }
+
+    const context = await getGroupChatRealtimeContext(this.decodedToken, groupId);
+    const conversationContact = await getGroupChatContact(this.decodedToken, context.groupId);
+
+    this.conversationUnsubscribe = context.chatRef
+      .collection('encryptedEnvelopes')
+      .orderBy('sentAtMs', 'asc')
+      .limit(100)
+      .onSnapshot((_snapshot) => {
+        if (!this.decodedToken || !this.deviceId) {
+          return;
+        }
+
+        void this.sendGroupEncryptedConversationEnvelopes(context.groupId, conversationContact);
+      }, () => {
+        this.sendError('Realtime group messages are temporarily unavailable.');
+      });
   }
 
   private async sendEncryptedConversationEnvelopes(
@@ -360,6 +460,40 @@ class ChatRealtimeConnection {
     });
   }
 
+  private async sendGroupEncryptedConversationEnvelopes(
+    groupId: string,
+    contact: GroupChatContact
+  ): Promise<void> {
+    if (!this.decodedToken || !this.deviceId) {
+      return;
+    }
+
+    const isSessionActive = await this.ensureRealtimeSessionStillActive();
+
+    if (!isSessionActive) {
+      return;
+    }
+
+    const envelopes = await listEncryptedGroupEnvelopesForDevice(
+      this.decodedToken,
+      groupId,
+      this.deviceId
+    );
+    const [refreshedContact, messageReactions] = await Promise.all([
+      getGroupChatContact(this.decodedToken, groupId)
+        .catch(() => contact),
+      getGroupChatMessageReactions(this.decodedToken, groupId)
+    ]);
+
+    this.sendJson({
+      contact: refreshedContact,
+      contactId: groupId,
+      envelopes,
+      messageReactions,
+      type: 'conversationEncryptedEnvelopes'
+    });
+  }
+
   private async ensureRealtimeSessionStillActive(): Promise<boolean> {
     if (!this.decodedToken || !this.deviceId) {
       return false;
@@ -374,9 +508,9 @@ class ChatRealtimeConnection {
     }
   }
 
-	  private unsubscribeConversation(): void {
-	    this.conversationUnsubscribe?.();
-	    this.conversationUnsubscribe = null;
+  private unsubscribeConversation(): void {
+    this.conversationUnsubscribe?.();
+    this.conversationUnsubscribe = null;
   }
 
   private sendError(message: string, code?: RealtimeErrorCode): void {
@@ -425,8 +559,8 @@ class ChatRealtimeConnection {
     this.decodedToken = null;
     this.deviceId = null;
     this.tenantId = null;
-	  }
-	}
+  }
+}
 
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {

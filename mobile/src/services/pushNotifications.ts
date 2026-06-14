@@ -31,6 +31,7 @@ let notificationHandlerConfigured = false;
 let notificationsModulePromise: Promise<ExpoNotificationsModule> | null = null;
 
 export interface ChatPushNotificationData {
+  chatType?: 'DIRECT' | 'GROUP';
   contactId: string;
   conversationId: string;
   envelopeId: string;
@@ -313,6 +314,7 @@ function parseChatPushNotificationData(data: unknown): ChatPushNotificationData 
   }
 
   return {
+    chatType: payload.chatType === 'GROUP' ? 'GROUP' : payload.chatType === 'DIRECT' ? 'DIRECT' : undefined,
     contactId: payload.contactId,
     conversationId: payload.conversationId,
     envelopeId: payload.envelopeId,

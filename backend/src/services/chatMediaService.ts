@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { DecodedIdToken } from 'firebase-admin/auth';
+import type { DocumentReference } from 'firebase-admin/firestore';
 import { fieldValue, firestore, storageBucket } from '../config/firebaseAdmin.js';
 import type { RegisteredDeviceIdentity } from './deviceIdentityService.js';
 import { getEncryptedDirectContext } from './encryptedMessageEnvelopeService.js';
+import { getGroupChatMediaContext } from './groupChatService.js';
 
 export type ChatMediaKind = 'audio' | 'file' | 'image' | 'video';
 
@@ -33,10 +35,12 @@ export interface EncryptedChatMediaDownloadSession {
 
 interface ChatMediaRecord {
   chatId?: string;
+  chatType?: ChatMediaScope;
   contentType?: string;
   encryptedSizeBytes?: number;
   expiresAtMs?: number;
   fileName?: string;
+  groupId?: string;
   kind?: ChatMediaKind;
   participantIds?: string[];
   recipientUid?: string;
@@ -45,6 +49,16 @@ interface ChatMediaRecord {
   tenantId?: string;
   uploadedByDeviceId?: string;
   uploadedByUid?: string;
+}
+
+type ChatMediaScope = 'DIRECT' | 'GROUP';
+
+interface ChatMediaContext {
+  chatId: string;
+  chatRef: DocumentReference;
+  chatType: ChatMediaScope;
+  participantIds: string[];
+  tenantId: string;
 }
 
 const CHAT_MEDIA_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -60,9 +74,10 @@ export async function createEncryptedChatMediaUploadSession(
   decodedToken: DecodedIdToken,
   activeDevice: RegisteredDeviceIdentity,
   contactId: string,
-  input: CreateEncryptedChatMediaUploadInput
+  input: CreateEncryptedChatMediaUploadInput,
+  chatType: ChatMediaScope = 'DIRECT'
 ): Promise<EncryptedChatMediaUploadSession> {
-  const context = await getEncryptedDirectContext(decodedToken, contactId);
+  const context = await getChatMediaContext(decodedToken, contactId, chatType);
   const kind = input.kind;
   const maxEncryptedSizeBytes = CHAT_MEDIA_LIMITS[kind];
   const encryptedSizeBytes = Math.ceil(input.encryptedSizeBytes);
@@ -89,19 +104,22 @@ export async function createEncryptedChatMediaUploadSession(
     mediaId
   ].join('/');
   const expiresAtMs = Date.now() + CHAT_MEDIA_TTL_MS;
-  const participantIds = [decodedToken.uid, context.contactId].sort();
 
   await context.chatRef.collection('mediaAttachments').doc(mediaId).set({
     chatId: context.chatId,
+    chatType: context.chatType,
     contentType,
     createdAt: fieldValue.serverTimestamp(),
     encryptedSizeBytes,
     expiresAtMs,
     fileName,
+    groupId: context.chatType === 'GROUP' ? context.chatId : null,
     kind,
     originalSizeBytes: input.originalSizeBytes || null,
-    participantIds,
-    recipientUid: context.contactId,
+    participantIds: context.participantIds,
+    recipientUid: context.chatType === 'DIRECT'
+      ? context.participantIds.find((uid) => uid !== decodedToken.uid) || null
+      : null,
     status: 'PENDING_UPLOAD',
     storagePath,
     tenantId: context.tenantId,
@@ -126,9 +144,10 @@ export async function createEncryptedChatMediaUploadSession(
 export async function markEncryptedChatMediaUploaded(
   decodedToken: DecodedIdToken,
   contactId: string,
-  mediaId: string
+  mediaId: string,
+  chatType: ChatMediaScope = 'DIRECT'
 ): Promise<{ mediaId: string; status: 'AVAILABLE' }> {
-  const { mediaRef, record } = await getAuthorizedMediaRecord(decodedToken, contactId, mediaId);
+  const { mediaRef, record } = await getAuthorizedMediaRecord(decodedToken, contactId, mediaId, chatType);
 
   if (record.uploadedByUid !== decodedToken.uid) {
     throw authorizationError('This media upload is not available.');
@@ -159,9 +178,10 @@ export async function markEncryptedChatMediaUploaded(
 export async function createEncryptedChatMediaDownloadSession(
   decodedToken: DecodedIdToken,
   contactId: string,
-  mediaId: string
+  mediaId: string,
+  chatType: ChatMediaScope = 'DIRECT'
 ): Promise<EncryptedChatMediaDownloadSession> {
-  const { record } = await getAuthorizedMediaRecord(decodedToken, contactId, mediaId);
+  const { record } = await getAuthorizedMediaRecord(decodedToken, contactId, mediaId, chatType);
 
   if (record.status !== 'AVAILABLE' || !record.storagePath) {
     throw notFoundError('Media was not found.');
@@ -184,9 +204,10 @@ export async function createEncryptedChatMediaDownloadSession(
 async function getAuthorizedMediaRecord(
   decodedToken: DecodedIdToken,
   contactId: string,
-  mediaId: string
+  mediaId: string,
+  chatType: ChatMediaScope
 ) {
-  const context = await getEncryptedDirectContext(decodedToken, contactId);
+  const context = await getChatMediaContext(decodedToken, contactId, chatType);
   const safeMediaId = mediaId.trim();
 
   if (!/^media_[A-Za-z0-9_-]{12,80}$/.test(safeMediaId)) {
@@ -205,6 +226,7 @@ async function getAuthorizedMediaRecord(
   if (
     record.tenantId !== context.tenantId ||
     record.chatId !== context.chatId ||
+    (record.chatType || 'DIRECT') !== context.chatType ||
     !Array.isArray(record.participantIds) ||
     !record.participantIds.includes(decodedToken.uid) ||
     (record.expiresAtMs || 0) <= Date.now()
@@ -215,6 +237,34 @@ async function getAuthorizedMediaRecord(
   return {
     mediaRef,
     record
+  };
+}
+
+async function getChatMediaContext(
+  decodedToken: DecodedIdToken,
+  contactId: string,
+  chatType: ChatMediaScope
+): Promise<ChatMediaContext> {
+  if (chatType === 'GROUP') {
+    const context = await getGroupChatMediaContext(decodedToken, contactId);
+
+    return {
+      chatId: context.chatId,
+      chatRef: context.chatRef,
+      chatType: 'GROUP',
+      participantIds: context.memberIds,
+      tenantId: context.tenantId
+    };
+  }
+
+  const context = await getEncryptedDirectContext(decodedToken, contactId);
+
+  return {
+    chatId: context.chatId,
+    chatRef: context.chatRef,
+    chatType: 'DIRECT',
+    participantIds: [decodedToken.uid, context.contactId].sort(),
+    tenantId: context.tenantId
   };
 }
 

@@ -33,13 +33,27 @@ interface RegisteredPushTokenResponse {
 }
 
 interface SendChatMessagePushNotificationInput {
+  chatType?: 'DIRECT' | 'GROUP';
   conversationId: string;
   envelopeId: string;
   notificationPreviewByDevice?: Record<string, EncryptedNotificationPreviewRecord>;
+  notificationContactId?: string;
   recipientBadgeCount?: number;
   recipientUid: string;
   senderUid: string;
   senderKeyAgreementPublicKey?: string;
+  sentAt: string;
+  tenantId: string;
+}
+
+interface SendGroupChatMessagePushNotificationsInput {
+  conversationId: string;
+  envelopeId: string;
+  groupId: string;
+  notificationPreviewByDevice?: Record<string, EncryptedNotificationPreviewRecord>;
+  recipientUids: string[];
+  senderKeyAgreementPublicKey?: string;
+  senderUid: string;
   sentAt: string;
   tenantId: string;
 }
@@ -236,7 +250,8 @@ export async function sendChatMessagePushNotification(
     const notificationPreview = getNotificationPreviewForDevice(input, record.deviceId || '');
     const title = senderName || 'Synzapp';
     const baseData: Record<string, string> = {
-      contactId: input.senderUid,
+      chatType: input.chatType || 'DIRECT',
+      contactId: input.notificationContactId || input.senderUid,
       conversationId: input.conversationId,
       envelopeId: input.envelopeId,
       badgeCount: String(unreadBadgeCount),
@@ -320,21 +335,49 @@ export async function sendChatMessagePushNotification(
   }, { merge: true });
 }
 
+export async function sendGroupChatMessagePushNotifications(
+  input: SendGroupChatMessagePushNotificationsInput
+): Promise<void> {
+  await Promise.all(input.recipientUids.map((recipientUid) =>
+    sendChatMessagePushNotification({
+      chatType: 'GROUP',
+      conversationId: input.conversationId,
+      envelopeId: input.envelopeId,
+      notificationContactId: input.groupId,
+      notificationPreviewByDevice: input.notificationPreviewByDevice,
+      recipientUid,
+      senderKeyAgreementPublicKey: input.senderKeyAgreementPublicKey,
+      senderUid: input.senderUid,
+      sentAt: input.sentAt,
+      tenantId: input.tenantId
+    })
+  ));
+}
+
 async function getUnreadChatBadgeCount(tenantId: string, uid: string): Promise<number> {
-  const snapshot = await firestore
-    .collection('organizations')
-    .doc(tenantId)
-    .collection('directChats')
-    .where('participantIds', 'array-contains', uid)
-    .get();
-  const unreadCount = snapshot.docs.reduce((total, doc) => {
+  const organizationRef = firestore.collection('organizations').doc(tenantId);
+  const [directChatsSnapshot, groupsSnapshot] = await Promise.all([
+    organizationRef.collection('directChats')
+      .where('participantIds', 'array-contains', uid)
+      .get(),
+    organizationRef.collection('groups')
+      .where('status', '==', 'ACTIVE')
+      .get()
+  ]);
+  const directUnreadCount = directChatsSnapshot.docs.reduce((total, doc) => {
+    const unreadCounts = doc.data().unreadCounts as Record<string, unknown> | undefined;
+    const count = unreadCounts?.[uid];
+
+    return total + (typeof count === 'number' && Number.isFinite(count) ? Math.max(0, count) : 0);
+  }, 0);
+  const groupUnreadCount = groupsSnapshot.docs.reduce((total, doc) => {
     const unreadCounts = doc.data().unreadCounts as Record<string, unknown> | undefined;
     const count = unreadCounts?.[uid];
 
     return total + (typeof count === 'number' && Number.isFinite(count) ? Math.max(0, count) : 0);
   }, 0);
 
-  return normalizeBadgeCount(unreadCount);
+  return normalizeBadgeCount(directUnreadCount + groupUnreadCount);
 }
 
 function normalizeBadgeCount(count: number): number {

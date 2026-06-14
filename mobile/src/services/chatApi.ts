@@ -16,10 +16,13 @@ export interface ChatContact {
   displayName: string;
   hasActiveDevice: boolean;
   initials: string;
+  isDepartmentDefault?: boolean;
   isOnline: boolean;
   lastMessageAt: string | null;
   lastSeenAt: string | null;
   memberCount?: number;
+  members?: ChatGroupMember[];
+  memberPolicy?: 'DEPARTMENT_PLUS_EXPLICIT' | 'EXPLICIT';
   messagePermissionMode?: 'ADMINS' | 'ALL_MEMBERS';
   preview: string;
   profilePhotoCacheKey: string | null;
@@ -28,6 +31,16 @@ export interface ChatContact {
   roleName: string;
   status: string;
   unreadCount: number;
+}
+
+export interface ChatGroupMember {
+  displayName: string;
+  initials: string;
+  profilePhotoCacheKey: string | null;
+  profilePhotoUrl: string | null;
+  role: 'ORG_ADMIN' | 'DEPT_ADMIN' | 'EMPLOYEE' | 'SYSTEM_ADMIN';
+  roleName: string;
+  uid: string;
 }
 
 export type ChatDeliveryStatus = 'delivered' | 'queued' | 'read' | 'sent';
@@ -257,6 +270,7 @@ export async function getChatMessages(input: {
 }
 
 export async function updateChatMessageReaction(input: {
+  chatType?: 'DIRECT' | 'GROUP';
   contactId: string;
   emoji: string;
   idToken: string;
@@ -266,8 +280,11 @@ export async function updateChatMessageReaction(input: {
   messageReactions: ChatMessageReactionMap;
 }> {
   const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
+  const path = input.chatType === 'GROUP'
+    ? `/api/profile/chat/groups/${encodeURIComponent(input.contactId)}/messages/${encodeURIComponent(input.messageId)}/reaction`
+    : `/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/messages/${encodeURIComponent(input.messageId)}/reaction`;
   const response = await fetch(
-    `${getSynzappApiBaseUrl()}/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/messages/${encodeURIComponent(input.messageId)}/reaction`,
+    `${getSynzappApiBaseUrl()}${path}`,
     {
       body: JSON.stringify({ emoji: input.emoji }),
       headers: {
@@ -537,11 +554,30 @@ function normalizeChatContact(contact: ChatContact): ChatContact {
     ...contact,
     chatType: contact.chatType === 'GROUP' ? 'GROUP' : 'DIRECT',
     hasActiveDevice: contact.hasActiveDevice !== false,
+    isDepartmentDefault: contact.isDepartmentDefault === true,
     isOnline: contact.isOnline === true,
     lastSeenAt: typeof contact.lastSeenAt === 'string' ? contact.lastSeenAt : null,
     memberCount: Number.isFinite(contact.memberCount) ? Math.max(Math.round(contact.memberCount || 0), 0) : undefined,
+    members: Array.isArray(contact.members) ? contact.members.map(normalizeChatGroupMember) : undefined,
+    memberPolicy: contact.memberPolicy === 'DEPARTMENT_PLUS_EXPLICIT' ? 'DEPARTMENT_PLUS_EXPLICIT' : contact.memberPolicy === 'EXPLICIT' ? 'EXPLICIT' : undefined,
     messagePermissionMode: contact.messagePermissionMode === 'ADMINS' ? 'ADMINS' : contact.messagePermissionMode === 'ALL_MEMBERS' ? 'ALL_MEMBERS' : undefined,
     profilePhotoUrl: normalizeSynzappApiUrl(contact.profilePhotoUrl)
+  };
+}
+
+function normalizeChatGroupMember(member: ChatGroupMember): ChatGroupMember {
+  return {
+    displayName: typeof member.displayName === 'string' && member.displayName.trim()
+      ? member.displayName
+      : 'Synzapp user',
+    initials: typeof member.initials === 'string' && member.initials.trim()
+      ? member.initials.trim().slice(0, 3).toUpperCase()
+      : '?',
+    profilePhotoCacheKey: typeof member.profilePhotoCacheKey === 'string' ? member.profilePhotoCacheKey : null,
+    profilePhotoUrl: normalizeSynzappApiUrl(member.profilePhotoUrl),
+    role: member.role || 'EMPLOYEE',
+    roleName: typeof member.roleName === 'string' && member.roleName.trim() ? member.roleName : 'Member',
+    uid: typeof member.uid === 'string' ? member.uid : ''
   };
 }
 
