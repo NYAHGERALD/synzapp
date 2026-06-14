@@ -243,6 +243,10 @@ export async function sendChatMessagePushNotification(
   }
 
   const senderName = getDisplayName(senderSnapshot.exists ? senderSnapshot.data() : null);
+  const senderProfilePhotoCacheKeys = getNotificationSenderProfilePhotoCacheKeys(
+    input,
+    senderSnapshot.exists ? senderSnapshot.data() : null
+  );
   const expoTargets: Array<{ message: ExpoPushMessage; record: PushTokenRecord & { deviceId: string } }> = [];
   const fcmTargets: Array<{ message: Message; record: PushTokenRecord & { deviceId: string } }> = [];
 
@@ -256,7 +260,16 @@ export async function sendChatMessagePushNotification(
       envelopeId: input.envelopeId,
       badgeCount: String(unreadBadgeCount),
       notificationFallbackBody: notificationPreview ? 'New encrypted message' : 'New message',
+      notificationSenderDisplayName: title,
+      ...(senderProfilePhotoCacheKeys.primary
+        ? { notificationSenderProfilePhotoCacheKey: senderProfilePhotoCacheKeys.primary }
+        : {}),
+      ...(senderProfilePhotoCacheKeys.fallback
+        ? { notificationSenderFallbackProfilePhotoCacheKey: senderProfilePhotoCacheKeys.fallback }
+        : {}),
+      notificationSenderUid: input.senderUid,
       notificationTitle: title,
+      senderUid: input.senderUid,
       sentAt: input.sentAt,
       type: 'chat.message'
     };
@@ -283,7 +296,7 @@ export async function sendChatMessagePushNotification(
           body: notificationPreview ? 'New encrypted message' : 'New message',
           channelId: 'chat-messages',
           data,
-          mutableContent: record.platform === 'ios' && Boolean(notificationPreview),
+          mutableContent: record.platform === 'ios',
           priority: 'high',
           sound: 'default',
           title,
@@ -534,6 +547,45 @@ function getDisplayName(user: FirebaseFirestore.DocumentData | null | undefined)
   const fullName = [firstName, lastName].filter(Boolean).join(' ').trim();
 
   return displayName || fullName;
+}
+
+function getNotificationSenderProfilePhotoCacheKeys(
+  input: SendChatMessagePushNotificationInput,
+  user: FirebaseFirestore.DocumentData | null | undefined
+): { fallback: string | null; primary: string | null } {
+  const storagePath = typeof user?.profilePhotoStoragePath === 'string'
+    ? user.profilePhotoStoragePath.trim()
+    : '';
+
+  if (!storagePath) {
+    return {
+      fallback: null,
+      primary: null
+    };
+  }
+
+  const version = getProfilePhotoVersion(user);
+  const profilePhotoCacheKey = `profile-photo-${input.senderUid}-${version}`;
+
+  if (input.chatType === 'GROUP' && input.notificationContactId) {
+    return {
+      fallback: profilePhotoCacheKey,
+      primary: `group-member-photo-${input.notificationContactId}-${input.senderUid}-${version}`
+    };
+  }
+
+  return {
+    fallback: null,
+    primary: profilePhotoCacheKey
+  };
+}
+
+function getProfilePhotoVersion(user: FirebaseFirestore.DocumentData | null | undefined): number {
+  const version = typeof user?.profilePhotoVersion === 'number' && Number.isFinite(user.profilePhotoVersion)
+    ? Math.floor(user.profilePhotoVersion)
+    : 1;
+
+  return Math.max(1, version);
 }
 
 function validationError(message: string): Error {

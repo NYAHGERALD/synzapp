@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Intents
 import Security
 import UserNotifications
 
@@ -21,6 +22,14 @@ final class NotificationService: UNNotificationServiceExtension {
 
     if let previewText = NotificationPreviewDecryptor.decrypt(userInfo: request.content.userInfo) {
       bestAttemptContent.body = previewText
+    }
+
+    if #available(iOS 15.0, *) {
+      contentHandler(CommunicationNotificationContentBuilder.enrich(
+        bestAttemptContent,
+        userInfo: request.content.userInfo
+      ))
+      return
     }
 
     contentHandler(bestAttemptContent)
@@ -46,11 +55,11 @@ private enum NotificationPreviewDecryptor {
 
   static func decrypt(userInfo: [AnyHashable: Any]) -> String? {
     guard
-      stringField("notificationPreviewAlgorithm", in: userInfo) == expectedAlgorithm,
-      stringField("notificationPreviewVersion", in: userInfo) == "1",
-      let ciphertext = decodeBase64Field("notificationPreviewCiphertext", in: userInfo),
-      let nonce = decodeBase64Field("notificationPreviewNonce", in: userInfo),
-      let senderPublicKeyData = decodeBase64Field(
+      NotificationPayloadReader.stringField("notificationPreviewAlgorithm", in: userInfo) == expectedAlgorithm,
+      NotificationPayloadReader.stringField("notificationPreviewVersion", in: userInfo) == "1",
+      let ciphertext = NotificationPayloadReader.decodeBase64Field("notificationPreviewCiphertext", in: userInfo),
+      let nonce = NotificationPayloadReader.decodeBase64Field("notificationPreviewNonce", in: userInfo),
+      let senderPublicKeyData = NotificationPayloadReader.decodeBase64Field(
         "notificationPreviewSenderKeyAgreementPublicKey",
         in: userInfo
       ),
@@ -125,7 +134,159 @@ private enum NotificationPreviewDecryptor {
     return nil
   }
 
-  private static func decodeBase64Field(_ key: String, in userInfo: [AnyHashable: Any]) -> Data? {
+}
+
+@available(iOS 15.0, *)
+private enum CommunicationNotificationContentBuilder {
+  static func enrich(
+    _ content: UNMutableNotificationContent,
+    userInfo: [AnyHashable: Any]
+  ) -> UNNotificationContent {
+    guard NotificationPayloadReader.stringField("type", in: userInfo) == "chat.message" else {
+      return content
+    }
+
+    let senderName = normalizedText(
+      NotificationPayloadReader.stringField("notificationSenderDisplayName", in: userInfo)
+        ?? NotificationPayloadReader.stringField("notificationTitle", in: userInfo)
+        ?? content.title
+    )
+
+    guard !senderName.isEmpty else {
+      return content
+    }
+
+    let senderIdentifier = normalizedText(
+      NotificationPayloadReader.stringField("notificationSenderUid", in: userInfo)
+        ?? NotificationPayloadReader.stringField("senderUid", in: userInfo)
+        ?? NotificationPayloadReader.stringField("contactId", in: userInfo)
+        ?? senderName
+    )
+    let conversationIdentifier = normalizedText(
+      NotificationPayloadReader.stringField("conversationId", in: userInfo)
+        ?? NotificationPayloadReader.stringField("contactId", in: userInfo)
+        ?? senderIdentifier
+    )
+    let senderImage = NotificationAvatarStore.image(
+      cacheKey: NotificationPayloadReader.stringField("notificationSenderProfilePhotoCacheKey", in: userInfo)
+    ) ?? NotificationAvatarStore.image(
+      cacheKey: NotificationPayloadReader.stringField("notificationSenderFallbackProfilePhotoCacheKey", in: userInfo)
+    )
+    let sender = INPerson(
+      personHandle: INPersonHandle(value: senderIdentifier, type: .unknown),
+      nameComponents: nil,
+      displayName: senderName,
+      image: senderImage,
+      contactIdentifier: senderIdentifier,
+      customIdentifier: senderIdentifier,
+      isMe: false,
+      suggestionType: .none
+    )
+    let recipient = INPerson(
+      personHandle: INPersonHandle(value: "synzapp-current-user", type: .unknown),
+      nameComponents: nil,
+      displayName: nil,
+      image: nil,
+      contactIdentifier: nil,
+      customIdentifier: "synzapp-current-user",
+      isMe: true,
+      suggestionType: .none
+    )
+    let intent = INSendMessageIntent(
+      recipients: [recipient],
+      outgoingMessageType: .outgoingMessageText,
+      content: content.body,
+      speakableGroupName: nil,
+      conversationIdentifier: conversationIdentifier,
+      serviceName: "Synzapp",
+      sender: sender,
+      attachments: nil
+    )
+    let interaction = INInteraction(intent: intent, response: nil)
+
+    if let senderImage = senderImage {
+      intent.setImage(senderImage, forParameterNamed: \.sender)
+    }
+
+    interaction.direction = .incoming
+    interaction.donate(completion: nil)
+
+    do {
+      let enrichedContent = try content.updating(from: intent)
+
+      guard let mutableContent = enrichedContent.mutableCopy() as? UNMutableNotificationContent else {
+        return enrichedContent
+      }
+
+      mutableContent.threadIdentifier = conversationIdentifier
+      mutableContent.userInfo = content.userInfo
+      mutableContent.badge = content.badge
+      mutableContent.sound = content.sound
+
+      return mutableContent
+    } catch {
+      content.threadIdentifier = conversationIdentifier
+      return content
+    }
+  }
+
+  private static func normalizedText(_ value: String?) -> String {
+    return (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+}
+
+@available(iOS 15.0, *)
+private enum NotificationAvatarStore {
+  private static let keychainAccessGroup = "F9M458TK87.com.synzapp.mobile.shared"
+  private static let keychainAccountPrefix = "synzapp.notificationAvatar.v1:"
+  private static let keychainServices = [
+    "synzapp.notification.avatar.v1:no-auth",
+    "synzapp.notification.avatar.v1"
+  ]
+  private static let maximumAvatarByteCount = 64 * 1024
+
+  static func image(cacheKey: String?) -> INImage? {
+    let safeCacheKey = (cacheKey ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+    guard !safeCacheKey.isEmpty else {
+      return nil
+    }
+
+    let encodedKey = Data("\(keychainAccountPrefix)\(safeCacheKey)".utf8)
+
+    for service in keychainServices {
+      let query: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrAccessGroup as String: keychainAccessGroup,
+        kSecAttrAccount as String: encodedKey,
+        kSecAttrGeneric as String: encodedKey,
+        kSecAttrService as String: service,
+        kSecMatchLimit as String: kSecMatchLimitOne,
+        kSecReturnData as String: kCFBooleanTrue as Any
+      ]
+      var item: CFTypeRef?
+      let status = SecItemCopyMatching(query as CFDictionary, &item)
+
+      guard
+        status == errSecSuccess,
+        let data = item as? Data,
+        let storedAvatar = try? JSONDecoder().decode(StoredNotificationAvatar.self, from: data),
+        storedAvatar.version == 1,
+        let avatarData = Data(base64Encoded: storedAvatar.base64, options: .ignoreUnknownCharacters),
+        avatarData.count <= maximumAvatarByteCount
+      else {
+        continue
+      }
+
+      return INImage(imageData: avatarData)
+    }
+
+    return nil
+  }
+}
+
+private enum NotificationPayloadReader {
+  static func decodeBase64Field(_ key: String, in userInfo: [AnyHashable: Any]) -> Data? {
     guard let value = stringField(key, in: userInfo) else {
       return nil
     }
@@ -133,7 +294,7 @@ private enum NotificationPreviewDecryptor {
     return Data(base64Encoded: value)
   }
 
-  private static func stringField(_ key: String, in userInfo: [AnyHashable: Any]) -> String? {
+  static func stringField(_ key: String, in userInfo: [AnyHashable: Any]) -> String? {
     if let value = userInfo[key] as? String {
       return value
     }
@@ -159,5 +320,11 @@ private struct StoredDeviceIdentity: Decodable {
 
 private struct NotificationPreviewPayload: Decodable {
   let text: String
+  let version: Int
+}
+
+private struct StoredNotificationAvatar: Decodable {
+  let base64: String
+  let mimeType: String?
   let version: Int
 }

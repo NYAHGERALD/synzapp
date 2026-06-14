@@ -16,6 +16,7 @@
       "buildNumber": "4",
       "appleTeamId": "F9M458TK87",
       "entitlements": {
+        "com.apple.developer.usernotifications.communication": true,
         "keychain-access-groups": [
           "$(AppIdentifierPrefix)com.synzapp.mobile",
           "$(AppIdentifierPrefix)com.synzapp.mobile.shared"
@@ -29,6 +30,9 @@
         "UIBackgroundModes": [
           "fetch",
           "remote-notification"
+        ],
+        "NSUserActivityTypes": [
+          "INSendMessageIntent"
         ],
         "ITSAppUsesNonExemptEncryption": false
       }
