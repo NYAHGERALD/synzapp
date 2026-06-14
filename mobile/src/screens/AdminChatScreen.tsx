@@ -164,10 +164,13 @@ interface ChatItem {
   contactId: string;
   hasActiveDevice: boolean;
   id: string;
+  isDepartmentDefault?: boolean;
   isOnline: boolean;
   lastMessageAt: string | null;
   lastSeenAt: string | null;
+  memberCount?: number;
   members?: ChatGroupMember[];
+  memberPolicy?: 'DEPARTMENT_PLUS_EXPLICIT' | 'EXPLICIT';
   profilePhotoUrl?: string | null;
   preview: string;
   title: string;
@@ -211,6 +214,8 @@ interface AudioAttachmentPreviewState {
 
 type DirectoryFilter = 'Departments' | 'Roles';
 type FooterTab = 'Chats' | 'Groups' | 'Employees' | 'Settings' | 'You';
+type GroupCallMode = 'select' | 'voice' | 'video';
+type GroupCallOption = 'schedule' | 'selectPeople' | 'sendLink' | 'video' | 'voice';
 type InviteMode = 'single' | 'batch' | 'manual';
 type SettingsScreen = 'list' | 'directory' | 'security' | 'chat-backup' | 'my-devices' | 'company-profile' | 'dept-admin-permissions' | 'groups' | 'role-permissions';
 type UserPermission =
@@ -414,9 +419,15 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [isAddMembersModalOpen, setIsAddMembersModalOpen] = useState(false);
   const [isGroupDetailsModalOpen, setIsGroupDetailsModalOpen] = useState(false);
   const [isGroupPermissionsModalOpen, setIsGroupPermissionsModalOpen] = useState(false);
+  const [isGroupCallOptionsOpen, setIsGroupCallOptionsOpen] = useState(false);
+  const [isGroupCallPeopleModalOpen, setIsGroupCallPeopleModalOpen] = useState(false);
+  const [isGroupSwitcherModalOpen, setIsGroupSwitcherModalOpen] = useState(false);
+  const [groupCallMode, setGroupCallMode] = useState<GroupCallMode>('select');
+  const [groupCallPeopleSearch, setGroupCallPeopleSearch] = useState('');
   const [newGroupNameDraft, setNewGroupNameDraft] = useState('');
   const [newGroupPhotoUri, setNewGroupPhotoUri] = useState<string | null>(null);
   const [newGroupPermissionMode, setNewGroupPermissionMode] = useState<'ADMINS' | 'ALL_MEMBERS'>('ALL_MEMBERS');
+  const [selectedGroupCallMemberIds, setSelectedGroupCallMemberIds] = useState<Record<string, boolean>>({});
   const [selectedNewGroupMemberIds, setSelectedNewGroupMemberIds] = useState<Record<string, boolean>>({});
   const [messageDraft, setMessageDraft] = useState('');
   const [mediaReviewItems, setMediaReviewItems] = useState<MediaReviewItem[]>([]);
@@ -529,6 +540,14 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     : undefined;
   const filteredChatItems = filterChatItems(chatItems, chatSearch);
   const selectedNewGroupMembers = directChatContacts.filter((contact) => selectedNewGroupMemberIds[contact.contactId]);
+  const activeGroupMemberContacts = selectedChat?.chatType === 'GROUP'
+    ? mapGroupMembersToSelectableContacts(selectedChat.members || [], directChatContacts, currentUid)
+    : [];
+  const activeGroupOnlineCount = selectedChat?.chatType === 'GROUP'
+    ? getOnlineGroupMemberCount(selectedChat, directChatContacts, currentUid)
+    : 0;
+  const selectedGroupCallMemberCount = Object.values(selectedGroupCallMemberIds).filter(Boolean).length;
+  const companyDisplayName = userProfile?.companyName || companyProfile?.companyName || 'Synzapp';
 
   useEffect(() => {
     void configureSynzappNotificationHandling();
@@ -1748,6 +1767,116 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setAddMembersSearch('');
     setIsNewChatModalOpen(false);
     setIsAddMembersModalOpen(true);
+  }
+
+  function handleOpenGroupCallOptions() {
+    const chat = selectedChatRef.current;
+
+    if (!isUserCreatedGroupChat(chat)) {
+      return;
+    }
+
+    setIsGroupCallPeopleModalOpen(false);
+    setIsGroupCallOptionsOpen(true);
+  }
+
+  function handleOpenGroupSwitcher() {
+    const chat = selectedChatRef.current;
+
+    if (!isUserCreatedGroupChat(chat)) {
+      return;
+    }
+
+    setIsGroupCallOptionsOpen(false);
+    setIsGroupCallPeopleModalOpen(false);
+    setIsGroupSwitcherModalOpen(true);
+    void loadGroupSettings(false);
+  }
+
+  function handleStartGroupCreateFromSwitcher() {
+    setIsGroupSwitcherModalOpen(false);
+    setNewChatSearch('');
+    setAddMembersSearch('');
+    setNewGroupNameDraft('');
+    setNewGroupPhotoUri(null);
+    setNewGroupPermissionMode('ALL_MEMBERS');
+    setSelectedNewGroupMemberIds({});
+    setIsNewChatModalOpen(false);
+    setIsAddMembersModalOpen(true);
+  }
+
+  function handleOpenGroupFromSwitcher(group: TenantGroup) {
+    setIsGroupSwitcherModalOpen(false);
+    void handleOpenGroupFromGroupsTab(group);
+  }
+
+  function handleOpenGroupCallPeopleModal(mode: GroupCallMode = 'select') {
+    const chat = selectedChatRef.current;
+
+    if (!isUserCreatedGroupChat(chat)) {
+      return;
+    }
+
+    setGroupCallMode(mode);
+    setGroupCallPeopleSearch('');
+    setSelectedGroupCallMemberIds({});
+    setIsGroupCallOptionsOpen(false);
+    setIsGroupCallPeopleModalOpen(true);
+  }
+
+  function handleCloseGroupCallPeopleModal() {
+    setIsGroupCallPeopleModalOpen(false);
+    setGroupCallPeopleSearch('');
+    setSelectedGroupCallMemberIds({});
+  }
+
+  function handleSelectGroupCallOption(option: GroupCallOption) {
+    if (option === 'selectPeople') {
+      handleOpenGroupCallPeopleModal('select');
+      return;
+    }
+
+    if (option === 'voice' || option === 'video') {
+      handleOpenGroupCallPeopleModal(option);
+      return;
+    }
+
+    setIsGroupCallOptionsOpen(false);
+    Alert.alert(
+      option === 'sendLink' ? 'Send call link' : 'Schedule call',
+      'This group call action is ready in the menu and will connect to the call service when calling is enabled.'
+    );
+  }
+
+  function handleToggleGroupCallMember(contactId: string) {
+    setSelectedGroupCallMemberIds((currentMemberIds) => {
+      const nextMemberIds = { ...currentMemberIds };
+
+      if (nextMemberIds[contactId]) {
+        delete nextMemberIds[contactId];
+      } else {
+        nextMemberIds[contactId] = true;
+      }
+
+      return nextMemberIds;
+    });
+  }
+
+  function handleConfirmGroupCallPeople() {
+    if (!selectedGroupCallMemberCount) {
+      return;
+    }
+
+    const modeLabel = groupCallMode === 'voice'
+      ? 'Voice call'
+      : groupCallMode === 'video'
+        ? 'Video call'
+        : 'Selected people';
+
+    setIsGroupCallPeopleModalOpen(false);
+    Alert.alert(modeLabel, `${selectedGroupCallMemberCount} ${selectedGroupCallMemberCount === 1 ? 'person' : 'people'} selected.`);
+    setGroupCallPeopleSearch('');
+    setSelectedGroupCallMemberIds({});
   }
 
   function handleReturnToNewChatModal() {
@@ -3304,6 +3433,11 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setError(null);
     setSelectedChat(null);
     setIsLoadingMessages(false);
+    setIsGroupCallOptionsOpen(false);
+    setIsGroupCallPeopleModalOpen(false);
+    setIsGroupSwitcherModalOpen(false);
+    setGroupCallPeopleSearch('');
+    setSelectedGroupCallMemberIds({});
     setMessageDraft('');
     setReplyTarget(null);
     resetForwardMode();
@@ -3323,6 +3457,11 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     selectedChatRef.current = null;
     setSelectedChat(null);
     setIsLoadingMessages(false);
+    setIsGroupCallOptionsOpen(false);
+    setIsGroupCallPeopleModalOpen(false);
+    setIsGroupSwitcherModalOpen(false);
+    setGroupCallPeopleSearch('');
+    setSelectedGroupCallMemberIds({});
     setMessageDraft('');
     setReplyTarget(null);
     resetForwardMode();
@@ -4554,7 +4693,11 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       ) : selectedChat ? (
         <MessageHeader
           chat={selectedChat}
+          onlineCount={activeGroupOnlineCount}
           onBack={handleCloseChat}
+          onOpenGroupCallOptions={handleOpenGroupCallOptions}
+          onOpenGroupPeoplePicker={() => handleOpenGroupCallPeopleModal('select')}
+          onOpenGroupSwitcher={handleOpenGroupSwitcher}
           profilePhotoHeaders={profilePhotoHeaders}
         />
       ) : activeTab === 'Settings' && settingsScreen === 'directory' ? (
@@ -5010,6 +5153,40 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         permissionMode={newGroupPermissionMode}
       />
 
+      <GroupCallOptionsModal
+        groupName={selectedChat?.title || 'Group'}
+        isOpen={isGroupCallOptionsOpen}
+        onClose={() => setIsGroupCallOptionsOpen(false)}
+        onSelect={handleSelectGroupCallOption}
+        onlineCount={activeGroupOnlineCount}
+      />
+
+      <GroupCallPeopleModal
+        contacts={activeGroupMemberContacts}
+        isOpen={isGroupCallPeopleModalOpen}
+        mode={groupCallMode}
+        onCancel={handleCloseGroupCallPeopleModal}
+        onConfirm={handleConfirmGroupCallPeople}
+        onSearchChange={setGroupCallPeopleSearch}
+        onToggleMember={handleToggleGroupCallMember}
+        onlineCount={activeGroupOnlineCount}
+        profilePhotoHeaders={profilePhotoHeaders}
+        search={groupCallPeopleSearch}
+        selectedCount={selectedGroupCallMemberCount}
+        selectedMemberIds={selectedGroupCallMemberIds}
+      />
+
+      <GroupSwitcherModal
+        companyName={companyDisplayName}
+        groups={groups}
+        isLoading={isLoadingGroups}
+        isOpen={isGroupSwitcherModalOpen}
+        onAddGroup={handleStartGroupCreateFromSwitcher}
+        onClose={() => setIsGroupSwitcherModalOpen(false)}
+        onOpenGroup={handleOpenGroupFromSwitcher}
+        selectedGroupId={selectedChat?.contactId || null}
+      />
+
       <NativeOptionPickerModal picker={nativeOptionPicker} />
 
       <AddRecordModal
@@ -5184,13 +5361,28 @@ function HeaderActions({
 
 function MessageHeader({
   chat,
+  onlineCount,
   onBack,
+  onOpenGroupCallOptions,
+  onOpenGroupPeoplePicker,
+  onOpenGroupSwitcher,
   profilePhotoHeaders
 }: {
   chat: ChatItem;
+  onlineCount: number;
   onBack: () => void;
+  onOpenGroupCallOptions: () => void;
+  onOpenGroupPeoplePicker: () => void;
+  onOpenGroupSwitcher: () => void;
   profilePhotoHeaders?: Record<string, string>;
 }) {
+  const isUserCreatedGroup = isUserCreatedGroupChat(chat);
+  const presenceText = chat.chatType === 'GROUP'
+    ? formatGroupOnlineCount(onlineCount)
+    : chat.isOnline
+      ? 'online'
+      : '';
+
   return (
     <View style={styles.messageHeader}>
       <Pressable
@@ -5203,41 +5395,70 @@ function MessageHeader({
         <Text style={styles.messageBackText}>‹</Text>
       </Pressable>
 
-      <ProfileAvatar
-        headers={profilePhotoHeaders}
-        name={chat.title}
-        size={46}
-        uri={chat.profilePhotoUrl}
-      />
+      <Pressable
+        accessibilityLabel={isUserCreatedGroup ? 'Open group list' : undefined}
+        accessibilityRole={isUserCreatedGroup ? 'button' : undefined}
+        disabled={!isUserCreatedGroup}
+        onPress={onOpenGroupSwitcher}
+        style={({ pressed }) => [
+          styles.messageHeaderIdentity,
+          pressed && isUserCreatedGroup && styles.pressed
+        ]}
+      >
+        <ProfileAvatar
+          headers={profilePhotoHeaders}
+          name={chat.title}
+          size={46}
+          uri={chat.profilePhotoUrl}
+        />
 
-      <View style={styles.messageHeaderText}>
-        <Text numberOfLines={1} style={styles.messageHeaderTitle}>{chat.title}</Text>
-        {chat.isOnline ? (
-          <Text numberOfLines={1} style={styles.messageHeaderPresence}>online</Text>
-        ) : null}
-      </View>
+        <View style={styles.messageHeaderText}>
+          <Text numberOfLines={1} style={styles.messageHeaderTitle}>{chat.title}</Text>
+          {presenceText ? (
+            <Text numberOfLines={1} style={styles.messageHeaderPresence}>{presenceText}</Text>
+          ) : null}
+        </View>
+      </Pressable>
 
       <View style={styles.messageHeaderActions}>
+        {isUserCreatedGroup ? (
+          <Pressable
+            android_ripple={androidIconRipple}
+            accessibilityLabel="Select people"
+            accessibilityRole="button"
+            onPress={onOpenGroupPeoplePicker}
+            style={({ pressed }) => [styles.messageHeaderIcon, pressed && styles.pressed]}
+          >
+            <Ionicons color="#FFFFFF" name="person-add" size={24} />
+          </Pressable>
+        ) : null}
         <Pressable
           android_ripple={androidIconRipple}
-          accessibilityLabel="Video call"
+          accessibilityLabel={isUserCreatedGroup ? 'Open group call options' : 'Video call'}
           accessibilityRole="button"
+          onPress={isUserCreatedGroup ? onOpenGroupCallOptions : undefined}
           style={({ pressed }) => [styles.messageHeaderIcon, pressed && styles.pressed]}
         >
-          <Ionicons color="#FFFFFF" name="videocam" size={26} />
+          <View style={styles.messageHeaderVideoIcon}>
+            <Ionicons color="#FFFFFF" name="videocam" size={26} />
+            {isUserCreatedGroup ? <Feather color="#FFFFFF" name="chevron-down" size={14} /> : null}
+          </View>
         </Pressable>
-        <Pressable
-          android_ripple={androidIconRipple}
-          accessibilityLabel="Call"
-          accessibilityRole="button"
-          style={({ pressed }) => [styles.messageHeaderIcon, pressed && styles.pressed]}
-        >
-          <Ionicons color="#FFFFFF" name="call" size={25} />
-        </Pressable>
+        {!isUserCreatedGroup ? (
+          <Pressable
+            android_ripple={androidIconRipple}
+            accessibilityLabel="Call"
+            accessibilityRole="button"
+            style={({ pressed }) => [styles.messageHeaderIcon, pressed && styles.pressed]}
+          >
+            <Ionicons color="#FFFFFF" name="call" size={25} />
+          </Pressable>
+        ) : null}
         <Pressable
           android_ripple={androidIconRipple}
           accessibilityLabel="More"
           accessibilityRole="button"
+          onPress={isUserCreatedGroup ? onOpenGroupCallOptions : undefined}
           style={({ pressed }) => [styles.messageHeaderIcon, pressed && styles.pressed]}
         >
           <Ionicons color="#FFFFFF" name="ellipsis-vertical" size={27} />
@@ -8489,6 +8710,270 @@ function GroupPermissionsModal({
   );
 }
 
+function GroupCallOptionsModal({
+  groupName,
+  isOpen,
+  onClose,
+  onSelect,
+  onlineCount
+}: {
+  groupName: string;
+  isOpen: boolean;
+  onClose: () => void;
+  onSelect: (option: GroupCallOption) => void;
+  onlineCount: number;
+}) {
+  const options: Array<{ icon: keyof typeof Feather.glyphMap; id: GroupCallOption; label: string }> = [
+    { icon: 'phone', id: 'voice', label: 'Voice call' },
+    { icon: 'video', id: 'video', label: 'Video call' },
+    { icon: 'check-circle', id: 'selectPeople', label: 'Select people' },
+    { icon: 'link', id: 'sendLink', label: 'Send call link' },
+    { icon: 'calendar', id: 'schedule', label: 'Schedule call' }
+  ];
+
+  return (
+    <Modal
+      animationType="fade"
+      onRequestClose={onClose}
+      transparent
+      visible={isOpen}
+    >
+      <View style={styles.groupCallOptionsRoot}>
+        <Pressable
+          accessibilityLabel="Close group call options"
+          accessibilityRole="button"
+          onPress={onClose}
+          style={styles.groupCallOptionsBackdrop}
+        />
+        <View accessibilityViewIsModal style={styles.groupCallOptionsPanel}>
+          <View style={styles.groupCallOptionsHeader}>
+            <Text numberOfLines={1} style={styles.groupCallOptionsTitle}>{groupName}</Text>
+            <Text style={styles.groupCallOptionsSubtitle}>{formatGroupOnlineCount(onlineCount)}</Text>
+          </View>
+          {options.map((option) => (
+            <Pressable
+              accessibilityRole="button"
+              android_ripple={androidButtonRipple}
+              key={option.id}
+              onPress={() => onSelect(option.id)}
+              style={({ pressed }) => [styles.groupCallOptionRow, pressed && styles.pressed]}
+            >
+              <Feather color="#334155" name={option.icon} size={20} />
+              <Text style={styles.groupCallOptionText}>{option.label}</Text>
+            </Pressable>
+          ))}
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function GroupCallPeopleModal({
+  contacts,
+  isOpen,
+  mode,
+  onCancel,
+  onConfirm,
+  onSearchChange,
+  onToggleMember,
+  onlineCount,
+  profilePhotoHeaders,
+  search,
+  selectedCount,
+  selectedMemberIds
+}: {
+  contacts: ChatContact[];
+  isOpen: boolean;
+  mode: GroupCallMode;
+  onCancel: () => void;
+  onConfirm: () => void;
+  onSearchChange: (value: string) => void;
+  onToggleMember: (contactId: string) => void;
+  onlineCount: number;
+  profilePhotoHeaders?: Record<string, string>;
+  search: string;
+  selectedCount: number;
+  selectedMemberIds: Record<string, boolean>;
+}) {
+  const filteredContacts = filterChatContacts(contacts, search);
+  const insets = useSafeAreaInsets();
+  const modalTopPadding = getFullScreenModalTopPadding(insets.top);
+  const actionLabel = mode === 'select' ? 'Done' : 'Call';
+
+  return (
+    <Modal
+      allowSwipeDismissal={Platform.OS === 'ios'}
+      animationType="slide"
+      onRequestClose={onCancel}
+      presentationStyle={getNativeFullHeightModalPresentationStyle()}
+      transparent={false}
+      visible={isOpen}
+    >
+      <View style={[styles.newChatModalScreen, { paddingTop: modalTopPadding }]}>
+        <View style={styles.newChatHeader}>
+          <Pressable
+            accessibilityLabel="Close select people"
+            accessibilityRole="button"
+            onPress={onCancel}
+            style={({ pressed }) => [styles.newChatHeaderIconButton, pressed && styles.pressed]}
+          >
+            <Feather color={colors.ink} name="x" size={24} />
+          </Pressable>
+          <View style={styles.newChatCenteredTitleWrap}>
+            <Text style={styles.newChatHeaderTitle}>{getGroupCallPeopleTitle(mode)}</Text>
+            <Text style={styles.newChatHeaderSubtitle}>
+              {selectedCount > 0 ? `${selectedCount} selected` : formatGroupOnlineCount(onlineCount)}
+            </Text>
+          </View>
+          <Pressable
+            accessibilityLabel={actionLabel}
+            accessibilityRole="button"
+            disabled={!selectedCount}
+            onPress={onConfirm}
+            style={({ pressed }) => [
+              styles.newChatNextButton,
+              pressed && selectedCount > 0 && styles.pressed,
+              !selectedCount && styles.disabled
+            ]}
+          >
+            <Text style={styles.newChatNextText}>{actionLabel}</Text>
+          </Pressable>
+        </View>
+
+        <ChatSearchBar
+          onChangeText={onSearchChange}
+          placeholder="Search people"
+          value={search}
+        />
+
+        <ScrollView
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+          style={styles.newChatContactList}
+        >
+          {filteredContacts.map((contact) => (
+            <ChatMemberSelectRow
+              contact={contact}
+              isSelected={Boolean(selectedMemberIds[contact.contactId])}
+              key={contact.contactId}
+              onToggle={() => onToggleMember(contact.contactId)}
+              profilePhotoHeaders={profilePhotoHeaders}
+            />
+          ))}
+
+          {!filteredContacts.length ? (
+            <Text style={styles.batchEmpty}>{search.trim() ? 'No people found' : 'No group members available'}</Text>
+          ) : null}
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+}
+
+function GroupSwitcherModal({
+  companyName,
+  groups,
+  isLoading,
+  isOpen,
+  onAddGroup,
+  onClose,
+  onOpenGroup,
+  selectedGroupId
+}: {
+  companyName: string;
+  groups: TenantGroup[];
+  isLoading: boolean;
+  isOpen: boolean;
+  onAddGroup: () => void;
+  onClose: () => void;
+  onOpenGroup: (group: TenantGroup) => void;
+  selectedGroupId: string | null;
+}) {
+  const insets = useSafeAreaInsets();
+  const modalTopPadding = getFullScreenModalTopPadding(insets.top);
+  const visibleGroups = groups.filter((group) => !group.systemManaged || !group.isDepartmentDefault);
+
+  return (
+    <Modal
+      allowSwipeDismissal={Platform.OS === 'ios'}
+      animationType="slide"
+      onRequestClose={onClose}
+      presentationStyle={getNativeFullHeightModalPresentationStyle()}
+      transparent={false}
+      visible={isOpen}
+    >
+      <View style={[styles.newChatModalScreen, { paddingTop: modalTopPadding }]}>
+        <View style={styles.newChatHeader}>
+          <View style={styles.newChatHeaderSpacer} />
+          <Text numberOfLines={1} style={styles.newChatHeaderTitle}>{companyName}</Text>
+          <Pressable
+            accessibilityLabel="Close groups"
+            accessibilityRole="button"
+            onPress={onClose}
+            style={({ pressed }) => [styles.newChatHeaderIconButton, pressed && styles.pressed]}
+          >
+            <Feather color={colors.ink} name="x" size={24} />
+          </Pressable>
+        </View>
+
+        <Text style={styles.groupSwitcherSectionTitle}>Groups you're in</Text>
+
+        {isLoading && !visibleGroups.length ? (
+          <View style={styles.loadingRow}>
+            <ActivityIndicator color={colors.primary} />
+          </View>
+        ) : (
+          <ScrollView
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+            style={styles.groupSwitcherList}
+          >
+            {visibleGroups.map((group) => (
+              <Pressable
+                accessibilityLabel={`Open ${group.name}`}
+                accessibilityRole="button"
+                key={group.groupId}
+                onPress={() => onOpenGroup(group)}
+                style={({ pressed }) => [
+                  styles.groupSwitcherRow,
+                  selectedGroupId === group.groupId && styles.groupSwitcherRowActive,
+                  pressed && styles.pressed
+                ]}
+              >
+                <View style={styles.groupIcon}>
+                  <Ionicons color={colors.primary} name="people" size={21} />
+                </View>
+                <View style={styles.chatText}>
+                  <Text numberOfLines={1} style={styles.chatTitle}>{group.name}</Text>
+                  <Text numberOfLines={1} style={styles.chatPreview}>{getGroupSubtitle(group)}</Text>
+                </View>
+                <Text numberOfLines={1} style={styles.groupMeta}>
+                  {group.memberCount === 1 ? '1 member' : `${group.memberCount} members`}
+                </Text>
+              </Pressable>
+            ))}
+
+            {!visibleGroups.length ? (
+              <Text style={styles.batchEmpty}>No groups yet</Text>
+            ) : null}
+          </ScrollView>
+        )}
+
+        <Pressable
+          accessibilityLabel="Add group"
+          accessibilityRole="button"
+          android_ripple={androidButtonRipple}
+          onPress={onAddGroup}
+          style={({ pressed }) => [styles.groupSwitcherAddButton, pressed && styles.pressed]}
+        >
+          <Feather color="#FFFFFF" name="plus" size={19} />
+          <Text style={styles.groupSwitcherAddText}>Add group</Text>
+        </Pressable>
+      </View>
+    </Modal>
+  );
+}
+
 function GroupPermissionOption({
   description,
   isSelected,
@@ -11441,15 +11926,89 @@ function mapChatContactToChatItem(contact: ChatContact): ChatItem {
     contactId: contact.contactId,
     hasActiveDevice: contact.hasActiveDevice,
     id: `${contact.chatType === 'GROUP' ? 'group' : 'contact'}-${contact.contactId}`,
+    isDepartmentDefault: contact.isDepartmentDefault === true,
     isOnline: contact.isOnline === true,
     lastMessageAt: contact.lastMessageAt,
     lastSeenAt: contact.lastSeenAt,
+    memberCount: contact.memberCount,
     members: contact.members,
+    memberPolicy: contact.memberPolicy,
     preview: contact.preview,
     profilePhotoUrl: contact.profilePhotoUrl,
     title: contact.displayName,
     unreadCount: contact.unreadCount || 0
   };
+}
+
+function isUserCreatedGroupChat(chat?: ChatItem | null): chat is ChatItem {
+  return Boolean(chat && chat.chatType === 'GROUP' && chat.isDepartmentDefault !== true);
+}
+
+function mapGroupMembersToSelectableContacts(
+  members: ChatGroupMember[],
+  directContacts: ChatContact[],
+  currentUid: string
+): ChatContact[] {
+  const directContactById = new Map(directContacts.map((contact) => [contact.contactId, contact]));
+
+  return members
+    .filter((member) => member.uid && member.uid !== currentUid)
+    .map((member) => {
+      const directContact = directContactById.get(member.uid);
+      const isOnline = directContact?.isOnline === true;
+
+      return {
+        chatType: 'DIRECT',
+        contactId: member.uid,
+        conversationId: directContact?.conversationId || member.uid,
+        displayName: member.displayName,
+        hasActiveDevice: directContact?.hasActiveDevice !== false,
+        initials: member.initials,
+        isOnline,
+        lastMessageAt: null,
+        lastSeenAt: directContact?.lastSeenAt || null,
+        preview: '',
+        profilePhotoCacheKey: member.profilePhotoCacheKey || directContact?.profilePhotoCacheKey || null,
+        profilePhotoUrl: member.profilePhotoUrl || directContact?.profilePhotoUrl || null,
+        role: member.role,
+        roleName: isOnline ? 'online' : member.roleName,
+        status: 'ACTIVE',
+        unreadCount: 0
+      };
+    });
+}
+
+function getOnlineGroupMemberCount(
+  chat: ChatItem,
+  directContacts: ChatContact[],
+  currentUid: string
+): number {
+  if (chat.chatType !== 'GROUP') {
+    return chat.isOnline ? 1 : 0;
+  }
+
+  const directContactById = new Map(directContacts.map((contact) => [contact.contactId, contact]));
+
+  return (chat.members || []).filter((member) =>
+    member.uid !== currentUid &&
+    directContactById.get(member.uid)?.isOnline === true
+  ).length;
+}
+
+function formatGroupOnlineCount(onlineCount: number): string {
+  return onlineCount === 1 ? '1 online' : `${Math.max(onlineCount, 0)} online`;
+}
+
+function getGroupCallPeopleTitle(mode: GroupCallMode): string {
+  if (mode === 'voice') {
+    return 'Voice call';
+  }
+
+  if (mode === 'video') {
+    return 'Video call';
+  }
+
+  return 'Select people';
 }
 
 function filterChatItems(chats: ChatItem[], search: string): ChatItem[] {
@@ -12255,6 +12814,14 @@ const styles = StyleSheet.create({
     fontWeight: '400',
     lineHeight: 43
   },
+  messageHeaderIdentity: {
+    alignItems: 'center',
+    flex: 1,
+    flexDirection: 'row',
+    gap: 9,
+    minHeight: 54,
+    minWidth: 0
+  },
   messageHeaderText: {
     flex: 1,
     minWidth: 0
@@ -12282,6 +12849,13 @@ const styles = StyleSheet.create({
     height: 46,
     justifyContent: 'center',
     minWidth: 40
+  },
+  messageHeaderVideoIcon: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 1,
+    justifyContent: 'center',
+    minWidth: 34
   },
   roundIconButton: {
     alignItems: 'center',
@@ -14279,6 +14853,102 @@ const styles = StyleSheet.create({
   memberSelectCheckActive: {
     backgroundColor: colors.primary,
     borderColor: colors.primary
+  },
+  groupCallOptionsRoot: {
+    alignItems: 'flex-end',
+    flex: 1,
+    justifyContent: 'flex-start',
+    paddingHorizontal: 12,
+    paddingTop: Platform.OS === 'android' ? 56 : 78
+  },
+  groupCallOptionsBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(15, 23, 42, 0.16)'
+  },
+  groupCallOptionsPanel: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    elevation: 18,
+    minWidth: 238,
+    overflow: 'hidden',
+    shadowColor: '#000000',
+    shadowOffset: { height: 8, width: 0 },
+    shadowOpacity: 0.18,
+    shadowRadius: 20
+  },
+  groupCallOptionsHeader: {
+    borderBottomColor: '#E5E7EB',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 18,
+    paddingVertical: 12
+  },
+  groupCallOptionsTitle: {
+    color: colors.ink,
+    fontSize: 16,
+    fontWeight: '400',
+    lineHeight: 21,
+    maxWidth: 220
+  },
+  groupCallOptionsSubtitle: {
+    color: '#64748B',
+    fontSize: 12,
+    fontWeight: '400',
+    lineHeight: 16,
+    marginTop: 1
+  },
+  groupCallOptionRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 14,
+    minHeight: 48,
+    paddingHorizontal: 18,
+    paddingVertical: 9
+  },
+  groupCallOptionText: {
+    color: colors.ink,
+    fontSize: 16,
+    fontWeight: '400',
+    lineHeight: 21
+  },
+  groupSwitcherSectionTitle: {
+    color: '#64748B',
+    fontSize: 14,
+    fontWeight: '400',
+    lineHeight: 19,
+    marginBottom: 4,
+    marginTop: 10
+  },
+  groupSwitcherList: {
+    flex: 1
+  },
+  groupSwitcherRow: {
+    alignItems: 'center',
+    borderBottomColor: '#E5E7EB',
+    borderBottomWidth: 1,
+    flexDirection: 'row',
+    gap: 11,
+    minHeight: 64,
+    paddingVertical: 8
+  },
+  groupSwitcherRowActive: {
+    backgroundColor: '#F0FDFA'
+  },
+  groupSwitcherAddButton: {
+    alignItems: 'center',
+    backgroundColor: colors.primary,
+    borderRadius: 22,
+    flexDirection: 'row',
+    gap: 8,
+    justifyContent: 'center',
+    minHeight: 46,
+    marginBottom: Platform.OS === 'android' ? 18 : 10,
+    marginTop: 12
+  },
+  groupSwitcherAddText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '400',
+    lineHeight: 21
   },
   groupNameRow: {
     alignItems: 'center',
