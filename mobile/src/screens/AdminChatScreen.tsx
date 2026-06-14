@@ -87,6 +87,7 @@ import {
   decryptRealtimeEncryptedEnvelopes,
   deleteChatMessageForMe,
   getChatMessages,
+  grantGroupChatHistoryKeys,
   listChatContacts,
   listGroupChatContacts,
   openChatRealtimeSocket,
@@ -1519,11 +1520,19 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       const baseContact = shouldMarkRead
         ? { ...event.contact, unreadCount: 0 }
         : event.contact;
+      const eventIdToken = await getIdToken();
+      if (event.contact.chatType === 'GROUP' && event.envelopes.length) {
+        await grantGroupChatHistoryKeys({
+          contactId: event.contact.contactId,
+          envelopes: event.envelopes,
+          idToken: eventIdToken
+        }).catch(() => undefined);
+      }
       const deliveredMessages = event.envelopes.length
         ? await decryptRealtimeEncryptedEnvelopes({
             currentUid,
             envelopes: event.envelopes,
-            idToken: await getIdToken()
+            idToken: eventIdToken
           })
         : [];
       const deliveredMessagesWithReactions = applyReactionMapToMessages(deliveredMessages, event.messageReactions);
@@ -1612,11 +1621,19 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           ownerUid: currentUid
         })
       ]);
+      const eventIdToken = await getIdToken();
+      if (event.type === 'conversationEncryptedEnvelopes' && event.contact.chatType === 'GROUP') {
+        await grantGroupChatHistoryKeys({
+          contactId: event.contactId,
+          envelopes: event.envelopes,
+          idToken: eventIdToken
+        }).catch(() => undefined);
+      }
       const serverMessages = uniqueChatMessages(event.type === 'conversationEncryptedEnvelopes'
         ? await decryptRealtimeEncryptedEnvelopes({
             currentUid,
             envelopes: event.envelopes,
-            idToken: await getIdToken()
+            idToken: eventIdToken
           })
         : event.messages);
       const eventReactionMap = event.type === 'conversationEncryptedEnvelopes'

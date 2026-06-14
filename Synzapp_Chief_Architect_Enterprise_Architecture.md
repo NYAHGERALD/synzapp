@@ -1108,6 +1108,8 @@ Required model:
 - Backup plaintext is created only on an authorized device.
 - Backup ciphertext may be stored in Synzapp-managed Cloud Storage or a tenant-approved storage provider.
 - Backup encryption keys must be protected by a user-controlled recovery secret, platform passkey, hardware-backed key vault, or tenant-approved enterprise key-management design.
+- Durable group history must use device-assisted key grants when an active group member or a newly registered group member device needs access to older encrypted group envelopes.
+- Synzapp backend may validate group membership, active device status, envelope ownership, and key-grant routing, but it must not decrypt message bodies or message keys while granting history access.
 - Synzapp backend may store backup metadata, version, owner, tenantId, conversation IDs, backup object paths, key version, backup policy, and access state.
 - Synzapp backend must not store readable message bodies or unrestricted backup-decryption keys.
 - Backup restore is allowed only after phone authentication, backend session verification, tenant membership verification, active user status verification, and active device registration.
@@ -1310,7 +1312,8 @@ Realtime listeners must subscribe only to active conversations or summary docume
 ## 18.6 Server Retention for Chat Content
 
 - One-to-one encrypted envelopes should be deleted after recipient delivery acknowledgment and a short grace period.
-- Group encrypted envelopes should be deleted after all eligible recipient devices receive the envelope or after TTL.
+- Durable group encrypted envelopes may be retained as ciphertext for authorized group history according to tenant retention policy.
+- Newly eligible group devices must receive history access through encrypted key grants created by an already-authorized member device or a tenant-approved enterprise key workflow.
 - Undelivered encrypted envelopes expire automatically.
 - Chat summary metadata and receipts may remain for enterprise UX and audit needs.
 - Plaintext message content must not remain in backend storage.
@@ -1342,6 +1345,8 @@ When a department is created, the backend creates a system-managed department gr
 Only Org Admins and authorized Department Admins can add or remove external employees or external Department Admins from a department group. These external memberships are explicit, auditable, and do not change the employee's primary department assignment.
 
 Group creation is tenant-scoped. Org Admins with group management permission can create company-wide or department groups. Department Admins with group creation permission can create only department groups for their assigned department. Every created group stores tenantId, scope, optional departmentId, creator membership, status, member count, member policy, system-managed flag, and audit metadata.
+
+When a user or device becomes newly eligible for a group after messages already exist, durable group history is unlocked by encrypted key grants. An authorized device that already has access re-encrypts only the historical message keys to the newly eligible active devices. The backend stores those encrypted key copies and never sees plaintext message content or raw message keys.
 
 ## 19.3 Announcement Channels
 

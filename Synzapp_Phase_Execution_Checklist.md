@@ -157,6 +157,7 @@ This must be completed before expanding chat beyond the current direct-message U
 - [x] Add encrypted backup restore after phone auth, backend membership check, and active device registration.
 - [x] Block backup restore when a user is removed, suspended, or no longer belongs to the tenant.
 - [x] Add high-entropy recovery-key foundation for restoring encrypted chat backups after reinstall.
+- [x] Add device-assisted encrypted group history key grants so newly eligible group devices can decrypt retained group history without backend plaintext access.
 - [x] Add tenant-controlled encrypted chat backup policy that defaults to disabled.
 - [x] Add Org Admin settings to enable or disable encrypted backups.
 - [x] Add Org Admin settings to allow or block self-service recovery-key restore.
@@ -485,6 +486,7 @@ Allow Org Admin to manage the company workspace safely.
 - [x] Groups footer tab lists only backend-authorized groups for Org Admin, Department Admin, and Employee users.
 - [ ] Group member management for adding or removing external employees and external Department Admins from department groups.
 - [x] Encrypted group-chat messaging for department and custom groups.
+- [x] Durable encrypted group history access uses backend-validated, device-generated key grants for newly eligible member devices.
 - [x] Role assignment.
 - [x] Permission assignment.
 - [x] Department Admin permission settings catalog and mobile settings screen for invite users, department groups, announcements, work orders, action plans, and department activity.

@@ -79,6 +79,11 @@ export interface EncryptedMessageBody {
   senderDeviceId: string;
 }
 
+export interface GroupHistoryKeyGrant {
+  encryptedKeysByDevice: Record<string, string>;
+  envelopeId: string;
+}
+
 const NOTIFICATION_PREVIEW_ALGORITHM = 'x25519-sha256-aes-256-gcm+synzapp-notification-preview-v1';
 const NOTIFICATION_PREVIEW_DERIVATION_LABEL = 'Synzapp notification preview v1';
 const NOTIFICATION_PREVIEW_MAX_CHARS = 180;
@@ -241,23 +246,69 @@ export async function decryptChatEnvelopes(input: {
   return decryptedMessages.filter((message): message is ChatMessage => Boolean(message));
 }
 
+export async function buildGroupHistoryKeyGrants(input: {
+  envelopes: EncryptedChatEnvelope[];
+  idToken: string;
+}): Promise<GroupHistoryKeyGrant[]> {
+  const localDevice = await getLocalDeviceKeyMaterial(input.idToken);
+  const grants = await Promise.all(input.envelopes.map(async (envelope) => {
+    const recipientDevices = envelope.historyKeyRecipientDevices || [];
+
+    if (!recipientDevices.length) {
+      return null;
+    }
+
+    const messageKey = decryptMessageKeyForEnvelope({
+      envelope,
+      localDevicePrivateKey: localDevice.keyAgreementPrivateKey
+    });
+
+    if (!messageKey) {
+      return null;
+    }
+
+    const encryptedKeysByDevice: Record<string, string> = {};
+
+    recipientDevices.forEach((device) => {
+      if (!device.deviceId || !device.keyAgreementPublicKey) {
+        return;
+      }
+
+      const keyNonce = Crypto.getRandomBytes(nacl.box.nonceLength);
+      const encryptedKey = nacl.box(
+        messageKey,
+        keyNonce,
+        toByteArray(device.keyAgreementPublicKey),
+        localDevice.keyAgreementPrivateKey
+      );
+      const payload: EncryptedKeyPayload = {
+        ciphertext: fromByteArray(encryptedKey),
+        nonce: fromByteArray(keyNonce),
+        version: 1
+      };
+
+      encryptedKeysByDevice[device.deviceId] = JSON.stringify(payload);
+    });
+
+    if (!Object.keys(encryptedKeysByDevice).length) {
+      return null;
+    }
+
+    return {
+      encryptedKeysByDevice,
+      envelopeId: envelope.envelopeId
+    };
+  }));
+
+  return grants.filter((grant): grant is GroupHistoryKeyGrant => Boolean(grant));
+}
+
 async function decryptChatEnvelope(input: {
   envelope: EncryptedChatEnvelope;
   localDevicePrivateKey: Uint8Array;
 }): Promise<EncryptedChatPayload | null> {
   try {
-    const keyPayload = JSON.parse(input.envelope.encryptedKeyForDevice) as Partial<EncryptedKeyPayload>;
-
-    if (keyPayload.version !== 1 || !keyPayload.ciphertext || !keyPayload.nonce) {
-      return null;
-    }
-
-    const messageKey = nacl.box.open(
-      toByteArray(keyPayload.ciphertext),
-      toByteArray(keyPayload.nonce),
-      toByteArray(input.envelope.senderKeyAgreementPublicKey),
-      input.localDevicePrivateKey
-    );
+    const messageKey = decryptMessageKeyForEnvelope(input);
 
     if (!messageKey) {
       return null;
@@ -270,6 +321,28 @@ async function decryptChatEnvelope(input: {
     );
 
     return plaintext ? parseDecryptedTextPayload(bytesToUtf8(plaintext)) : null;
+  } catch {
+    return null;
+  }
+}
+
+function decryptMessageKeyForEnvelope(input: {
+  envelope: EncryptedChatEnvelope;
+  localDevicePrivateKey: Uint8Array;
+}): Uint8Array | null {
+  try {
+    const keyPayload = JSON.parse(input.envelope.encryptedKeyForDevice) as Partial<EncryptedKeyPayload>;
+
+    if (keyPayload.version !== 1 || !keyPayload.ciphertext || !keyPayload.nonce) {
+      return null;
+    }
+
+    return nacl.box.open(
+      toByteArray(keyPayload.ciphertext),
+      toByteArray(keyPayload.nonce),
+      toByteArray(input.envelope.senderKeyAgreementPublicKey),
+      input.localDevicePrivateKey
+    );
   } catch {
     return null;
   }

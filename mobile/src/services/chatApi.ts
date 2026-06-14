@@ -5,8 +5,10 @@ import {
 } from './apiConfig';
 import { getRegisteredDeviceHeaders } from './deviceIdentity';
 import {
+  buildGroupHistoryKeyGrants,
   decryptChatEnvelopes,
-  encryptChatMessage
+  encryptChatMessage,
+  type GroupHistoryKeyGrant
 } from './chatEncryption';
 
 export interface ChatContact {
@@ -137,6 +139,7 @@ export interface EncryptedChatEnvelope {
   deliveryStatus: Exclude<ChatDeliveryStatus, 'queued'> | null;
   encryptedKeyForDevice: string;
   envelopeId: string;
+  historyKeyRecipientDevices?: EncryptionDevicePublicKey[];
   keyVersion: number;
   nonce: string;
   senderDeviceId: string;
@@ -255,12 +258,21 @@ export async function getChatMessages(input: {
     envelopes?: EncryptedChatEnvelope[];
     messageReactions?: ChatMessageReactionMap;
   };
+  const envelopes = (body.envelopes || []).map(normalizeEncryptedEnvelope);
   const messageReactions = normalizeMessageReactionMap(body.messageReactions);
   const messages = await decryptChatEnvelopes({
     currentUid: input.currentUid,
-    envelopes: (body.envelopes || []).map(normalizeEncryptedEnvelope),
+    envelopes,
     idToken: input.idToken
   });
+
+  if (input.chatType === 'GROUP') {
+    await grantGroupChatHistoryKeys({
+      contactId: input.contactId,
+      envelopes,
+      idToken: input.idToken
+    }).catch(() => undefined);
+  }
 
   return {
     contact: normalizeChatContact(body.contact),
@@ -595,6 +607,53 @@ async function getChatEncryptionContext(input: {
   return body.context;
 }
 
+export async function grantGroupChatHistoryKeys(input: {
+  contactId: string;
+  envelopes: EncryptedChatEnvelope[];
+  idToken: string;
+}): Promise<void> {
+  const grants = await buildGroupHistoryKeyGrants({
+    envelopes: input.envelopes,
+    idToken: input.idToken
+  });
+
+  if (!grants.length) {
+    return;
+  }
+
+  const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
+  const response = await fetch(
+    `${getSynzappApiBaseUrl()}/api/profile/chat/groups/${encodeURIComponent(input.contactId)}/history-key-grants`,
+    {
+      body: JSON.stringify({
+        grants: grants.slice(0, 100).map(normalizeGroupHistoryKeyGrant)
+      }),
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${input.idToken}`,
+        'Content-Type': 'application/json',
+        ...deviceHeaders
+      },
+      method: 'POST'
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+}
+
+function normalizeGroupHistoryKeyGrant(grant: GroupHistoryKeyGrant): GroupHistoryKeyGrant {
+  return {
+    encryptedKeysByDevice: Object.fromEntries(
+      Object.entries(grant.encryptedKeysByDevice || {})
+        .filter(([deviceId, encryptedKey]) => deviceId && encryptedKey)
+        .slice(0, 100)
+    ),
+    envelopeId: grant.envelopeId
+  };
+}
+
 function normalizeChatContact(contact: ChatContact): ChatContact {
   return {
     ...contact,
@@ -849,7 +908,22 @@ function normalizeEncryptedEnvelope(envelope: EncryptedChatEnvelope): EncryptedC
 
   return {
     ...envelope,
-    deliveryStatus
+    deliveryStatus,
+    historyKeyRecipientDevices: Array.isArray(envelope.historyKeyRecipientDevices)
+      ? envelope.historyKeyRecipientDevices.map(normalizeEncryptionDevicePublicKey).filter((device) => Boolean(device.deviceId))
+      : undefined
+  };
+}
+
+function normalizeEncryptionDevicePublicKey(device: EncryptionDevicePublicKey): EncryptionDevicePublicKey {
+  return {
+    deviceId: typeof device.deviceId === 'string' ? device.deviceId.trim() : '',
+    identityPublicKey: typeof device.identityPublicKey === 'string' ? device.identityPublicKey.trim() : '',
+    keyAgreementPublicKey: typeof device.keyAgreementPublicKey === 'string' ? device.keyAgreementPublicKey.trim() : '',
+    keyVersion: Number.isFinite(device.keyVersion) ? Math.max(Math.round(device.keyVersion || 1), 1) : 1,
+    platform: typeof device.platform === 'string' && device.platform.trim() ? device.platform.trim() : 'unknown',
+    signingPublicKey: typeof device.signingPublicKey === 'string' ? device.signingPublicKey.trim() : '',
+    uid: typeof device.uid === 'string' ? device.uid.trim() : ''
   };
 }
 

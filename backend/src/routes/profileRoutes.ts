@@ -36,6 +36,7 @@ import {
   getGroupChatMemberProfilePhoto,
   getGroupChatMessageReactions,
   getGroupEncryptionContext,
+  grantGroupChatHistoryKeys,
   hideGroupChatMessageForCurrentUser,
   listCurrentUserGroupChatContacts,
   listEncryptedGroupEnvelopesForDevice,
@@ -131,6 +132,16 @@ const encryptedEnvelopeBodySchema = z.object({
   ).optional(),
   recipientDeviceIds: z.array(safeDeviceIdSchema).min(1).max(50),
   senderDeviceId: safeDeviceIdSchema
+});
+
+const groupHistoryKeyGrantBodySchema = z.object({
+  grants: z.array(z.object({
+    encryptedKeysByDevice: z.record(
+      safeDeviceIdSchema,
+      z.string().trim().min(16).max(4000)
+    ),
+    envelopeId: z.string().trim().regex(/^[A-Za-z0-9_-]{8,160}$/)
+  })).min(1).max(100)
 });
 
 const groupChatBodySchema = z.object({
@@ -445,6 +456,48 @@ profileRouter.get('/chat/groups/:groupId/encrypted-messages', verifyAppCheck, as
 
     res.json({ contact, envelopes, messageReactions });
   } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.post('/chat/groups/:groupId/history-key-grants', verifyAppCheck, async (req, res, next) => {
+  const groupId = Array.isArray(req.params.groupId)
+    ? req.params.groupId[0] || ''
+    : req.params.groupId || '';
+
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    const body = groupHistoryKeyGrantBodySchema.parse(req.body);
+    const result = await grantGroupChatHistoryKeys(
+      decodedToken,
+      groupId,
+      activeDevice.deviceId,
+      body.grants
+    );
+
+    await writeAuditEvent({
+      action: 'GROUP_CHAT_HISTORY_KEYS_GRANTED',
+      metadata: {
+        grantedDeviceCount: result.grantedDeviceCount,
+        grantedEnvelopeCount: result.grantedEnvelopeCount,
+        groupId
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: result.tenantId,
+      uid: decodedToken.uid
+    });
+
+    res.json(result);
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'GROUP_CHAT_HISTORY_KEYS_GRANTED',
+      reason: error instanceof Error ? error.message : 'Group history key grant failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
     next(error);
   }
 });

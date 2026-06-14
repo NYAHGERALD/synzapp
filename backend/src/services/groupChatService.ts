@@ -19,6 +19,8 @@ import type {
 } from './userProfileService.js';
 
 const GROUP_HIDDEN_MESSAGE_LIMIT = 5000;
+const GROUP_HISTORY_KEY_GRANT_DEVICE_LIMIT = 100;
+const GROUP_HISTORY_KEY_GRANT_ENVELOPE_LIMIT = 100;
 
 export interface CreateGroupChatInput {
   memberIds: string[];
@@ -79,6 +81,7 @@ export interface EncryptedGroupEnvelopeForDevice {
   deliveryStatus: 'delivered' | 'read' | 'sent' | null;
   encryptedKeyForDevice: string;
   envelopeId: string;
+  historyKeyRecipientDevices?: EncryptionDevicePublicKey[];
   keyVersion: number;
   nonce: string;
   senderDeviceId: string;
@@ -99,6 +102,18 @@ export interface EncryptedGroupEnvelopeResponse {
   senderDeviceId: string;
   senderKeyAgreementPublicKey: string;
   sentAt: string;
+  tenantId: string;
+}
+
+export interface GroupHistoryKeyGrantInput {
+  encryptedKeysByDevice: Record<string, string>;
+  envelopeId: string;
+}
+
+export interface GroupHistoryKeyGrantResult {
+  grantedDeviceCount: number;
+  grantedEnvelopeCount: number;
+  groupId: string;
   tenantId: string;
 }
 
@@ -178,6 +193,7 @@ interface EncryptedGroupEnvelopeRecord {
   encryptedKeysByDevice?: Record<string, string>;
   envelopeId?: string;
   expiresAtMs?: number | null;
+  groupId?: string;
   keyVersion?: number;
   nonce?: string;
   notificationPreviewByDevice?: Record<string, EncryptedNotificationPreviewRecord>;
@@ -188,6 +204,7 @@ interface EncryptedGroupEnvelopeRecord {
   senderKeyAgreementPublicKey?: string;
   senderUid?: string;
   sentAtMs?: number;
+  tenantId?: string;
 }
 
 interface GroupHiddenMessageRecord {
@@ -423,14 +440,18 @@ export async function listEncryptedGroupEnvelopesForDevice(
   const shouldMarkDelivered = options.markAsDelivered !== false;
   const shouldMarkRead = options.markAsRead !== false;
 
-  const [envelopesSnapshot, hiddenMessageIds] = await Promise.all([
+  const [envelopesSnapshot, hiddenMessageIds, activeGroupDevices] = await Promise.all([
     context.groupRef
       .collection('encryptedEnvelopes')
       .orderBy('sentAtMs', 'asc')
       .limit(options.limit || 500)
       .get(),
-    getHiddenGroupMessageIds(context.groupRef, context.tenantId, decodedToken.uid)
+    getHiddenGroupMessageIds(context.groupRef, context.tenantId, decodedToken.uid),
+    listActiveDevicesForGroupMembers(context.tenantId, context.memberIds, '')
   ]);
+  const activeGroupDevicesById = new Map(activeGroupDevices
+    .filter((device) => Boolean(device.deviceId && device.keyAgreementPublicKey))
+    .map((device) => [device.deviceId || '', device]));
   const nowMs = Date.now();
   const batch = firestore.batch();
   let hasBatchUpdates = false;
@@ -482,7 +503,14 @@ export async function listEncryptedGroupEnvelopesForDevice(
         }
       }
 
-      return mapEncryptedGroupEnvelopeForDevice(decodedToken.uid, deviceId, doc.id, record, encryptedKeyForDevice);
+      return mapEncryptedGroupEnvelopeForDevice(
+        decodedToken.uid,
+        deviceId,
+        doc.id,
+        record,
+        encryptedKeyForDevice,
+        getMissingHistoryKeyRecipientDevices(record, activeGroupDevicesById, deviceId)
+      );
     })
     .filter((envelope): envelope is EncryptedGroupEnvelopeForDevice => Boolean(envelope));
 
@@ -503,6 +531,114 @@ export async function listEncryptedGroupEnvelopesForDevice(
   }
 
   return envelopes;
+}
+
+export async function grantGroupChatHistoryKeys(
+  decodedToken: DecodedIdToken,
+  groupId: string,
+  grantingDeviceId: string,
+  grants: GroupHistoryKeyGrantInput[]
+): Promise<GroupHistoryKeyGrantResult> {
+  const context = await getGroupChatContext(decodedToken, groupId);
+  const grantingDevice = await getActiveDevice(context.tenantId, decodedToken.uid, grantingDeviceId);
+
+  if (!grantingDevice) {
+    throw authorizationError('This device is not authorized.');
+  }
+
+  const activeGroupDevices = await listActiveDevicesForGroupMembers(context.tenantId, context.memberIds, '');
+  const activeGroupDevicesById = new Map(activeGroupDevices
+    .filter((device) => Boolean(device.deviceId && device.keyAgreementPublicKey))
+    .map((device) => [device.deviceId || '', device]));
+  const normalizedGrants = grants
+    .map(normalizeGroupHistoryKeyGrant)
+    .filter((grant): grant is GroupHistoryKeyGrantInput => Boolean(grant))
+    .slice(0, GROUP_HISTORY_KEY_GRANT_ENVELOPE_LIMIT);
+
+  if (!normalizedGrants.length) {
+    return {
+      grantedDeviceCount: 0,
+      grantedEnvelopeCount: 0,
+      groupId: context.groupId,
+      tenantId: context.tenantId
+    };
+  }
+
+  let grantedDeviceCount = 0;
+  let grantedEnvelopeCount = 0;
+
+  await firestore.runTransaction(async (transaction) => {
+    const grantRefs = normalizedGrants.map((grant) => ({
+      grant,
+      ref: context.groupRef.collection('encryptedEnvelopes').doc(grant.envelopeId)
+    }));
+    const snapshots = await Promise.all(grantRefs.map(({ ref }) => transaction.get(ref)));
+
+    snapshots.forEach((snapshot, index) => {
+      if (!snapshot.exists) {
+        return;
+      }
+
+      const { grant } = grantRefs[index];
+      const record = snapshot.data() as EncryptedGroupEnvelopeRecord;
+
+      if (
+        record.tenantId !== context.tenantId ||
+        record.groupId !== context.groupId ||
+        !record.encryptedKeysByDevice?.[grantingDeviceId]
+      ) {
+        return;
+      }
+
+      const existingKeysByDevice = record.encryptedKeysByDevice || {};
+      const nextKeysByDevice = {
+        ...existingKeysByDevice
+      };
+      const nextRecipientDeviceIds = new Set(record.recipientDeviceIds || []);
+      let nextGrantedDeviceCount = 0;
+
+      Object.entries(grant.encryptedKeysByDevice)
+        .slice(0, GROUP_HISTORY_KEY_GRANT_DEVICE_LIMIT)
+        .forEach(([deviceId, encryptedKey]) => {
+          const targetDevice = activeGroupDevicesById.get(deviceId);
+
+          if (
+            !targetDevice ||
+            existingKeysByDevice[deviceId] ||
+            deviceId === grantingDeviceId ||
+            !isEncryptedGroupHistoryKeyGrantPayload(encryptedKey)
+          ) {
+            return;
+          }
+
+          nextKeysByDevice[deviceId] = encryptedKey;
+          nextRecipientDeviceIds.add(deviceId);
+          nextGrantedDeviceCount += 1;
+        });
+
+      if (!nextGrantedDeviceCount) {
+        return;
+      }
+
+      transaction.set(snapshot.ref, {
+        encryptedKeysByDevice: nextKeysByDevice,
+        historyKeyGrantedAt: fieldValue.serverTimestamp(),
+        historyKeyGrantedByDeviceId: grantingDeviceId,
+        recipientDeviceIds: [...nextRecipientDeviceIds],
+        updatedAt: fieldValue.serverTimestamp()
+      }, { merge: true });
+
+      grantedDeviceCount += nextGrantedDeviceCount;
+      grantedEnvelopeCount += 1;
+    });
+  });
+
+  return {
+    grantedDeviceCount,
+    grantedEnvelopeCount,
+    groupId: context.groupId,
+    tenantId: context.tenantId
+  };
 }
 
 export async function sendEncryptedGroupEnvelope(
@@ -1379,7 +1515,8 @@ function mapEncryptedGroupEnvelopeForDevice(
   deviceId: string,
   fallbackId: string,
   record: EncryptedGroupEnvelopeRecord,
-  encryptedKeyForDevice: string
+  encryptedKeyForDevice: string,
+  historyKeyRecipientDevices?: EncryptionDevicePublicKey[]
 ): EncryptedGroupEnvelopeForDevice {
   const sentAtMs = record.sentAtMs || Date.now();
 
@@ -1390,6 +1527,7 @@ function mapEncryptedGroupEnvelopeForDevice(
     deliveryStatus: getEnvelopeDeliveryStatus(currentUid, record),
     encryptedKeyForDevice,
     envelopeId: record.envelopeId || fallbackId,
+    ...(historyKeyRecipientDevices?.length ? { historyKeyRecipientDevices } : {}),
     keyVersion: record.keyVersion || 1,
     nonce: record.nonce || '',
     senderDeviceId: record.senderDeviceId || '',
@@ -1397,6 +1535,86 @@ function mapEncryptedGroupEnvelopeForDevice(
     senderUid: record.senderUid || '',
     sentAt: new Date(sentAtMs).toISOString()
   };
+}
+
+function getMissingHistoryKeyRecipientDevices(
+  record: EncryptedGroupEnvelopeRecord,
+  activeGroupDevicesById: Map<string, DeviceKeyRecord>,
+  currentDeviceId: string
+): EncryptionDevicePublicKey[] {
+  const encryptedKeysByDevice = record.encryptedKeysByDevice || {};
+
+  return [...activeGroupDevicesById.values()]
+    .filter((device) => {
+      const deviceId = device.deviceId || '';
+
+      return Boolean(
+        deviceId &&
+        deviceId !== currentDeviceId &&
+        !encryptedKeysByDevice[deviceId] &&
+        device.keyAgreementPublicKey
+      );
+    })
+    .slice(0, GROUP_HISTORY_KEY_GRANT_DEVICE_LIMIT)
+    .map(mapDevicePublicKey);
+}
+
+function normalizeGroupHistoryKeyGrant(
+  grant: GroupHistoryKeyGrantInput
+): GroupHistoryKeyGrantInput | null {
+  const envelopeId = normalizeOptionalGroupMessageId(grant.envelopeId);
+
+  if (!envelopeId) {
+    return null;
+  }
+
+  const encryptedKeysByDevice = Object.fromEntries(
+    Object.entries(grant.encryptedKeysByDevice || {})
+      .filter(([deviceId, encryptedKey]) => (
+        isSafeDeviceId(deviceId) &&
+        isEncryptedGroupHistoryKeyGrantPayload(encryptedKey)
+      ))
+      .slice(0, GROUP_HISTORY_KEY_GRANT_DEVICE_LIMIT)
+  );
+
+  if (!Object.keys(encryptedKeysByDevice).length) {
+    return null;
+  }
+
+  return {
+    encryptedKeysByDevice,
+    envelopeId
+  };
+}
+
+export function isEncryptedGroupHistoryKeyGrantPayload(value: string): boolean {
+  try {
+    const payload = JSON.parse(value) as Partial<{
+      ciphertext: unknown;
+      nonce: unknown;
+      version: unknown;
+    }>;
+
+    return (
+      payload.version === 1 &&
+      typeof payload.ciphertext === 'string' &&
+      payload.ciphertext.trim().length >= 16 &&
+      typeof payload.nonce === 'string' &&
+      payload.nonce.trim().length >= 8
+    );
+  } catch {
+    return false;
+  }
+}
+
+function normalizeOptionalGroupMessageId(messageId: string): string | null {
+  const safeMessageId = messageId.trim();
+
+  return /^[A-Za-z0-9_-]{8,160}$/.test(safeMessageId) ? safeMessageId : null;
+}
+
+function isSafeDeviceId(deviceId: string): boolean {
+  return /^[A-Za-z0-9_-]{16,128}$/.test(deviceId.trim());
 }
 
 function getEnvelopeDeliveryStatus(
