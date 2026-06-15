@@ -19,6 +19,7 @@ import {
   Alert,
   Animated,
   AppState,
+  Dimensions,
   Easing,
   FlatList,
   Image,
@@ -546,11 +547,19 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const isConversationSurfaceOpen = Boolean(selectedChat || isAiAssistantOpen);
   const isCompactAndroid = Platform.OS === 'android' && height < 720;
   const footerHeight = isCompactAndroid ? 64 : 68;
-  const footerBottom = Platform.OS === 'android'
-    ? Math.min(Math.max(insets.bottom, 0), 4)
-    : Math.max(Math.min(insets.bottom, 6), 4);
   const footerTabHeight = isCompactAndroid ? 56 : 60;
   const androidStatusBarHeight = Platform.OS === 'android' ? RNStatusBar.currentHeight || 0 : 0;
+  const androidEstimatedNavigationInset = Platform.OS === 'android'
+    ? Math.max(0, Math.round(Dimensions.get('screen').height - height - androidStatusBarHeight))
+    : 0;
+  const androidBottomInset = Platform.OS === 'android'
+    ? Math.max(insets.bottom, androidEstimatedNavigationInset)
+    : 0;
+  const footerBottom = Platform.OS === 'android'
+    ? androidBottomInset > 0
+      ? androidBottomInset + 6
+      : 4
+    : Math.max(Math.min(insets.bottom, 6), 4);
   const deviceTopInset = Math.max(insets.top, androidStatusBarHeight);
   const headerTopPadding = Platform.OS === 'android' ? Math.max(deviceTopInset + 10, 38) : 8;
   const messageTopPadding = Platform.OS === 'android' ? Math.max(deviceTopInset + 6, 34) : 0;
