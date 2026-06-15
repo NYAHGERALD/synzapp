@@ -1913,7 +1913,17 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   }
 
   function handleCloseChatNotificationSettings() {
+    const chat = selectedChatRef.current;
+
     setIsChatNotificationSettingsOpen(false);
+
+    if (chat && chat.chatType !== 'GROUP') {
+      setTimeout(() => {
+        if (selectedChatRef.current?.contactId === chat.contactId) {
+          setIsContactInfoModalOpen(true);
+        }
+      }, Platform.OS === 'ios' ? 260 : 120);
+    }
   }
 
   function handleOpenChatNotificationSettings() {
@@ -1924,8 +1934,14 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     }
 
     setError(null);
-    setIsChatNotificationSettingsOpen(true);
+    setIsContactInfoModalOpen(false);
     void loadChatNotificationSettings(chat, true);
+
+    setTimeout(() => {
+      if (selectedChatRef.current?.contactId === chat.contactId) {
+        setIsChatNotificationSettingsOpen(true);
+      }
+    }, Platform.OS === 'ios' ? 320 : 140);
   }
 
   async function loadChatNotificationSettings(chat: ChatItem, showError = true) {
