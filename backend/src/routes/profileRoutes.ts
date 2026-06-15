@@ -466,6 +466,69 @@ profileRouter.post('/chat/groups/:groupId/members', verifyAppCheck, async (req, 
   }
 });
 
+profileRouter.get('/chat/groups/:groupId/notification-settings', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    const groupId = Array.isArray(req.params.groupId)
+      ? req.params.groupId[0] || ''
+      : req.params.groupId || '';
+
+    await getGroupChatContact(decodedToken, groupId);
+    const settings = await getChatNotificationSettings(activeDevice.tenantId, decodedToken.uid, groupId);
+
+    res.json({ settings });
+  } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.put('/chat/groups/:groupId/notification-settings', verifyAppCheck, async (req, res, next) => {
+  const groupId = Array.isArray(req.params.groupId)
+    ? req.params.groupId[0] || ''
+    : req.params.groupId || '';
+
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    const body = chatNotificationSettingsBodySchema.parse(req.body);
+
+    await getGroupChatContact(decodedToken, groupId);
+    const settings = await updateChatNotificationSettings(
+      activeDevice.tenantId,
+      decodedToken.uid,
+      groupId,
+      body
+    );
+
+    await writeAuditEvent({
+      action: 'GROUP_CHAT_NOTIFICATION_SETTINGS_UPDATED',
+      metadata: {
+        alertTone: settings.alertTone,
+        groupId,
+        muteMode: settings.muteMode,
+        mutedUntil: settings.mutedUntil
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: activeDevice.tenantId,
+      uid: decodedToken.uid
+    });
+
+    res.json({ settings });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'GROUP_CHAT_NOTIFICATION_SETTINGS_UPDATED',
+      metadata: { groupId },
+      reason: error instanceof Error ? error.message : 'Group notification settings update failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
 profileRouter.get('/chat/groups/:groupId/members/:memberUid/photo', verifyAppCheck, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');

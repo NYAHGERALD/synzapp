@@ -308,12 +308,16 @@ export async function createGroupChat(input: {
 }
 
 export async function getChatNotificationSettings(input: {
+  chatType?: 'DIRECT' | 'GROUP';
   contactId: string;
   idToken: string;
 }): Promise<ChatNotificationSettings> {
   const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
+  const path = input.chatType === 'GROUP'
+    ? `/api/profile/chat/groups/${encodeURIComponent(input.contactId)}/notification-settings`
+    : `/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/notification-settings`;
   const response = await fetch(
-    `${getSynzappApiBaseUrl()}/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/notification-settings`,
+    `${getSynzappApiBaseUrl()}${path}`,
     {
       headers: {
         Accept: 'application/json',
@@ -335,13 +339,17 @@ export async function getChatNotificationSettings(input: {
 
 export async function updateChatNotificationSettings(input: {
   alertTone: ChatNotificationAlertTone;
+  chatType?: 'DIRECT' | 'GROUP';
   contactId: string;
   idToken: string;
   muteMode: ChatNotificationMuteMode;
 }): Promise<ChatNotificationSettings> {
   const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
+  const path = input.chatType === 'GROUP'
+    ? `/api/profile/chat/groups/${encodeURIComponent(input.contactId)}/notification-settings`
+    : `/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/notification-settings`;
   const response = await fetch(
-    `${getSynzappApiBaseUrl()}/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/notification-settings`,
+    `${getSynzappApiBaseUrl()}${path}`,
     {
       body: JSON.stringify({
         alertTone: input.alertTone,

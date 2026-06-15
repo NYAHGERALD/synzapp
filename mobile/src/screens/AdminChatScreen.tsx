@@ -382,6 +382,8 @@ interface InviteDraft {
 
 type EmployeeAction = EmployeeLifecycleAction | 'ASSIGN_DEPT_ADMIN' | 'REMOVE_DEPT_ADMIN' | 'CHANGE_ROLE';
 
+type MessageListModalMode = 'search' | 'starred';
+
 interface EmployeeActionOption {
   action: EmployeeAction;
   confirmButton: string;
@@ -510,10 +512,14 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [isGroupPermissionsModalOpen, setIsGroupPermissionsModalOpen] = useState(false);
   const [isGroupCallOptionsOpen, setIsGroupCallOptionsOpen] = useState(false);
   const [isGroupCallPeopleModalOpen, setIsGroupCallPeopleModalOpen] = useState(false);
+  const [isGroupAddMembersModalOpen, setIsGroupAddMembersModalOpen] = useState(false);
+  const [isGroupMembersModalOpen, setIsGroupMembersModalOpen] = useState(false);
   const [isGroupInfoModalOpen, setIsGroupInfoModalOpen] = useState(false);
   const [isGroupSwitcherModalOpen, setIsGroupSwitcherModalOpen] = useState(false);
   const [groupCallMode, setGroupCallMode] = useState<GroupCallMode>('select');
   const [groupCallPeopleSearch, setGroupCallPeopleSearch] = useState('');
+  const [groupAddMembersSearch, setGroupAddMembersSearch] = useState('');
+  const [groupMembersSearch, setGroupMembersSearch] = useState('');
   const [chatTranscriptLanguageSearch, setChatTranscriptLanguageSearch] = useState('');
   const [addToGroupSearch, setAddToGroupSearch] = useState('');
   const [newGroupNameDraft, setNewGroupNameDraft] = useState('');
@@ -521,6 +527,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [newGroupPermissionMode, setNewGroupPermissionMode] = useState<'ADMINS' | 'ALL_MEMBERS'>('ALL_MEMBERS');
   const [newGroupFlowOrigin, setNewGroupFlowOrigin] = useState<NewGroupFlowOrigin>('newChat');
   const [selectedGroupCallMemberIds, setSelectedGroupCallMemberIds] = useState<Record<string, boolean>>({});
+  const [selectedGroupAddMemberIds, setSelectedGroupAddMemberIds] = useState<Record<string, boolean>>({});
   const [selectedNewGroupMemberIds, setSelectedNewGroupMemberIds] = useState<Record<string, boolean>>({});
   const [selectedAddToGroupIds, setSelectedAddToGroupIds] = useState<Record<string, boolean>>({});
   const [messageDraft, setMessageDraft] = useState('');
@@ -538,6 +545,8 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [forwardRecipientIds, setForwardRecipientIds] = useState<Record<string, boolean>>({});
   const [isForwardRecipientModalOpen, setIsForwardRecipientModalOpen] = useState(false);
   const [isForwardingMessages, setIsForwardingMessages] = useState(false);
+  const [messageListModalMode, setMessageListModalMode] = useState<MessageListModalMode | null>(null);
+  const [messageListSearch, setMessageListSearch] = useState('');
   const [nativeOptionPicker, setNativeOptionPicker] = useState<NativeOptionPickerState | null>(null);
   const [messageReactions, setMessageReactions] = useState<ChatMessageReactionMap>({});
   const [chatNotificationSettingsByContactId, setChatNotificationSettingsByContactId] = useState<Record<string, ChatNotificationSettings>>({});
@@ -555,6 +564,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [isLoadingDirectContactDetails, setIsLoadingDirectContactDetails] = useState(false);
   const [isLoadingAddToGroups, setIsLoadingAddToGroups] = useState(false);
   const [isSavingAddToGroups, setIsSavingAddToGroups] = useState(false);
+  const [isSavingGroupAddMembers, setIsSavingGroupAddMembers] = useState(false);
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [isLoadingBatchContacts, setIsLoadingBatchContacts] = useState(false);
   const [isPickingInviteContact, setIsPickingInviteContact] = useState(false);
@@ -662,10 +672,17 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const activeGroupMemberContacts = selectedChat?.chatType === 'GROUP'
     ? mapGroupMembersToSelectableContacts(selectedChat.members || [], directChatContacts, currentUid)
     : [];
+  const activeGroupAddableContacts = selectedChat?.chatType === 'GROUP'
+    ? getAddableContactsForGroup(selectedChat, directChatContacts, currentUid)
+    : [];
+  const selectedGroupAddMembers = activeGroupAddableContacts.filter((contact) => selectedGroupAddMemberIds[contact.contactId]);
   const activeGroupOnlineCount = selectedChat?.chatType === 'GROUP'
     ? getOnlineGroupMemberCount(selectedChat, directChatContacts, currentUid)
     : 0;
-  const activeDirectChatNotificationSettings = selectedChat && selectedChat.chatType !== 'GROUP'
+  const activeGroupStarredMessageCount = selectedChat?.chatType === 'GROUP'
+    ? messages.filter((message) => Boolean(starredMessageIds[message.messageId])).length
+    : 0;
+  const activeChatNotificationSettings = selectedChat
     ? chatNotificationSettingsByContactId[selectedChat.contactId] || null
     : null;
   const activeDirectChatTranscriptLanguage = selectedChat && selectedChat.chatType !== 'GROUP'
@@ -679,6 +696,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     : [];
   const selectedAddToGroupCount = Object.values(selectedAddToGroupIds).filter(Boolean).length;
   const selectedGroupCallMemberCount = Object.values(selectedGroupCallMemberIds).filter(Boolean).length;
+  const selectedGroupAddMemberCount = Object.values(selectedGroupAddMemberIds).filter(Boolean).length;
   const companyDisplayName = userProfile?.companyName || companyProfile?.companyName || 'Synzapp';
 
   useEffect(() => {
@@ -1946,6 +1964,8 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     }
 
     setIsGroupCallPeopleModalOpen(false);
+    setIsGroupAddMembersModalOpen(false);
+    setIsGroupMembersModalOpen(false);
     setIsGroupCallOptionsOpen(true);
   }
 
@@ -1958,6 +1978,8 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
     setIsGroupCallOptionsOpen(false);
     setIsGroupCallPeopleModalOpen(false);
+    setIsGroupAddMembersModalOpen(false);
+    setIsGroupMembersModalOpen(false);
     setIsGroupSwitcherModalOpen(false);
     setIsContactInfoModalOpen(false);
     setIsChatNotificationSettingsOpen(false);
@@ -1980,6 +2002,8 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
     setIsGroupCallOptionsOpen(false);
     setIsGroupCallPeopleModalOpen(false);
+    setIsGroupAddMembersModalOpen(false);
+    setIsGroupMembersModalOpen(false);
     setIsGroupSwitcherModalOpen(false);
     setIsGroupInfoModalOpen(false);
     setIsChatNotificationSettingsOpen(false);
@@ -2032,10 +2056,14 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
     setIsChatNotificationSettingsOpen(false);
 
-    if (chat && chat.chatType !== 'GROUP') {
+    if (chat) {
       setTimeout(() => {
         if (selectedChatRef.current?.contactId === chat.contactId) {
-          setIsContactInfoModalOpen(true);
+          if (chat.chatType === 'GROUP') {
+            setIsGroupInfoModalOpen(true);
+          } else {
+            setIsContactInfoModalOpen(true);
+          }
         }
       }, Platform.OS === 'ios' ? 260 : 120);
     }
@@ -2044,12 +2072,13 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   function handleOpenChatNotificationSettings() {
     const chat = selectedChatRef.current;
 
-    if (!chat || chat.chatType === 'GROUP') {
+    if (!chat) {
       return;
     }
 
     setError(null);
     setIsContactInfoModalOpen(false);
+    setIsGroupInfoModalOpen(false);
     void loadChatNotificationSettings(chat, true);
 
     setTimeout(() => {
@@ -2060,15 +2089,12 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   }
 
   async function loadChatNotificationSettings(chat: ChatItem, showError = true) {
-    if (chat.chatType === 'GROUP') {
-      return;
-    }
-
     setIsLoadingChatNotificationSettings(true);
 
     try {
       const idToken = await getIdToken();
       const settings = await getChatNotificationSettings({
+        chatType: chat.chatType,
         contactId: chat.contactId,
         idToken
       });
@@ -2089,7 +2115,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   async function handleSelectChatNotificationMuteMode() {
     const chat = selectedChatRef.current;
 
-    if (!chat || chat.chatType === 'GROUP' || isSavingChatNotificationSettings) {
+    if (!chat || isSavingChatNotificationSettings) {
       return;
     }
 
@@ -2111,7 +2137,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   async function handleSelectChatNotificationAlertTone() {
     const chat = selectedChatRef.current;
 
-    if (!chat || chat.chatType === 'GROUP' || isSavingChatNotificationSettings) {
+    if (!chat || isSavingChatNotificationSettings) {
       return;
     }
 
@@ -2153,6 +2179,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       const idToken = await getIdToken();
       const settings = await updateChatNotificationSettings({
         alertTone: optimisticSettings.alertTone,
+        chatType: chat.chatType,
         contactId: chat.contactId,
         idToken,
         muteMode: optimisticSettings.muteMode
@@ -2474,6 +2501,8 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsGroupInfoModalOpen(false);
     setIsGroupCallOptionsOpen(false);
     setIsGroupCallPeopleModalOpen(false);
+    setIsGroupAddMembersModalOpen(false);
+    setIsGroupMembersModalOpen(false);
     setIsGroupSwitcherModalOpen(true);
     void loadGroupSettings(false);
   }
@@ -2508,6 +2537,8 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setGroupCallPeopleSearch('');
     setSelectedGroupCallMemberIds({});
     setIsGroupCallOptionsOpen(false);
+    setIsGroupAddMembersModalOpen(false);
+    setIsGroupMembersModalOpen(false);
     setIsGroupCallPeopleModalOpen(true);
   }
 
@@ -2515,6 +2546,196 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsGroupCallPeopleModalOpen(false);
     setGroupCallPeopleSearch('');
     setSelectedGroupCallMemberIds({});
+  }
+
+  function handleOpenGroupAddMembersModal() {
+    const chat = selectedChatRef.current;
+
+    if (chat?.chatType !== 'GROUP') {
+      return;
+    }
+
+    setError(null);
+    setIsGroupInfoModalOpen(false);
+    setIsGroupCallOptionsOpen(false);
+    setIsGroupCallPeopleModalOpen(false);
+    setIsGroupMembersModalOpen(false);
+    setGroupAddMembersSearch('');
+    setSelectedGroupAddMemberIds({});
+
+    setTimeout(() => {
+      if (selectedChatRef.current?.contactId === chat.contactId) {
+        setIsGroupAddMembersModalOpen(true);
+      }
+    }, Platform.OS === 'ios' ? 320 : 140);
+  }
+
+  function handleCloseGroupAddMembersModal() {
+    const chat = selectedChatRef.current;
+
+    setIsGroupAddMembersModalOpen(false);
+    setGroupAddMembersSearch('');
+    setSelectedGroupAddMemberIds({});
+
+    if (chat?.chatType === 'GROUP') {
+      setTimeout(() => {
+        if (selectedChatRef.current?.contactId === chat.contactId) {
+          setIsGroupInfoModalOpen(true);
+        }
+      }, Platform.OS === 'ios' ? 260 : 120);
+    }
+  }
+
+  function handleOpenGroupMembersModal() {
+    const chat = selectedChatRef.current;
+
+    if (chat?.chatType !== 'GROUP') {
+      return;
+    }
+
+    setGroupMembersSearch('');
+    setIsGroupInfoModalOpen(false);
+    setIsGroupAddMembersModalOpen(false);
+    setIsGroupCallOptionsOpen(false);
+    setIsGroupCallPeopleModalOpen(false);
+
+    setTimeout(() => {
+      if (selectedChatRef.current?.contactId === chat.contactId) {
+        setIsGroupMembersModalOpen(true);
+      }
+    }, Platform.OS === 'ios' ? 320 : 140);
+  }
+
+  function handleCloseGroupMembersModal() {
+    const chat = selectedChatRef.current;
+
+    setIsGroupMembersModalOpen(false);
+    setGroupMembersSearch('');
+
+    if (chat?.chatType === 'GROUP') {
+      setTimeout(() => {
+        if (selectedChatRef.current?.contactId === chat.contactId) {
+          setIsGroupInfoModalOpen(true);
+        }
+      }, Platform.OS === 'ios' ? 260 : 120);
+    }
+  }
+
+  function handleToggleGroupAddMember(contactId: string) {
+    setSelectedGroupAddMemberIds((currentIds) => {
+      const nextIds = { ...currentIds };
+
+      if (nextIds[contactId]) {
+        delete nextIds[contactId];
+      } else {
+        nextIds[contactId] = true;
+      }
+
+      return nextIds;
+    });
+  }
+
+  function handleRemoveGroupAddMember(contactId: string) {
+    setSelectedGroupAddMemberIds((currentIds) => omitRecordKey(currentIds, contactId));
+  }
+
+  async function handleConfirmGroupAddMembers() {
+    const chat = selectedChatRef.current;
+
+    if (!chat || chat.chatType !== 'GROUP' || !selectedGroupAddMembers.length || isSavingGroupAddMembers) {
+      return;
+    }
+
+    const unavailableMember = selectedGroupAddMembers.find((member) => !member.hasActiveDevice);
+
+    if (unavailableMember) {
+      Alert.alert(
+        'Secure device needed',
+        getRecipientDeviceNotReadyMessage(unavailableMember.displayName)
+      );
+      return;
+    }
+
+    setIsSavingGroupAddMembers(true);
+    setError(null);
+
+    try {
+      const idToken = await getIdToken();
+
+      await Promise.all(selectedGroupAddMembers.map((member) =>
+        addContactToGroupChat({
+          contactId: member.contactId,
+          groupId: chat.contactId,
+          idToken
+        })
+      ));
+
+      const refreshedContacts = await loadChatContacts(false);
+      await loadGroupSettings(false);
+
+      const refreshedGroup = refreshedContacts.find((contact) =>
+        contact.chatType === 'GROUP' &&
+        contact.contactId === chat.contactId
+      );
+
+      if (refreshedGroup) {
+        const refreshedChat = mapChatContactToChatItem(refreshedGroup);
+
+        selectedChatRef.current = refreshedChat;
+        setSelectedChat(refreshedChat);
+      }
+
+      setSelectedGroupAddMemberIds({});
+      setIsGroupAddMembersModalOpen(false);
+
+      setTimeout(() => {
+        if (selectedChatRef.current?.contactId === chat.contactId) {
+          setIsGroupInfoModalOpen(true);
+        }
+      }, Platform.OS === 'ios' ? 260 : 120);
+
+      Alert.alert(
+        'Members added',
+        `${selectedGroupAddMembers.length === 1 ? selectedGroupAddMembers[0].displayName : `${selectedGroupAddMembers.length} members`} added to ${chat.title}.`
+      );
+    } catch (nextError) {
+      setError(getErrorMessage(nextError, 'Unable to add members to this group.'));
+    } finally {
+      setIsSavingGroupAddMembers(false);
+    }
+  }
+
+  function handleOpenGroupMessageList(mode: MessageListModalMode) {
+    const chat = selectedChatRef.current;
+
+    if (chat?.chatType !== 'GROUP') {
+      return;
+    }
+
+    setMessageListModalMode(null);
+    setMessageListSearch('');
+    setIsGroupInfoModalOpen(false);
+
+    setTimeout(() => {
+      if (selectedChatRef.current?.contactId === chat.contactId) {
+        setMessageListModalMode(mode);
+      }
+    }, Platform.OS === 'ios' ? 320 : 140);
+  }
+
+  function handleCloseGroupMessageList() {
+    const chat = selectedChatRef.current;
+
+    setMessageListModalMode(null);
+    setMessageListSearch('');
+
+    if (chat?.chatType === 'GROUP') {
+      setTimeout(() => {
+        if (selectedChatRef.current?.contactId === chat.contactId) {
+          setIsGroupInfoModalOpen(true);
+        }
+      }, Platform.OS === 'ios' ? 260 : 120);
+    }
   }
 
   function handleGroupInfoUnavailableAction(title: string) {
@@ -4182,11 +4403,18 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsAddToGroupModalOpen(false);
     setIsGroupCallOptionsOpen(false);
     setIsGroupCallPeopleModalOpen(false);
+    setIsGroupAddMembersModalOpen(false);
+    setIsGroupMembersModalOpen(false);
     setIsGroupInfoModalOpen(false);
     setIsGroupSwitcherModalOpen(false);
     setGroupCallPeopleSearch('');
+    setGroupAddMembersSearch('');
+    setGroupMembersSearch('');
     setAddToGroupSearch('');
+    setMessageListSearch('');
+    setMessageListModalMode(null);
     setSelectedGroupCallMemberIds({});
+    setSelectedGroupAddMemberIds({});
     setSelectedAddToGroupIds({});
     setMessageDraft('');
     setReplyTarget(null);
@@ -4214,11 +4442,18 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsAddToGroupModalOpen(false);
     setIsGroupCallOptionsOpen(false);
     setIsGroupCallPeopleModalOpen(false);
+    setIsGroupAddMembersModalOpen(false);
+    setIsGroupMembersModalOpen(false);
     setIsGroupInfoModalOpen(false);
     setIsGroupSwitcherModalOpen(false);
     setGroupCallPeopleSearch('');
+    setGroupAddMembersSearch('');
+    setGroupMembersSearch('');
     setAddToGroupSearch('');
+    setMessageListSearch('');
+    setMessageListModalMode(null);
     setSelectedGroupCallMemberIds({});
+    setSelectedGroupAddMemberIds({});
     setSelectedAddToGroupIds({});
     setMessageDraft('');
     setReplyTarget(null);
@@ -5970,12 +6205,30 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         selectedMemberIds={selectedGroupCallMemberIds}
       />
 
+      <GroupAddMembersModal
+        contacts={activeGroupAddableContacts}
+        isOpen={isGroupAddMembersModalOpen}
+        isSaving={isSavingGroupAddMembers}
+        onCancel={handleCloseGroupAddMembersModal}
+        onConfirm={() => {
+          void handleConfirmGroupAddMembers();
+        }}
+        onRemoveMember={handleRemoveGroupAddMember}
+        onSearchChange={setGroupAddMembersSearch}
+        onToggleMember={handleToggleGroupAddMember}
+        profilePhotoHeaders={profilePhotoHeaders}
+        search={groupAddMembersSearch}
+        selectedCount={selectedGroupAddMemberCount}
+        selectedMemberIds={selectedGroupAddMemberIds}
+        selectedMembers={selectedGroupAddMembers}
+      />
+
       <ContactInfoModal
         chat={selectedChat}
         commonGroups={getCommonGroupContactsForDirectChat(selectedChat, groupChatContacts)}
         contactDetails={activeDirectContactDetails}
         isOpen={isContactInfoModalOpen}
-        notificationSettings={activeDirectChatNotificationSettings}
+        notificationSettings={activeChatNotificationSettings}
         transcriptLanguage={activeDirectChatTranscriptLanguage}
         onAddToGroup={handleOpenAddToGroupModal}
         onClose={handleCloseContactInfo}
@@ -5990,7 +6243,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         profilePhotoHeaders={profilePhotoHeaders}
       />
 
-      <DirectChatNotificationSettingsModal
+      <ChatNotificationSettingsModal
         chat={selectedChat}
         isLoading={isLoadingChatNotificationSettings}
         isOpen={isChatNotificationSettingsOpen}
@@ -6002,7 +6255,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         onSelectMuteMode={() => {
           void handleSelectChatNotificationMuteMode();
         }}
-        settings={activeDirectChatNotificationSettings}
+        settings={activeChatNotificationSettings}
       />
 
       <DirectChatTranscriptLanguageModal
@@ -6055,18 +6308,44 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         directContacts={directChatContacts}
         groupCount={groups.length}
         isOpen={isGroupInfoModalOpen}
+        notificationSettings={activeChatNotificationSettings}
         onClose={handleCloseGroupInfo}
         onExitGroup={() => handleGroupInfoUnavailableAction('Exit group')}
-        onOpenEdit={() => handleGroupInfoUnavailableAction('Edit group')}
-        onOpenAddMembers={() => handleGroupInfoUnavailableAction('Add members')}
+        onOpenAddMembers={handleOpenGroupAddMembersModal}
         onOpenGroupSwitcher={handleOpenGroupSwitcher}
-        onOpenNotifications={() => handleGroupInfoUnavailableAction('Notifications')}
-        onOpenSearch={() => handleGroupInfoUnavailableAction('Search')}
-        onOpenStarred={() => handleGroupInfoUnavailableAction('Starred messages')}
+        onOpenMembers={handleOpenGroupMembersModal}
+        onOpenNotifications={handleOpenChatNotificationSettings}
+        onOpenSearchMessages={() => handleOpenGroupMessageList('search')}
+        onOpenStarred={() => handleOpenGroupMessageList('starred')}
         onStartVideoCall={() => handleOpenGroupCallPeopleModal('video')}
         onStartVoiceCall={() => handleOpenGroupCallPeopleModal('voice')}
         onlineCount={activeGroupOnlineCount}
         profilePhotoHeaders={profilePhotoHeaders}
+        starredCount={activeGroupStarredMessageCount}
+      />
+
+      <MessageListModal
+        chat={selectedChat}
+        currentUid={currentUid}
+        isOpen={Boolean(messageListModalMode)}
+        messages={messages}
+        mode={messageListModalMode || 'search'}
+        onChangeSearch={setMessageListSearch}
+        onClose={handleCloseGroupMessageList}
+        search={messageListSearch}
+        starredMessageIds={starredMessageIds}
+      />
+
+      <GroupMembersModal
+        chat={selectedChat}
+        currentUid={currentUid}
+        directContacts={directChatContacts}
+        isOpen={isGroupMembersModalOpen}
+        onAddMembers={handleOpenGroupAddMembersModal}
+        onChangeSearch={setGroupMembersSearch}
+        onClose={handleCloseGroupMembersModal}
+        profilePhotoHeaders={profilePhotoHeaders}
+        search={groupMembersSearch}
       />
 
       <GroupSwitcherModal
@@ -9844,6 +10123,150 @@ function AddMembersModal({
   );
 }
 
+function GroupAddMembersModal({
+  contacts,
+  isOpen,
+  isSaving,
+  onCancel,
+  onConfirm,
+  onRemoveMember,
+  onSearchChange,
+  onToggleMember,
+  profilePhotoHeaders,
+  search,
+  selectedCount,
+  selectedMemberIds,
+  selectedMembers
+}: {
+  contacts: ChatContact[];
+  isOpen: boolean;
+  isSaving: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+  onRemoveMember: (contactId: string) => void;
+  onSearchChange: (value: string) => void;
+  onToggleMember: (contactId: string) => void;
+  profilePhotoHeaders?: Record<string, string>;
+  search: string;
+  selectedCount: number;
+  selectedMemberIds: Record<string, boolean>;
+  selectedMembers: ChatContact[];
+}) {
+  const filteredContacts = filterChatContacts(contacts, search);
+  const insets = useSafeAreaInsets();
+  const modalTopPadding = getFullScreenModalTopPadding(insets.top);
+  const canAdd = selectedCount > 0 && !isSaving;
+
+  return (
+    <Modal
+      allowSwipeDismissal={Platform.OS === 'ios'}
+      animationType="slide"
+      onRequestClose={onCancel}
+      presentationStyle={getNativeFullHeightModalPresentationStyle()}
+      transparent={false}
+      visible={isOpen}
+    >
+      <View style={[styles.newChatModalScreen, { paddingTop: modalTopPadding }]}>
+        <View style={styles.newChatHeader}>
+          <Pressable
+            accessibilityLabel="Close add members"
+            accessibilityRole="button"
+            disabled={isSaving}
+            onPress={onCancel}
+            style={({ pressed }) => [styles.newChatHeaderIconButton, pressed && !isSaving && styles.pressed]}
+          >
+            <Feather color={colors.ink} name="x" size={24} />
+          </Pressable>
+          <View style={styles.newChatCenteredTitleWrap}>
+            <Text style={styles.newChatHeaderTitle}>Add members</Text>
+            {selectedCount > 0 ? (
+              <Text style={styles.newChatHeaderSubtitle}>{selectedCount} selected</Text>
+            ) : null}
+          </View>
+          <Pressable
+            accessibilityLabel="Add selected members"
+            accessibilityRole="button"
+            disabled={!canAdd}
+            onPress={onConfirm}
+            style={({ pressed }) => [
+              styles.newChatNextButton,
+              pressed && canAdd && styles.pressed,
+              !canAdd && styles.disabled
+            ]}
+          >
+            {isSaving ? (
+              <ActivityIndicator color="#FFFFFF" size="small" />
+            ) : (
+              <Text style={styles.newChatNextText}>Add</Text>
+            )}
+          </Pressable>
+        </View>
+
+        <ChatSearchBar
+          onChangeText={onSearchChange}
+          placeholder="Search name or number"
+          value={search}
+        />
+
+        {selectedMembers.length ? (
+          <View style={styles.addMembersSelectedPanel}>
+            <ScrollView
+              contentContainerStyle={styles.addMembersSelectedContent}
+              horizontal
+              keyboardShouldPersistTaps="handled"
+              showsHorizontalScrollIndicator={false}
+            >
+              {selectedMembers.map((member) => (
+                <View key={member.contactId} style={styles.addMembersSelectedChip}>
+                  <View style={styles.groupMemberAvatarWrap}>
+                    <ProfileAvatar
+                      headers={profilePhotoHeaders}
+                      name={member.displayName}
+                      size={48}
+                      uri={member.profilePhotoUrl}
+                    />
+                    <Pressable
+                      accessibilityLabel={`Remove ${member.displayName}`}
+                      accessibilityRole="button"
+                      disabled={isSaving}
+                      onPress={() => onRemoveMember(member.contactId)}
+                      style={({ pressed }) => [styles.groupMemberRemoveButton, pressed && !isSaving && styles.pressed]}
+                    >
+                      <Feather color="#FFFFFF" name="x" size={13} />
+                    </Pressable>
+                  </View>
+                  <Text numberOfLines={2} style={styles.addMembersSelectedName}>{member.displayName}</Text>
+                </View>
+              ))}
+            </ScrollView>
+          </View>
+        ) : null}
+
+        <ScrollView
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+          style={styles.newChatContactList}
+        >
+          <Text style={styles.addMembersSectionTitle}>Available members</Text>
+          {filteredContacts.map((contact) => (
+            <ChatMemberSelectRow
+              contact={contact}
+              isSelected={Boolean(selectedMemberIds[contact.contactId])}
+              key={contact.contactId}
+              onToggle={() => onToggleMember(contact.contactId)}
+              profilePhotoHeaders={profilePhotoHeaders}
+            />
+          ))}
+
+          {!filteredContacts.length ? (
+            <Text style={styles.batchEmpty}>{search.trim() ? 'No members found' : 'Everyone available is already in this group.'}</Text>
+          ) : null}
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+}
+
 function GroupDetailsModal({
   groupName,
   groupPhotoUri,
@@ -10349,7 +10772,7 @@ function AddToGroupRow({
   );
 }
 
-function DirectChatNotificationSettingsModal({
+function ChatNotificationSettingsModal({
   chat,
   isLoading,
   isOpen,
@@ -10371,7 +10794,7 @@ function DirectChatNotificationSettingsModal({
   const insets = useSafeAreaInsets();
   const modalTopPadding = getFullScreenModalTopPadding(insets.top);
 
-  if (!chat || chat.chatType === 'GROUP') {
+  if (!chat) {
     return null;
   }
 
@@ -10389,7 +10812,7 @@ function DirectChatNotificationSettingsModal({
       <View style={[styles.notificationSettingsScreen, { paddingTop: modalTopPadding }]}>
         <View style={styles.notificationSettingsTopBar}>
           <Pressable
-            accessibilityLabel="Back to contact info"
+            accessibilityLabel={chat.chatType === 'GROUP' ? 'Back to group info' : 'Back to contact info'}
             accessibilityRole="button"
             onPress={onClose}
             style={({ pressed }) => [styles.groupInfoTopButton, pressed && styles.pressed]}
@@ -10992,18 +11415,20 @@ function GroupInfoModal({
   directContacts,
   groupCount,
   isOpen,
+  notificationSettings,
   onClose,
   onExitGroup,
   onOpenAddMembers,
-  onOpenEdit,
   onOpenGroupSwitcher,
+  onOpenMembers,
   onOpenNotifications,
-  onOpenSearch,
+  onOpenSearchMessages,
   onOpenStarred,
   onStartVideoCall,
   onStartVoiceCall,
   onlineCount,
-  profilePhotoHeaders
+  profilePhotoHeaders,
+  starredCount
 }: {
   chat: ChatItem | null;
   companyName: string;
@@ -11011,18 +11436,20 @@ function GroupInfoModal({
   directContacts: ChatContact[];
   groupCount: number;
   isOpen: boolean;
+  notificationSettings: ChatNotificationSettings | null;
   onClose: () => void;
   onExitGroup: () => void;
   onOpenAddMembers: () => void;
-  onOpenEdit: () => void;
   onOpenGroupSwitcher: () => void;
+  onOpenMembers: () => void;
   onOpenNotifications: () => void;
-  onOpenSearch: () => void;
+  onOpenSearchMessages: () => void;
   onOpenStarred: () => void;
   onStartVideoCall: () => void;
   onStartVoiceCall: () => void;
   onlineCount: number;
   profilePhotoHeaders?: Record<string, string>;
+  starredCount: number;
 }) {
   const insets = useSafeAreaInsets();
   const modalTopPadding = getFullScreenModalTopPadding(insets.top);
@@ -11039,7 +11466,6 @@ function GroupInfoModal({
   const memberCount = chat.memberCount ?? members.length;
   const memberCountLabel = formatGroupMemberCount(memberCount);
   const groupDescription = getGroupInfoDescription(chat);
-  const isEditableGroup = isUserCreatedGroupChat(chat);
 
   return (
     <Modal
@@ -11060,18 +11486,7 @@ function GroupInfoModal({
           >
             <Text style={styles.backButtonText}>‹</Text>
           </Pressable>
-          {isEditableGroup ? (
-            <Pressable
-              accessibilityLabel="Edit group"
-              accessibilityRole="button"
-              onPress={onOpenEdit}
-              style={({ pressed }) => [styles.groupInfoEditButton, pressed && styles.pressed]}
-            >
-              <Text style={styles.groupInfoEditText}>Edit</Text>
-            </Pressable>
-          ) : (
-            <View style={styles.groupInfoTopButton} />
-          )}
+          <View style={styles.groupInfoTopButtonSpacer} />
         </View>
 
         <ScrollView
@@ -11098,7 +11513,7 @@ function GroupInfoModal({
             <GroupInfoActionButton icon="phone" label="Audio" onPress={onStartVoiceCall} />
             <GroupInfoActionButton icon="video" label="Video" onPress={onStartVideoCall} />
             <GroupInfoActionButton icon="user-plus" label="Add" onPress={onOpenAddMembers} />
-            <GroupInfoActionButton icon="search" label="Search" onPress={onOpenSearch} />
+            <GroupInfoActionButton icon="search" label="Search" onPress={onOpenSearchMessages} />
           </View>
 
           <View style={styles.groupInfoSection}>
@@ -11115,13 +11530,13 @@ function GroupInfoModal({
               icon="star"
               label="Starred"
               onPress={onOpenStarred}
-              value="None"
+              value={formatStarredMessageCount(starredCount)}
             />
             <GroupInfoSettingRow
               icon="bell"
               label="Notifications"
               onPress={onOpenNotifications}
-              value="All"
+              value={getChatNotificationSummary(notificationSettings)}
             />
           </View>
 
@@ -11131,7 +11546,7 @@ function GroupInfoModal({
               <Pressable
                 accessibilityLabel="Search members"
                 accessibilityRole="button"
-                onPress={onOpenSearch}
+                onPress={onOpenMembers}
                 style={({ pressed }) => [styles.groupInfoMemberSearchButton, pressed && styles.pressed]}
               >
                 <Feather color={colors.ink} name="search" size={18} />
@@ -11158,7 +11573,7 @@ function GroupInfoModal({
               <GroupInfoSettingRow
                 icon="chevron-down"
                 label="See all"
-                onPress={onOpenSearch}
+                onPress={onOpenMembers}
               />
             ) : null}
           </View>
@@ -11269,6 +11684,218 @@ function GroupInfoMemberRow({
       ) : null}
       <Feather color="#A7B3C3" name="chevron-right" size={18} />
     </View>
+  );
+}
+
+function GroupMembersModal({
+  chat,
+  currentUid,
+  directContacts,
+  isOpen,
+  onAddMembers,
+  onChangeSearch,
+  onClose,
+  profilePhotoHeaders,
+  search
+}: {
+  chat: ChatItem | null;
+  currentUid: string;
+  directContacts: ChatContact[];
+  isOpen: boolean;
+  onAddMembers: () => void;
+  onChangeSearch: (value: string) => void;
+  onClose: () => void;
+  profilePhotoHeaders?: Record<string, string>;
+  search: string;
+}) {
+  const insets = useSafeAreaInsets();
+  const modalTopPadding = getFullScreenModalTopPadding(insets.top);
+  const directContactById = useMemo(() => new Map(
+    directContacts.map((contact) => [contact.contactId, contact])
+  ), [directContacts]);
+
+  if (!chat || chat.chatType !== 'GROUP') {
+    return null;
+  }
+
+  const members = chat.members || [];
+  const visibleMembers = filterGroupInfoMembers(members, directContactById, currentUid, search);
+  const memberCount = chat.memberCount ?? members.length;
+
+  return (
+    <Modal
+      allowSwipeDismissal={Platform.OS === 'ios'}
+      animationType="slide"
+      onRequestClose={onClose}
+      presentationStyle={getNativeFullHeightModalPresentationStyle()}
+      transparent={false}
+      visible={isOpen}
+    >
+      <View style={[styles.newChatModalScreen, { paddingTop: modalTopPadding }]}>
+        <View style={styles.newChatHeader}>
+          <Pressable
+            accessibilityLabel="Close members"
+            accessibilityRole="button"
+            onPress={onClose}
+            style={({ pressed }) => [styles.newChatHeaderIconButton, pressed && styles.pressed]}
+          >
+            <Feather color={colors.ink} name="x" size={24} />
+          </Pressable>
+          <View style={styles.newChatCenteredTitleWrap}>
+            <Text numberOfLines={1} style={styles.newChatHeaderTitle}>Members</Text>
+            <Text numberOfLines={1} style={styles.newChatHeaderSubtitle}>{formatGroupMemberCount(memberCount)}</Text>
+          </View>
+          <View style={styles.newChatHeaderSpacer} />
+        </View>
+
+        <ChatSearchBar
+          onChangeText={onChangeSearch}
+          placeholder="Search members"
+          value={search}
+        />
+
+        <ScrollView
+          keyboardDismissMode={getKeyboardDismissMode()}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+          style={styles.newChatContactList}
+        >
+          <View style={styles.groupInfoSection}>
+            <GroupInfoSettingRow
+              icon="plus"
+              label="Add members"
+              onPress={onAddMembers}
+            />
+
+            {visibleMembers.map((member) => (
+              <GroupInfoMemberRow
+                directContact={directContactById.get(member.uid)}
+                isCurrentUser={member.uid === currentUid}
+                key={member.uid || member.displayName}
+                member={member}
+                profilePhotoHeaders={profilePhotoHeaders}
+              />
+            ))}
+          </View>
+
+          {!visibleMembers.length ? (
+            <Text style={styles.batchEmpty}>{search.trim() ? 'No members found' : 'No members yet'}</Text>
+          ) : null}
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+}
+
+function MessageListModal({
+  chat,
+  currentUid,
+  isOpen,
+  messages,
+  mode,
+  onChangeSearch,
+  onClose,
+  search,
+  starredMessageIds
+}: {
+  chat: ChatItem | null;
+  currentUid: string;
+  isOpen: boolean;
+  messages: ChatMessage[];
+  mode: MessageListModalMode;
+  onChangeSearch: (value: string) => void;
+  onClose: () => void;
+  search: string;
+  starredMessageIds: Record<string, boolean>;
+}) {
+  const insets = useSafeAreaInsets();
+  const modalTopPadding = getFullScreenModalTopPadding(insets.top);
+  const senderNameByUid = useMemo(() => new Map(
+    (chat?.members || []).map((member) => [member.uid, member.displayName])
+  ), [chat?.members]);
+
+  if (!chat || chat.chatType !== 'GROUP') {
+    return null;
+  }
+
+  const visibleMessages = filterMessageListModalMessages(messages, mode, search, starredMessageIds);
+  const title = mode === 'starred' ? 'Starred messages' : 'Search messages';
+
+  return (
+    <Modal
+      allowSwipeDismissal={Platform.OS === 'ios'}
+      animationType="slide"
+      onRequestClose={onClose}
+      presentationStyle={getNativeFullHeightModalPresentationStyle()}
+      transparent={false}
+      visible={isOpen}
+    >
+      <View style={[styles.newChatModalScreen, { paddingTop: modalTopPadding }]}>
+        <View style={styles.newChatHeader}>
+          <Pressable
+            accessibilityLabel="Close messages"
+            accessibilityRole="button"
+            onPress={onClose}
+            style={({ pressed }) => [styles.newChatHeaderIconButton, pressed && styles.pressed]}
+          >
+            <Feather color={colors.ink} name="x" size={24} />
+          </Pressable>
+          <View style={styles.newChatCenteredTitleWrap}>
+            <Text numberOfLines={1} style={styles.newChatHeaderTitle}>{title}</Text>
+            <Text numberOfLines={1} style={styles.newChatHeaderSubtitle}>{chat.title}</Text>
+          </View>
+          <View style={styles.newChatHeaderSpacer} />
+        </View>
+
+        {mode === 'search' ? (
+          <ChatSearchBar
+            onChangeText={onChangeSearch}
+            placeholder="Search messages"
+            value={search}
+          />
+        ) : null}
+
+        <ScrollView
+          keyboardDismissMode={getKeyboardDismissMode()}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+          style={styles.newChatContactList}
+        >
+          {visibleMessages.map((message) => (
+            <View key={message.messageId} style={styles.messageListRow}>
+              <View style={styles.messageListIcon}>
+                <Feather
+                  color={message.senderUid === currentUid ? colors.primary : '#64748B'}
+                  name={mode === 'starred' ? 'star' : 'message-circle'}
+                  size={18}
+                />
+              </View>
+              <View style={styles.chatText}>
+                <View style={styles.messageListMetaRow}>
+                  <Text numberOfLines={1} style={styles.messageListSender}>
+                    {getGroupMessageSenderName(message, currentUid, senderNameByUid)}
+                  </Text>
+                  <Text numberOfLines={1} style={styles.messageListTime}>{formatMessageTime(message.sentAt)}</Text>
+                </View>
+                <Text numberOfLines={2} style={styles.messageListPreview}>
+                  {getMessageListPreview(message)}
+                </Text>
+              </View>
+            </View>
+          ))}
+
+          {!visibleMessages.length ? (
+            <Text style={styles.batchEmpty}>
+              {mode === 'starred'
+                ? 'No starred messages yet'
+                : search.trim()
+                  ? 'No messages found'
+                  : 'Type to search messages'}
+            </Text>
+          ) : null}
+        </ScrollView>
+      </View>
+    </Modal>
   );
 }
 
@@ -14381,10 +15008,6 @@ function mapChatContactToChatItem(contact: ChatContact): ChatItem {
   };
 }
 
-function isUserCreatedGroupChat(chat?: ChatItem | null): chat is ChatItem {
-  return Boolean(chat && chat.chatType === 'GROUP' && chat.isDepartmentDefault !== true);
-}
-
 function getCommonGroupContactsForDirectChat(
   chat: ChatItem | null,
   groupContacts: ChatContact[]
@@ -14396,6 +15019,44 @@ function getCommonGroupContactsForDirectChat(
   return groupContacts.filter((groupContact) =>
     (groupContact.members || []).some((member) => member.uid === chat.contactId)
   );
+}
+
+function getAddableContactsForGroup(
+  chat: ChatItem,
+  directContacts: ChatContact[],
+  currentUid: string
+): ChatContact[] {
+  const existingMemberIds = new Set((chat.members || [])
+    .map((member) => member.uid)
+    .filter(Boolean));
+
+  existingMemberIds.add(currentUid);
+
+  return directContacts.filter((contact) => !existingMemberIds.has(contact.contactId));
+}
+
+function filterGroupInfoMembers(
+  members: ChatGroupMember[],
+  directContactById: Map<string, ChatContact>,
+  currentUid: string,
+  search: string
+): ChatGroupMember[] {
+  const query = normalizeSearchQuery(search);
+
+  if (!query) {
+    return members;
+  }
+
+  return members.filter((member) => {
+    const directContact = directContactById.get(member.uid);
+    const displayName = member.uid === currentUid ? 'You' : member.displayName;
+
+    return normalizeSearchQuery([
+      displayName,
+      member.roleName,
+      directContact?.phoneMasked || ''
+    ].join(' ')).includes(query);
+  });
 }
 
 function mapGroupMembersToSelectableContacts(
@@ -14458,6 +15119,14 @@ function formatGroupMemberCount(memberCount: number): string {
   const safeMemberCount = Math.max(Math.round(memberCount || 0), 0);
 
   return safeMemberCount === 1 ? '1 member' : `${safeMemberCount} members`;
+}
+
+function formatStarredMessageCount(starredCount: number): string {
+  const safeStarredCount = Math.max(Math.round(starredCount || 0), 0);
+
+  return safeStarredCount === 0
+    ? 'None'
+    : `${safeStarredCount} ${safeStarredCount === 1 ? 'message' : 'messages'}`;
 }
 
 function formatCommonGroupCount(groupCount: number): string {
@@ -14683,6 +15352,64 @@ function filterAddableChatGroups(groups: AddableChatGroup[], search: string): Ad
   return groups.filter((group) =>
     normalizeSearchQuery(`${group.name} ${group.departmentName || ''} ${group.description || ''}`).includes(query)
   );
+}
+
+function filterMessageListModalMessages(
+  messages: ChatMessage[],
+  mode: MessageListModalMode,
+  search: string,
+  starredMessageIds: Record<string, boolean>
+): ChatMessage[] {
+  const baseMessages = mode === 'starred'
+    ? messages.filter((message) => Boolean(starredMessageIds[message.messageId]))
+    : messages;
+  const query = normalizeSearchQuery(search);
+
+  if (mode === 'starred' || !query) {
+    return [...baseMessages].reverse();
+  }
+
+  return baseMessages
+    .filter((message) => normalizeSearchQuery(getMessageListPreview(message)).includes(query))
+    .reverse();
+}
+
+function getMessageListPreview(message: ChatMessage): string {
+  if (message.text?.trim()) {
+    return message.text.trim();
+  }
+
+  const firstMedia = message.mediaItems?.[0] || message.media || message.image || null;
+
+  if (firstMedia) {
+    if (firstMedia.kind === 'image') {
+      return 'Photo';
+    }
+
+    if (firstMedia.kind === 'video') {
+      return 'Video';
+    }
+
+    if (firstMedia.kind === 'audio') {
+      return 'Voice message';
+    }
+
+    return firstMedia.fileName || 'File';
+  }
+
+  return 'Message';
+}
+
+function getGroupMessageSenderName(
+  message: ChatMessage,
+  currentUid: string,
+  senderNameByUid: Map<string, string>
+): string {
+  if (message.senderUid === currentUid) {
+    return 'You';
+  }
+
+  return senderNameByUid.get(message.senderUid) || 'Member';
 }
 
 function normalizeSearchQuery(value: string): string {
@@ -18373,6 +19100,51 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '400',
     lineHeight: 17
+  },
+  messageListRow: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderBottomColor: '#E5E7EB',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 11,
+    minHeight: 64,
+    paddingHorizontal: 12,
+    paddingVertical: 9
+  },
+  messageListIcon: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderRadius: 20,
+    height: 40,
+    justifyContent: 'center',
+    width: 40
+  },
+  messageListMetaRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    justifyContent: 'space-between'
+  },
+  messageListSender: {
+    color: colors.ink,
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '600',
+    lineHeight: 19
+  },
+  messageListTime: {
+    color: '#8B95A5',
+    fontSize: 12,
+    fontWeight: '400',
+    lineHeight: 16
+  },
+  messageListPreview: {
+    color: '#64748B',
+    fontSize: 14,
+    fontWeight: '400',
+    lineHeight: 19,
+    marginTop: 1
   },
   groupInfoMembersHeader: {
     alignItems: 'center',
