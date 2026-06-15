@@ -419,6 +419,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [chatContacts, setChatContacts] = useState<ChatContact[]>([]);
   const [chatListFilter, setChatListFilter] = useState<ChatListFilter>('all');
   const [chatSearch, setChatSearch] = useState('');
+  const [isScreenKeyboardVisible, setIsScreenKeyboardVisible] = useState(false);
   const [newChatSearch, setNewChatSearch] = useState('');
   const [addMembersSearch, setAddMembersSearch] = useState('');
   const [isNewChatModalOpen, setIsNewChatModalOpen] = useState(false);
@@ -542,6 +543,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const headerTopPadding = Platform.OS === 'android' ? Math.max(deviceTopInset + 10, 38) : 8;
   const messageTopPadding = Platform.OS === 'android' ? Math.max(deviceTopInset + 6, 34) : 0;
   const contentBottomPadding = footerBottom + footerHeight + 18;
+  const tabContentBottomPadding = isScreenKeyboardVisible ? 18 : contentBottomPadding;
   const floatingAddBottom = footerBottom + footerHeight + 14;
   const profilePhotoHeaders = profilePhotoAuthToken
     ? {
@@ -796,6 +798,18 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
     void loadChatContacts();
   }, [activeTab]);
+
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const showSubscription = Keyboard.addListener(showEvent, () => setIsScreenKeyboardVisible(true));
+    const hideSubscription = Keyboard.addListener(hideEvent, () => setIsScreenKeyboardVisible(false));
+
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, []);
 
   useEffect(() => {
     if (activeTab !== 'You') {
@@ -4902,8 +4916,10 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         />
       ) : (
         <ScrollView
-          contentContainerStyle={[styles.tabContent, { paddingBottom: contentBottomPadding }]}
+          contentContainerStyle={[styles.tabContent, { paddingBottom: tabContentBottomPadding }]}
+          keyboardDismissMode={getKeyboardDismissMode()}
           keyboardShouldPersistTaps="handled"
+          onScrollBeginDrag={() => Keyboard.dismiss()}
           showsVerticalScrollIndicator={false}
           style={styles.tabScroll}
         >
@@ -5106,7 +5122,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         </Pressable>
       ) : null}
 
-      {!selectedChat ? (
+      {!selectedChat && !isScreenKeyboardVisible ? (
         <View style={[
         styles.footer,
         {
@@ -8551,7 +8567,10 @@ function ChatFilterChip({
       accessibilityLabel={labelText}
       accessibilityRole="button"
       accessibilityState={{ selected: isActive }}
-      onPress={onPress}
+      onPress={() => {
+        Keyboard.dismiss();
+        onPress();
+      }}
       style={({ pressed }) => [
         styles.chatFilterChip,
         isActive && styles.chatFilterChipActive,
@@ -8584,7 +8603,10 @@ function ChatsUtilityRow({
     <Pressable
       accessibilityLabel={label}
       accessibilityRole="button"
-      onPress={onPress}
+      onPress={() => {
+        Keyboard.dismiss();
+        onPress();
+      }}
       style={({ pressed }) => [styles.chatsUtilityRow, pressed && styles.pressed]}
     >
       <View style={styles.chatsUtilityIcon}>
@@ -11301,7 +11323,10 @@ function ChatRow({
   return (
     <Pressable
       accessibilityRole="button"
-      onPress={onOpen}
+      onPress={() => {
+        Keyboard.dismiss();
+        onOpen();
+      }}
       style={({ pressed }) => [
         styles.chatRow,
         styles.contactChatRow,
@@ -12938,6 +12963,10 @@ function getFullScreenModalTopPadding(topInset: number): number {
   return Platform.OS === 'android'
     ? Math.max(deviceTopInset + 10, 38)
     : Math.max(deviceTopInset + 8, 22);
+}
+
+function getKeyboardDismissMode(): 'interactive' | 'on-drag' {
+  return Platform.OS === 'ios' ? 'interactive' : 'on-drag';
 }
 
 function getNativeFullHeightModalPresentationStyle(): 'fullScreen' | 'pageSheet' {
