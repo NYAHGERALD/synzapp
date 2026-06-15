@@ -1450,15 +1450,16 @@ async function getActiveGroupMemberIds(
 ): Promise<string[]> {
   const explicitMembersSnapshot = await groupRef
     .collection('members')
-    .where('status', '==', 'ACTIVE')
     .get();
   const memberIds = new Set<string>();
 
   explicitMembersSnapshot.docs.forEach((doc) => {
     const member = doc.data() as GroupMemberRecord;
     const uid = member.uid || doc.id;
+    const isActiveMember = !member.status || member.status === 'ACTIVE';
+    const isSameTenant = !member.tenantId || member.tenantId === tenantId;
 
-    if (uid && member.tenantId === tenantId) {
+    if (uid && isActiveMember && isSameTenant) {
       memberIds.add(uid);
     }
   });

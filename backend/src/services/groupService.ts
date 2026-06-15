@@ -404,7 +404,8 @@ async function isGroupVisibleToUser(
 
   const member = memberSnapshot.data() as { status?: string; tenantId?: string };
 
-  return member.tenantId === context.tenantId && member.status === 'ACTIVE';
+  return (!member.tenantId || member.tenantId === context.tenantId) &&
+    (!member.status || member.status === 'ACTIVE');
 }
 
 async function hydrateTenantGroupMemberCount(
