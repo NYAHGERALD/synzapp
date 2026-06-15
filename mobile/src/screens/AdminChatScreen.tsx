@@ -19,6 +19,7 @@ import {
   Alert,
   Animated,
   AppState,
+  Easing,
   FlatList,
   Image,
   Keyboard,
@@ -387,6 +388,14 @@ interface NativeOptionPickerState {
 }
 
 const footerTabs: FooterTab[] = ['Chats', 'Groups', 'Employees', 'Settings', 'You'];
+const synzappAiSuggestions = [
+  'Draft a professional message',
+  'Summarize what I should do next',
+  'Help me brainstorm ideas',
+  'Plan a work conversation',
+  'Improve the tone of my writing',
+  'Prepare a quick checklist'
+];
 const androidButtonRipple = { borderless: false, color: 'rgba(15, 118, 110, 0.14)' } as const;
 const androidIconRipple = { borderless: true, color: 'rgba(15, 118, 110, 0.14)' } as const;
 
@@ -419,6 +428,8 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [chatContacts, setChatContacts] = useState<ChatContact[]>([]);
   const [chatListFilter, setChatListFilter] = useState<ChatListFilter>('all');
   const [chatSearch, setChatSearch] = useState('');
+  const [isAiAssistantOpen, setIsAiAssistantOpen] = useState(false);
+  const [aiAssistantDraft, setAiAssistantDraft] = useState('');
   const [isScreenKeyboardVisible, setIsScreenKeyboardVisible] = useState(false);
   const [newChatSearch, setNewChatSearch] = useState('');
   const [addMembersSearch, setAddMembersSearch] = useState('');
@@ -532,6 +543,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const selectedForwardMessageCount = Object.values(forwardSelectedMessageIds).filter(Boolean).length;
   const selectedForwardRecipientCount = Object.values(forwardRecipientIds).filter(Boolean).length;
   const employeeItems = approvedEmployees.map(mapApprovedEmployeeToListItem);
+  const isConversationSurfaceOpen = Boolean(selectedChat || isAiAssistantOpen);
   const isCompactAndroid = Platform.OS === 'android' && height < 720;
   const footerHeight = isCompactAndroid ? 64 : 68;
   const footerBottom = Platform.OS === 'android'
@@ -1924,7 +1936,21 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
   function handleOpenAskSynzappAi() {
     Keyboard.dismiss();
-    Alert.alert('Ask Synzapp AI', 'The Synzapp AI assistant will open here when the AI modal is enabled.');
+    setIsAiAssistantOpen(true);
+  }
+
+  function handleCloseAskSynzappAi() {
+    Keyboard.dismiss();
+    setIsAiAssistantOpen(false);
+    setAiAssistantDraft('');
+  }
+
+  function handleSendAskSynzappAiPrompt() {
+    if (!aiAssistantDraft.trim()) {
+      return;
+    }
+
+    Alert.alert('Synzapp AI', 'AI responses will appear in this chat when the assistant service is enabled.');
   }
 
   function handleOpenCommonGroupFromContactInfo(groupContact: ChatContact) {
@@ -3534,6 +3560,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setActiveTab(tab);
     setError(null);
     setSelectedChat(null);
+    setIsAiAssistantOpen(false);
     setIsLoadingMessages(false);
     setIsContactInfoModalOpen(false);
     setIsGroupCallOptionsOpen(false);
@@ -4784,8 +4811,8 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     <View style={[
       styles.screen,
       {
-        paddingBottom: selectedChat ? 0 : 98,
-        paddingTop: selectedChat ? messageTopPadding : headerTopPadding
+        paddingBottom: isConversationSurfaceOpen ? 0 : 98,
+        paddingTop: isConversationSurfaceOpen ? messageTopPadding : headerTopPadding
       }
     ]}>
       {selectedChat && isForwardMode ? (
@@ -4807,7 +4834,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           onOpenGroupPeoplePicker={() => handleOpenGroupCallPeopleModal('select')}
           profilePhotoHeaders={profilePhotoHeaders}
         />
-      ) : activeTab === 'Settings' && settingsScreen === 'directory' ? (
+      ) : isAiAssistantOpen ? null : activeTab === 'Settings' && settingsScreen === 'directory' ? (
         <DirectoryHeader
           filter={directoryFilter}
           onBack={() => setSettingsScreen('list')}
@@ -4848,7 +4875,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         />
       )}
 
-      {!selectedChat && activeTab !== 'You' ? (
+      {!selectedChat && !isAiAssistantOpen && activeTab !== 'You' ? (
         <Text style={styles.title}>
           {activeTab === 'Settings' && settingsScreen === 'directory'
             ? 'Departments and roles'
@@ -4920,12 +4947,21 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           selectedForwardMessageIds={forwardSelectedMessageIds}
           starredMessageIds={starredMessageIds}
         />
+      ) : isAiAssistantOpen ? (
+        <SynzappAiAssistantScreen
+          bottomInset={insets.bottom}
+          draft={aiAssistantDraft}
+          isCompactAndroid={isCompactAndroid}
+          onBack={handleCloseAskSynzappAi}
+          onDraftChange={setAiAssistantDraft}
+          onSend={handleSendAskSynzappAiPrompt}
+          profileName={userProfile?.displayName || ''}
+        />
       ) : (
         <ScrollView
           contentContainerStyle={[styles.tabContent, { paddingBottom: tabContentBottomPadding }]}
           keyboardDismissMode={getKeyboardDismissMode()}
           keyboardShouldPersistTaps="handled"
-          onScrollBeginDrag={() => Keyboard.dismiss()}
           showsVerticalScrollIndicator={false}
           style={styles.tabScroll}
         >
@@ -5109,7 +5145,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         </ScrollView>
       )}
 
-      {activeTab === 'Settings' && (settingsScreen === 'directory' || settingsScreen === 'groups') ? (
+      {!isAiAssistantOpen && activeTab === 'Settings' && (settingsScreen === 'directory' || settingsScreen === 'groups') ? (
         <Pressable
           accessibilityLabel={
             settingsScreen === 'groups'
@@ -5128,7 +5164,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         </Pressable>
       ) : null}
 
-      {!selectedChat && activeTab === 'Chats' && !isScreenKeyboardVisible ? (
+      {!selectedChat && !isAiAssistantOpen && activeTab === 'Chats' && !isScreenKeyboardVisible ? (
         <Pressable
           accessibilityLabel="Ask Synzapp AI"
           accessibilityRole="button"
@@ -5143,7 +5179,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         </Pressable>
       ) : null}
 
-      {!selectedChat && !isScreenKeyboardVisible ? (
+      {!selectedChat && !isAiAssistantOpen && !isScreenKeyboardVisible ? (
         <View style={[
         styles.footer,
         {
@@ -5526,6 +5562,242 @@ function HeaderActions({
         </View>
       ) : null}
     </View>
+  );
+}
+
+function SynzappAiAssistantScreen({
+  bottomInset,
+  draft,
+  isCompactAndroid,
+  onBack,
+  onDraftChange,
+  onSend,
+  profileName
+}: {
+  bottomInset: number;
+  draft: string;
+  isCompactAndroid: boolean;
+  onBack: () => void;
+  onDraftChange: (value: string) => void;
+  onSend: () => void;
+  profileName: string;
+}) {
+  const spinValue = useRef(new Animated.Value(0)).current;
+  const pulseValue = useRef(new Animated.Value(0)).current;
+  const safeFirstName = profileName.trim().split(/\s+/)[0] || '';
+  const greeting = safeFirstName ? `Hello, ${safeFirstName}` : 'Hello';
+  const canSend = draft.trim().length > 0;
+
+  useEffect(() => {
+    spinValue.setValue(0);
+    pulseValue.setValue(0);
+
+    const spinAnimation = Animated.loop(
+      Animated.timing(spinValue, {
+        duration: 3200,
+        easing: Easing.linear,
+        toValue: 1,
+        useNativeDriver: true
+      })
+    );
+    const pulseAnimation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseValue, {
+          duration: 1200,
+          easing: Easing.inOut(Easing.ease),
+          toValue: 1,
+          useNativeDriver: true
+        }),
+        Animated.timing(pulseValue, {
+          duration: 1200,
+          easing: Easing.inOut(Easing.ease),
+          toValue: 0,
+          useNativeDriver: true
+        })
+      ])
+    );
+
+    spinAnimation.start();
+    pulseAnimation.start();
+
+    return () => {
+      spinAnimation.stop();
+      pulseAnimation.stop();
+    };
+  }, [pulseValue, spinValue]);
+
+  const rotation = spinValue.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '360deg']
+  });
+  const haloScale = pulseValue.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.94, 1.08]
+  });
+  const haloOpacity = pulseValue.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.28, 0.48]
+  });
+  const composerBottomPadding = Math.max(bottomInset + 6, isCompactAndroid ? 10 : 12);
+
+  return (
+    <View style={styles.aiScreen}>
+      <View style={styles.aiHeader}>
+        <Pressable
+          accessibilityLabel="Back to chats"
+          accessibilityRole="button"
+          onPress={onBack}
+          style={({ pressed }) => [styles.aiHeaderButton, pressed && styles.pressed]}
+        >
+          <Text style={styles.backButtonText}>‹</Text>
+        </Pressable>
+        <View style={styles.aiHeaderTitleRow}>
+          <SynzappAiMark size={30} spin={rotation} />
+          <View style={styles.aiHeaderTitleText}>
+            <Text numberOfLines={1} style={styles.aiHeaderTitle}>Synzapp AI</Text>
+            <Text numberOfLines={1} style={styles.aiHeaderSubtitle}>Private assistant preview</Text>
+          </View>
+        </View>
+        <View style={styles.aiHeaderButton}>
+          <Feather color={colors.primary} name="clock" size={22} />
+        </View>
+      </View>
+
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={styles.aiKeyboardAvoidingView}
+      >
+        <ScrollView
+          contentContainerStyle={styles.aiScrollContent}
+          keyboardDismissMode={getKeyboardDismissMode()}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+          style={styles.aiScroll}
+        >
+          <View style={styles.aiHero}>
+            <View style={styles.aiHeroMarkWrap}>
+              <Animated.View
+                pointerEvents="none"
+                style={[
+                  styles.aiHeroHalo,
+                  {
+                    opacity: haloOpacity,
+                    transform: [{ scale: haloScale }]
+                  }
+                ]}
+              />
+              <SynzappAiMark size={92} spin={rotation} />
+            </View>
+            <Text style={styles.aiGreeting}>{greeting}</Text>
+            <Text style={styles.aiPrompt}>
+              I'm your Synzapp AI assistant, ready to help with messages, planning, ideas, and anything else on your mind.
+            </Text>
+          </View>
+
+          <View style={styles.aiSuggestionList}>
+            {synzappAiSuggestions.map((suggestion) => (
+              <Pressable
+                accessibilityLabel={suggestion}
+                accessibilityRole="button"
+                key={suggestion}
+                onPress={() => onDraftChange(suggestion)}
+                style={({ pressed }) => [styles.aiSuggestionRow, pressed && styles.pressed]}
+              >
+                <Feather color="#64748B" name="file-text" size={17} />
+                <Text numberOfLines={1} style={styles.aiSuggestionText}>{suggestion}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </ScrollView>
+
+        <View style={[styles.aiComposer, { paddingBottom: composerBottomPadding }]}>
+          <View style={styles.aiInputBox}>
+            <TextInput
+              multiline
+              onChangeText={onDraftChange}
+              placeholder="Ask Synzapp AI"
+              placeholderTextColor="#8B95A5"
+              returnKeyType="default"
+              scrollEnabled
+              style={styles.aiInput}
+              value={draft}
+            />
+            <Pressable
+              accessibilityLabel="Send AI prompt"
+              accessibilityRole="button"
+              disabled={!canSend}
+              onPress={onSend}
+              style={({ pressed }) => [
+                styles.aiSendButton,
+                pressed && canSend && styles.pressed,
+                !canSend && styles.disabled
+              ]}
+            >
+              <Ionicons color="#FFFFFF" name="arrow-up" size={20} />
+            </Pressable>
+          </View>
+        </View>
+      </KeyboardAvoidingView>
+    </View>
+  );
+}
+
+function SynzappAiMark({
+  size,
+  spin
+}: {
+  size: number;
+  spin: Animated.AnimatedInterpolation<string>;
+}) {
+  const petalSize = size * 0.24;
+  const radius = size * 0.29;
+  const centerSize = size * 0.18;
+
+  return (
+    <Animated.View
+      style={[
+        styles.aiMark,
+        {
+          height: size,
+          transform: [{ rotate: spin }],
+          width: size
+        }
+      ]}
+    >
+      {[0, 1, 2, 3, 4, 5].map((index) => {
+        const angle = (Math.PI * 2 * index) / 6;
+
+        return (
+          <View
+            key={index}
+            style={[
+              styles.aiMarkPetal,
+              {
+                backgroundColor: getAiPetalColor(index),
+                borderRadius: petalSize / 2,
+                height: petalSize,
+                left: (size / 2) + Math.cos(angle) * radius - (petalSize / 2),
+                top: (size / 2) + Math.sin(angle) * radius - (petalSize / 2),
+                transform: [{ rotate: `${index * 28}deg` }],
+                width: petalSize
+              }
+            ]}
+          />
+        );
+      })}
+      <View
+        style={[
+          styles.aiMarkCenter,
+          {
+            borderRadius: centerSize / 2,
+            height: centerSize,
+            left: (size - centerSize) / 2,
+            top: (size - centerSize) / 2,
+            width: centerSize
+          }
+        ]}
+      />
+    </Animated.View>
   );
 }
 
@@ -8588,10 +8860,7 @@ function ChatFilterChip({
       accessibilityLabel={labelText}
       accessibilityRole="button"
       accessibilityState={{ selected: isActive }}
-      onPress={() => {
-        Keyboard.dismiss();
-        onPress();
-      }}
+      onPress={onPress}
       style={({ pressed }) => [
         styles.chatFilterChip,
         isActive && styles.chatFilterChipActive,
@@ -8624,10 +8893,7 @@ function ChatsUtilityRow({
     <Pressable
       accessibilityLabel={label}
       accessibilityRole="button"
-      onPress={() => {
-        Keyboard.dismiss();
-        onPress();
-      }}
+      onPress={onPress}
       style={({ pressed }) => [styles.chatsUtilityRow, pressed && styles.pressed]}
     >
       <View style={styles.chatsUtilityIcon}>
@@ -11344,10 +11610,7 @@ function ChatRow({
   return (
     <Pressable
       accessibilityRole="button"
-      onPress={() => {
-        Keyboard.dismiss();
-        onOpen();
-      }}
+      onPress={onOpen}
       style={({ pressed }) => [
         styles.chatRow,
         styles.contactChatRow,
@@ -12990,6 +13253,12 @@ function getKeyboardDismissMode(): 'interactive' | 'on-drag' {
   return Platform.OS === 'ios' ? 'interactive' : 'on-drag';
 }
 
+function getAiPetalColor(index: number): string {
+  const colorsByIndex = ['#6754F5', '#7C3AED', '#A855F7', '#2F6BFF', '#20C997', '#4F46E5'];
+
+  return colorsByIndex[index % colorsByIndex.length];
+}
+
 function getNativeFullHeightModalPresentationStyle(): 'fullScreen' | 'pageSheet' {
   return Platform.OS === 'ios' ? 'pageSheet' : 'fullScreen';
 }
@@ -14063,6 +14332,174 @@ const styles = StyleSheet.create({
   },
   tabContent: {
     paddingBottom: 92
+  },
+  aiScreen: {
+    backgroundColor: '#F8FAFC',
+    flex: 1,
+    marginHorizontal: -10
+  },
+  aiHeader: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderBottomColor: '#E5E7EB',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 8,
+    minHeight: 58,
+    paddingHorizontal: 12
+  },
+  aiHeaderButton: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 21,
+    height: 42,
+    justifyContent: 'center',
+    width: 42
+  },
+  aiHeaderTitleRow: {
+    alignItems: 'center',
+    flex: 1,
+    flexDirection: 'row',
+    gap: 10,
+    minWidth: 0
+  },
+  aiHeaderTitleText: {
+    flex: 1,
+    minWidth: 0
+  },
+  aiHeaderTitle: {
+    color: colors.ink,
+    fontSize: 17,
+    fontWeight: '700',
+    lineHeight: 22
+  },
+  aiHeaderSubtitle: {
+    color: '#64748B',
+    fontSize: 12,
+    fontWeight: '400',
+    lineHeight: 16
+  },
+  aiKeyboardAvoidingView: {
+    flex: 1
+  },
+  aiScroll: {
+    flex: 1
+  },
+  aiScrollContent: {
+    gap: 16,
+    paddingBottom: 18,
+    paddingHorizontal: 16,
+    paddingTop: 26
+  },
+  aiHero: {
+    alignItems: 'center',
+    paddingHorizontal: 10
+  },
+  aiHeroMarkWrap: {
+    alignItems: 'center',
+    height: 124,
+    justifyContent: 'center',
+    position: 'relative',
+    width: 124
+  },
+  aiHeroHalo: {
+    backgroundColor: '#A78BFA',
+    borderRadius: 58,
+    height: 116,
+    position: 'absolute',
+    width: 116
+  },
+  aiGreeting: {
+    color: '#0B141A',
+    fontSize: 21,
+    fontWeight: '700',
+    lineHeight: 27,
+    marginTop: 10,
+    textAlign: 'center'
+  },
+  aiPrompt: {
+    color: '#475569',
+    fontSize: 15,
+    fontWeight: '400',
+    lineHeight: 21,
+    marginTop: 8,
+    maxWidth: 340,
+    textAlign: 'center'
+  },
+  aiSuggestionList: {
+    gap: 10,
+    paddingTop: 6
+  },
+  aiSuggestionRow: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderColor: '#E5E7EB',
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 10,
+    minHeight: 50,
+    paddingHorizontal: 13,
+    paddingVertical: 10
+  },
+  aiSuggestionText: {
+    color: colors.ink,
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '500',
+    lineHeight: 20
+  },
+  aiComposer: {
+    backgroundColor: '#F8FAFC',
+    borderTopColor: '#E5E7EB',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 10,
+    paddingTop: 8
+  },
+  aiInputBox: {
+    alignItems: 'flex-end',
+    backgroundColor: '#FFFFFF',
+    borderColor: '#E5E7EB',
+    borderRadius: 22,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 8,
+    minHeight: 44,
+    paddingHorizontal: 10,
+    paddingVertical: 5
+  },
+  aiInput: {
+    color: colors.ink,
+    flex: 1,
+    fontSize: 16,
+    fontWeight: '400',
+    lineHeight: 21,
+    maxHeight: 112,
+    minHeight: 34,
+    paddingHorizontal: 0,
+    paddingVertical: 7,
+    textAlignVertical: 'top'
+  },
+  aiSendButton: {
+    alignItems: 'center',
+    backgroundColor: colors.primary,
+    borderRadius: 18,
+    height: 36,
+    justifyContent: 'center',
+    marginBottom: 1,
+    width: 36
+  },
+  aiMark: {
+    position: 'relative'
+  },
+  aiMarkPetal: {
+    position: 'absolute'
+  },
+  aiMarkCenter: {
+    backgroundColor: '#FFFFFF',
+    borderColor: 'rgba(79, 70, 229, 0.18)',
+    borderWidth: 1,
+    position: 'absolute'
   },
   messageScreen: {
     backgroundColor: '#ECE5DD',
