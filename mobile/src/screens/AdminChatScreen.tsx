@@ -88,11 +88,14 @@ import {
   ChatNotificationMuteMode,
   ChatNotificationSettings,
   ChatReplyReference,
+  ChatTranscriptLanguageCode,
+  ChatTranscriptLanguageSetting,
   createGroupChat,
   decryptRealtimeEncryptedEnvelopes,
   deleteChatMessageForMe,
   getChatNotificationSettings,
   getChatMessages,
+  getChatTranscriptLanguage,
   grantGroupChatHistoryKeys,
   listChatContacts,
   listGroupChatContacts,
@@ -103,7 +106,8 @@ import {
   unsubscribeRealtimeConversation,
   sendChatMessage,
   updateChatMessageReaction,
-  updateChatNotificationSettings
+  updateChatNotificationSettings,
+  updateChatTranscriptLanguage
 } from '../services/chatApi';
 import {
   ChatBackupPolicy,
@@ -393,6 +397,12 @@ interface NativeOptionPickerState {
   title: string;
 }
 
+interface TranscriptLanguageOption {
+  code: ChatTranscriptLanguageCode;
+  label: string;
+  status: 'available' | 'onDevice';
+}
+
 const footerTabs: FooterTab[] = ['Chats', 'Groups', 'Employees', 'Settings', 'You'];
 const synzappAiSuggestions = [
   'Draft a professional message',
@@ -419,6 +429,31 @@ const chatNotificationAlertToneOptions: Array<{
   { label: 'Chime', value: 'chime' },
   { label: 'Pulse', value: 'pulse' },
   { label: 'Silent', value: 'silent' }
+];
+const chatTranscriptLanguageOptions: TranscriptLanguageOption[] = [
+  { code: 'en-US', label: 'English (United States)', status: 'onDevice' },
+  { code: 'ar-SA', label: 'Arabic (Saudi Arabia)', status: 'available' },
+  { code: 'yue-CN', label: 'Cantonese (China mainland)', status: 'available' },
+  { code: 'zh-CN', label: 'Chinese (China mainland)', status: 'available' },
+  { code: 'zh-HK', label: 'Chinese (Hong Kong)', status: 'available' },
+  { code: 'zh-TW', label: 'Chinese (Taiwan)', status: 'available' },
+  { code: 'da-DK', label: 'Danish (Denmark)', status: 'available' },
+  { code: 'nl-BE', label: 'Dutch (Belgium)', status: 'available' },
+  { code: 'nl-NL', label: 'Dutch (Netherlands)', status: 'available' },
+  { code: 'en-AU', label: 'English (Australia)', status: 'available' },
+  { code: 'en-CA', label: 'English (Canada)', status: 'available' },
+  { code: 'en-GB', label: 'English (United Kingdom)', status: 'available' },
+  { code: 'en-IN', label: 'English (India)', status: 'available' },
+  { code: 'fr-CA', label: 'French (Canada)', status: 'available' },
+  { code: 'fr-FR', label: 'French (France)', status: 'available' },
+  { code: 'de-DE', label: 'German (Germany)', status: 'available' },
+  { code: 'hi-IN', label: 'Hindi (India)', status: 'available' },
+  { code: 'it-IT', label: 'Italian (Italy)', status: 'available' },
+  { code: 'ja-JP', label: 'Japanese (Japan)', status: 'available' },
+  { code: 'ko-KR', label: 'Korean (South Korea)', status: 'available' },
+  { code: 'pt-BR', label: 'Portuguese (Brazil)', status: 'available' },
+  { code: 'es-MX', label: 'Spanish (Mexico)', status: 'available' },
+  { code: 'es-ES', label: 'Spanish (Spain)', status: 'available' }
 ];
 const androidButtonRipple = { borderless: false, color: 'rgba(15, 118, 110, 0.14)' } as const;
 const androidIconRipple = { borderless: true, color: 'rgba(15, 118, 110, 0.14)' } as const;
@@ -461,6 +496,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [isAddMembersModalOpen, setIsAddMembersModalOpen] = useState(false);
   const [isContactInfoModalOpen, setIsContactInfoModalOpen] = useState(false);
   const [isChatNotificationSettingsOpen, setIsChatNotificationSettingsOpen] = useState(false);
+  const [isChatTranscriptLanguageOpen, setIsChatTranscriptLanguageOpen] = useState(false);
   const [isGroupDetailsModalOpen, setIsGroupDetailsModalOpen] = useState(false);
   const [isGroupPermissionsModalOpen, setIsGroupPermissionsModalOpen] = useState(false);
   const [isGroupCallOptionsOpen, setIsGroupCallOptionsOpen] = useState(false);
@@ -469,6 +505,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [isGroupSwitcherModalOpen, setIsGroupSwitcherModalOpen] = useState(false);
   const [groupCallMode, setGroupCallMode] = useState<GroupCallMode>('select');
   const [groupCallPeopleSearch, setGroupCallPeopleSearch] = useState('');
+  const [chatTranscriptLanguageSearch, setChatTranscriptLanguageSearch] = useState('');
   const [newGroupNameDraft, setNewGroupNameDraft] = useState('');
   const [newGroupPhotoUri, setNewGroupPhotoUri] = useState<string | null>(null);
   const [newGroupPermissionMode, setNewGroupPermissionMode] = useState<'ADMINS' | 'ALL_MEMBERS'>('ALL_MEMBERS');
@@ -492,12 +529,15 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [nativeOptionPicker, setNativeOptionPicker] = useState<NativeOptionPickerState | null>(null);
   const [messageReactions, setMessageReactions] = useState<ChatMessageReactionMap>({});
   const [chatNotificationSettingsByContactId, setChatNotificationSettingsByContactId] = useState<Record<string, ChatNotificationSettings>>({});
+  const [chatTranscriptLanguageByContactId, setChatTranscriptLanguageByContactId] = useState<Record<string, ChatTranscriptLanguageSetting>>({});
   const [starredMessageIds, setStarredMessageIds] = useState<Record<string, boolean>>({});
   const [selectedChat, setSelectedChat] = useState<ChatItem | null>(null);
   const [isLoadingChats, setIsLoadingChats] = useState(false);
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
   const [isLoadingChatNotificationSettings, setIsLoadingChatNotificationSettings] = useState(false);
   const [isSavingChatNotificationSettings, setIsSavingChatNotificationSettings] = useState(false);
+  const [isLoadingChatTranscriptLanguage, setIsLoadingChatTranscriptLanguage] = useState(false);
+  const [isSavingChatTranscriptLanguage, setIsSavingChatTranscriptLanguage] = useState(false);
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [isLoadingBatchContacts, setIsLoadingBatchContacts] = useState(false);
   const [isPickingInviteContact, setIsPickingInviteContact] = useState(false);
@@ -610,6 +650,9 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     : 0;
   const activeDirectChatNotificationSettings = selectedChat && selectedChat.chatType !== 'GROUP'
     ? chatNotificationSettingsByContactId[selectedChat.contactId] || null
+    : null;
+  const activeDirectChatTranscriptLanguage = selectedChat && selectedChat.chatType !== 'GROUP'
+    ? chatTranscriptLanguageByContactId[selectedChat.contactId] || null
     : null;
   const selectedGroupCallMemberCount = Object.values(selectedGroupCallMemberIds).filter(Boolean).length;
   const companyDisplayName = userProfile?.companyName || companyProfile?.companyName || 'Synzapp';
@@ -1780,6 +1823,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     selectedChatRef.current = chat;
     setSelectedChat(chat);
     setIsChatNotificationSettingsOpen(false);
+    setIsChatTranscriptLanguageOpen(false);
     setChatContacts((currentContacts) => currentContacts.map((contact) =>
       contact.contactId === chat.contactId
         ? { ...contact, unreadCount: 0 }
@@ -1886,6 +1930,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsGroupSwitcherModalOpen(false);
     setIsContactInfoModalOpen(false);
     setIsChatNotificationSettingsOpen(false);
+    setIsChatTranscriptLanguageOpen(false);
     setIsGroupInfoModalOpen(true);
   }
 
@@ -1904,12 +1949,15 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsGroupCallPeopleModalOpen(false);
     setIsGroupSwitcherModalOpen(false);
     setIsGroupInfoModalOpen(false);
+    setIsChatNotificationSettingsOpen(false);
+    setIsChatTranscriptLanguageOpen(false);
     setIsContactInfoModalOpen(true);
   }
 
   function handleCloseContactInfo() {
     setIsContactInfoModalOpen(false);
     setIsChatNotificationSettingsOpen(false);
+    setIsChatTranscriptLanguageOpen(false);
   }
 
   function handleCloseChatNotificationSettings() {
@@ -2055,6 +2103,111 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       setError(getErrorMessage(nextError, 'Unable to update notification settings.'));
     } finally {
       setIsSavingChatNotificationSettings(false);
+    }
+  }
+
+  function handleCloseChatTranscriptLanguage() {
+    const chat = selectedChatRef.current;
+
+    setIsChatTranscriptLanguageOpen(false);
+    setChatTranscriptLanguageSearch('');
+
+    if (chat && chat.chatType !== 'GROUP') {
+      setTimeout(() => {
+        if (selectedChatRef.current?.contactId === chat.contactId) {
+          setIsContactInfoModalOpen(true);
+        }
+      }, Platform.OS === 'ios' ? 260 : 120);
+    }
+  }
+
+  function handleOpenChatTranscriptLanguage() {
+    const chat = selectedChatRef.current;
+
+    if (!chat || chat.chatType === 'GROUP') {
+      return;
+    }
+
+    setError(null);
+    setChatTranscriptLanguageSearch('');
+    setIsContactInfoModalOpen(false);
+    void loadChatTranscriptLanguage(chat, true);
+
+    setTimeout(() => {
+      if (selectedChatRef.current?.contactId === chat.contactId) {
+        setIsChatTranscriptLanguageOpen(true);
+      }
+    }, Platform.OS === 'ios' ? 320 : 140);
+  }
+
+  async function loadChatTranscriptLanguage(chat: ChatItem, showError = true) {
+    if (chat.chatType === 'GROUP') {
+      return;
+    }
+
+    setIsLoadingChatTranscriptLanguage(true);
+
+    try {
+      const idToken = await getIdToken();
+      const transcriptLanguage = await getChatTranscriptLanguage({
+        contactId: chat.contactId,
+        idToken
+      });
+
+      setChatTranscriptLanguageByContactId((currentLanguages) => ({
+        ...currentLanguages,
+        [chat.contactId]: transcriptLanguage
+      }));
+    } catch (nextError) {
+      if (showError) {
+        setError(getErrorMessage(nextError, 'Unable to load transcript language.'));
+      }
+    } finally {
+      setIsLoadingChatTranscriptLanguage(false);
+    }
+  }
+
+  async function handleSelectChatTranscriptLanguage(languageCode: ChatTranscriptLanguageCode) {
+    const chat = selectedChatRef.current;
+
+    if (!chat || chat.chatType === 'GROUP' || isSavingChatTranscriptLanguage) {
+      return;
+    }
+
+    const previousLanguage = chatTranscriptLanguageByContactId[chat.contactId] ||
+      getDefaultChatTranscriptLanguage(chat.contactId);
+    const optimisticLanguage: ChatTranscriptLanguageSetting = {
+      contactId: chat.contactId,
+      languageCode,
+      updatedAt: new Date().toISOString()
+    };
+
+    setIsSavingChatTranscriptLanguage(true);
+    setChatTranscriptLanguageByContactId((currentLanguages) => ({
+      ...currentLanguages,
+      [chat.contactId]: optimisticLanguage
+    }));
+
+    try {
+      const idToken = await getIdToken();
+      const transcriptLanguage = await updateChatTranscriptLanguage({
+        contactId: chat.contactId,
+        idToken,
+        languageCode
+      });
+
+      setChatTranscriptLanguageByContactId((currentLanguages) => ({
+        ...currentLanguages,
+        [chat.contactId]: transcriptLanguage
+      }));
+    } catch (nextError) {
+      setChatTranscriptLanguageByContactId((currentLanguages) => ({
+        ...currentLanguages,
+        [chat.contactId]: previousLanguage
+      }));
+      setError(getErrorMessage(nextError, 'Unable to update transcript language.'));
+    } finally {
+      setIsSavingChatTranscriptLanguage(false);
     }
   }
 
@@ -3752,6 +3905,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsLoadingMessages(false);
     setIsContactInfoModalOpen(false);
     setIsChatNotificationSettingsOpen(false);
+    setIsChatTranscriptLanguageOpen(false);
     setIsGroupCallOptionsOpen(false);
     setIsGroupCallPeopleModalOpen(false);
     setIsGroupInfoModalOpen(false);
@@ -3779,6 +3933,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsLoadingMessages(false);
     setIsContactInfoModalOpen(false);
     setIsChatNotificationSettingsOpen(false);
+    setIsChatTranscriptLanguageOpen(false);
     setIsGroupCallOptionsOpen(false);
     setIsGroupCallPeopleModalOpen(false);
     setIsGroupInfoModalOpen(false);
@@ -5538,6 +5693,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         commonGroups={getCommonGroupContactsForDirectChat(selectedChat, groupChatContacts)}
         isOpen={isContactInfoModalOpen}
         notificationSettings={activeDirectChatNotificationSettings}
+        transcriptLanguage={activeDirectChatTranscriptLanguage}
         onAddToGroup={() => handleContactInfoUnavailableAction('Add to group')}
         onClose={handleCloseContactInfo}
         onCreateGroup={() => handleContactInfoUnavailableAction('Create group')}
@@ -5546,7 +5702,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         onOpenGroup={handleOpenCommonGroupFromContactInfo}
         onOpenNotifications={handleOpenChatNotificationSettings}
         onOpenSearch={() => handleContactInfoUnavailableAction('Search')}
-        onOpenTranscriptLanguage={() => handleContactInfoUnavailableAction('Transcript language')}
+        onOpenTranscriptLanguage={handleOpenChatTranscriptLanguage}
         onStartVideoCall={() => handleContactInfoUnavailableAction('Video call')}
         onStartVoiceCall={() => handleContactInfoUnavailableAction('Audio call')}
         profilePhotoHeaders={profilePhotoHeaders}
@@ -5565,6 +5721,20 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           void handleSelectChatNotificationMuteMode();
         }}
         settings={activeDirectChatNotificationSettings}
+      />
+
+      <DirectChatTranscriptLanguageModal
+        chat={selectedChat}
+        isLoading={isLoadingChatTranscriptLanguage}
+        isOpen={isChatTranscriptLanguageOpen}
+        isSaving={isSavingChatTranscriptLanguage}
+        onChangeSearch={setChatTranscriptLanguageSearch}
+        onClose={handleCloseChatTranscriptLanguage}
+        onSelectLanguage={(languageCode) => {
+          void handleSelectChatTranscriptLanguage(languageCode);
+        }}
+        search={chatTranscriptLanguageSearch}
+        transcriptLanguage={activeDirectChatTranscriptLanguage}
       />
 
       <GroupInfoModal
@@ -9801,11 +9971,195 @@ function ChatNotificationSettingsRow({
   );
 }
 
+function DirectChatTranscriptLanguageModal({
+  chat,
+  isLoading,
+  isOpen,
+  isSaving,
+  onChangeSearch,
+  onClose,
+  onSelectLanguage,
+  search,
+  transcriptLanguage
+}: {
+  chat: ChatItem | null;
+  isLoading: boolean;
+  isOpen: boolean;
+  isSaving: boolean;
+  onChangeSearch: (value: string) => void;
+  onClose: () => void;
+  onSelectLanguage: (languageCode: ChatTranscriptLanguageCode) => void;
+  search: string;
+  transcriptLanguage: ChatTranscriptLanguageSetting | null;
+}) {
+  const insets = useSafeAreaInsets();
+  const modalTopPadding = getFullScreenModalTopPadding(insets.top);
+
+  if (!chat || chat.chatType === 'GROUP') {
+    return null;
+  }
+
+  const selectedLanguage = transcriptLanguage || getDefaultChatTranscriptLanguage(chat.contactId);
+  const onDeviceLanguages = filterTranscriptLanguageOptions(
+    chatTranscriptLanguageOptions.filter((option) => option.status === 'onDevice'),
+    search
+  );
+  const availableLanguages = filterTranscriptLanguageOptions(
+    chatTranscriptLanguageOptions.filter((option) => option.status === 'available'),
+    search
+  );
+  const hasMatches = onDeviceLanguages.length > 0 || availableLanguages.length > 0;
+
+  return (
+    <Modal
+      allowSwipeDismissal={Platform.OS === 'ios'}
+      animationType="slide"
+      onRequestClose={onClose}
+      presentationStyle={getNativeFullHeightModalPresentationStyle()}
+      transparent={false}
+      visible={isOpen}
+    >
+      <View style={[styles.transcriptLanguageScreen, { paddingTop: modalTopPadding }]}>
+        <View style={styles.transcriptLanguageTopBar}>
+          <Pressable
+            accessibilityLabel="Back to contact info"
+            accessibilityRole="button"
+            onPress={onClose}
+            style={({ pressed }) => [styles.groupInfoTopButton, pressed && styles.pressed]}
+          >
+            <Feather color={colors.ink} name="x" size={22} />
+          </Pressable>
+          <Text numberOfLines={1} style={styles.transcriptLanguageTitle}>Chat transcript language</Text>
+          <View style={styles.groupInfoTopButtonSpacer} />
+        </View>
+
+        <View style={styles.transcriptLanguageSearchWrap}>
+          <ChatSearchBar
+            onChangeText={onChangeSearch}
+            placeholder="Search"
+            value={search}
+          />
+        </View>
+
+        <ScrollView
+          contentContainerStyle={styles.transcriptLanguageContent}
+          keyboardDismissMode={getKeyboardDismissMode()}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={styles.transcriptLanguageNote}>
+            <Text style={styles.transcriptLanguageNoteText}>
+              This language is for transcripts in this chat only. To change the language for all transcripts, go to Transcript language in Settings.
+            </Text>
+          </View>
+
+          <TranscriptLanguageSection
+            disabled={isSaving}
+            languages={onDeviceLanguages}
+            onSelectLanguage={onSelectLanguage}
+            selectedLanguageCode={selectedLanguage.languageCode}
+            title="On Device"
+          />
+
+          <TranscriptLanguageSection
+            disabled={isSaving}
+            languages={availableLanguages}
+            onSelectLanguage={onSelectLanguage}
+            selectedLanguageCode={selectedLanguage.languageCode}
+            title="Available to download"
+          />
+
+          {!hasMatches ? (
+            <Text style={styles.transcriptLanguageEmpty}>No languages found</Text>
+          ) : null}
+
+          {isLoading || isSaving ? (
+            <View style={styles.notificationSettingsLoadingRow}>
+              <ActivityIndicator color={colors.primary} />
+              <Text style={styles.notificationSettingsLoadingText}>
+                {isSaving ? 'Saving language...' : 'Loading language...'}
+              </Text>
+            </View>
+          ) : null}
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+}
+
+function TranscriptLanguageSection({
+  disabled,
+  languages,
+  onSelectLanguage,
+  selectedLanguageCode,
+  title
+}: {
+  disabled: boolean;
+  languages: TranscriptLanguageOption[];
+  onSelectLanguage: (languageCode: ChatTranscriptLanguageCode) => void;
+  selectedLanguageCode: ChatTranscriptLanguageCode;
+  title: string;
+}) {
+  if (!languages.length) {
+    return null;
+  }
+
+  return (
+    <View style={styles.transcriptLanguageSectionWrap}>
+      <Text style={styles.transcriptLanguageSectionTitle}>{title}</Text>
+      <View style={styles.transcriptLanguageSection}>
+        {languages.map((language) => (
+          <TranscriptLanguageRow
+            disabled={disabled}
+            isSelected={language.code === selectedLanguageCode}
+            key={language.code}
+            language={language}
+            onSelect={() => onSelectLanguage(language.code)}
+          />
+        ))}
+      </View>
+    </View>
+  );
+}
+
+function TranscriptLanguageRow({
+  disabled,
+  isSelected,
+  language,
+  onSelect
+}: {
+  disabled: boolean;
+  isSelected: boolean;
+  language: TranscriptLanguageOption;
+  onSelect: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityLabel={language.label}
+      accessibilityRole="button"
+      accessibilityState={{ selected: isSelected }}
+      disabled={disabled}
+      onPress={onSelect}
+      style={({ pressed }) => [
+        styles.transcriptLanguageRow,
+        pressed && styles.pressed,
+        disabled && styles.disabled
+      ]}
+    >
+      <Text numberOfLines={1} style={styles.transcriptLanguageRowText}>{language.label}</Text>
+      {isSelected ? (
+        <Feather color="#22C55E" name="check" size={20} />
+      ) : null}
+    </Pressable>
+  );
+}
+
 function ContactInfoModal({
   chat,
   commonGroups,
   isOpen,
   notificationSettings,
+  transcriptLanguage,
   onAddToGroup,
   onClose,
   onCreateGroup,
@@ -9823,6 +10177,7 @@ function ContactInfoModal({
   commonGroups: ChatContact[];
   isOpen: boolean;
   notificationSettings: ChatNotificationSettings | null;
+  transcriptLanguage: ChatTranscriptLanguageSetting | null;
   onAddToGroup: () => void;
   onClose: () => void;
   onCreateGroup: () => void;
@@ -9916,7 +10271,7 @@ function ContactInfoModal({
               icon="file-text"
               label="Transcript language"
               onPress={onOpenTranscriptLanguage}
-              value="English (United States)"
+              value={getChatTranscriptLanguageLabel(transcriptLanguage?.languageCode || 'en-US')}
             />
           </View>
 
@@ -13535,6 +13890,34 @@ function getChatNotificationAlertToneLabel(alertTone: ChatNotificationAlertTone)
   return chatNotificationAlertToneOptions.find((option) => option.value === alertTone)?.label || 'Default (Note)';
 }
 
+function getDefaultChatTranscriptLanguage(contactId: string): ChatTranscriptLanguageSetting {
+  return {
+    contactId,
+    languageCode: 'en-US',
+    updatedAt: null
+  };
+}
+
+function getChatTranscriptLanguageLabel(languageCode: ChatTranscriptLanguageCode): string {
+  return chatTranscriptLanguageOptions.find((option) => option.code === languageCode)?.label ||
+    'English (United States)';
+}
+
+function filterTranscriptLanguageOptions(
+  languages: TranscriptLanguageOption[],
+  search: string
+): TranscriptLanguageOption[] {
+  const query = normalizeSearchQuery(search);
+
+  if (!query) {
+    return languages;
+  }
+
+  return languages.filter((language) =>
+    normalizeSearchQuery(`${language.label} ${language.code}`).includes(query)
+  );
+}
+
 function getCommonGroupPreview(group: ChatContact, contactName: string): string {
   const memberNames = (group.members || [])
     .map((member) => member.displayName)
@@ -17014,6 +17397,90 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '400',
     lineHeight: 19
+  },
+  transcriptLanguageScreen: {
+    backgroundColor: '#F4F6F8',
+    flex: 1
+  },
+  transcriptLanguageTopBar: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    minHeight: 52,
+    paddingHorizontal: 16
+  },
+  transcriptLanguageTitle: {
+    color: colors.ink,
+    flex: 1,
+    fontSize: 17,
+    fontWeight: '700',
+    lineHeight: 22,
+    paddingHorizontal: 10,
+    textAlign: 'center'
+  },
+  transcriptLanguageSearchWrap: {
+    paddingHorizontal: 14,
+    paddingTop: 6
+  },
+  transcriptLanguageContent: {
+    paddingBottom: 28,
+    paddingHorizontal: 16,
+    paddingTop: 18
+  },
+  transcriptLanguageNote: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 8,
+    marginBottom: 18,
+    paddingHorizontal: 16,
+    paddingVertical: 14
+  },
+  transcriptLanguageNoteText: {
+    color: '#8B95A5',
+    fontSize: 13,
+    fontWeight: '500',
+    lineHeight: 18
+  },
+  transcriptLanguageSectionWrap: {
+    marginBottom: 18
+  },
+  transcriptLanguageSectionTitle: {
+    color: '#64748B',
+    fontSize: 17,
+    fontWeight: '700',
+    lineHeight: 22,
+    marginBottom: 8,
+    paddingHorizontal: 14
+  },
+  transcriptLanguageSection: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    overflow: 'hidden'
+  },
+  transcriptLanguageRow: {
+    alignItems: 'center',
+    borderBottomColor: '#E5E7EB',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 12,
+    minHeight: 48,
+    paddingHorizontal: 16,
+    paddingVertical: 10
+  },
+  transcriptLanguageRowText: {
+    color: colors.ink,
+    flex: 1,
+    fontSize: 16,
+    fontWeight: '500',
+    lineHeight: 21,
+    minWidth: 0
+  },
+  transcriptLanguageEmpty: {
+    color: '#64748B',
+    fontSize: 15,
+    fontWeight: '400',
+    lineHeight: 20,
+    paddingVertical: 18,
+    textAlign: 'center'
   },
   groupInfoHero: {
     alignItems: 'center',

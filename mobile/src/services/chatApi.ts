@@ -50,12 +50,42 @@ export type ChatDeliveryStatus = 'delivered' | 'queued' | 'read' | 'sent';
 export type ChatRealtimeErrorCode = 'SESSION_UNVERIFIED';
 export type ChatNotificationAlertTone = 'chime' | 'default' | 'pulse' | 'silent';
 export type ChatNotificationMuteMode = '1w' | '8h' | 'always' | 'off';
+export type ChatTranscriptLanguageCode =
+  | 'ar-SA'
+  | 'da-DK'
+  | 'de-DE'
+  | 'en-AU'
+  | 'en-CA'
+  | 'en-GB'
+  | 'en-IN'
+  | 'en-US'
+  | 'es-ES'
+  | 'es-MX'
+  | 'fr-CA'
+  | 'fr-FR'
+  | 'hi-IN'
+  | 'it-IT'
+  | 'ja-JP'
+  | 'ko-KR'
+  | 'nl-BE'
+  | 'nl-NL'
+  | 'pt-BR'
+  | 'yue-CN'
+  | 'zh-CN'
+  | 'zh-HK'
+  | 'zh-TW';
 
 export interface ChatNotificationSettings {
   alertTone: ChatNotificationAlertTone;
   contactId: string;
   muteMode: ChatNotificationMuteMode;
   mutedUntil: string | null;
+  updatedAt: string | null;
+}
+
+export interface ChatTranscriptLanguageSetting {
+  contactId: string;
+  languageCode: ChatTranscriptLanguageCode;
   updatedAt: string | null;
 }
 
@@ -295,6 +325,61 @@ export async function updateChatNotificationSettings(input: {
   const body = await response.json() as { settings?: ChatNotificationSettings };
 
   return normalizeChatNotificationSettings(body.settings, input.contactId);
+}
+
+export async function getChatTranscriptLanguage(input: {
+  contactId: string;
+  idToken: string;
+}): Promise<ChatTranscriptLanguageSetting> {
+  const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
+  const response = await fetch(
+    `${getSynzappApiBaseUrl()}/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/transcript-language`,
+    {
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${input.idToken}`,
+        ...deviceHeaders
+      },
+      method: 'GET'
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  const body = await response.json() as { transcriptLanguage?: ChatTranscriptLanguageSetting };
+
+  return normalizeChatTranscriptLanguage(body.transcriptLanguage, input.contactId);
+}
+
+export async function updateChatTranscriptLanguage(input: {
+  contactId: string;
+  idToken: string;
+  languageCode: ChatTranscriptLanguageCode;
+}): Promise<ChatTranscriptLanguageSetting> {
+  const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
+  const response = await fetch(
+    `${getSynzappApiBaseUrl()}/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/transcript-language`,
+    {
+      body: JSON.stringify({ languageCode: input.languageCode }),
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${input.idToken}`,
+        'Content-Type': 'application/json',
+        ...deviceHeaders
+      },
+      method: 'PUT'
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  const body = await response.json() as { transcriptLanguage?: ChatTranscriptLanguageSetting };
+
+  return normalizeChatTranscriptLanguage(body.transcriptLanguage, input.contactId);
 }
 
 export async function getChatMessages(input: {
@@ -789,6 +874,51 @@ function isChatNotificationAlertTone(value: unknown): value is ChatNotificationA
 
 function isChatNotificationMuteMode(value: unknown): value is ChatNotificationMuteMode {
   return value === '1w' || value === '8h' || value === 'always' || value === 'off';
+}
+
+function normalizeChatTranscriptLanguage(
+  transcriptLanguage: ChatTranscriptLanguageSetting | undefined,
+  contactId: string
+): ChatTranscriptLanguageSetting {
+  return {
+    contactId: typeof transcriptLanguage?.contactId === 'string' && transcriptLanguage.contactId.trim()
+      ? transcriptLanguage.contactId.trim()
+      : contactId,
+    languageCode: isChatTranscriptLanguageCode(transcriptLanguage?.languageCode)
+      ? transcriptLanguage.languageCode
+      : 'en-US',
+    updatedAt: typeof transcriptLanguage?.updatedAt === 'string' && transcriptLanguage.updatedAt.trim()
+      ? transcriptLanguage.updatedAt.trim()
+      : null
+  };
+}
+
+function isChatTranscriptLanguageCode(value: unknown): value is ChatTranscriptLanguageCode {
+  return (
+    value === 'ar-SA' ||
+    value === 'da-DK' ||
+    value === 'de-DE' ||
+    value === 'en-AU' ||
+    value === 'en-CA' ||
+    value === 'en-GB' ||
+    value === 'en-IN' ||
+    value === 'en-US' ||
+    value === 'es-ES' ||
+    value === 'es-MX' ||
+    value === 'fr-CA' ||
+    value === 'fr-FR' ||
+    value === 'hi-IN' ||
+    value === 'it-IT' ||
+    value === 'ja-JP' ||
+    value === 'ko-KR' ||
+    value === 'nl-BE' ||
+    value === 'nl-NL' ||
+    value === 'pt-BR' ||
+    value === 'yue-CN' ||
+    value === 'zh-CN' ||
+    value === 'zh-HK' ||
+    value === 'zh-TW'
+  );
 }
 
 function normalizeChatGroupMember(member: ChatGroupMember): ChatGroupMember {

@@ -62,6 +62,11 @@ import {
   sendGroupChatMessagePushNotifications,
   updateChatNotificationSettings
 } from '../services/notificationService.js';
+import {
+  getChatTranscriptLanguage,
+  updateChatTranscriptLanguage,
+  type ChatTranscriptLanguageCode
+} from '../services/chatTranscriptLanguageService.js';
 import { writeAuditEvent } from '../services/auditService.js';
 
 const profileRouter = Router();
@@ -167,6 +172,36 @@ const chatMessageReactionBodySchema = z.object({
 const chatNotificationSettingsBodySchema = z.object({
   alertTone: z.enum(['chime', 'default', 'pulse', 'silent']),
   muteMode: z.enum(['1w', '8h', 'always', 'off'])
+});
+
+const chatTranscriptLanguageCodeSchema = z.enum([
+  'ar-SA',
+  'da-DK',
+  'de-DE',
+  'en-AU',
+  'en-CA',
+  'en-GB',
+  'en-IN',
+  'en-US',
+  'es-ES',
+  'es-MX',
+  'fr-CA',
+  'fr-FR',
+  'hi-IN',
+  'it-IT',
+  'ja-JP',
+  'ko-KR',
+  'nl-BE',
+  'nl-NL',
+  'pt-BR',
+  'yue-CN',
+  'zh-CN',
+  'zh-HK',
+  'zh-TW'
+]);
+
+const chatTranscriptLanguageBodySchema = z.object({
+  languageCode: chatTranscriptLanguageCodeSchema
 });
 
 const encryptedChatBackupBodySchema = z.object({
@@ -785,6 +820,65 @@ profileRouter.put('/chat/conversations/:contactId/notification-settings', verify
     await writeAuditEvent({
       action: 'DIRECT_CHAT_NOTIFICATION_SETTINGS_UPDATED',
       reason: error instanceof Error ? error.message : 'Notification settings update failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
+profileRouter.get('/chat/conversations/:contactId/transcript-language', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    const contactId = Array.isArray(req.params.contactId)
+      ? req.params.contactId[0] || ''
+      : req.params.contactId || '';
+
+    await getDirectChatContact(decodedToken, contactId);
+    const transcriptLanguage = await getChatTranscriptLanguage(activeDevice.tenantId, decodedToken.uid, contactId);
+
+    res.json({ transcriptLanguage });
+  } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.put('/chat/conversations/:contactId/transcript-language', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    const contactId = Array.isArray(req.params.contactId)
+      ? req.params.contactId[0] || ''
+      : req.params.contactId || '';
+    const body = chatTranscriptLanguageBodySchema.parse(req.body);
+
+    await getDirectChatContact(decodedToken, contactId);
+    const transcriptLanguage = await updateChatTranscriptLanguage(
+      activeDevice.tenantId,
+      decodedToken.uid,
+      contactId,
+      body.languageCode as ChatTranscriptLanguageCode
+    );
+
+    await writeAuditEvent({
+      action: 'DIRECT_CHAT_TRANSCRIPT_LANGUAGE_UPDATED',
+      metadata: {
+        contactId,
+        languageCode: transcriptLanguage.languageCode
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: activeDevice.tenantId,
+      uid: decodedToken.uid
+    });
+
+    res.json({ transcriptLanguage });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'DIRECT_CHAT_TRANSCRIPT_LANGUAGE_UPDATED',
+      reason: error instanceof Error ? error.message : 'Transcript language update failed',
       req,
       status: 'FAILED'
     }).catch(() => undefined);
