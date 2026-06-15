@@ -34,6 +34,7 @@ import {
 import {
   addGroupChatMember,
   createGroupChat,
+  exitGroupChat,
   getGroupChatContact,
   getGroupChatMemberProfilePhoto,
   getGroupChatMessageReactions,
@@ -458,6 +459,42 @@ profileRouter.post('/chat/groups/:groupId/members', verifyAppCheck, async (req, 
       action: 'GROUP_CHAT_MEMBER_ADDED',
       metadata: { groupId },
       reason: error instanceof Error ? error.message : 'Group member add failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
+profileRouter.delete('/chat/groups/:groupId/members/me', verifyAppCheck, async (req, res, next) => {
+  const groupId = Array.isArray(req.params.groupId)
+    ? req.params.groupId[0] || ''
+    : req.params.groupId || '';
+
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const result = await exitGroupChat(decodedToken, groupId);
+
+    await writeAuditEvent({
+      action: 'GROUP_CHAT_EXITED',
+      metadata: {
+        exited: result.exited,
+        groupId: result.groupId
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: result.tenantId,
+      uid: decodedToken.uid
+    });
+
+    res.json(result);
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'GROUP_CHAT_EXITED',
+      metadata: { groupId },
+      reason: error instanceof Error ? error.message : 'Group exit failed',
       req,
       status: 'FAILED'
     }).catch(() => undefined);

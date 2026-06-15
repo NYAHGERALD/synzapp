@@ -96,6 +96,7 @@ import {
   decryptRealtimeEncryptedEnvelopes,
   deleteChatMessageForMe,
   DirectChatContactDetails,
+  exitGroupChat,
   getChatNotificationSettings,
   getDirectChatContactDetails,
   getChatMessages,
@@ -384,6 +385,19 @@ type EmployeeAction = EmployeeLifecycleAction | 'ASSIGN_DEPT_ADMIN' | 'REMOVE_DE
 
 type MessageListModalMode = 'search' | 'starred';
 
+interface ChatSearchMatch {
+  messageId: string;
+  preview: string;
+  senderUid: string;
+  sentAt: string;
+}
+
+interface ChatSearchDateOption {
+  count: number;
+  dateKey: string;
+  label: string;
+}
+
 interface EmployeeActionOption {
   action: EmployeeAction;
   confirmButton: string;
@@ -545,6 +559,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [forwardRecipientIds, setForwardRecipientIds] = useState<Record<string, boolean>>({});
   const [isForwardRecipientModalOpen, setIsForwardRecipientModalOpen] = useState(false);
   const [isForwardingMessages, setIsForwardingMessages] = useState(false);
+  const [isConversationSearchOpen, setIsConversationSearchOpen] = useState(false);
   const [messageListModalMode, setMessageListModalMode] = useState<MessageListModalMode | null>(null);
   const [messageListSearch, setMessageListSearch] = useState('');
   const [nativeOptionPicker, setNativeOptionPicker] = useState<NativeOptionPickerState | null>(null);
@@ -565,6 +580,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [isLoadingAddToGroups, setIsLoadingAddToGroups] = useState(false);
   const [isSavingAddToGroups, setIsSavingAddToGroups] = useState(false);
   const [isSavingGroupAddMembers, setIsSavingGroupAddMembers] = useState(false);
+  const [isExitingGroupChat, setIsExitingGroupChat] = useState(false);
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [isLoadingBatchContacts, setIsLoadingBatchContacts] = useState(false);
   const [isPickingInviteContact, setIsPickingInviteContact] = useState(false);
@@ -1868,6 +1884,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsChatTranscriptLanguageOpen(false);
     setIsDirectContactDetailsOpen(false);
     setIsAddToGroupModalOpen(false);
+    setIsConversationSearchOpen(false);
     setChatContacts((currentContacts) => currentContacts.map((contact) =>
       contact.contactId === chat.contactId
         ? { ...contact, unreadCount: 0 }
@@ -1986,6 +2003,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsChatTranscriptLanguageOpen(false);
     setIsDirectContactDetailsOpen(false);
     setIsAddToGroupModalOpen(false);
+    setIsConversationSearchOpen(false);
     setIsGroupInfoModalOpen(true);
   }
 
@@ -2010,6 +2028,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsChatTranscriptLanguageOpen(false);
     setIsDirectContactDetailsOpen(false);
     setIsAddToGroupModalOpen(false);
+    setIsConversationSearchOpen(false);
     void loadDirectContactDetails(chat, false);
     setIsContactInfoModalOpen(true);
   }
@@ -2735,6 +2754,93 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           setIsGroupInfoModalOpen(true);
         }
       }, Platform.OS === 'ios' ? 260 : 120);
+    }
+  }
+
+  function handleOpenConversationSearch() {
+    const chat = selectedChatRef.current;
+
+    if (!chat) {
+      return;
+    }
+
+    setIsContactInfoModalOpen(false);
+    setIsGroupInfoModalOpen(false);
+    setIsGroupCallOptionsOpen(false);
+    setIsGroupCallPeopleModalOpen(false);
+    setIsGroupAddMembersModalOpen(false);
+    setIsGroupMembersModalOpen(false);
+    setMessageListModalMode(null);
+    setMessageListSearch('');
+    setIsConversationSearchOpen(true);
+  }
+
+  function handleCloseConversationSearch() {
+    setIsConversationSearchOpen(false);
+  }
+
+  function handleExitGroupChat() {
+    const chat = selectedChatRef.current;
+
+    if (!chat || chat.chatType !== 'GROUP' || !canExitGroupChat(chat) || isExitingGroupChat) {
+      return;
+    }
+
+    Alert.alert(
+      `Exit group "${chat.title}"?`,
+      'You will stop receiving messages from this group. The encrypted group history remains available to the other members.',
+      [
+        {
+          style: 'cancel',
+          text: 'Cancel'
+        },
+        {
+          onPress: () => {
+            void confirmExitGroupChat(chat);
+          },
+          style: 'destructive',
+          text: 'Exit group'
+        }
+      ]
+    );
+  }
+
+  async function confirmExitGroupChat(chat: ChatItem) {
+    if (isExitingGroupChat || chat.chatType !== 'GROUP') {
+      return;
+    }
+
+    setIsExitingGroupChat(true);
+    setError(null);
+
+    try {
+      const idToken = await getIdToken();
+      await exitGroupChat({
+        groupId: chat.contactId,
+        idToken
+      });
+
+      setChatContacts((currentContacts) =>
+        currentContacts.filter((contact) => contact.contactId !== chat.contactId)
+      );
+      setGroups((currentGroups) => currentGroups.filter((group) => group.groupId !== chat.contactId));
+      setIsGroupInfoModalOpen(false);
+      setIsConversationSearchOpen(false);
+
+      if (selectedChatRef.current?.contactId === chat.contactId) {
+        selectedChatRef.current = null;
+        setSelectedChat(null);
+        setMessages([]);
+        setMessageDraft('');
+        setReplyTarget(null);
+      }
+
+      void loadChatContacts(false);
+      void loadGroupSettings(false);
+    } catch (nextError) {
+      setError(getErrorMessage(nextError, 'Unable to exit this group.'));
+    } finally {
+      setIsExitingGroupChat(false);
     }
   }
 
@@ -4407,6 +4513,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsGroupMembersModalOpen(false);
     setIsGroupInfoModalOpen(false);
     setIsGroupSwitcherModalOpen(false);
+    setIsConversationSearchOpen(false);
     setGroupCallPeopleSearch('');
     setGroupAddMembersSearch('');
     setGroupMembersSearch('');
@@ -4446,6 +4553,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsGroupMembersModalOpen(false);
     setIsGroupInfoModalOpen(false);
     setIsGroupSwitcherModalOpen(false);
+    setIsConversationSearchOpen(false);
     setGroupCallPeopleSearch('');
     setGroupAddMembersSearch('');
     setGroupMembersSearch('');
@@ -5683,7 +5791,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           selectedCount={selectedForwardMessageCount}
           title={selectedChat.title}
         />
-      ) : selectedChat ? (
+      ) : selectedChat && !isConversationSearchOpen ? (
         <MessageHeader
           chat={selectedChat}
           onlineCount={activeGroupOnlineCount}
@@ -5780,6 +5888,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           isCompactAndroid={isCompactAndroid}
           isForwardMode={isForwardMode}
           isLoading={isLoadingMessages}
+          isSearchOpen={isConversationSearchOpen}
           isSending={isSendingMessage}
           messageReactions={messageReactions}
           messages={messages}
@@ -5787,6 +5896,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           onCancelReply={() => setReplyTarget(null)}
           onDraftChange={setMessageDraft}
           onMessageLongPress={handleOpenMessageActions}
+          onCloseSearch={handleCloseConversationSearch}
           onOpenMedia={handleOpenMessageAttachment}
           onPrepareAttachment={handlePrepareAttachment}
           onMessageReply={handleReplyToMessage}
@@ -6236,7 +6346,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         onOpenContactDetails={handleOpenDirectContactDetails}
         onOpenGroup={handleOpenCommonGroupFromContactInfo}
         onOpenNotifications={handleOpenChatNotificationSettings}
-        onOpenSearch={() => handleContactInfoUnavailableAction('Search')}
+        onOpenSearch={handleOpenConversationSearch}
         onOpenTranscriptLanguage={handleOpenChatTranscriptLanguage}
         onStartVideoCall={() => handleContactInfoUnavailableAction('Video call')}
         onStartVoiceCall={() => handleContactInfoUnavailableAction('Audio call')}
@@ -6310,12 +6420,12 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         isOpen={isGroupInfoModalOpen}
         notificationSettings={activeChatNotificationSettings}
         onClose={handleCloseGroupInfo}
-        onExitGroup={() => handleGroupInfoUnavailableAction('Exit group')}
+        onExitGroup={handleExitGroupChat}
         onOpenAddMembers={handleOpenGroupAddMembersModal}
         onOpenGroupSwitcher={handleOpenGroupSwitcher}
         onOpenMembers={handleOpenGroupMembersModal}
         onOpenNotifications={handleOpenChatNotificationSettings}
-        onOpenSearchMessages={() => handleOpenGroupMessageList('search')}
+        onOpenSearchMessages={handleOpenConversationSearch}
         onOpenStarred={() => handleOpenGroupMessageList('starred')}
         onStartVideoCall={() => handleOpenGroupCallPeopleModal('video')}
         onStartVoiceCall={() => handleOpenGroupCallPeopleModal('voice')}
@@ -7598,10 +7708,12 @@ function MessageThread({
   isCompactAndroid,
   isForwardMode,
   isLoading,
+  isSearchOpen,
   isSending,
   messageReactions,
   messages,
   onCancelReply,
+  onCloseSearch,
   onDraftChange,
   onMessageLongPress,
   onOpenMedia,
@@ -7628,10 +7740,12 @@ function MessageThread({
   isCompactAndroid: boolean;
   isForwardMode: boolean;
   isLoading: boolean;
+  isSearchOpen: boolean;
   isSending: boolean;
   messageReactions: ChatMessageReactionMap;
   messages: ChatMessage[];
   onCancelReply: () => void;
+  onCloseSearch: () => void;
   onDraftChange: (value: string) => void;
   onMessageLongPress: (message: ChatMessage) => void;
   onOpenMedia: (message: ChatMessage, activeIndex: number) => void;
@@ -7657,11 +7771,32 @@ function MessageThread({
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const [scrollToLatestUnreadCount, setScrollToLatestUnreadCount] = useState(0);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchSenderUid, setSearchSenderUid] = useState<string | null>(null);
+  const [searchDateKey, setSearchDateKey] = useState<string | null>(null);
+  const [activeSearchMatchIndex, setActiveSearchMatchIndex] = useState(0);
+  const [isSearchDateModalOpen, setIsSearchDateModalOpen] = useState(false);
+  const [isSearchPersonModalOpen, setIsSearchPersonModalOpen] = useState(false);
   const [activeAudioPlaybackId, setActiveAudioPlaybackId] = useState<string | null>(null);
   const canSend = canChat && draft.trim().length > 0 && !isSending && !isVoiceRecording;
   const threadItems = buildMessageThreadItems(uniqueChatMessages(messages));
   const groupMemberByUid = useMemo(() => new Map(groupMembers.map((member) => [member.uid, member])), [groupMembers]);
+  const searchMatches = useMemo(() => getChatSearchMatches({
+    dateKey: searchDateKey,
+    messages,
+    query: searchQuery,
+    senderUid: isGroupChat ? searchSenderUid : null
+  }), [isGroupChat, messages, searchDateKey, searchQuery, searchSenderUid]);
+  const safeSearchMatchIndex = searchMatches.length
+    ? Math.min(activeSearchMatchIndex, searchMatches.length - 1)
+    : -1;
+  const activeSearchMatch = safeSearchMatchIndex >= 0 ? searchMatches[safeSearchMatchIndex] : null;
+  const hasSearchFilters = Boolean(searchQuery.trim() || searchDateKey || (isGroupChat && searchSenderUid));
+  const searchSenderLabel = searchSenderUid
+    ? getChatSearchSenderLabel(searchSenderUid, currentUid, groupMemberByUid)
+    : 'Person';
   const inputRef = useRef<TextInput | null>(null);
+  const searchInputRef = useRef<TextInput | null>(null);
   const activeVoiceRecordingUriRef = useRef<string | null>(null);
   const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isAtLatestRef = useRef(true);
@@ -7711,10 +7846,23 @@ function MessageThread({
     messageOffsetsRef.current[messageId] = y;
   }
 
-  function handleReplyPreviewPress(messageId: string) {
+  function scrollToMessage(messageId: string, animated = true) {
     const targetY = messageOffsetsRef.current[messageId];
 
     if (typeof targetY !== 'number') {
+      return false;
+    }
+
+    scrollViewRef.current?.scrollTo({
+      animated,
+      y: Math.max(targetY - (isSearchOpen ? 84 : 18), 0)
+    });
+
+    return true;
+  }
+
+  function handleReplyPreviewPress(messageId: string) {
+    if (typeof messageOffsetsRef.current[messageId] !== 'number') {
       return;
     }
 
@@ -7729,10 +7877,7 @@ function MessageThread({
 
     lastReplyJumpRef.current = { messageId, timestamp: now };
 
-    scrollViewRef.current?.scrollTo({
-      animated: true,
-      y: Math.max(targetY - 18, 0)
-    });
+    scrollToMessage(messageId, true);
     setHighlightedMessageId(messageId);
 
     if (highlightTimerRef.current) {
@@ -7743,6 +7888,64 @@ function MessageThread({
       setHighlightedMessageId(null);
       highlightTimerRef.current = null;
     }, 1500);
+  }
+
+  function handleCloseThreadSearch() {
+    setSearchQuery('');
+    setSearchSenderUid(null);
+    setSearchDateKey(null);
+    setActiveSearchMatchIndex(0);
+    setHighlightedMessageId(null);
+    setIsSearchDateModalOpen(false);
+    setIsSearchPersonModalOpen(false);
+    Keyboard.dismiss();
+    onCloseSearch();
+  }
+
+  function handleSearchNavigation(direction: 'next' | 'previous') {
+    if (!searchMatches.length) {
+      return;
+    }
+
+    setActiveSearchMatchIndex((currentIndex) => {
+      if (direction === 'next') {
+        return currentIndex >= searchMatches.length - 1 ? 0 : currentIndex + 1;
+      }
+
+      return currentIndex <= 0 ? searchMatches.length - 1 : currentIndex - 1;
+    });
+  }
+
+  function handleSearchQueryChange(value: string) {
+    setSearchQuery(value);
+    setActiveSearchMatchIndex(0);
+  }
+
+  function handleSelectSearchDate(dateKey: string | null, targetMessageId?: string, shouldClose = true) {
+    setSearchDateKey(dateKey);
+
+    if (shouldClose) {
+      setIsSearchDateModalOpen(false);
+    }
+
+    if (targetMessageId) {
+      const nextIndex = getChatSearchMatches({
+        dateKey,
+        messages,
+        query: searchQuery,
+        senderUid: isGroupChat ? searchSenderUid : null
+      }).findIndex((match) => match.messageId === targetMessageId);
+
+      setActiveSearchMatchIndex(nextIndex >= 0 ? nextIndex : 0);
+    } else {
+      setActiveSearchMatchIndex(0);
+    }
+  }
+
+  function handleSelectSearchPerson(senderUid: string | null) {
+    setSearchSenderUid(senderUid);
+    setIsSearchPersonModalOpen(false);
+    setActiveSearchMatchIndex(0);
   }
 
   async function handleStartVoiceRecording() {
@@ -7883,6 +8086,44 @@ function MessageThread({
   }, []);
 
   useEffect(() => {
+    if (!isSearchOpen) {
+      setSearchQuery('');
+      setSearchSenderUid(null);
+      setSearchDateKey(null);
+      setActiveSearchMatchIndex(0);
+      setIsSearchDateModalOpen(false);
+      setIsSearchPersonModalOpen(false);
+      return;
+    }
+
+    setTimeout(() => searchInputRef.current?.focus(), 140);
+  }, [isSearchOpen]);
+
+  useEffect(() => {
+    if (!isSearchOpen || activeSearchMatchIndex < searchMatches.length) {
+      return;
+    }
+
+    setActiveSearchMatchIndex(Math.max(searchMatches.length - 1, 0));
+  }, [activeSearchMatchIndex, isSearchOpen, searchMatches.length]);
+
+  useEffect(() => {
+    if (!isSearchOpen) {
+      return;
+    }
+
+    if (!activeSearchMatch) {
+      setHighlightedMessageId(null);
+      return;
+    }
+
+    setHighlightedMessageId(activeSearchMatch.messageId);
+    setTimeout(() => {
+      scrollToMessage(activeSearchMatch.messageId, true);
+    }, 80);
+  }, [activeSearchMatch?.messageId, isSearchOpen]);
+
+  useEffect(() => {
     if (recorder.uri || recorderState.url) {
       activeVoiceRecordingUriRef.current = recorder.uri || recorderState.url;
     }
@@ -7897,6 +8138,10 @@ function MessageThread({
   }, [recorder]);
 
   useEffect(() => {
+    if (isSearchOpen) {
+      return;
+    }
+
     if (!messages.length) {
       previousMessageCountRef.current = 0;
       setScrollToLatestUnreadCount(0);
@@ -7923,20 +8168,20 @@ function MessageThread({
     setTimeout(() => {
       scrollToLatest(previousMessageCount > 0);
     }, 50);
-  }, [messages.length]);
+  }, [isSearchOpen, messages.length]);
 
   useEffect(() => {
-    if (!isKeyboardVisible) {
+    if (!isKeyboardVisible || isSearchOpen) {
       return;
     }
 
     setTimeout(() => {
       scrollToLatest(true);
     }, 80);
-  }, [isKeyboardVisible]);
+  }, [isKeyboardVisible, isSearchOpen]);
 
   useEffect(() => {
-    if (!replyTarget || !canChat) {
+    if (!replyTarget || !canChat || isSearchOpen) {
       return;
     }
 
@@ -7944,7 +8189,7 @@ function MessageThread({
       inputRef.current?.focus();
       scrollToLatest(true);
     }, 90);
-  }, [canChat, replyTarget?.messageId]);
+  }, [canChat, isSearchOpen, replyTarget?.messageId]);
 
   useEffect(() => {
     if (draft.length === 0) {
@@ -7960,12 +8205,30 @@ function MessageThread({
 
   return (
     <View style={styles.messageScreen}>
+      {isSearchOpen ? (
+        <ChatThreadSearchHeader
+          inputRef={searchInputRef}
+          matchCount={searchMatches.length}
+          onChangeQuery={handleSearchQueryChange}
+          onClearQuery={() => setSearchQuery('')}
+          onClose={handleCloseThreadSearch}
+          query={searchQuery}
+        />
+      ) : null}
+
       <ScrollView
-        contentContainerStyle={styles.messageListContent}
+        contentContainerStyle={[
+          styles.messageListContent,
+          isSearchOpen && styles.messageListContentSearching
+        ]}
         keyboardDismissMode={getKeyboardDismissMode()}
         keyboardShouldPersistTaps="always"
         onContentSizeChange={() => {
-          if (isAtLatestRef.current) {
+          if (isSearchOpen) {
+            if (activeSearchMatch) {
+              setTimeout(() => scrollToMessage(activeSearchMatch.messageId, false), 20);
+            }
+          } else if (isAtLatestRef.current) {
             setTimeout(() => scrollToLatest(false), 20);
           } else {
             setShowScrollToLatest(true);
@@ -8022,6 +8285,7 @@ function MessageThread({
               }}
               profilePhotoHeaders={profilePhotoHeaders}
               reactions={messageReactions[item.message.messageId] || item.message.reactions || []}
+              searchQuery={isSearchOpen ? searchQuery : ''}
               senderMember={isGroupChat ? groupMemberByUid.get(item.message.senderUid) || null : null}
               starred={Boolean(starredMessageIds[item.message.messageId])}
             />
@@ -8029,7 +8293,7 @@ function MessageThread({
         ))}
       </ScrollView>
 
-      {showScrollToLatest && !isForwardMode ? (
+      {showScrollToLatest && !isForwardMode && !isSearchOpen ? (
         <Pressable
           accessibilityLabel="Scroll to latest message"
           accessibilityRole="button"
@@ -8051,7 +8315,93 @@ function MessageThread({
         </Pressable>
       ) : null}
 
-      {!isForwardMode ? (
+      {isSearchOpen ? (
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          keyboardVerticalOffset={0}
+          pointerEvents="box-none"
+          style={styles.chatSearchFooterWrap}
+        >
+          <View style={styles.chatSearchFooter}>
+            <View style={styles.chatSearchNavigationPill}>
+              <Pressable
+                accessibilityLabel="Previous search result"
+                accessibilityRole="button"
+                disabled={!searchMatches.length}
+                onPress={() => handleSearchNavigation('previous')}
+                style={({ pressed }) => [
+                  styles.chatSearchNavButton,
+                  pressed && searchMatches.length > 0 && styles.pressed,
+                  !searchMatches.length && styles.disabled
+                ]}
+              >
+                <Feather color={colors.ink} name="chevron-up" size={22} />
+              </Pressable>
+              <View style={styles.chatSearchNavDivider} />
+              <Pressable
+                accessibilityLabel="Next search result"
+                accessibilityRole="button"
+                disabled={!searchMatches.length}
+                onPress={() => handleSearchNavigation('next')}
+                style={({ pressed }) => [
+                  styles.chatSearchNavButton,
+                  pressed && searchMatches.length > 0 && styles.pressed,
+                  !searchMatches.length && styles.disabled
+                ]}
+              >
+                <Feather color={colors.ink} name="chevron-down" size={22} />
+              </Pressable>
+            </View>
+
+            <Text numberOfLines={1} style={styles.chatSearchResultText}>
+              {getChatSearchResultLabel({
+                hasFilters: hasSearchFilters,
+                matchCount: searchMatches.length,
+                matchIndex: safeSearchMatchIndex
+              })}
+            </Text>
+
+            {isGroupChat ? (
+              <Pressable
+                accessibilityLabel="Filter search by person"
+                accessibilityRole="button"
+                onPress={() => setIsSearchPersonModalOpen(true)}
+                style={({ pressed }) => [
+                  styles.chatSearchFilterButton,
+                  searchSenderUid && styles.chatSearchFilterButtonActive,
+                  pressed && styles.pressed
+                ]}
+              >
+                <Feather color={searchSenderUid ? '#FFFFFF' : colors.primary} name="user" size={18} />
+                <Text
+                  numberOfLines={1}
+                  style={[
+                    styles.chatSearchFilterText,
+                    searchSenderUid && styles.chatSearchFilterTextActive
+                  ]}
+                >
+                  {searchSenderLabel}
+                </Text>
+              </Pressable>
+            ) : null}
+
+            <Pressable
+              accessibilityLabel="Search by date or time"
+              accessibilityRole="button"
+              onPress={() => setIsSearchDateModalOpen(true)}
+              style={({ pressed }) => [
+                styles.chatSearchDateButton,
+                searchDateKey && styles.chatSearchDateButtonActive,
+                pressed && styles.pressed
+              ]}
+            >
+              <Feather color={searchDateKey ? '#FFFFFF' : colors.primary} name="calendar" size={20} />
+            </Pressable>
+          </View>
+        </KeyboardAvoidingView>
+      ) : null}
+
+      {!isForwardMode && !isSearchOpen ? (
       <View style={[styles.messageComposer, { paddingBottom: composerBottomPadding }]}>
         <View style={styles.messageComposerMain}>
           {replyTarget ? (
@@ -8187,7 +8537,316 @@ function MessageThread({
         </Pressable>
       </View>
       ) : null}
+
+      <ChatSearchDateModal
+        currentDateKey={searchDateKey}
+        currentUid={currentUid}
+        groupMemberByUid={groupMemberByUid}
+        isOpen={isSearchDateModalOpen}
+        messages={messages}
+        onClose={() => setIsSearchDateModalOpen(false)}
+        onSelectDate={handleSelectSearchDate}
+      />
+
+      <ChatSearchPersonModal
+        currentUid={currentUid}
+        groupMembers={groupMembers}
+        isOpen={isSearchPersonModalOpen}
+        onClose={() => setIsSearchPersonModalOpen(false)}
+        onSelectPerson={handleSelectSearchPerson}
+        profilePhotoHeaders={profilePhotoHeaders}
+        selectedSenderUid={searchSenderUid}
+      />
     </View>
+  );
+}
+
+function ChatThreadSearchHeader({
+  inputRef,
+  matchCount,
+  onChangeQuery,
+  onClearQuery,
+  onClose,
+  query
+}: {
+  inputRef: React.RefObject<TextInput | null>;
+  matchCount: number;
+  onChangeQuery: (value: string) => void;
+  onClearQuery: () => void;
+  onClose: () => void;
+  query: string;
+}) {
+  return (
+    <View style={styles.chatSearchHeader}>
+      <View style={styles.threadSearchBox}>
+        <Feather color="#64748B" name="search" size={18} />
+        <TextInput
+          autoCapitalize="none"
+          autoCorrect={false}
+          onChangeText={onChangeQuery}
+          placeholder="Search"
+          placeholderTextColor="#8B95A5"
+          ref={inputRef}
+          returnKeyType="search"
+          style={styles.threadSearchInput}
+          value={query}
+        />
+        {query.trim() ? (
+          <Pressable
+            accessibilityLabel="Clear search"
+            accessibilityRole="button"
+            onPress={onClearQuery}
+            style={({ pressed }) => [styles.chatSearchClearButton, pressed && styles.pressed]}
+          >
+            <Feather color="#FFFFFF" name="x" size={12} />
+          </Pressable>
+        ) : null}
+      </View>
+      {query.trim() && matchCount > 0 ? (
+        <Text numberOfLines={1} style={styles.chatSearchHeaderCount}>{matchCount}</Text>
+      ) : null}
+      <Pressable
+        accessibilityLabel="Close search"
+        accessibilityRole="button"
+        onPress={onClose}
+        style={({ pressed }) => [styles.chatSearchCloseButton, pressed && styles.pressed]}
+      >
+        <Feather color={colors.ink} name="x" size={24} />
+      </Pressable>
+    </View>
+  );
+}
+
+function ChatSearchDateModal({
+  currentDateKey,
+  currentUid,
+  groupMemberByUid,
+  isOpen,
+  messages,
+  onClose,
+  onSelectDate
+}: {
+  currentDateKey: string | null;
+  currentUid: string;
+  groupMemberByUid: Map<string, ChatGroupMember>;
+  isOpen: boolean;
+  messages: ChatMessage[];
+  onClose: () => void;
+  onSelectDate: (dateKey: string | null, targetMessageId?: string, shouldClose?: boolean) => void;
+}) {
+  const dateOptions = getChatSearchDateOptions(messages);
+  const activeDateKey = currentDateKey || dateOptions.at(-1)?.dateKey || null;
+  const visibleMessages = activeDateKey
+    ? getChatSearchMessagesForDate(messages, activeDateKey)
+    : [];
+
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <Modal
+      animationType="slide"
+      onRequestClose={onClose}
+      transparent
+      visible
+    >
+      <View style={styles.chatSearchModalRoot}>
+        <Pressable
+          accessibilityLabel="Close date search"
+          accessibilityRole="button"
+          onPress={onClose}
+          style={styles.chatSearchModalBackdrop}
+        />
+        <View style={styles.chatSearchModalSheet}>
+          <View style={styles.chatSearchModalHandle} />
+          <View style={styles.chatSearchModalHeader}>
+            <Text style={styles.chatSearchModalTitle}>Search by date and time</Text>
+            <Pressable
+              accessibilityLabel="Close date search"
+              accessibilityRole="button"
+              onPress={onClose}
+              style={({ pressed }) => [styles.chatSearchModalCloseButton, pressed && styles.pressed]}
+            >
+              <Feather color={colors.ink} name="x" size={22} />
+            </Pressable>
+          </View>
+
+          <ScrollView
+            contentContainerStyle={styles.chatSearchDateChips}
+            horizontal
+            keyboardShouldPersistTaps="handled"
+            showsHorizontalScrollIndicator={false}
+          >
+            {dateOptions.map((option) => (
+              <Pressable
+                accessibilityRole="button"
+                key={option.dateKey}
+                onPress={() => onSelectDate(option.dateKey, undefined, false)}
+                style={({ pressed }) => [
+                  styles.chatSearchDateChip,
+                  option.dateKey === activeDateKey && styles.chatSearchDateChipActive,
+                  pressed && styles.pressed
+                ]}
+              >
+                <Text
+                  numberOfLines={1}
+                  style={[
+                    styles.chatSearchDateChipText,
+                    option.dateKey === activeDateKey && styles.chatSearchDateChipTextActive
+                  ]}
+                >
+                  {option.label}
+                </Text>
+                <Text
+                  style={[
+                    styles.chatSearchDateChipCount,
+                    option.dateKey === activeDateKey && styles.chatSearchDateChipTextActive
+                  ]}
+                >
+                  {option.count}
+                </Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+
+          <ScrollView
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+            style={styles.chatSearchTimeList}
+          >
+            {visibleMessages.map((message) => (
+              <Pressable
+                accessibilityRole="button"
+                key={message.messageId}
+                onPress={() => onSelectDate(activeDateKey, message.messageId)}
+                style={({ pressed }) => [styles.chatSearchTimeRow, pressed && styles.pressed]}
+              >
+                <View style={styles.chatSearchTimeIcon}>
+                  <Feather color={colors.primary} name="clock" size={17} />
+                </View>
+                <View style={styles.chatText}>
+                  <Text numberOfLines={1} style={styles.chatSearchTimeTitle}>
+                    {formatMessageTime(message.sentAt)} - {getChatSearchSenderLabel(message.senderUid, currentUid, groupMemberByUid)}
+                  </Text>
+                  <Text numberOfLines={2} style={styles.chatSearchTimePreview}>
+                    {getMessageListPreview(message)}
+                  </Text>
+                </View>
+              </Pressable>
+            ))}
+
+            {!visibleMessages.length ? (
+              <Text style={styles.batchEmpty}>No messages on this date</Text>
+            ) : null}
+          </ScrollView>
+
+          <Pressable
+            accessibilityRole="button"
+            disabled={!activeDateKey || !visibleMessages.length}
+            onPress={() => onSelectDate(activeDateKey, visibleMessages[0]?.messageId)}
+            style={({ pressed }) => [
+              styles.chatSearchJumpDateButton,
+              pressed && Boolean(activeDateKey && visibleMessages.length) && styles.pressed,
+              (!activeDateKey || !visibleMessages.length) && styles.disabled
+            ]}
+          >
+            <Text style={styles.chatSearchJumpDateText}>Jump to date</Text>
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function ChatSearchPersonModal({
+  currentUid,
+  groupMembers,
+  isOpen,
+  onClose,
+  onSelectPerson,
+  profilePhotoHeaders,
+  selectedSenderUid
+}: {
+  currentUid: string;
+  groupMembers: ChatGroupMember[];
+  isOpen: boolean;
+  onClose: () => void;
+  onSelectPerson: (senderUid: string | null) => void;
+  profilePhotoHeaders?: Record<string, string>;
+  selectedSenderUid: string | null;
+}) {
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <Modal
+      animationType="slide"
+      onRequestClose={onClose}
+      transparent
+      visible
+    >
+      <View style={styles.chatSearchModalRoot}>
+        <Pressable
+          accessibilityLabel="Close person search"
+          accessibilityRole="button"
+          onPress={onClose}
+          style={styles.chatSearchModalBackdrop}
+        />
+        <View style={styles.chatSearchModalSheet}>
+          <View style={styles.chatSearchModalHandle} />
+          <View style={styles.chatSearchModalHeader}>
+            <Text style={styles.chatSearchModalTitle}>Search by person</Text>
+            <Pressable
+              accessibilityLabel="Close person search"
+              accessibilityRole="button"
+              onPress={onClose}
+              style={({ pressed }) => [styles.chatSearchModalCloseButton, pressed && styles.pressed]}
+            >
+              <Feather color={colors.ink} name="x" size={22} />
+            </Pressable>
+          </View>
+
+          <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => onSelectPerson(null)}
+              style={({ pressed }) => [styles.chatSearchPersonRow, pressed && styles.pressed]}
+            >
+              <View style={styles.chatSearchPersonAvatar}>
+                <Feather color={colors.primary} name="users" size={18} />
+              </View>
+              <Text style={styles.chatSearchPersonName}>All people</Text>
+              {!selectedSenderUid ? <Feather color={colors.primary} name="check" size={18} /> : null}
+            </Pressable>
+
+            {groupMembers.map((member) => (
+              <Pressable
+                accessibilityRole="button"
+                key={member.uid}
+                onPress={() => onSelectPerson(member.uid)}
+                style={({ pressed }) => [styles.chatSearchPersonRow, pressed && styles.pressed]}
+              >
+                <ProfileAvatar
+                  headers={profilePhotoHeaders}
+                  name={member.uid === currentUid ? 'You' : member.displayName}
+                  size={38}
+                  uri={member.profilePhotoUrl}
+                />
+                <View style={styles.chatText}>
+                  <Text numberOfLines={1} style={styles.chatSearchPersonName}>
+                    {member.uid === currentUid ? 'You' : member.displayName}
+                  </Text>
+                  <Text numberOfLines={1} style={styles.chatSearchPersonRole}>{member.roleName}</Text>
+                </View>
+                {selectedSenderUid === member.uid ? <Feather color={colors.primary} name="check" size={18} /> : null}
+              </Pressable>
+            ))}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -8808,6 +9467,7 @@ function MessageBubble({
   onToggleSelect,
   profilePhotoHeaders,
   reactions = [],
+  searchQuery = '',
   senderMember,
   starred
 }: {
@@ -8831,6 +9491,7 @@ function MessageBubble({
   onToggleSelect?: (message: ChatMessage) => void;
   profilePhotoHeaders?: Record<string, string>;
   reactions?: ChatMessageReaction[];
+  searchQuery?: string;
   senderMember?: ChatGroupMember | null;
   starred?: boolean;
 }) {
@@ -9041,7 +9702,7 @@ function MessageBubble({
             ) : null}
             {message.text.trim() ? (
               <Text style={[styles.messageBubbleText, hasMedia && styles.messageBubbleCaptionText]}>
-                {message.text}
+                {renderHighlightedMessageText(message.text, searchQuery)}
               </Text>
             ) : null}
             <View style={styles.messageBubbleMetaRow}>
@@ -11466,6 +12127,7 @@ function GroupInfoModal({
   const memberCount = chat.memberCount ?? members.length;
   const memberCountLabel = formatGroupMemberCount(memberCount);
   const groupDescription = getGroupInfoDescription(chat);
+  const showExitGroup = canExitGroupChat(chat);
 
   return (
     <Modal
@@ -11578,17 +12240,19 @@ function GroupInfoModal({
             ) : null}
           </View>
 
-          <View style={styles.groupInfoSection}>
-            <Pressable
-              accessibilityLabel="Exit group"
-              accessibilityRole="button"
-              onPress={onExitGroup}
-              style={({ pressed }) => [styles.groupInfoExitRow, pressed && styles.pressed]}
-            >
-              <Feather color="#DC2626" name="log-out" size={20} />
-              <Text style={styles.groupInfoExitText}>Exit group</Text>
-            </Pressable>
-          </View>
+          {showExitGroup ? (
+            <View style={styles.groupInfoSection}>
+              <Pressable
+                accessibilityLabel="Exit group"
+                accessibilityRole="button"
+                onPress={onExitGroup}
+                style={({ pressed }) => [styles.groupInfoExitRow, pressed && styles.pressed]}
+              >
+                <Feather color="#DC2626" name="log-out" size={20} />
+                <Text style={styles.groupInfoExitText}>Exit group</Text>
+              </Pressable>
+            </View>
+          ) : null}
         </ScrollView>
       </View>
     </Modal>
@@ -15262,6 +15926,12 @@ function getGroupInfoDescription(chat: ChatItem): string {
   return 'Company group';
 }
 
+function canExitGroupChat(chat: ChatItem): boolean {
+  return chat.chatType === 'GROUP' &&
+    chat.isDepartmentDefault !== true &&
+    chat.memberPolicy !== 'DEPARTMENT_PLUS_EXPLICIT';
+}
+
 function getGroupInfoMemberSubtitle(
   member: ChatGroupMember,
   directContact: ChatContact | undefined,
@@ -15374,6 +16044,78 @@ function filterMessageListModalMessages(
     .reverse();
 }
 
+function getChatSearchMatches({
+  dateKey,
+  messages,
+  query,
+  senderUid
+}: {
+  dateKey: string | null;
+  messages: ChatMessage[];
+  query: string;
+  senderUid: string | null;
+}): ChatSearchMatch[] {
+  const normalizedQuery = normalizeSearchQuery(query);
+
+  if (!normalizedQuery && !dateKey && !senderUid) {
+    return [];
+  }
+
+  return uniqueChatMessages(messages)
+    .filter((message) => {
+      if (senderUid && message.senderUid !== senderUid) {
+        return false;
+      }
+
+      if (dateKey && getMessageDateKey(message.sentAt) !== dateKey) {
+        return false;
+      }
+
+      if (normalizedQuery && !normalizeSearchQuery(message.text).includes(normalizedQuery)) {
+        return false;
+      }
+
+      return true;
+    })
+    .map((message) => ({
+      messageId: message.messageId,
+      preview: getMessageListPreview(message),
+      senderUid: message.senderUid,
+      sentAt: message.sentAt
+    }));
+}
+
+function getChatSearchDateOptions(messages: ChatMessage[]): ChatSearchDateOption[] {
+  const optionByDateKey = new Map<string, ChatSearchDateOption>();
+
+  uniqueChatMessages(messages).forEach((message) => {
+    const dateKey = getMessageDateKey(message.sentAt);
+
+    if (!dateKey) {
+      return;
+    }
+
+    const existingOption = optionByDateKey.get(dateKey);
+
+    if (existingOption) {
+      existingOption.count += 1;
+      return;
+    }
+
+    optionByDateKey.set(dateKey, {
+      count: 1,
+      dateKey,
+      label: formatChatSearchDateLabel(dateKey)
+    });
+  });
+
+  return [...optionByDateKey.values()].sort((first, second) => first.dateKey.localeCompare(second.dateKey));
+}
+
+function getChatSearchMessagesForDate(messages: ChatMessage[], dateKey: string): ChatMessage[] {
+  return uniqueChatMessages(messages).filter((message) => getMessageDateKey(message.sentAt) === dateKey);
+}
+
 function getMessageListPreview(message: ChatMessage): string {
   if (message.text?.trim()) {
     return message.text.trim();
@@ -15400,6 +16142,41 @@ function getMessageListPreview(message: ChatMessage): string {
   return 'Message';
 }
 
+function getChatSearchResultLabel({
+  hasFilters,
+  matchCount,
+  matchIndex
+}: {
+  hasFilters: boolean;
+  matchCount: number;
+  matchIndex: number;
+}): string {
+  if (!hasFilters) {
+    return 'Type, choose a date, or pick a person';
+  }
+
+  if (!matchCount) {
+    return 'No results';
+  }
+
+  return `${matchIndex + 1} of ${matchCount}`;
+}
+
+function formatChatSearchDateLabel(dateKey: string): string {
+  const [year, month, day] = dateKey.split('-').map((part) => Number.parseInt(part, 10));
+  const date = new Date(year || 0, Math.max((month || 1) - 1, 0), day || 1);
+
+  if (Number.isNaN(date.getTime())) {
+    return 'Date';
+  }
+
+  return date.toLocaleDateString([], {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric'
+  });
+}
+
 function getGroupMessageSenderName(
   message: ChatMessage,
   currentUid: string,
@@ -15410,6 +16187,56 @@ function getGroupMessageSenderName(
   }
 
   return senderNameByUid.get(message.senderUid) || 'Member';
+}
+
+function getChatSearchSenderLabel(
+  senderUid: string,
+  currentUid: string,
+  senderNameByUid: Map<string, ChatGroupMember>
+): string {
+  if (senderUid === currentUid) {
+    return 'You';
+  }
+
+  return senderNameByUid.get(senderUid)?.displayName || 'Member';
+}
+
+function renderHighlightedMessageText(text: string, query: string): React.ReactNode {
+  const safeQuery = query.trim();
+
+  if (!safeQuery) {
+    return text;
+  }
+
+  const lowerText = text.toLowerCase();
+  const lowerQuery = safeQuery.toLowerCase();
+  const parts: React.ReactNode[] = [];
+  let cursor = 0;
+  let partIndex = 0;
+
+  while (cursor < text.length) {
+    const matchIndex = lowerText.indexOf(lowerQuery, cursor);
+
+    if (matchIndex < 0) {
+      parts.push(text.slice(cursor));
+      break;
+    }
+
+    if (matchIndex > cursor) {
+      parts.push(text.slice(cursor, matchIndex));
+    }
+
+    parts.push(
+      <Text key={`highlight-${partIndex}`} style={styles.messageSearchHighlight}>
+        {text.slice(matchIndex, matchIndex + safeQuery.length)}
+      </Text>
+    );
+
+    cursor = matchIndex + safeQuery.length;
+    partIndex += 1;
+  }
+
+  return parts;
 }
 
 function normalizeSearchQuery(value: string): string {
@@ -16700,6 +17527,153 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingTop: 12
   },
+  messageListContentSearching: {
+    paddingBottom: 86,
+    paddingTop: 76
+  },
+  chatSearchHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 10,
+    left: 12,
+    position: 'absolute',
+    right: 12,
+    top: 10,
+    zIndex: 12
+  },
+  threadSearchBox: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 22,
+    elevation: 6,
+    flex: 1,
+    flexDirection: 'row',
+    gap: 8,
+    minHeight: 44,
+    paddingHorizontal: 13,
+    shadowColor: '#0F172A',
+    shadowOffset: { height: 4, width: 0 },
+    shadowOpacity: 0.12,
+    shadowRadius: 10
+  },
+  threadSearchInput: {
+    color: colors.ink,
+    flex: 1,
+    fontSize: 16,
+    fontWeight: '400',
+    lineHeight: 21,
+    minHeight: 38,
+    paddingHorizontal: 0,
+    paddingVertical: 8
+  },
+  chatSearchClearButton: {
+    alignItems: 'center',
+    backgroundColor: '#111827',
+    borderRadius: 10,
+    height: 20,
+    justifyContent: 'center',
+    width: 20
+  },
+  chatSearchHeaderCount: {
+    color: '#64748B',
+    fontSize: 13,
+    fontWeight: '600',
+    lineHeight: 18,
+    maxWidth: 42
+  },
+  chatSearchCloseButton: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.94)',
+    borderRadius: 22,
+    elevation: 5,
+    height: 44,
+    justifyContent: 'center',
+    shadowColor: '#0F172A',
+    shadowOffset: { height: 3, width: 0 },
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
+    width: 44
+  },
+  chatSearchFooterWrap: {
+    bottom: 0,
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    zIndex: 12
+  },
+  chatSearchFooter: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(244, 246, 248, 0.96)',
+    borderTopColor: 'rgba(203, 213, 225, 0.7)',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 8,
+    minHeight: 64,
+    paddingBottom: Platform.OS === 'ios' ? 10 : 8,
+    paddingHorizontal: 12,
+    paddingTop: 8
+  },
+  chatSearchNavigationPill: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 22,
+    flexDirection: 'row',
+    height: 44,
+    overflow: 'hidden'
+  },
+  chatSearchNavButton: {
+    alignItems: 'center',
+    height: 44,
+    justifyContent: 'center',
+    width: 42
+  },
+  chatSearchNavDivider: {
+    backgroundColor: '#E5E7EB',
+    height: 22,
+    width: StyleSheet.hairlineWidth
+  },
+  chatSearchResultText: {
+    color: '#64748B',
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '400',
+    lineHeight: 18,
+    minWidth: 0
+  },
+  chatSearchFilterButton: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
+    flexDirection: 'row',
+    gap: 5,
+    height: 40,
+    maxWidth: 112,
+    paddingHorizontal: 10
+  },
+  chatSearchFilterButtonActive: {
+    backgroundColor: colors.primary
+  },
+  chatSearchFilterText: {
+    color: colors.primary,
+    fontSize: 12,
+    fontWeight: '600',
+    lineHeight: 16,
+    maxWidth: 72
+  },
+  chatSearchFilterTextActive: {
+    color: '#FFFFFF'
+  },
+  chatSearchDateButton: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
+    height: 40,
+    justifyContent: 'center',
+    width: 40
+  },
+  chatSearchDateButtonActive: {
+    backgroundColor: colors.primary
+  },
   messageLoadingRow: {
     alignItems: 'center',
     minHeight: 42,
@@ -16975,6 +17949,11 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '400',
     lineHeight: 20
+  },
+  messageSearchHighlight: {
+    backgroundColor: '#FDE68A',
+    borderRadius: 3,
+    color: '#713F12'
   },
   messageBubbleCaptionText: {
     paddingHorizontal: 6,
@@ -17384,6 +18363,173 @@ const styles = StyleSheet.create({
   },
   messageActionLabelDestructive: {
     color: '#E11D48'
+  },
+  chatSearchModalRoot: {
+    backgroundColor: 'rgba(15, 23, 42, 0.24)',
+    flex: 1,
+    justifyContent: 'flex-end'
+  },
+  chatSearchModalBackdrop: {
+    ...StyleSheet.absoluteFillObject
+  },
+  chatSearchModalSheet: {
+    backgroundColor: '#F4F6F8',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: '76%',
+    minHeight: 360,
+    paddingBottom: 16,
+    paddingHorizontal: 12,
+    shadowColor: '#0F172A',
+    shadowOffset: { height: -6, width: 0 },
+    shadowOpacity: 0.16,
+    shadowRadius: 18
+  },
+  chatSearchModalHandle: {
+    alignSelf: 'center',
+    backgroundColor: '#A8B0BC',
+    borderRadius: 2,
+    height: 4,
+    marginTop: 8,
+    width: 42
+  },
+  chatSearchModalHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    minHeight: 54
+  },
+  chatSearchModalTitle: {
+    color: colors.ink,
+    flex: 1,
+    fontSize: 17,
+    fontWeight: '600',
+    lineHeight: 22,
+    textAlign: 'center'
+  },
+  chatSearchModalCloseButton: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
+    height: 40,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: 0,
+    width: 40
+  },
+  chatSearchDateChips: {
+    gap: 8,
+    paddingBottom: 10,
+    paddingTop: 2
+  },
+  chatSearchDateChip: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderColor: '#E5E7EB',
+    borderRadius: 18,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 6,
+    minHeight: 36,
+    paddingHorizontal: 12
+  },
+  chatSearchDateChipActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary
+  },
+  chatSearchDateChipText: {
+    color: colors.ink,
+    fontSize: 13,
+    fontWeight: '600',
+    lineHeight: 18
+  },
+  chatSearchDateChipTextActive: {
+    color: '#FFFFFF'
+  },
+  chatSearchDateChipCount: {
+    color: '#64748B',
+    fontSize: 12,
+    fontWeight: '400',
+    lineHeight: 16
+  },
+  chatSearchTimeList: {
+    flex: 1
+  },
+  chatSearchTimeRow: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderBottomColor: '#E5E7EB',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 11,
+    minHeight: 62,
+    paddingHorizontal: 12,
+    paddingVertical: 8
+  },
+  chatSearchTimeIcon: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderRadius: 19,
+    height: 38,
+    justifyContent: 'center',
+    width: 38
+  },
+  chatSearchTimeTitle: {
+    color: colors.ink,
+    fontSize: 15,
+    fontWeight: '600',
+    lineHeight: 20
+  },
+  chatSearchTimePreview: {
+    color: '#64748B',
+    fontSize: 13,
+    fontWeight: '400',
+    lineHeight: 18
+  },
+  chatSearchJumpDateButton: {
+    alignItems: 'center',
+    backgroundColor: '#22C55E',
+    borderRadius: 22,
+    justifyContent: 'center',
+    minHeight: 46,
+    marginTop: 12
+  },
+  chatSearchJumpDateText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '600',
+    lineHeight: 20
+  },
+  chatSearchPersonRow: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderBottomColor: '#E5E7EB',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 11,
+    minHeight: 62,
+    paddingHorizontal: 12,
+    paddingVertical: 8
+  },
+  chatSearchPersonAvatar: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderRadius: 19,
+    height: 38,
+    justifyContent: 'center',
+    width: 38
+  },
+  chatSearchPersonName: {
+    color: colors.ink,
+    fontSize: 16,
+    fontWeight: '400',
+    lineHeight: 21
+  },
+  chatSearchPersonRole: {
+    color: '#8B95A5',
+    fontSize: 12,
+    fontWeight: '400',
+    lineHeight: 16
   },
   messageActionSeparator: {
     backgroundColor: '#E5E7EB',

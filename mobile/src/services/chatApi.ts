@@ -461,6 +461,44 @@ export async function addContactToGroupChat(input: {
   };
 }
 
+export async function exitGroupChat(input: {
+  groupId: string;
+  idToken: string;
+}): Promise<{
+  exited: boolean;
+  groupId: string;
+  tenantId: string;
+}> {
+  const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
+  const response = await fetch(
+    `${getSynzappApiBaseUrl()}/api/profile/chat/groups/${encodeURIComponent(input.groupId)}/members/me`,
+    {
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${input.idToken}`,
+        ...deviceHeaders
+      },
+      method: 'DELETE'
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  const body = await response.json() as {
+    exited?: boolean;
+    groupId?: string;
+    tenantId?: string;
+  };
+
+  return {
+    exited: body.exited === true,
+    groupId: typeof body.groupId === 'string' ? body.groupId : input.groupId,
+    tenantId: typeof body.tenantId === 'string' ? body.tenantId : ''
+  };
+}
+
 export async function getChatTranscriptLanguage(input: {
   contactId: string;
   idToken: string;

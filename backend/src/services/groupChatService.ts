@@ -87,6 +87,12 @@ export interface AddGroupChatMemberResult {
   tenantId: string;
 }
 
+export interface ExitGroupChatResult {
+  exited: boolean;
+  groupId: string;
+  tenantId: string;
+}
+
 export interface GroupEncryptionContextResponse {
   recipientDevices: EncryptionDevicePublicKey[];
   senderDevice: EncryptionDevicePublicKey;
@@ -566,6 +572,74 @@ export async function addGroupChatMember(
     group: mapGroupChatAddableGroup(context.tenantId, safeGroupId, updatedGroup, updatedMemberIds.length),
     groupId: safeGroupId,
     memberId: safeMemberUid,
+    tenantId: context.tenantId
+  };
+}
+
+export async function exitGroupChat(
+  decodedToken: DecodedIdToken,
+  groupId: string
+): Promise<ExitGroupChatResult> {
+  const context = await getActiveUserContext(decodedToken);
+  const safeGroupId = normalizeGroupId(groupId);
+  const organizationRef = firestore.collection('organizations').doc(context.tenantId);
+  const groupRef = organizationRef.collection('groups').doc(safeGroupId);
+  const memberRef = groupRef.collection('members').doc(context.uid);
+  let exited = false;
+
+  await firestore.runTransaction(async (transaction) => {
+    const [groupSnapshot, memberSnapshot] = await Promise.all([
+      transaction.get(groupRef),
+      transaction.get(memberRef)
+    ]);
+
+    if (!groupSnapshot.exists) {
+      throw notFoundError('Group chat was not found.');
+    }
+
+    const group = groupSnapshot.data() as TenantGroupRecord;
+
+    if (group.tenantId !== context.tenantId || group.status !== 'ACTIVE' || !isChatEnabledGroup(group)) {
+      throw notFoundError('Group chat was not found.');
+    }
+
+    if (!canCurrentUserExitGroupChat(group)) {
+      throw authorizationError('Department group chats cannot be exited.');
+    }
+
+    if (!memberSnapshot.exists) {
+      throw authorizationError('You are not a member of this group.');
+    }
+
+    const member = memberSnapshot.data() as GroupMemberRecord;
+
+    if (member.tenantId !== context.tenantId || member.status === 'LEFT' || member.status === 'REMOVED') {
+      throw authorizationError('You are not an active member of this group.');
+    }
+
+    const nextMemberCount = Math.max((group.memberCount || 1) - 1, 0);
+
+    transaction.set(memberRef, {
+      leftAt: fieldValue.serverTimestamp(),
+      leftBy: context.uid,
+      status: 'LEFT',
+      updatedAt: fieldValue.serverTimestamp()
+    }, { merge: true });
+
+    transaction.set(groupRef, {
+      memberCount: nextMemberCount,
+      unreadCounts: {
+        [context.uid]: 0
+      },
+      updatedAt: fieldValue.serverTimestamp()
+    }, { merge: true });
+
+    exited = true;
+  });
+
+  return {
+    exited,
+    groupId: safeGroupId,
     tenantId: context.tenantId
   };
 }
@@ -1360,6 +1434,12 @@ function canAddMemberToGroup(
   }
 
   return group.createdBy === context.uid;
+}
+
+function canCurrentUserExitGroupChat(group: TenantGroupRecord): boolean {
+  return group.isDepartmentDefault !== true &&
+    group.systemManaged !== true &&
+    group.memberPolicy !== 'DEPARTMENT_PLUS_EXPLICIT';
 }
 
 function mapGroupChatAddableGroup(
