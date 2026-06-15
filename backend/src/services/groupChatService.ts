@@ -63,6 +63,30 @@ export interface GroupChatMember {
   uid: string;
 }
 
+export interface GroupChatAddableGroup {
+  autoMembershipDepartmentId: string | null;
+  departmentId: string | null;
+  departmentName: string | null;
+  description: string | null;
+  groupId: string;
+  isDepartmentDefault: boolean;
+  memberCount: number;
+  memberPolicy: 'DEPARTMENT_PLUS_EXPLICIT' | 'EXPLICIT';
+  name: string;
+  scope: 'COMPANY' | 'DEPARTMENT';
+  status: string;
+  systemManaged: boolean;
+  tenantId: string;
+}
+
+export interface AddGroupChatMemberResult {
+  added: boolean;
+  group: GroupChatAddableGroup;
+  groupId: string;
+  memberId: string;
+  tenantId: string;
+}
+
 export interface GroupEncryptionContextResponse {
   recipientDevices: EncryptionDevicePublicKey[];
   senderDevice: EncryptionDevicePublicKey;
@@ -129,6 +153,9 @@ interface TenantGroupRecord {
   autoMembershipDepartmentId?: string | null;
   chatType?: string;
   createdBy?: string;
+  departmentId?: string | null;
+  departmentName?: string | null;
+  description?: string | null;
   groupId?: string;
   isDepartmentDefault?: boolean;
   lastMessageSentAtMs?: number | null;
@@ -139,6 +166,7 @@ interface TenantGroupRecord {
   name?: string;
   scope?: 'COMPANY' | 'DEPARTMENT';
   status?: string;
+  systemManaged?: boolean;
   tenantId?: string;
   unreadCounts?: Record<string, number>;
 }
@@ -156,6 +184,7 @@ interface TenantUserRecord {
   roleName?: string;
   status?: string;
   tenantId?: string;
+  uid?: string;
 }
 
 interface TenantDepartmentRecord {
@@ -397,6 +426,148 @@ export async function listCurrentUserGroupChatContacts(
 
     return first.displayName.localeCompare(second.displayName);
   });
+}
+
+export async function listAddableGroupChatTargets(
+  decodedToken: DecodedIdToken,
+  memberUid: string
+): Promise<GroupChatAddableGroup[]> {
+  const context = await getActiveUserContext(decodedToken);
+  const member = await getVisibleGroupAddMember(context, memberUid);
+  const organizationRef = firestore.collection('organizations').doc(context.tenantId);
+  const groups: GroupChatAddableGroup[] = [];
+
+  await ensureDepartmentSystemGroupsForUser(context);
+
+  const snapshot = await organizationRef
+    .collection('groups')
+    .where('status', '==', 'ACTIVE')
+    .get();
+
+  for (const doc of snapshot.docs) {
+    const group = doc.data() as TenantGroupRecord;
+
+    if (group.tenantId !== context.tenantId || !isChatEnabledGroup(group)) {
+      continue;
+    }
+
+    const memberIds = await getActiveGroupMemberIds(context.tenantId, doc.ref, group);
+    const safeMemberUid = member.uid || memberUid.trim();
+
+    if (
+      memberIds.includes(safeMemberUid) ||
+      !canAddMemberToGroup(context, group, memberIds) ||
+      memberIds.length >= 50
+    ) {
+      continue;
+    }
+
+    groups.push(mapGroupChatAddableGroup(context.tenantId, doc.id, group, memberIds.length));
+  }
+
+  return groups.sort((first, second) => first.name.localeCompare(second.name));
+}
+
+export async function addGroupChatMember(
+  decodedToken: DecodedIdToken,
+  groupId: string,
+  memberUid: string
+): Promise<AddGroupChatMemberResult> {
+  const context = await getActiveUserContext(decodedToken);
+  const safeGroupId = normalizeGroupId(groupId);
+  const member = await getVisibleGroupAddMember(context, memberUid);
+  const safeMemberUid = member.uid || memberUid.trim();
+  const organizationRef = firestore.collection('organizations').doc(context.tenantId);
+  const groupRef = organizationRef.collection('groups').doc(safeGroupId);
+  const groupSnapshot = await groupRef.get();
+
+  if (!groupSnapshot.exists) {
+    throw notFoundError('Group chat was not found.');
+  }
+
+  const group = groupSnapshot.data() as TenantGroupRecord;
+
+  if (group.tenantId !== context.tenantId || group.status !== 'ACTIVE' || !isChatEnabledGroup(group)) {
+    throw notFoundError('Group chat was not found.');
+  }
+
+  const memberIds = await getActiveGroupMemberIds(context.tenantId, groupRef, group);
+
+  if (!canAddMemberToGroup(context, group, memberIds)) {
+    throw authorizationError('You do not have permission to add members to this group.');
+  }
+
+  if (memberIds.includes(safeMemberUid)) {
+    return {
+      added: false,
+      group: mapGroupChatAddableGroup(context.tenantId, safeGroupId, group, memberIds.length),
+      groupId: safeGroupId,
+      memberId: safeMemberUid,
+      tenantId: context.tenantId
+    };
+  }
+
+  if (memberIds.length >= 50) {
+    throw validationError('Group chats can include up to 50 members for now.');
+  }
+
+  let added = true;
+
+  await firestore.runTransaction(async (transaction) => {
+    const [freshGroupSnapshot, explicitMemberSnapshot] = await Promise.all([
+      transaction.get(groupRef),
+      transaction.get(groupRef.collection('members').doc(safeMemberUid))
+    ]);
+
+    if (!freshGroupSnapshot.exists) {
+      throw notFoundError('Group chat was not found.');
+    }
+
+    const freshGroup = freshGroupSnapshot.data() as TenantGroupRecord;
+
+    if (
+      freshGroup.tenantId !== context.tenantId ||
+      freshGroup.status !== 'ACTIVE' ||
+      !isChatEnabledGroup(freshGroup)
+    ) {
+      throw notFoundError('Group chat was not found.');
+    }
+
+    const explicitMember = explicitMemberSnapshot.exists
+      ? explicitMemberSnapshot.data() as GroupMemberRecord
+      : null;
+
+    if (explicitMember?.tenantId === context.tenantId && explicitMember.status === 'ACTIVE') {
+      added = false;
+      return;
+    }
+
+    transaction.set(groupRef.collection('members').doc(safeMemberUid), {
+      addedAt: fieldValue.serverTimestamp(),
+      addedBy: context.uid,
+      role: 'MEMBER',
+      status: 'ACTIVE',
+      tenantId: context.tenantId,
+      uid: safeMemberUid
+    }, { merge: true });
+
+    transaction.set(groupRef, {
+      memberCount: fieldValue.increment(1),
+      updatedAt: fieldValue.serverTimestamp()
+    }, { merge: true });
+  });
+
+  const updatedGroupSnapshot = await groupRef.get();
+  const updatedGroup = updatedGroupSnapshot.data() as TenantGroupRecord;
+  const updatedMemberIds = await getActiveGroupMemberIds(context.tenantId, groupRef, updatedGroup);
+
+  return {
+    added,
+    group: mapGroupChatAddableGroup(context.tenantId, safeGroupId, updatedGroup, updatedMemberIds.length),
+    groupId: safeGroupId,
+    memberId: safeMemberUid,
+    tenantId: context.tenantId
+  };
 }
 
 export async function getGroupEncryptionContext(
@@ -1088,11 +1259,7 @@ async function getActiveUserContext(decodedToken: DecodedIdToken) {
 
 async function getGroupChatContext(decodedToken: DecodedIdToken, groupId: string): Promise<GroupChatContext> {
   const context = await getActiveUserContext(decodedToken);
-  const safeGroupId = groupId.trim();
-
-  if (!safeGroupId || !/^group_[A-Za-z0-9_-]{8,160}$/.test(safeGroupId)) {
-    throw notFoundError('Group chat was not found.');
-  }
+  const safeGroupId = normalizeGroupId(groupId);
 
   const organizationRef = firestore.collection('organizations').doc(context.tenantId);
   const groupRef = organizationRef.collection('groups').doc(safeGroupId);
@@ -1120,6 +1287,103 @@ async function getGroupChatContext(decodedToken: DecodedIdToken, groupId: string
     groupRef,
     memberIds,
     tenantId: context.tenantId
+  };
+}
+
+function normalizeGroupId(groupId: string): string {
+  const safeGroupId = groupId.trim();
+
+  if (!safeGroupId || !/^group_[A-Za-z0-9_-]{8,160}$/.test(safeGroupId)) {
+    throw notFoundError('Group chat was not found.');
+  }
+
+  return safeGroupId;
+}
+
+async function getVisibleGroupAddMember(
+  context: Awaited<ReturnType<typeof getActiveUserContext>>,
+  memberUid: string
+): Promise<TenantUserRecord> {
+  const safeMemberUid = memberUid.trim();
+
+  if (!safeMemberUid || safeMemberUid === context.uid) {
+    throw validationError('Select a contact to add.');
+  }
+
+  const memberSnapshot = await firestore
+    .collection('organizations')
+    .doc(context.tenantId)
+    .collection('users')
+    .doc(safeMemberUid)
+    .get();
+
+  if (!memberSnapshot.exists) {
+    throw validationError('This contact is not available to add to groups.');
+  }
+
+  const member = memberSnapshot.data() as TenantUserRecord;
+  const visibleRoles = getVisibleChatContactRoles(context.role);
+
+  if (
+    member.tenantId !== context.tenantId ||
+    member.status !== 'ACTIVE' ||
+    !member.role ||
+    !visibleRoles.includes(member.role)
+  ) {
+    throw validationError('This contact is not available to add to groups.');
+  }
+
+  return {
+    ...member,
+    uid: safeMemberUid
+  };
+}
+
+function canAddMemberToGroup(
+  context: Awaited<ReturnType<typeof getActiveUserContext>>,
+  group: TenantGroupRecord,
+  memberIds: string[]
+): boolean {
+  if (memberIds.includes(context.uid)) {
+    return true;
+  }
+
+  if (context.role !== 'ORG_ADMIN') {
+    return false;
+  }
+
+  if (
+    group.isDepartmentDefault === true &&
+    group.memberPolicy === 'DEPARTMENT_PLUS_EXPLICIT'
+  ) {
+    return true;
+  }
+
+  return group.createdBy === context.uid;
+}
+
+function mapGroupChatAddableGroup(
+  tenantId: string,
+  groupId: string,
+  group: TenantGroupRecord,
+  memberCount: number
+): GroupChatAddableGroup {
+  return {
+    autoMembershipDepartmentId: group.autoMembershipDepartmentId || null,
+    departmentId: group.departmentId || null,
+    departmentName: group.departmentName || null,
+    description: group.description || null,
+    groupId: group.groupId || groupId,
+    isDepartmentDefault: group.isDepartmentDefault === true,
+    memberCount,
+    memberPolicy: group.memberPolicy === 'DEPARTMENT_PLUS_EXPLICIT'
+      ? 'DEPARTMENT_PLUS_EXPLICIT'
+      : 'EXPLICIT',
+    name: group.name || 'Group chat',
+    scope: group.scope === 'DEPARTMENT' ? 'DEPARTMENT' : 'COMPANY',
+    status: group.status || 'ACTIVE',
+    systemManaged: group.systemManaged === true,
+    tenantId
   };
 }
 

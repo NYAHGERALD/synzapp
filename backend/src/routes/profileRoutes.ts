@@ -32,12 +32,14 @@ import {
   sendEncryptedDirectEnvelope
 } from '../services/encryptedMessageEnvelopeService.js';
 import {
+  addGroupChatMember,
   createGroupChat,
   getGroupChatContact,
   getGroupChatMemberProfilePhoto,
   getGroupChatMessageReactions,
   getGroupEncryptionContext,
   grantGroupChatHistoryKeys,
+  listAddableGroupChatTargets,
   hideGroupChatMessageForCurrentUser,
   listCurrentUserGroupChatContacts,
   listEncryptedGroupEnvelopesForDevice,
@@ -156,6 +158,10 @@ const groupChatBodySchema = z.object({
   memberIds: z.array(z.string().trim().min(1).max(128)).min(1).max(49),
   messagePermissionMode: z.enum(['ADMINS', 'ALL_MEMBERS']).optional(),
   name: z.string().trim().min(1).max(120)
+});
+
+const groupChatMemberBodySchema = z.object({
+  contactId: z.string().trim().min(1).max(128)
 });
 
 const encryptedMediaUploadBodySchema = z.object({
@@ -413,6 +419,45 @@ profileRouter.post('/chat/groups', verifyAppCheck, async (req, res, next) => {
     await writeAuditEvent({
       action: 'GROUP_CHAT_CREATED',
       reason: error instanceof Error ? error.message : 'Group chat creation failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
+profileRouter.post('/chat/groups/:groupId/members', verifyAppCheck, async (req, res, next) => {
+  const groupId = Array.isArray(req.params.groupId)
+    ? req.params.groupId[0] || ''
+    : req.params.groupId || '';
+
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const body = groupChatMemberBodySchema.parse(req.body);
+    const result = await addGroupChatMember(decodedToken, groupId, body.contactId);
+
+    await writeAuditEvent({
+      action: 'GROUP_CHAT_MEMBER_ADDED',
+      metadata: {
+        added: result.added,
+        groupId: result.groupId,
+        memberId: result.memberId,
+        name: result.group.name
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: result.tenantId,
+      uid: decodedToken.uid
+    });
+
+    res.json(result);
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'GROUP_CHAT_MEMBER_ADDED',
+      metadata: { groupId },
+      reason: error instanceof Error ? error.message : 'Group member add failed',
       req,
       status: 'FAILED'
     }).catch(() => undefined);
@@ -778,6 +823,21 @@ profileRouter.get('/chat/conversations/:contactId/details', verifyAppCheck, asyn
     const details = await getDirectChatContactDetails(decodedToken, contactId);
 
     res.json({ details });
+  } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.get('/chat/conversations/:contactId/addable-groups', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const contactId = Array.isArray(req.params.contactId)
+      ? req.params.contactId[0] || ''
+      : req.params.contactId || '';
+    const groups = await listAddableGroupChatTargets(decodedToken, contactId);
+
+    res.json({ groups });
   } catch (error) {
     next(error);
   }

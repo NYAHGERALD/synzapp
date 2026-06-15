@@ -51,6 +51,30 @@ export interface DirectChatContactDetails {
   status: string;
 }
 
+export interface AddableChatGroup {
+  autoMembershipDepartmentId: string | null;
+  departmentId: string | null;
+  departmentName: string | null;
+  description: string | null;
+  groupId: string;
+  isDepartmentDefault: boolean;
+  memberCount: number;
+  memberPolicy: 'DEPARTMENT_PLUS_EXPLICIT' | 'EXPLICIT';
+  name: string;
+  scope: 'COMPANY' | 'DEPARTMENT';
+  status: string;
+  systemManaged: boolean;
+  tenantId: string;
+}
+
+export interface AddContactToGroupResult {
+  added: boolean;
+  group: AddableChatGroup;
+  groupId: string;
+  memberId: string;
+  tenantId: string;
+}
+
 export interface ChatGroupMember {
   displayName: string;
   initials: string;
@@ -366,6 +390,67 @@ export async function getDirectChatContactDetails(input: {
   const body = await response.json() as { details?: DirectChatContactDetails };
 
   return normalizeDirectChatContactDetails(body.details, input.contactId);
+}
+
+export async function listAddableGroupsForContact(input: {
+  contactId: string;
+  idToken: string;
+}): Promise<AddableChatGroup[]> {
+  const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
+  const response = await fetch(
+    `${getSynzappApiBaseUrl()}/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/addable-groups`,
+    {
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${input.idToken}`,
+        ...deviceHeaders
+      },
+      method: 'GET'
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  const body = await response.json() as { groups?: AddableChatGroup[] };
+
+  return (body.groups || []).map(normalizeAddableChatGroup);
+}
+
+export async function addContactToGroupChat(input: {
+  contactId: string;
+  groupId: string;
+  idToken: string;
+}): Promise<AddContactToGroupResult> {
+  const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
+  const response = await fetch(
+    `${getSynzappApiBaseUrl()}/api/profile/chat/groups/${encodeURIComponent(input.groupId)}/members`,
+    {
+      body: JSON.stringify({ contactId: input.contactId }),
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${input.idToken}`,
+        'Content-Type': 'application/json',
+        ...deviceHeaders
+      },
+      method: 'POST'
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  const body = await response.json() as AddContactToGroupResult;
+
+  return {
+    added: body.added === true,
+    group: normalizeAddableChatGroup(body.group),
+    groupId: typeof body.groupId === 'string' ? body.groupId : input.groupId,
+    memberId: typeof body.memberId === 'string' ? body.memberId : input.contactId,
+    tenantId: typeof body.tenantId === 'string' ? body.tenantId : ''
+  };
 }
 
 export async function getChatTranscriptLanguage(input: {
@@ -904,6 +989,44 @@ function normalizeDirectChatContactDetails(
     status: typeof details?.status === 'string' && details.status.trim()
       ? details.status.trim()
       : 'ACTIVE'
+  };
+}
+
+function normalizeAddableChatGroup(group: AddableChatGroup | undefined): AddableChatGroup {
+  return {
+    autoMembershipDepartmentId: typeof group?.autoMembershipDepartmentId === 'string' && group.autoMembershipDepartmentId.trim()
+      ? group.autoMembershipDepartmentId.trim()
+      : null,
+    departmentId: typeof group?.departmentId === 'string' && group.departmentId.trim()
+      ? group.departmentId.trim()
+      : null,
+    departmentName: typeof group?.departmentName === 'string' && group.departmentName.trim()
+      ? group.departmentName.trim()
+      : null,
+    description: typeof group?.description === 'string' && group.description.trim()
+      ? group.description.trim()
+      : null,
+    groupId: typeof group?.groupId === 'string' && group.groupId.trim()
+      ? group.groupId.trim()
+      : '',
+    isDepartmentDefault: group?.isDepartmentDefault === true,
+    memberCount: typeof group?.memberCount === 'number' && Number.isFinite(group.memberCount)
+      ? Math.max(0, group.memberCount)
+      : 0,
+    memberPolicy: group?.memberPolicy === 'DEPARTMENT_PLUS_EXPLICIT'
+      ? 'DEPARTMENT_PLUS_EXPLICIT'
+      : 'EXPLICIT',
+    name: typeof group?.name === 'string' && group.name.trim()
+      ? group.name.trim()
+      : 'Group chat',
+    scope: group?.scope === 'DEPARTMENT' ? 'DEPARTMENT' : 'COMPANY',
+    status: typeof group?.status === 'string' && group.status.trim()
+      ? group.status.trim()
+      : 'ACTIVE',
+    systemManaged: group?.systemManaged === true,
+    tenantId: typeof group?.tenantId === 'string' && group.tenantId.trim()
+      ? group.tenantId.trim()
+      : ''
   };
 }
 
