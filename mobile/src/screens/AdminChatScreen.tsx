@@ -5818,7 +5818,6 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         isOpen={isDirectContactDetailsOpen}
         onAddToGroup={() => handleContactInfoUnavailableAction('Add to group')}
         onClose={handleCloseDirectContactDetails}
-        onOpenEdit={() => handleContactInfoUnavailableAction('Edit contact')}
         onStartVideoCall={() => handleContactInfoUnavailableAction('Video call')}
         onStartVoiceCall={() => handleContactInfoUnavailableAction('Audio call')}
         profilePhotoHeaders={profilePhotoHeaders}
@@ -10248,7 +10247,6 @@ function DirectContactDetailsModal({
   isOpen,
   onAddToGroup,
   onClose,
-  onOpenEdit,
   onStartVideoCall,
   onStartVoiceCall,
   profilePhotoHeaders
@@ -10259,7 +10257,6 @@ function DirectContactDetailsModal({
   isOpen: boolean;
   onAddToGroup: () => void;
   onClose: () => void;
-  onOpenEdit: () => void;
   onStartVideoCall: () => void;
   onStartVoiceCall: () => void;
   profilePhotoHeaders?: Record<string, string>;
@@ -10286,14 +10283,6 @@ function DirectContactDetailsModal({
     >
       <View style={[styles.directContactDetailsScreen, { paddingTop: modalTopPadding }]}>
         <View style={styles.directContactDetailsTopBar}>
-          <Pressable
-            accessibilityLabel="Edit contact"
-            accessibilityRole="button"
-            onPress={onOpenEdit}
-            style={({ pressed }) => [styles.groupInfoEditButton, pressed && styles.pressed]}
-          >
-            <Text style={styles.groupInfoEditText}>Edit</Text>
-          </Pressable>
           <Pressable
             accessibilityLabel="Close contact details"
             accessibilityRole="button"
@@ -17720,7 +17709,7 @@ const styles = StyleSheet.create({
   directContactDetailsTopBar: {
     alignItems: 'center',
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    justifyContent: 'flex-end',
     minHeight: 52,
     paddingHorizontal: 16
   },
