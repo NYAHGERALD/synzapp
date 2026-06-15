@@ -355,6 +355,8 @@ type DeviceListItem = TenantDevice | CurrentUserDevice;
 
 type FeatherIconName = React.ComponentProps<typeof Feather>['name'];
 
+type NewGroupFlowOrigin = 'contactInfo' | 'groupSwitcher' | 'newChat';
+
 interface InviteContactDraft {
   displayName?: string;
   phoneNumber: string;
@@ -512,6 +514,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [newGroupNameDraft, setNewGroupNameDraft] = useState('');
   const [newGroupPhotoUri, setNewGroupPhotoUri] = useState<string | null>(null);
   const [newGroupPermissionMode, setNewGroupPermissionMode] = useState<'ADMINS' | 'ALL_MEMBERS'>('ALL_MEMBERS');
+  const [newGroupFlowOrigin, setNewGroupFlowOrigin] = useState<NewGroupFlowOrigin>('newChat');
   const [selectedGroupCallMemberIds, setSelectedGroupCallMemberIds] = useState<Record<string, boolean>>({});
   const [selectedNewGroupMemberIds, setSelectedNewGroupMemberIds] = useState<Record<string, boolean>>({});
   const [messageDraft, setMessageDraft] = useState('');
@@ -1897,7 +1900,11 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsAddMembersModalOpen(false);
     setIsGroupDetailsModalOpen(false);
     setIsGroupPermissionsModalOpen(false);
+    resetNewGroupDraft();
     setNewChatSearch('');
+  }
+
+  function resetNewGroupDraft() {
     setAddMembersSearch('');
     setNewGroupNameDraft('');
     setNewGroupPhotoUri(null);
@@ -1911,6 +1918,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   }
 
   function handleOpenAddMembersModal() {
+    setNewGroupFlowOrigin('newChat');
     setAddMembersSearch('');
     setIsNewChatModalOpen(false);
     setIsAddMembersModalOpen(true);
@@ -1964,6 +1972,34 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsDirectContactDetailsOpen(false);
     void loadDirectContactDetails(chat, false);
     setIsContactInfoModalOpen(true);
+  }
+
+  function handleStartCreateGroupWithContactInfo() {
+    const chat = selectedChatRef.current;
+
+    if (!chat || chat.chatType === 'GROUP') {
+      return;
+    }
+
+    setError(null);
+    setNewGroupFlowOrigin('contactInfo');
+    setIsContactInfoModalOpen(false);
+    setIsChatNotificationSettingsOpen(false);
+    setIsChatTranscriptLanguageOpen(false);
+    setIsDirectContactDetailsOpen(false);
+    setIsNewChatModalOpen(false);
+    setIsAddMembersModalOpen(false);
+    setAddMembersSearch('');
+    setNewGroupNameDraft('');
+    setNewGroupPhotoUri(null);
+    setNewGroupPermissionMode('ALL_MEMBERS');
+    setSelectedNewGroupMemberIds({ [chat.contactId]: true });
+
+    setTimeout(() => {
+      if (selectedChatRef.current?.contactId === chat.contactId) {
+        setIsAddMembersModalOpen(true);
+      }
+    }, Platform.OS === 'ios' ? 320 : 140);
   }
 
   function handleCloseContactInfo() {
@@ -2300,6 +2336,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
   function handleStartGroupCreateFromSwitcher() {
     setIsGroupSwitcherModalOpen(false);
+    setNewGroupFlowOrigin('groupSwitcher');
     setNewChatSearch('');
     setAddMembersSearch('');
     setNewGroupNameDraft('');
@@ -2423,6 +2460,24 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
   function handleReturnToNewChatModal() {
     setIsAddMembersModalOpen(false);
+    resetNewGroupDraft();
+
+    if (newGroupFlowOrigin === 'contactInfo') {
+      const chat = selectedChatRef.current;
+
+      if (chat && chat.chatType !== 'GROUP') {
+        setIsContactInfoModalOpen(true);
+      }
+
+      return;
+    }
+
+    if (newGroupFlowOrigin === 'groupSwitcher') {
+      setIsGroupSwitcherModalOpen(true);
+      void loadGroupSettings(false);
+      return;
+    }
+
     setIsNewChatModalOpen(true);
   }
 
@@ -5706,11 +5761,13 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         isOpen={isAddMembersModalOpen}
         onBack={handleReturnToNewChatModal}
         onNext={handleOpenGroupDetailsModal}
+        onRemoveMember={handleRemoveNewGroupMember}
         onSearchChange={setAddMembersSearch}
         onToggleMember={handleToggleNewGroupMember}
         profilePhotoHeaders={profilePhotoHeaders}
         search={addMembersSearch}
         selectedMemberIds={selectedNewGroupMemberIds}
+        selectedMembers={selectedNewGroupMembers}
         selectedCount={selectedNewGroupMembers.length}
       />
 
@@ -5772,7 +5829,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         transcriptLanguage={activeDirectChatTranscriptLanguage}
         onAddToGroup={() => handleContactInfoUnavailableAction('Add to group')}
         onClose={handleCloseContactInfo}
-        onCreateGroup={() => handleContactInfoUnavailableAction('Create group')}
+        onCreateGroup={handleStartCreateGroupWithContactInfo}
         onOpenContactDetails={handleOpenDirectContactDetails}
         onOpenGroup={handleOpenCommonGroupFromContactInfo}
         onOpenNotifications={handleOpenChatNotificationSettings}
@@ -9490,23 +9547,27 @@ function AddMembersModal({
   isOpen,
   onBack,
   onNext,
+  onRemoveMember,
   onSearchChange,
   onToggleMember,
   profilePhotoHeaders,
   search,
   selectedCount,
-  selectedMemberIds
+  selectedMemberIds,
+  selectedMembers
 }: {
   contacts: ChatContact[];
   isOpen: boolean;
   onBack: () => void;
   onNext: () => void;
+  onRemoveMember: (contactId: string) => void;
   onSearchChange: (value: string) => void;
   onToggleMember: (contactId: string) => void;
   profilePhotoHeaders?: Record<string, string>;
   search: string;
   selectedCount: number;
   selectedMemberIds: Record<string, boolean>;
+  selectedMembers: ChatContact[];
 }) {
   const filteredContacts = filterChatContacts(contacts, search);
   const insets = useSafeAreaInsets();
@@ -9524,7 +9585,7 @@ function AddMembersModal({
       <View style={[styles.newChatModalScreen, { paddingTop: modalTopPadding }]}>
         <View style={styles.newChatHeader}>
           <Pressable
-            accessibilityLabel="Back to new chat"
+            accessibilityLabel="Close add members"
             accessibilityRole="button"
             onPress={onBack}
             style={({ pressed }) => [styles.newChatHeaderIconButton, pressed && styles.pressed]}
@@ -9554,15 +9615,49 @@ function AddMembersModal({
 
         <ChatSearchBar
           onChangeText={onSearchChange}
-          placeholder="Search members"
+          placeholder="Search name or number"
           value={search}
         />
+
+        {selectedMembers.length ? (
+          <View style={styles.addMembersSelectedPanel}>
+            <ScrollView
+              contentContainerStyle={styles.addMembersSelectedContent}
+              horizontal
+              keyboardShouldPersistTaps="handled"
+              showsHorizontalScrollIndicator={false}
+            >
+              {selectedMembers.map((member) => (
+                <View key={member.contactId} style={styles.addMembersSelectedChip}>
+                  <View style={styles.groupMemberAvatarWrap}>
+                    <ProfileAvatar
+                      headers={profilePhotoHeaders}
+                      name={member.displayName}
+                      size={48}
+                      uri={member.profilePhotoUrl}
+                    />
+                    <Pressable
+                      accessibilityLabel={`Remove ${member.displayName}`}
+                      accessibilityRole="button"
+                      onPress={() => onRemoveMember(member.contactId)}
+                      style={({ pressed }) => [styles.groupMemberRemoveButton, pressed && styles.pressed]}
+                    >
+                      <Feather color="#FFFFFF" name="x" size={13} />
+                    </Pressable>
+                  </View>
+                  <Text numberOfLines={2} style={styles.addMembersSelectedName}>{member.displayName}</Text>
+                </View>
+              ))}
+            </ScrollView>
+          </View>
+        ) : null}
 
         <ScrollView
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
           style={styles.newChatContactList}
         >
+          <Text style={styles.addMembersSectionTitle}>Frequently contacted</Text>
           {filteredContacts.map((contact) => (
             <ChatMemberSelectRow
               contact={contact}
@@ -14242,7 +14337,7 @@ function filterChatContacts(contacts: ChatContact[], search: string): ChatContac
   }
 
   return contacts.filter((contact) =>
-    normalizeSearchQuery(`${contact.displayName} ${contact.roleName}`).includes(query)
+    normalizeSearchQuery(`${contact.displayName} ${contact.roleName} ${contact.phoneMasked || ''}`).includes(query)
   );
 }
 
@@ -17302,6 +17397,37 @@ const styles = StyleSheet.create({
   },
   newChatContactList: {
     flex: 1
+  },
+  addMembersSelectedPanel: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    minHeight: 96,
+    marginBottom: 12,
+    paddingVertical: 10
+  },
+  addMembersSelectedContent: {
+    gap: 14,
+    paddingHorizontal: 8
+  },
+  addMembersSelectedChip: {
+    alignItems: 'center',
+    width: 66
+  },
+  addMembersSelectedName: {
+    color: colors.ink,
+    fontSize: 11,
+    fontWeight: '400',
+    lineHeight: 15,
+    marginTop: 6,
+    textAlign: 'center'
+  },
+  addMembersSectionTitle: {
+    color: '#64748B',
+    fontSize: 15,
+    fontWeight: '600',
+    lineHeight: 20,
+    paddingBottom: 4,
+    paddingTop: 4
   },
   newChatContactRow: {
     alignItems: 'center',
