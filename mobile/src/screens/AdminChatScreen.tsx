@@ -1962,6 +1962,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsChatNotificationSettingsOpen(false);
     setIsChatTranscriptLanguageOpen(false);
     setIsDirectContactDetailsOpen(false);
+    void loadDirectContactDetails(chat, false);
     setIsContactInfoModalOpen(true);
   }
 
@@ -5765,6 +5766,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       <ContactInfoModal
         chat={selectedChat}
         commonGroups={getCommonGroupContactsForDirectChat(selectedChat, groupChatContacts)}
+        contactDetails={activeDirectContactDetails}
         isOpen={isContactInfoModalOpen}
         notificationSettings={activeDirectChatNotificationSettings}
         transcriptLanguage={activeDirectChatTranscriptLanguage}
@@ -5772,7 +5774,6 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         onClose={handleCloseContactInfo}
         onCreateGroup={() => handleContactInfoUnavailableAction('Create group')}
         onOpenContactDetails={handleOpenDirectContactDetails}
-        onOpenEdit={() => handleContactInfoUnavailableAction('Edit contact')}
         onOpenGroup={handleOpenCommonGroupFromContactInfo}
         onOpenNotifications={handleOpenChatNotificationSettings}
         onOpenSearch={() => handleContactInfoUnavailableAction('Search')}
@@ -10377,6 +10378,7 @@ function DirectContactDetailsModal({
 function ContactInfoModal({
   chat,
   commonGroups,
+  contactDetails,
   isOpen,
   notificationSettings,
   transcriptLanguage,
@@ -10384,7 +10386,6 @@ function ContactInfoModal({
   onClose,
   onCreateGroup,
   onOpenContactDetails,
-  onOpenEdit,
   onOpenGroup,
   onOpenNotifications,
   onOpenSearch,
@@ -10395,6 +10396,7 @@ function ContactInfoModal({
 }: {
   chat: ChatItem | null;
   commonGroups: ChatContact[];
+  contactDetails: DirectChatContactDetails | null;
   isOpen: boolean;
   notificationSettings: ChatNotificationSettings | null;
   transcriptLanguage: ChatTranscriptLanguageSetting | null;
@@ -10402,7 +10404,6 @@ function ContactInfoModal({
   onClose: () => void;
   onCreateGroup: () => void;
   onOpenContactDetails: () => void;
-  onOpenEdit: () => void;
   onOpenGroup: (group: ChatContact) => void;
   onOpenNotifications: () => void;
   onOpenSearch: () => void;
@@ -10419,6 +10420,7 @@ function ContactInfoModal({
   }
 
   const visibleCommonGroups = commonGroups.slice(0, 3);
+  const phoneNumber = contactDetails?.phoneFormatted || chat.phoneMasked || null;
 
   return (
     <Modal
@@ -10440,14 +10442,7 @@ function ContactInfoModal({
             <Text style={styles.backButtonText}>‹</Text>
           </Pressable>
           <Text numberOfLines={1} style={styles.contactInfoHeaderTitle}>Contact info</Text>
-          <Pressable
-            accessibilityLabel="Edit contact"
-            accessibilityRole="button"
-            onPress={onOpenEdit}
-            style={({ pressed }) => [styles.groupInfoEditButton, pressed && styles.pressed]}
-          >
-            <Text style={styles.groupInfoEditText}>Edit</Text>
-          </Pressable>
+          <View style={styles.groupInfoTopButtonSpacer} />
         </View>
 
         <ScrollView
@@ -10463,8 +10458,8 @@ function ContactInfoModal({
               uri={chat.profilePhotoUrl}
             />
             <Text numberOfLines={2} style={styles.contactInfoName}>{chat.title}</Text>
-            {chat.phoneMasked ? (
-              <Text numberOfLines={1} style={styles.contactInfoMeta}>{chat.phoneMasked}</Text>
+            {phoneNumber ? (
+              <Text numberOfLines={1} style={styles.contactInfoMeta}>{phoneNumber}</Text>
             ) : null}
             <Text numberOfLines={1} style={styles.contactInfoPresence}>
               {getContactInfoPresenceText(chat)}
