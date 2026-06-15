@@ -172,8 +172,11 @@ interface ChatItem {
   memberCount?: number;
   members?: ChatGroupMember[];
   memberPolicy?: 'DEPARTMENT_PLUS_EXPLICIT' | 'EXPLICIT';
+  phoneMasked?: string | null;
   profilePhotoUrl?: string | null;
   preview: string;
+  roleName?: string;
+  status?: string;
   title: string;
   unreadCount: number;
 }
@@ -418,6 +421,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [addMembersSearch, setAddMembersSearch] = useState('');
   const [isNewChatModalOpen, setIsNewChatModalOpen] = useState(false);
   const [isAddMembersModalOpen, setIsAddMembersModalOpen] = useState(false);
+  const [isContactInfoModalOpen, setIsContactInfoModalOpen] = useState(false);
   const [isGroupDetailsModalOpen, setIsGroupDetailsModalOpen] = useState(false);
   const [isGroupPermissionsModalOpen, setIsGroupPermissionsModalOpen] = useState(false);
   const [isGroupCallOptionsOpen, setIsGroupCallOptionsOpen] = useState(false);
@@ -519,6 +523,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     : ['Chats', 'Groups', 'Settings', 'You'];
   const chatItems = chatContacts.map(mapChatContactToChatItem);
   const directChatContacts = chatContacts.filter((contact) => (contact.chatType || 'DIRECT') !== 'GROUP');
+  const groupChatContacts = chatContacts.filter((contact) => contact.chatType === 'GROUP');
   const selectedForwardMessageCount = Object.values(forwardSelectedMessageIds).filter(Boolean).length;
   const selectedForwardRecipientCount = Object.values(forwardRecipientIds).filter(Boolean).length;
   const employeeItems = approvedEmployees.map(mapApprovedEmployeeToListItem);
@@ -1808,11 +1813,30 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsGroupCallOptionsOpen(false);
     setIsGroupCallPeopleModalOpen(false);
     setIsGroupSwitcherModalOpen(false);
+    setIsContactInfoModalOpen(false);
     setIsGroupInfoModalOpen(true);
   }
 
   function handleCloseGroupInfo() {
     setIsGroupInfoModalOpen(false);
+  }
+
+  function handleOpenContactInfo() {
+    const chat = selectedChatRef.current;
+
+    if (!chat || chat.chatType === 'GROUP') {
+      return;
+    }
+
+    setIsGroupCallOptionsOpen(false);
+    setIsGroupCallPeopleModalOpen(false);
+    setIsGroupSwitcherModalOpen(false);
+    setIsGroupInfoModalOpen(false);
+    setIsContactInfoModalOpen(true);
+  }
+
+  function handleCloseContactInfo() {
+    setIsContactInfoModalOpen(false);
   }
 
   function handleOpenGroupSwitcher() {
@@ -1869,6 +1893,15 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
   function handleGroupInfoUnavailableAction(title: string) {
     Alert.alert(title, 'This group action is ready in the group profile and will connect to the group management service when that service is enabled.');
+  }
+
+  function handleContactInfoUnavailableAction(title: string) {
+    Alert.alert(title, 'This contact action is ready in the contact profile and will connect to the contact management service when that service is enabled.');
+  }
+
+  function handleOpenCommonGroupFromContactInfo(groupContact: ChatContact) {
+    setIsContactInfoModalOpen(false);
+    void handleOpenChat(mapChatContactToChatItem(groupContact));
   }
 
   function handleSelectGroupCallOption(option: GroupCallOption) {
@@ -3474,8 +3507,10 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setError(null);
     setSelectedChat(null);
     setIsLoadingMessages(false);
+    setIsContactInfoModalOpen(false);
     setIsGroupCallOptionsOpen(false);
     setIsGroupCallPeopleModalOpen(false);
+    setIsGroupInfoModalOpen(false);
     setIsGroupSwitcherModalOpen(false);
     setGroupCallPeopleSearch('');
     setSelectedGroupCallMemberIds({});
@@ -3498,8 +3533,10 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     selectedChatRef.current = null;
     setSelectedChat(null);
     setIsLoadingMessages(false);
+    setIsContactInfoModalOpen(false);
     setIsGroupCallOptionsOpen(false);
     setIsGroupCallPeopleModalOpen(false);
+    setIsGroupInfoModalOpen(false);
     setIsGroupSwitcherModalOpen(false);
     setGroupCallPeopleSearch('');
     setSelectedGroupCallMemberIds({});
@@ -4736,6 +4773,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           chat={selectedChat}
           onlineCount={activeGroupOnlineCount}
           onBack={handleCloseChat}
+          onOpenContactInfo={handleOpenContactInfo}
           onOpenGroupCallOptions={handleOpenGroupCallOptions}
           onOpenGroupInfo={handleOpenGroupInfo}
           onOpenGroupPeoplePicker={() => handleOpenGroupCallPeopleModal('select')}
@@ -5217,6 +5255,24 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         selectedMemberIds={selectedGroupCallMemberIds}
       />
 
+      <ContactInfoModal
+        chat={selectedChat}
+        commonGroups={getCommonGroupContactsForDirectChat(selectedChat, groupChatContacts)}
+        isOpen={isContactInfoModalOpen}
+        onAddToGroup={() => handleContactInfoUnavailableAction('Add to group')}
+        onClose={handleCloseContactInfo}
+        onCreateGroup={() => handleContactInfoUnavailableAction('Create group')}
+        onOpenContactDetails={() => handleContactInfoUnavailableAction('Contact details')}
+        onOpenEdit={() => handleContactInfoUnavailableAction('Edit contact')}
+        onOpenGroup={handleOpenCommonGroupFromContactInfo}
+        onOpenNotifications={() => handleContactInfoUnavailableAction('Notifications')}
+        onOpenSearch={() => handleContactInfoUnavailableAction('Search')}
+        onOpenTranscriptLanguage={() => handleContactInfoUnavailableAction('Transcript language')}
+        onStartVideoCall={() => handleContactInfoUnavailableAction('Video call')}
+        onStartVoiceCall={() => handleContactInfoUnavailableAction('Audio call')}
+        profilePhotoHeaders={profilePhotoHeaders}
+      />
+
       <GroupInfoModal
         chat={selectedChat}
         companyName={companyDisplayName}
@@ -5425,6 +5481,7 @@ function MessageHeader({
   chat,
   onlineCount,
   onBack,
+  onOpenContactInfo,
   onOpenGroupCallOptions,
   onOpenGroupInfo,
   onOpenGroupPeoplePicker,
@@ -5433,6 +5490,7 @@ function MessageHeader({
   chat: ChatItem;
   onlineCount: number;
   onBack: () => void;
+  onOpenContactInfo: () => void;
   onOpenGroupCallOptions: () => void;
   onOpenGroupInfo: () => void;
   onOpenGroupPeoplePicker: () => void;
@@ -5458,13 +5516,12 @@ function MessageHeader({
       </Pressable>
 
       <Pressable
-        accessibilityLabel={isGroupChat ? 'Open group info' : undefined}
-        accessibilityRole={isGroupChat ? 'button' : undefined}
-        disabled={!isGroupChat}
-        onPress={onOpenGroupInfo}
+        accessibilityLabel={isGroupChat ? 'Open group info' : 'Open contact info'}
+        accessibilityRole="button"
+        onPress={isGroupChat ? onOpenGroupInfo : onOpenContactInfo}
         style={({ pressed }) => [
           styles.messageHeaderIdentity,
-          pressed && isGroupChat && styles.pressed
+          pressed && styles.pressed
         ]}
       >
         <ProfileAvatar
@@ -5520,7 +5577,7 @@ function MessageHeader({
           android_ripple={androidIconRipple}
           accessibilityLabel="More"
           accessibilityRole="button"
-          onPress={isGroupChat ? onOpenGroupCallOptions : undefined}
+          onPress={isGroupChat ? onOpenGroupCallOptions : onOpenContactInfo}
           style={({ pressed }) => [styles.messageHeaderIcon, pressed && styles.pressed]}
         >
           <Ionicons color="#FFFFFF" name="ellipsis-vertical" size={27} />
@@ -8932,6 +8989,204 @@ function GroupCallPeopleModal({
   );
 }
 
+function ContactInfoModal({
+  chat,
+  commonGroups,
+  isOpen,
+  onAddToGroup,
+  onClose,
+  onCreateGroup,
+  onOpenContactDetails,
+  onOpenEdit,
+  onOpenGroup,
+  onOpenNotifications,
+  onOpenSearch,
+  onOpenTranscriptLanguage,
+  onStartVideoCall,
+  onStartVoiceCall,
+  profilePhotoHeaders
+}: {
+  chat: ChatItem | null;
+  commonGroups: ChatContact[];
+  isOpen: boolean;
+  onAddToGroup: () => void;
+  onClose: () => void;
+  onCreateGroup: () => void;
+  onOpenContactDetails: () => void;
+  onOpenEdit: () => void;
+  onOpenGroup: (group: ChatContact) => void;
+  onOpenNotifications: () => void;
+  onOpenSearch: () => void;
+  onOpenTranscriptLanguage: () => void;
+  onStartVideoCall: () => void;
+  onStartVoiceCall: () => void;
+  profilePhotoHeaders?: Record<string, string>;
+}) {
+  const insets = useSafeAreaInsets();
+  const modalTopPadding = getFullScreenModalTopPadding(insets.top);
+
+  if (!chat || chat.chatType === 'GROUP') {
+    return null;
+  }
+
+  const visibleCommonGroups = commonGroups.slice(0, 3);
+
+  return (
+    <Modal
+      allowSwipeDismissal={Platform.OS === 'ios'}
+      animationType="slide"
+      onRequestClose={onClose}
+      presentationStyle={getNativeFullHeightModalPresentationStyle()}
+      transparent={false}
+      visible={isOpen}
+    >
+      <View style={[styles.groupInfoScreen, { paddingTop: modalTopPadding }]}>
+        <View style={styles.contactInfoTopBar}>
+          <Pressable
+            accessibilityLabel="Close contact info"
+            accessibilityRole="button"
+            onPress={onClose}
+            style={({ pressed }) => [styles.groupInfoTopButton, pressed && styles.pressed]}
+          >
+            <Text style={styles.backButtonText}>‹</Text>
+          </Pressable>
+          <Text numberOfLines={1} style={styles.contactInfoHeaderTitle}>Contact info</Text>
+          <Pressable
+            accessibilityLabel="Edit contact"
+            accessibilityRole="button"
+            onPress={onOpenEdit}
+            style={({ pressed }) => [styles.groupInfoEditButton, pressed && styles.pressed]}
+          >
+            <Text style={styles.groupInfoEditText}>Edit</Text>
+          </Pressable>
+        </View>
+
+        <ScrollView
+          contentContainerStyle={styles.groupInfoContent}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={styles.contactInfoHero}>
+            <ProfileAvatar
+              headers={profilePhotoHeaders}
+              name={chat.title}
+              size={104}
+              uri={chat.profilePhotoUrl}
+            />
+            <Text numberOfLines={2} style={styles.contactInfoName}>{chat.title}</Text>
+            {chat.phoneMasked ? (
+              <Text numberOfLines={1} style={styles.contactInfoMeta}>{chat.phoneMasked}</Text>
+            ) : null}
+            <Text numberOfLines={1} style={styles.contactInfoPresence}>
+              {getContactInfoPresenceText(chat)}
+            </Text>
+          </View>
+
+          <View style={styles.contactInfoActionGrid}>
+            <GroupInfoActionButton icon="phone" label="Audio" onPress={onStartVoiceCall} />
+            <GroupInfoActionButton icon="video" label="Video" onPress={onStartVideoCall} />
+            <GroupInfoActionButton icon="search" label="Search" onPress={onOpenSearch} />
+          </View>
+
+          <View style={styles.groupInfoSection}>
+            <GroupInfoSettingRow
+              icon="bell"
+              label="Notifications"
+              onPress={onOpenNotifications}
+            />
+          </View>
+
+          <View style={styles.groupInfoSection}>
+            <GroupInfoSettingRow
+              icon="file-text"
+              label="Transcript language"
+              onPress={onOpenTranscriptLanguage}
+              value="English (United States)"
+            />
+          </View>
+
+          <View style={styles.groupInfoSection}>
+            <GroupInfoSettingRow
+              icon="user"
+              label="Contact details"
+              onPress={onOpenContactDetails}
+            />
+          </View>
+
+          <View style={styles.groupInfoSection}>
+            <View style={styles.contactInfoCommonHeader}>
+              <Text style={styles.groupInfoMembersTitle}>
+                {formatCommonGroupCount(commonGroups.length)}
+              </Text>
+            </View>
+            <GroupInfoSettingRow
+              icon="plus"
+              label={`Create group with ${chat.title}`}
+              onPress={onCreateGroup}
+            />
+            <GroupInfoSettingRow
+              icon="users"
+              label="Add to group"
+              onPress={onAddToGroup}
+            />
+            {visibleCommonGroups.map((group) => (
+              <ContactCommonGroupRow
+                contactName={chat.title}
+                group={group}
+                key={group.contactId}
+                onOpen={() => onOpenGroup(group)}
+                profilePhotoHeaders={profilePhotoHeaders}
+              />
+            ))}
+            {commonGroups.length > visibleCommonGroups.length ? (
+              <GroupInfoSettingRow
+                icon="chevron-down"
+                label="See all"
+                onPress={onOpenSearch}
+              />
+            ) : null}
+          </View>
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+}
+
+function ContactCommonGroupRow({
+  contactName,
+  group,
+  onOpen,
+  profilePhotoHeaders
+}: {
+  contactName: string;
+  group: ChatContact;
+  onOpen: () => void;
+  profilePhotoHeaders?: Record<string, string>;
+}) {
+  return (
+    <Pressable
+      accessibilityLabel={`Open ${group.displayName}`}
+      accessibilityRole="button"
+      onPress={onOpen}
+      style={({ pressed }) => [styles.contactInfoCommonGroupRow, pressed && styles.pressed]}
+    >
+      <ProfileAvatar
+        headers={profilePhotoHeaders}
+        name={group.displayName}
+        size={42}
+        uri={group.profilePhotoUrl}
+      />
+      <View style={styles.chatText}>
+        <Text numberOfLines={1} style={styles.groupInfoMemberName}>{group.displayName}</Text>
+        <Text numberOfLines={1} style={styles.contactInfoCommonGroupSubtitle}>
+          {getCommonGroupPreview(group, contactName)}
+        </Text>
+      </View>
+      <Feather color="#A7B3C3" name="chevron-right" size={18} />
+    </Pressable>
+  );
+}
+
 function GroupInfoModal({
   chat,
   companyName,
@@ -12304,8 +12559,11 @@ function mapChatContactToChatItem(contact: ChatContact): ChatItem {
     memberCount: contact.memberCount,
     members: contact.members,
     memberPolicy: contact.memberPolicy,
+    phoneMasked: contact.phoneMasked || null,
     preview: contact.preview,
     profilePhotoUrl: contact.profilePhotoUrl,
+    roleName: contact.roleName,
+    status: contact.status,
     title: contact.displayName,
     unreadCount: contact.unreadCount || 0
   };
@@ -12313,6 +12571,19 @@ function mapChatContactToChatItem(contact: ChatContact): ChatItem {
 
 function isUserCreatedGroupChat(chat?: ChatItem | null): chat is ChatItem {
   return Boolean(chat && chat.chatType === 'GROUP' && chat.isDepartmentDefault !== true);
+}
+
+function getCommonGroupContactsForDirectChat(
+  chat: ChatItem | null,
+  groupContacts: ChatContact[]
+): ChatContact[] {
+  if (!chat || chat.chatType === 'GROUP') {
+    return [];
+  }
+
+  return groupContacts.filter((groupContact) =>
+    (groupContact.members || []).some((member) => member.uid === chat.contactId)
+  );
 }
 
 function mapGroupMembersToSelectableContacts(
@@ -12338,6 +12609,7 @@ function mapGroupMembersToSelectableContacts(
         isOnline,
         lastMessageAt: null,
         lastSeenAt: directContact?.lastSeenAt || null,
+        phoneMasked: directContact?.phoneMasked || null,
         preview: '',
         profilePhotoCacheKey: member.profilePhotoCacheKey || directContact?.profilePhotoCacheKey || null,
         profilePhotoUrl: member.profilePhotoUrl || directContact?.profilePhotoUrl || null,
@@ -12374,6 +12646,49 @@ function formatGroupMemberCount(memberCount: number): string {
   const safeMemberCount = Math.max(Math.round(memberCount || 0), 0);
 
   return safeMemberCount === 1 ? '1 member' : `${safeMemberCount} members`;
+}
+
+function formatCommonGroupCount(groupCount: number): string {
+  const safeGroupCount = Math.max(Math.round(groupCount || 0), 0);
+
+  return safeGroupCount === 1 ? '1 group in common' : `${safeGroupCount} groups in common`;
+}
+
+function getContactInfoPresenceText(chat: ChatItem): string {
+  if (chat.isOnline) {
+    return 'online';
+  }
+
+  if (chat.lastSeenAt) {
+    const lastSeen = formatChatListTime(chat.lastSeenAt);
+
+    if (lastSeen) {
+      return `last seen ${lastSeen}`;
+    }
+  }
+
+  return chat.roleName || 'Synzapp contact';
+}
+
+function getCommonGroupPreview(group: ChatContact, contactName: string): string {
+  const memberNames = (group.members || [])
+    .map((member) => member.displayName)
+    .filter((name) => name && name !== contactName)
+    .slice(0, 4);
+
+  if (!memberNames.length) {
+    return getGroupSubtitleFromContact(group);
+  }
+
+  return memberNames.join(', ');
+}
+
+function getGroupSubtitleFromContact(group: ChatContact): string {
+  if (group.isDepartmentDefault) {
+    return 'Department group';
+  }
+
+  return group.memberCount === 1 ? '1 member' : `${group.memberCount || 0} members`;
 }
 
 function getGroupInfoDescription(chat: ChatItem): string {
@@ -15367,6 +15682,57 @@ const styles = StyleSheet.create({
     backgroundColor: '#F4F6F8',
     flex: 1
   },
+  contactInfoTopBar: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    minHeight: 46,
+    paddingHorizontal: 16
+  },
+  contactInfoHeaderTitle: {
+    color: colors.ink,
+    flex: 1,
+    fontSize: 17,
+    fontWeight: '600',
+    lineHeight: 22,
+    paddingHorizontal: 10,
+    textAlign: 'center'
+  },
+  contactInfoHero: {
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingTop: 10
+  },
+  contactInfoName: {
+    color: '#0B141A',
+    fontSize: 24,
+    fontWeight: '600',
+    lineHeight: 30,
+    marginTop: 12,
+    maxWidth: 320,
+    textAlign: 'center'
+  },
+  contactInfoMeta: {
+    color: '#64748B',
+    fontSize: 14,
+    fontWeight: '400',
+    lineHeight: 19,
+    marginTop: 2,
+    textAlign: 'center'
+  },
+  contactInfoPresence: {
+    color: '#8B95A5',
+    fontSize: 14,
+    fontWeight: '400',
+    lineHeight: 19,
+    marginTop: 1,
+    textAlign: 'center'
+  },
+  contactInfoActionGrid: {
+    flexDirection: 'row',
+    gap: 8,
+    justifyContent: 'space-between'
+  },
   groupInfoTopBar: {
     alignItems: 'center',
     flexDirection: 'row',
@@ -15564,6 +15930,29 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '400',
     lineHeight: 21
+  },
+  contactInfoCommonHeader: {
+    borderBottomColor: '#E5E7EB',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    minHeight: 44,
+    justifyContent: 'center',
+    paddingHorizontal: 14
+  },
+  contactInfoCommonGroupRow: {
+    alignItems: 'center',
+    borderBottomColor: '#E5E7EB',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 11,
+    minHeight: 62,
+    paddingHorizontal: 12,
+    paddingVertical: 8
+  },
+  contactInfoCommonGroupSubtitle: {
+    color: '#8B95A5',
+    fontSize: 12,
+    fontWeight: '400',
+    lineHeight: 16
   },
   groupNameRow: {
     alignItems: 'center',

@@ -26,6 +26,7 @@ export interface ChatContact {
   members?: ChatGroupMember[];
   memberPolicy?: 'DEPARTMENT_PLUS_EXPLICIT' | 'EXPLICIT';
   messagePermissionMode?: 'ADMINS' | 'ALL_MEMBERS';
+  phoneMasked?: string | null;
   preview: string;
   profilePhotoCacheKey: string | null;
   profilePhotoUrl: string | null;
@@ -666,6 +667,7 @@ function normalizeChatContact(contact: ChatContact): ChatContact {
     members: Array.isArray(contact.members) ? contact.members.map(normalizeChatGroupMember) : undefined,
     memberPolicy: contact.memberPolicy === 'DEPARTMENT_PLUS_EXPLICIT' ? 'DEPARTMENT_PLUS_EXPLICIT' : contact.memberPolicy === 'EXPLICIT' ? 'EXPLICIT' : undefined,
     messagePermissionMode: contact.messagePermissionMode === 'ADMINS' ? 'ADMINS' : contact.messagePermissionMode === 'ALL_MEMBERS' ? 'ALL_MEMBERS' : undefined,
+    phoneMasked: typeof contact.phoneMasked === 'string' && contact.phoneMasked.trim() ? contact.phoneMasked.trim() : null,
     profilePhotoUrl: normalizeSynzappApiUrl(contact.profilePhotoUrl)
   };
 }

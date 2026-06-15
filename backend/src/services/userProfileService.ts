@@ -57,6 +57,7 @@ export interface ChatContact {
   isOnline: boolean;
   lastMessageAt: string | null;
   lastSeenAt: string | null;
+  phoneMasked: string | null;
   preview: string;
   profilePhotoCacheKey: string | null;
   profilePhotoUrl: string | null;
@@ -811,6 +812,7 @@ function buildChatContact(
     isOnline: presence.isOnline,
     lastMessageAt: lastMessageSentAtMs ? new Date(lastMessageSentAtMs).toISOString() : null,
     lastSeenAt: presence.lastSeenAt,
+    phoneMasked: user.phoneMasked || null,
     preview: directChat?.lastMessageText || '',
     profilePhotoCacheKey: user.profilePhotoStoragePath
       ? buildProfilePhotoCacheKey(contactId, user.profilePhotoVersion)
