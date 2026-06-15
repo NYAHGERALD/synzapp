@@ -533,11 +533,11 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const selectedForwardRecipientCount = Object.values(forwardRecipientIds).filter(Boolean).length;
   const employeeItems = approvedEmployees.map(mapApprovedEmployeeToListItem);
   const isCompactAndroid = Platform.OS === 'android' && height < 720;
-  const footerHeight = isCompactAndroid ? 56 : 60;
+  const footerHeight = isCompactAndroid ? 64 : 68;
   const footerBottom = Platform.OS === 'android'
-    ? Math.max(insets.bottom + 2, isCompactAndroid ? 14 : 18)
-    : Math.max(insets.bottom, 10);
-  const footerTabHeight = isCompactAndroid ? 46 : 50;
+    ? Math.min(Math.max(insets.bottom, 0), 4)
+    : Math.max(Math.min(insets.bottom, 6), 4);
+  const footerTabHeight = isCompactAndroid ? 56 : 60;
   const androidStatusBarHeight = Platform.OS === 'android' ? RNStatusBar.currentHeight || 0 : 0;
   const deviceTopInset = Math.max(insets.top, androidStatusBarHeight);
   const headerTopPadding = Platform.OS === 'android' ? Math.max(deviceTopInset + 10, 38) : 8;
@@ -545,6 +545,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const contentBottomPadding = footerBottom + footerHeight + 18;
   const tabContentBottomPadding = isScreenKeyboardVisible ? 18 : contentBottomPadding;
   const floatingAddBottom = footerBottom + footerHeight + 14;
+  const askButtonBottom = footerBottom + footerHeight + 16;
   const profilePhotoHeaders = profilePhotoAuthToken
     ? {
         Authorization: `Bearer ${profilePhotoAuthToken}`,
@@ -1919,6 +1920,11 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
   function handleChatsSectionUnavailableAction(title: string) {
     Alert.alert(title, 'This chats section is ready in the Chats tab and will connect to the chat management service when that service is enabled.');
+  }
+
+  function handleOpenAskSynzappAi() {
+    Keyboard.dismiss();
+    Alert.alert('Ask Synzapp AI', 'The Synzapp AI assistant will open here when the AI modal is enabled.');
   }
 
   function handleOpenCommonGroupFromContactInfo(groupContact: ChatContact) {
@@ -5122,11 +5128,26 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         </Pressable>
       ) : null}
 
+      {!selectedChat && activeTab === 'Chats' && !isScreenKeyboardVisible ? (
+        <Pressable
+          accessibilityLabel="Ask Synzapp AI"
+          accessibilityRole="button"
+          onPress={handleOpenAskSynzappAi}
+          style={({ pressed }) => [
+            styles.askFloatingButton,
+            { bottom: askButtonBottom },
+            pressed && styles.pressed
+          ]}
+        >
+          <Text style={styles.askFloatingText}>Ask</Text>
+        </Pressable>
+      ) : null}
+
       {!selectedChat && !isScreenKeyboardVisible ? (
         <View style={[
         styles.footer,
         {
-          borderRadius: isCompactAndroid ? 24 : 28,
+          borderRadius: isCompactAndroid ? 32 : 34,
           bottom: footerBottom,
           minHeight: footerHeight
         }
@@ -11732,7 +11753,7 @@ function FooterIcon({
         <ProfileAvatar
           headers={profilePhotoHeaders}
           name={profile?.displayName || 'You'}
-          size={24}
+          size={28}
           uri={profile?.profilePhotoUrl}
         />
       </View>
@@ -11740,18 +11761,18 @@ function FooterIcon({
   }
 
   if (tab === 'Employees') {
-    return <Ionicons color={iconColor} name={active ? 'people' : 'people-outline'} size={23} />;
+    return <Ionicons color={iconColor} name={active ? 'people' : 'people-outline'} size={27} />;
   }
 
   if (tab === 'Groups') {
-    return <Ionicons color={iconColor} name={active ? 'albums' : 'albums-outline'} size={23} />;
+    return <Ionicons color={iconColor} name={active ? 'albums' : 'albums-outline'} size={27} />;
   }
 
   if (tab === 'Settings') {
-    return <Ionicons color={iconColor} name={active ? 'settings' : 'settings-outline'} size={23} />;
+    return <Ionicons color={iconColor} name={active ? 'settings' : 'settings-outline'} size={27} />;
   }
 
-  return <Ionicons color={iconColor} name={active ? 'chatbubble-ellipses' : 'chatbubble-ellipses-outline'} size={23} />;
+  return <Ionicons color={iconColor} name={active ? 'chatbubble-ellipses' : 'chatbubble-ellipses-outline'} size={27} />;
 }
 
 function sortByName<T extends { name: string }>(records: T[]): T[] {
@@ -16642,6 +16663,29 @@ const styles = StyleSheet.create({
     fontWeight: '400',
     lineHeight: 35
   },
+  askFloatingButton: {
+    alignItems: 'center',
+    backgroundColor: colors.primary,
+    borderColor: '#FFFFFF',
+    borderRadius: 31,
+    borderWidth: 2,
+    elevation: 12,
+    height: 62,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: 16,
+    shadowColor: '#0F172A',
+    shadowOffset: { height: 9, width: 0 },
+    shadowOpacity: 0.18,
+    shadowRadius: 18,
+    width: 62
+  },
+  askFloatingText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+    lineHeight: 20
+  },
   settingsInputBox: {
     borderBottomColor: 'rgba(15, 118, 110, 0.28)',
     borderBottomWidth: 1,
@@ -16836,18 +16880,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: 'rgba(255, 255, 255, 0.98)',
     borderColor: '#E7EAF0',
-    borderRadius: 28,
+    borderRadius: 34,
     borderWidth: 1,
-    bottom: 16,
     elevation: 10,
     flexDirection: 'row',
     justifyContent: 'space-between',
-    left: 12,
-    minHeight: 60,
-    paddingHorizontal: 6,
-    paddingVertical: 5,
+    left: 8,
+    minHeight: 68,
+    paddingHorizontal: 7,
+    paddingVertical: 6,
     position: 'absolute',
-    right: 12,
+    right: 8,
     shadowColor: '#0F172A',
     shadowOffset: { height: 10, width: 0 },
     shadowOpacity: 0.12,
@@ -16855,34 +16898,34 @@ const styles = StyleSheet.create({
   },
   footerTab: {
     alignItems: 'center',
-    borderRadius: 24,
+    borderRadius: 28,
     flex: 1,
     justifyContent: 'center',
-    minHeight: 52,
+    minHeight: 60,
     minWidth: 0,
     overflow: 'hidden',
     position: 'relative'
   },
   footerTabActivePill: {
     backgroundColor: '#EEF0F5',
-    borderRadius: 24,
-    bottom: 4,
+    borderRadius: 28,
+    bottom: 5,
     left: 4,
     position: 'absolute',
     right: 4,
-    top: 4
+    top: 5
   },
   footerTabContent: {
     alignItems: 'center',
-    gap: 1,
+    gap: 2,
     justifyContent: 'center',
     minWidth: 0
   },
   footerTabText: {
     color: '#111827',
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '400',
-    lineHeight: 13
+    lineHeight: 14
   },
   footerTabTextActive: {
     color: '#4F46E5'
@@ -16890,12 +16933,12 @@ const styles = StyleSheet.create({
   footerProfileAvatar: {
     alignItems: 'center',
     borderColor: 'transparent',
-    borderRadius: 15,
+    borderRadius: 17,
     borderWidth: 2,
-    height: 30,
+    height: 34,
     justifyContent: 'center',
     overflow: 'hidden',
-    width: 30
+    width: 34
   },
   footerProfileAvatarActive: {
     backgroundColor: '#EEF2FF',
