@@ -13613,15 +13613,15 @@ const styles = StyleSheet.create({
   },
   chatSearchBox: {
     alignItems: 'center',
-    backgroundColor: '#F8FAFC',
-    borderColor: '#E2E8F0',
-    borderRadius: 8,
+    backgroundColor: '#F3F4F6',
+    borderColor: 'transparent',
+    borderRadius: 22,
     borderWidth: 1,
     flexDirection: 'row',
     gap: 8,
     minHeight: 42,
     marginBottom: 8,
-    paddingHorizontal: 12
+    paddingHorizontal: 14
   },
   chatSearchInput: {
     color: colors.ink,
@@ -14679,8 +14679,10 @@ const styles = StyleSheet.create({
     backgroundColor: '#A8B0BC'
   },
   emojiKeyboardSearchContainer: {
-    backgroundColor: '#F8FAFC',
-    borderColor: 'transparent',
+    backgroundColor: '#F3F4F6',
+    borderColor: '#E5E7EB',
+    borderRadius: 20,
+    borderWidth: 1,
     minHeight: 38
   },
   emojiKeyboardSearchText: {
@@ -15661,18 +15663,21 @@ const styles = StyleSheet.create({
     lineHeight: 19
   },
   batchSearchBox: {
-    borderBottomColor: 'rgba(15, 118, 110, 0.28)',
-    borderBottomWidth: 1,
-    minHeight: 46,
+    backgroundColor: '#F3F4F6',
+    borderColor: '#E5E7EB',
+    borderRadius: 23,
+    borderWidth: 1,
     justifyContent: 'center',
-    marginBottom: 6
+    marginBottom: 6,
+    minHeight: 46,
+    paddingHorizontal: 14
   },
   batchSearchInput: {
     color: colors.ink,
     fontSize: 16,
     fontWeight: '400',
     minHeight: 46,
-    paddingHorizontal: 2
+    paddingHorizontal: 0
   },
   batchLoading: {
     alignItems: 'center',
