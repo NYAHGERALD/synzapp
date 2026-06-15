@@ -84,10 +84,14 @@ import {
   ChatMessage,
   ChatMessageReaction,
   ChatMessageReactionMap,
+  ChatNotificationAlertTone,
+  ChatNotificationMuteMode,
+  ChatNotificationSettings,
   ChatReplyReference,
   createGroupChat,
   decryptRealtimeEncryptedEnvelopes,
   deleteChatMessageForMe,
+  getChatNotificationSettings,
   getChatMessages,
   grantGroupChatHistoryKeys,
   listChatContacts,
@@ -98,7 +102,8 @@ import {
   subscribeRealtimeConversation,
   unsubscribeRealtimeConversation,
   sendChatMessage,
-  updateChatMessageReaction
+  updateChatMessageReaction,
+  updateChatNotificationSettings
 } from '../services/chatApi';
 import {
   ChatBackupPolicy,
@@ -397,6 +402,24 @@ const synzappAiSuggestions = [
   'Improve the tone of my writing',
   'Prepare a quick checklist'
 ];
+const chatNotificationMuteOptions: Array<{
+  label: string;
+  value: ChatNotificationMuteMode;
+}> = [
+  { label: 'No', value: 'off' },
+  { label: '8 hours', value: '8h' },
+  { label: '1 week', value: '1w' },
+  { label: 'Always', value: 'always' }
+];
+const chatNotificationAlertToneOptions: Array<{
+  label: string;
+  value: ChatNotificationAlertTone;
+}> = [
+  { label: 'Default (Note)', value: 'default' },
+  { label: 'Chime', value: 'chime' },
+  { label: 'Pulse', value: 'pulse' },
+  { label: 'Silent', value: 'silent' }
+];
 const androidButtonRipple = { borderless: false, color: 'rgba(15, 118, 110, 0.14)' } as const;
 const androidIconRipple = { borderless: true, color: 'rgba(15, 118, 110, 0.14)' } as const;
 
@@ -437,6 +460,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [isNewChatModalOpen, setIsNewChatModalOpen] = useState(false);
   const [isAddMembersModalOpen, setIsAddMembersModalOpen] = useState(false);
   const [isContactInfoModalOpen, setIsContactInfoModalOpen] = useState(false);
+  const [isChatNotificationSettingsOpen, setIsChatNotificationSettingsOpen] = useState(false);
   const [isGroupDetailsModalOpen, setIsGroupDetailsModalOpen] = useState(false);
   const [isGroupPermissionsModalOpen, setIsGroupPermissionsModalOpen] = useState(false);
   const [isGroupCallOptionsOpen, setIsGroupCallOptionsOpen] = useState(false);
@@ -467,10 +491,13 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [isForwardingMessages, setIsForwardingMessages] = useState(false);
   const [nativeOptionPicker, setNativeOptionPicker] = useState<NativeOptionPickerState | null>(null);
   const [messageReactions, setMessageReactions] = useState<ChatMessageReactionMap>({});
+  const [chatNotificationSettingsByContactId, setChatNotificationSettingsByContactId] = useState<Record<string, ChatNotificationSettings>>({});
   const [starredMessageIds, setStarredMessageIds] = useState<Record<string, boolean>>({});
   const [selectedChat, setSelectedChat] = useState<ChatItem | null>(null);
   const [isLoadingChats, setIsLoadingChats] = useState(false);
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+  const [isLoadingChatNotificationSettings, setIsLoadingChatNotificationSettings] = useState(false);
+  const [isSavingChatNotificationSettings, setIsSavingChatNotificationSettings] = useState(false);
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [isLoadingBatchContacts, setIsLoadingBatchContacts] = useState(false);
   const [isPickingInviteContact, setIsPickingInviteContact] = useState(false);
@@ -581,6 +608,9 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const activeGroupOnlineCount = selectedChat?.chatType === 'GROUP'
     ? getOnlineGroupMemberCount(selectedChat, directChatContacts, currentUid)
     : 0;
+  const activeDirectChatNotificationSettings = selectedChat && selectedChat.chatType !== 'GROUP'
+    ? chatNotificationSettingsByContactId[selectedChat.contactId] || null
+    : null;
   const selectedGroupCallMemberCount = Object.values(selectedGroupCallMemberIds).filter(Boolean).length;
   const companyDisplayName = userProfile?.companyName || companyProfile?.companyName || 'Synzapp';
 
@@ -1749,6 +1779,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     chatOpenRequestIdRef.current = openRequestId;
     selectedChatRef.current = chat;
     setSelectedChat(chat);
+    setIsChatNotificationSettingsOpen(false);
     setChatContacts((currentContacts) => currentContacts.map((contact) =>
       contact.contactId === chat.contactId
         ? { ...contact, unreadCount: 0 }
@@ -1854,6 +1885,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsGroupCallPeopleModalOpen(false);
     setIsGroupSwitcherModalOpen(false);
     setIsContactInfoModalOpen(false);
+    setIsChatNotificationSettingsOpen(false);
     setIsGroupInfoModalOpen(true);
   }
 
@@ -1877,6 +1909,137 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
   function handleCloseContactInfo() {
     setIsContactInfoModalOpen(false);
+    setIsChatNotificationSettingsOpen(false);
+  }
+
+  function handleCloseChatNotificationSettings() {
+    setIsChatNotificationSettingsOpen(false);
+  }
+
+  function handleOpenChatNotificationSettings() {
+    const chat = selectedChatRef.current;
+
+    if (!chat || chat.chatType === 'GROUP') {
+      return;
+    }
+
+    setError(null);
+    setIsChatNotificationSettingsOpen(true);
+    void loadChatNotificationSettings(chat, true);
+  }
+
+  async function loadChatNotificationSettings(chat: ChatItem, showError = true) {
+    if (chat.chatType === 'GROUP') {
+      return;
+    }
+
+    setIsLoadingChatNotificationSettings(true);
+
+    try {
+      const idToken = await getIdToken();
+      const settings = await getChatNotificationSettings({
+        contactId: chat.contactId,
+        idToken
+      });
+
+      setChatNotificationSettingsByContactId((currentSettings) => ({
+        ...currentSettings,
+        [chat.contactId]: settings
+      }));
+    } catch (nextError) {
+      if (showError) {
+        setError(getErrorMessage(nextError, 'Unable to load notification settings.'));
+      }
+    } finally {
+      setIsLoadingChatNotificationSettings(false);
+    }
+  }
+
+  async function handleSelectChatNotificationMuteMode() {
+    const chat = selectedChatRef.current;
+
+    if (!chat || chat.chatType === 'GROUP' || isSavingChatNotificationSettings) {
+      return;
+    }
+
+    const selectedOption = await selectScreenOption(
+      'Mute notifications',
+      chatNotificationMuteOptions,
+      (option) => option.label
+    );
+
+    if (!selectedOption) {
+      return;
+    }
+
+    await saveChatNotificationSettings(chat, {
+      muteMode: selectedOption.value
+    });
+  }
+
+  async function handleSelectChatNotificationAlertTone() {
+    const chat = selectedChatRef.current;
+
+    if (!chat || chat.chatType === 'GROUP' || isSavingChatNotificationSettings) {
+      return;
+    }
+
+    const selectedOption = await selectScreenOption(
+      'Alert tone',
+      chatNotificationAlertToneOptions,
+      (option) => option.label
+    );
+
+    if (!selectedOption) {
+      return;
+    }
+
+    await saveChatNotificationSettings(chat, {
+      alertTone: selectedOption.value
+    });
+  }
+
+  async function saveChatNotificationSettings(
+    chat: ChatItem,
+    updates: Partial<Pick<ChatNotificationSettings, 'alertTone' | 'muteMode'>>
+  ) {
+    const previousSettings = chatNotificationSettingsByContactId[chat.contactId] ||
+      getDefaultChatNotificationSettings(chat.contactId);
+    const optimisticSettings: ChatNotificationSettings = {
+      ...previousSettings,
+      ...updates,
+      mutedUntil: updates.muteMode ? getOptimisticMutedUntil(updates.muteMode) : previousSettings.mutedUntil,
+      updatedAt: new Date().toISOString()
+    };
+
+    setIsSavingChatNotificationSettings(true);
+    setChatNotificationSettingsByContactId((currentSettings) => ({
+      ...currentSettings,
+      [chat.contactId]: optimisticSettings
+    }));
+
+    try {
+      const idToken = await getIdToken();
+      const settings = await updateChatNotificationSettings({
+        alertTone: optimisticSettings.alertTone,
+        contactId: chat.contactId,
+        idToken,
+        muteMode: optimisticSettings.muteMode
+      });
+
+      setChatNotificationSettingsByContactId((currentSettings) => ({
+        ...currentSettings,
+        [chat.contactId]: settings
+      }));
+    } catch (nextError) {
+      setChatNotificationSettingsByContactId((currentSettings) => ({
+        ...currentSettings,
+        [chat.contactId]: previousSettings
+      }));
+      setError(getErrorMessage(nextError, 'Unable to update notification settings.'));
+    } finally {
+      setIsSavingChatNotificationSettings(false);
+    }
   }
 
   function handleOpenGroupSwitcher() {
@@ -3572,6 +3735,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsAiAssistantOpen(false);
     setIsLoadingMessages(false);
     setIsContactInfoModalOpen(false);
+    setIsChatNotificationSettingsOpen(false);
     setIsGroupCallOptionsOpen(false);
     setIsGroupCallPeopleModalOpen(false);
     setIsGroupInfoModalOpen(false);
@@ -3598,6 +3762,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setSelectedChat(null);
     setIsLoadingMessages(false);
     setIsContactInfoModalOpen(false);
+    setIsChatNotificationSettingsOpen(false);
     setIsGroupCallOptionsOpen(false);
     setIsGroupCallPeopleModalOpen(false);
     setIsGroupInfoModalOpen(false);
@@ -5356,18 +5521,34 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         chat={selectedChat}
         commonGroups={getCommonGroupContactsForDirectChat(selectedChat, groupChatContacts)}
         isOpen={isContactInfoModalOpen}
+        notificationSettings={activeDirectChatNotificationSettings}
         onAddToGroup={() => handleContactInfoUnavailableAction('Add to group')}
         onClose={handleCloseContactInfo}
         onCreateGroup={() => handleContactInfoUnavailableAction('Create group')}
         onOpenContactDetails={() => handleContactInfoUnavailableAction('Contact details')}
         onOpenEdit={() => handleContactInfoUnavailableAction('Edit contact')}
         onOpenGroup={handleOpenCommonGroupFromContactInfo}
-        onOpenNotifications={() => handleContactInfoUnavailableAction('Notifications')}
+        onOpenNotifications={handleOpenChatNotificationSettings}
         onOpenSearch={() => handleContactInfoUnavailableAction('Search')}
         onOpenTranscriptLanguage={() => handleContactInfoUnavailableAction('Transcript language')}
         onStartVideoCall={() => handleContactInfoUnavailableAction('Video call')}
         onStartVoiceCall={() => handleContactInfoUnavailableAction('Audio call')}
         profilePhotoHeaders={profilePhotoHeaders}
+      />
+
+      <DirectChatNotificationSettingsModal
+        chat={selectedChat}
+        isLoading={isLoadingChatNotificationSettings}
+        isOpen={isChatNotificationSettingsOpen}
+        isSaving={isSavingChatNotificationSettings}
+        onClose={handleCloseChatNotificationSettings}
+        onSelectAlertTone={() => {
+          void handleSelectChatNotificationAlertTone();
+        }}
+        onSelectMuteMode={() => {
+          void handleSelectChatNotificationMuteMode();
+        }}
+        settings={activeDirectChatNotificationSettings}
       />
 
       <GroupInfoModal
@@ -9482,10 +9663,133 @@ function GroupCallPeopleModal({
   );
 }
 
+function DirectChatNotificationSettingsModal({
+  chat,
+  isLoading,
+  isOpen,
+  isSaving,
+  onClose,
+  onSelectAlertTone,
+  onSelectMuteMode,
+  settings
+}: {
+  chat: ChatItem | null;
+  isLoading: boolean;
+  isOpen: boolean;
+  isSaving: boolean;
+  onClose: () => void;
+  onSelectAlertTone: () => void;
+  onSelectMuteMode: () => void;
+  settings: ChatNotificationSettings | null;
+}) {
+  const insets = useSafeAreaInsets();
+  const modalTopPadding = getFullScreenModalTopPadding(insets.top);
+
+  if (!chat || chat.chatType === 'GROUP') {
+    return null;
+  }
+
+  const effectiveSettings = settings || getDefaultChatNotificationSettings(chat.contactId);
+
+  return (
+    <Modal
+      allowSwipeDismissal={Platform.OS === 'ios'}
+      animationType="slide"
+      onRequestClose={onClose}
+      presentationStyle={getNativeFullHeightModalPresentationStyle()}
+      transparent={false}
+      visible={isOpen}
+    >
+      <View style={[styles.notificationSettingsScreen, { paddingTop: modalTopPadding }]}>
+        <View style={styles.notificationSettingsTopBar}>
+          <Pressable
+            accessibilityLabel="Back to contact info"
+            accessibilityRole="button"
+            onPress={onClose}
+            style={({ pressed }) => [styles.groupInfoTopButton, pressed && styles.pressed]}
+          >
+            <Text style={styles.backButtonText}>‹</Text>
+          </Pressable>
+          <View style={styles.notificationSettingsHeaderText}>
+            <Text numberOfLines={1} style={styles.notificationSettingsTitle}>Notifications</Text>
+            <Text numberOfLines={1} style={styles.notificationSettingsSubtitle}>{chat.title}</Text>
+          </View>
+          <View style={styles.groupInfoTopButtonSpacer} />
+        </View>
+
+        <ScrollView
+          contentContainerStyle={styles.notificationSettingsContent}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          <Text style={styles.notificationSettingsSectionLabel}>Messages</Text>
+
+          <View style={styles.notificationSettingsSection}>
+            <ChatNotificationSettingsRow
+              disabled={isSaving}
+              label="Mute notifications"
+              onPress={onSelectMuteMode}
+              value={getChatNotificationMuteLabel(effectiveSettings)}
+            />
+            <ChatNotificationSettingsRow
+              disabled={isSaving}
+              label="Alert tone"
+              onPress={onSelectAlertTone}
+              value={getChatNotificationAlertToneLabel(effectiveSettings.alertTone)}
+            />
+          </View>
+
+          {isLoading || isSaving ? (
+            <View style={styles.notificationSettingsLoadingRow}>
+              <ActivityIndicator color={colors.primary} />
+              <Text style={styles.notificationSettingsLoadingText}>
+                {isSaving ? 'Saving settings...' : 'Loading settings...'}
+              </Text>
+            </View>
+          ) : null}
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+}
+
+function ChatNotificationSettingsRow({
+  disabled,
+  label,
+  onPress,
+  value
+}: {
+  disabled: boolean;
+  label: string;
+  onPress: () => void;
+  value: string;
+}) {
+  return (
+    <Pressable
+      accessibilityLabel={label}
+      accessibilityRole="button"
+      disabled={disabled}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.notificationSettingsRow,
+        pressed && styles.pressed,
+        disabled && styles.disabled
+      ]}
+    >
+      <Text numberOfLines={1} style={styles.notificationSettingsRowLabel}>{label}</Text>
+      <View style={styles.notificationSettingsRowValueWrap}>
+        <Text numberOfLines={1} style={styles.notificationSettingsRowValue}>{value}</Text>
+        <Feather color="#A7B3C3" name="chevron-right" size={19} />
+      </View>
+    </Pressable>
+  );
+}
+
 function ContactInfoModal({
   chat,
   commonGroups,
   isOpen,
+  notificationSettings,
   onAddToGroup,
   onClose,
   onCreateGroup,
@@ -9502,6 +9806,7 @@ function ContactInfoModal({
   chat: ChatItem | null;
   commonGroups: ChatContact[];
   isOpen: boolean;
+  notificationSettings: ChatNotificationSettings | null;
   onAddToGroup: () => void;
   onClose: () => void;
   onCreateGroup: () => void;
@@ -9586,6 +9891,7 @@ function ContactInfoModal({
               icon="bell"
               label="Notifications"
               onPress={onOpenNotifications}
+              value={getChatNotificationSummary(notificationSettings)}
             />
           </View>
 
@@ -13163,6 +13469,56 @@ function getContactInfoPresenceText(chat: ChatItem): string {
   return chat.roleName || 'Synzapp contact';
 }
 
+function getDefaultChatNotificationSettings(contactId: string): ChatNotificationSettings {
+  return {
+    alertTone: 'default',
+    contactId,
+    muteMode: 'off',
+    mutedUntil: null,
+    updatedAt: null
+  };
+}
+
+function getOptimisticMutedUntil(muteMode: ChatNotificationMuteMode): string | null {
+  if (muteMode === 'off' || muteMode === 'always') {
+    return null;
+  }
+
+  const durationMs = muteMode === '8h'
+    ? 8 * 60 * 60 * 1000
+    : 7 * 24 * 60 * 60 * 1000;
+
+  return new Date(Date.now() + durationMs).toISOString();
+}
+
+function getChatNotificationSummary(settings: ChatNotificationSettings | null): string {
+  if (!settings || settings.muteMode === 'off') {
+    return 'All';
+  }
+
+  return `Muted ${getChatNotificationMuteLabel(settings).toLowerCase()}`;
+}
+
+function getChatNotificationMuteLabel(settings: ChatNotificationSettings): string {
+  if (settings.muteMode === 'always') {
+    return 'Always';
+  }
+
+  if (settings.muteMode === '8h' && settings.mutedUntil) {
+    return '8 hours';
+  }
+
+  if (settings.muteMode === '1w' && settings.mutedUntil) {
+    return '1 week';
+  }
+
+  return 'No';
+}
+
+function getChatNotificationAlertToneLabel(alertTone: ChatNotificationAlertTone): string {
+  return chatNotificationAlertToneOptions.find((option) => option.value === alertTone)?.label || 'Default (Note)';
+}
+
 function getCommonGroupPreview(group: ChatContact, contactName: string): string {
   const memberNames = (group.members || [])
     .map((member) => member.displayName)
@@ -16521,6 +16877,10 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     width: 40
   },
+  groupInfoTopButtonSpacer: {
+    height: 40,
+    width: 40
+  },
   groupInfoEditButton: {
     alignItems: 'center',
     backgroundColor: '#FFFFFF',
@@ -16541,6 +16901,103 @@ const styles = StyleSheet.create({
     paddingBottom: 28,
     paddingHorizontal: 12,
     paddingTop: 2
+  },
+  notificationSettingsScreen: {
+    backgroundColor: '#F4F6F8',
+    flex: 1
+  },
+  notificationSettingsTopBar: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    minHeight: 52,
+    paddingHorizontal: 16
+  },
+  notificationSettingsHeaderText: {
+    alignItems: 'center',
+    flex: 1,
+    minWidth: 0,
+    paddingHorizontal: 10
+  },
+  notificationSettingsTitle: {
+    color: colors.ink,
+    fontSize: 17,
+    fontWeight: '700',
+    lineHeight: 22,
+    textAlign: 'center'
+  },
+  notificationSettingsSubtitle: {
+    color: '#64748B',
+    fontSize: 12,
+    fontWeight: '500',
+    lineHeight: 16,
+    marginTop: 1,
+    textAlign: 'center'
+  },
+  notificationSettingsContent: {
+    paddingBottom: 28,
+    paddingHorizontal: 16,
+    paddingTop: 16
+  },
+  notificationSettingsSectionLabel: {
+    color: '#64748B',
+    fontSize: 17,
+    fontWeight: '600',
+    lineHeight: 22,
+    marginBottom: 8,
+    paddingHorizontal: 10
+  },
+  notificationSettingsSection: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    overflow: 'hidden'
+  },
+  notificationSettingsRow: {
+    alignItems: 'center',
+    borderBottomColor: '#E5E7EB',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    minHeight: 54,
+    paddingHorizontal: 16,
+    paddingVertical: 9
+  },
+  notificationSettingsRowLabel: {
+    color: colors.ink,
+    flex: 1,
+    fontSize: 16,
+    fontWeight: '400',
+    lineHeight: 21,
+    minWidth: 0
+  },
+  notificationSettingsRowValueWrap: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 6,
+    marginLeft: 12,
+    maxWidth: '52%'
+  },
+  notificationSettingsRowValue: {
+    color: '#8B95A5',
+    flexShrink: 1,
+    fontSize: 16,
+    fontWeight: '500',
+    lineHeight: 21,
+    textAlign: 'right'
+  },
+  notificationSettingsLoadingRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 10,
+    justifyContent: 'center',
+    minHeight: 48,
+    paddingTop: 16
+  },
+  notificationSettingsLoadingText: {
+    color: '#64748B',
+    fontSize: 14,
+    fontWeight: '400',
+    lineHeight: 19
   },
   groupInfoHero: {
     alignItems: 'center',

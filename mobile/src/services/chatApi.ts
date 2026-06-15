@@ -48,6 +48,16 @@ export interface ChatGroupMember {
 
 export type ChatDeliveryStatus = 'delivered' | 'queued' | 'read' | 'sent';
 export type ChatRealtimeErrorCode = 'SESSION_UNVERIFIED';
+export type ChatNotificationAlertTone = 'chime' | 'default' | 'pulse' | 'silent';
+export type ChatNotificationMuteMode = '1w' | '8h' | 'always' | 'off';
+
+export interface ChatNotificationSettings {
+  alertTone: ChatNotificationAlertTone;
+  contactId: string;
+  muteMode: ChatNotificationMuteMode;
+  mutedUntil: string | null;
+  updatedAt: string | null;
+}
 
 export interface ChatReplyReference {
   messageId: string;
@@ -226,6 +236,65 @@ export async function createGroupChat(input: {
   const body = await response.json() as { contact: ChatContact };
 
   return normalizeChatContact(body.contact);
+}
+
+export async function getChatNotificationSettings(input: {
+  contactId: string;
+  idToken: string;
+}): Promise<ChatNotificationSettings> {
+  const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
+  const response = await fetch(
+    `${getSynzappApiBaseUrl()}/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/notification-settings`,
+    {
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${input.idToken}`,
+        ...deviceHeaders
+      },
+      method: 'GET'
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  const body = await response.json() as { settings?: ChatNotificationSettings };
+
+  return normalizeChatNotificationSettings(body.settings, input.contactId);
+}
+
+export async function updateChatNotificationSettings(input: {
+  alertTone: ChatNotificationAlertTone;
+  contactId: string;
+  idToken: string;
+  muteMode: ChatNotificationMuteMode;
+}): Promise<ChatNotificationSettings> {
+  const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
+  const response = await fetch(
+    `${getSynzappApiBaseUrl()}/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/notification-settings`,
+    {
+      body: JSON.stringify({
+        alertTone: input.alertTone,
+        muteMode: input.muteMode
+      }),
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${input.idToken}`,
+        'Content-Type': 'application/json',
+        ...deviceHeaders
+      },
+      method: 'PUT'
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  const body = await response.json() as { settings?: ChatNotificationSettings };
+
+  return normalizeChatNotificationSettings(body.settings, input.contactId);
 }
 
 export async function getChatMessages(input: {
@@ -670,6 +739,56 @@ function normalizeChatContact(contact: ChatContact): ChatContact {
     phoneMasked: typeof contact.phoneMasked === 'string' && contact.phoneMasked.trim() ? contact.phoneMasked.trim() : null,
     profilePhotoUrl: normalizeSynzappApiUrl(contact.profilePhotoUrl)
   };
+}
+
+function normalizeChatNotificationSettings(
+  settings: ChatNotificationSettings | undefined,
+  contactId: string
+): ChatNotificationSettings {
+  const alertTone = isChatNotificationAlertTone(settings?.alertTone) ? settings.alertTone : 'default';
+  const muteMode = isChatNotificationMuteMode(settings?.muteMode) ? settings.muteMode : 'off';
+  const mutedUntil = typeof settings?.mutedUntil === 'string' && settings.mutedUntil.trim()
+    ? settings.mutedUntil.trim()
+    : null;
+  const normalizedMuteMode = isMuteModeCurrentlyActive(muteMode, mutedUntil) ? muteMode : 'off';
+
+  return {
+    alertTone,
+    contactId: typeof settings?.contactId === 'string' && settings.contactId.trim()
+      ? settings.contactId.trim()
+      : contactId,
+    muteMode: normalizedMuteMode,
+    mutedUntil: normalizedMuteMode === 'off' ? null : mutedUntil,
+    updatedAt: typeof settings?.updatedAt === 'string' && settings.updatedAt.trim()
+      ? settings.updatedAt.trim()
+      : null
+  };
+}
+
+function isMuteModeCurrentlyActive(muteMode: ChatNotificationMuteMode, mutedUntil: string | null): boolean {
+  if (muteMode === 'always') {
+    return true;
+  }
+
+  if (muteMode === 'off') {
+    return false;
+  }
+
+  if (!mutedUntil) {
+    return false;
+  }
+
+  const mutedUntilMs = Date.parse(mutedUntil);
+
+  return Number.isFinite(mutedUntilMs) && mutedUntilMs > Date.now();
+}
+
+function isChatNotificationAlertTone(value: unknown): value is ChatNotificationAlertTone {
+  return value === 'chime' || value === 'default' || value === 'pulse' || value === 'silent';
+}
+
+function isChatNotificationMuteMode(value: unknown): value is ChatNotificationMuteMode {
+  return value === '1w' || value === '8h' || value === 'always' || value === 'off';
 }
 
 function normalizeChatGroupMember(member: ChatGroupMember): ChatGroupMember {

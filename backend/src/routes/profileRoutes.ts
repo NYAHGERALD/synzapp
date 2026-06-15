@@ -56,9 +56,11 @@ import { getChatBackupPolicyForCurrentUser } from '../services/chatBackupPolicyS
 import { listCurrentUserGroups } from '../services/groupService.js';
 import {
   deactivateCurrentUserPushToken,
+  getChatNotificationSettings,
   registerCurrentUserPushToken,
   sendChatMessagePushNotification,
-  sendGroupChatMessagePushNotifications
+  sendGroupChatMessagePushNotifications,
+  updateChatNotificationSettings
 } from '../services/notificationService.js';
 import { writeAuditEvent } from '../services/auditService.js';
 
@@ -160,6 +162,11 @@ const encryptedMediaUploadBodySchema = z.object({
 
 const chatMessageReactionBodySchema = z.object({
   emoji: z.string().trim().max(16)
+});
+
+const chatNotificationSettingsBodySchema = z.object({
+  alertTone: z.enum(['chime', 'default', 'pulse', 'silent']),
+  muteMode: z.enum(['1w', '8h', 'always', 'off'])
 });
 
 const encryptedChatBackupBodySchema = z.object({
@@ -721,6 +728,67 @@ profileRouter.get('/chat/conversations/:contactId/encryption-context', verifyApp
 
     res.json({ context });
   } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.get('/chat/conversations/:contactId/notification-settings', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    const contactId = Array.isArray(req.params.contactId)
+      ? req.params.contactId[0] || ''
+      : req.params.contactId || '';
+
+    await getDirectChatContact(decodedToken, contactId);
+    const settings = await getChatNotificationSettings(activeDevice.tenantId, decodedToken.uid, contactId);
+
+    res.json({ settings });
+  } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.put('/chat/conversations/:contactId/notification-settings', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    const contactId = Array.isArray(req.params.contactId)
+      ? req.params.contactId[0] || ''
+      : req.params.contactId || '';
+    const body = chatNotificationSettingsBodySchema.parse(req.body);
+
+    await getDirectChatContact(decodedToken, contactId);
+    const settings = await updateChatNotificationSettings(
+      activeDevice.tenantId,
+      decodedToken.uid,
+      contactId,
+      body
+    );
+
+    await writeAuditEvent({
+      action: 'DIRECT_CHAT_NOTIFICATION_SETTINGS_UPDATED',
+      metadata: {
+        alertTone: settings.alertTone,
+        contactId,
+        muteMode: settings.muteMode,
+        mutedUntil: settings.mutedUntil
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: activeDevice.tenantId,
+      uid: decodedToken.uid
+    });
+
+    res.json({ settings });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'DIRECT_CHAT_NOTIFICATION_SETTINGS_UPDATED',
+      reason: error instanceof Error ? error.message : 'Notification settings update failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
     next(error);
   }
 });

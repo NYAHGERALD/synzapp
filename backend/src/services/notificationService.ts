@@ -1,11 +1,14 @@
 import { DecodedIdToken } from 'firebase-admin/auth';
 import { getMessaging, type Message } from 'firebase-admin/messaging';
+import { createHash } from 'crypto';
 import { adminApp, fieldValue, firestore } from '../config/firebaseAdmin.js';
 import { DevicePlatform, verifyActiveRegisteredDevice } from './deviceIdentityService.js';
 import type { EncryptedNotificationPreviewRecord } from './encryptedMessageEnvelopeService.js';
 
 type PushProvider = 'expo' | 'fcm';
 type PushTokenStatus = 'ACTIVE' | 'INACTIVE';
+export type ChatNotificationAlertTone = 'chime' | 'default' | 'pulse' | 'silent';
+export type ChatNotificationMuteMode = '1w' | '8h' | 'always' | 'off';
 
 interface RegisterPushTokenInput {
   deviceId: string;
@@ -30,6 +33,28 @@ interface RegisteredPushTokenResponse {
   platform: DevicePlatform;
   provider: PushProvider;
   status: PushTokenStatus;
+}
+
+export interface ChatNotificationSettingsResponse {
+  alertTone: ChatNotificationAlertTone;
+  contactId: string;
+  muteMode: ChatNotificationMuteMode;
+  mutedUntil: string | null;
+  updatedAt: string | null;
+}
+
+interface ChatNotificationSettingsRecord {
+  alertTone?: ChatNotificationAlertTone;
+  contactId?: string;
+  muteMode?: ChatNotificationMuteMode;
+  mutedUntil?: string | null;
+  tenantId?: string;
+  uid?: string;
+}
+
+interface UpdateChatNotificationSettingsInput {
+  alertTone: ChatNotificationAlertTone;
+  muteMode: ChatNotificationMuteMode;
 }
 
 interface SendChatMessagePushNotificationInput {
@@ -95,6 +120,10 @@ const EXPO_PUSH_TOKEN_PATTERN = /^(Expo|Exponent)PushToken\[[A-Za-z0-9_-]+\]$/;
 const EXPO_PUSH_BATCH_SIZE = 100;
 const FCM_PUSH_BATCH_SIZE = 500;
 const MAX_PUSH_BADGE_COUNT = 9999;
+const MUTE_DURATION_MS: Record<Exclude<ChatNotificationMuteMode, 'always' | 'off'>, number> = {
+  '1w': 7 * 24 * 60 * 60 * 1000,
+  '8h': 8 * 60 * 60 * 1000
+};
 
 export async function registerCurrentUserPushToken(
   decodedToken: DecodedIdToken,
@@ -197,12 +226,53 @@ export async function deactivateCurrentUserPushToken(
   ]);
 }
 
+export async function getChatNotificationSettings(
+  tenantId: string,
+  uid: string,
+  contactId: string
+): Promise<ChatNotificationSettingsResponse> {
+  const snapshot = await getChatNotificationSettingsRef(tenantId, uid, contactId).get();
+
+  return normalizeChatNotificationSettings(contactId, snapshot.exists
+    ? snapshot.data() as ChatNotificationSettingsRecord
+    : null);
+}
+
+export async function updateChatNotificationSettings(
+  tenantId: string,
+  uid: string,
+  contactId: string,
+  input: UpdateChatNotificationSettingsInput
+): Promise<ChatNotificationSettingsResponse> {
+  const now = new Date();
+  const mutedUntil = getMutedUntilForMode(input.muteMode, now);
+  const record: ChatNotificationSettingsRecord = {
+    alertTone: input.alertTone,
+    contactId,
+    muteMode: input.muteMode,
+    mutedUntil,
+    tenantId,
+    uid
+  };
+
+  await getChatNotificationSettingsRef(tenantId, uid, contactId).set({
+    ...record,
+    updatedAt: fieldValue.serverTimestamp()
+  }, { merge: true });
+
+  return {
+    ...normalizeChatNotificationSettings(contactId, record),
+    updatedAt: now.toISOString()
+  };
+}
+
 export async function sendChatMessagePushNotification(
   input: SendChatMessagePushNotificationInput
 ): Promise<void> {
   const organizationRef = firestore.collection('organizations').doc(input.tenantId);
   const eventRef = organizationRef.collection('notificationEvents').doc();
-  const [senderSnapshot, pushTokensSnapshot, unreadBadgeCount] = await Promise.all([
+  const notificationContactId = input.notificationContactId || input.senderUid;
+  const [senderSnapshot, pushTokensSnapshot, unreadBadgeCount, notificationSettings] = await Promise.all([
     organizationRef.collection('users').doc(input.senderUid).get(),
     organizationRef
       .collection('users')
@@ -212,7 +282,8 @@ export async function sendChatMessagePushNotification(
       .get(),
     input.recipientBadgeCount === undefined
       ? getUnreadChatBadgeCount(input.tenantId, input.recipientUid)
-      : Promise.resolve(normalizeBadgeCount(input.recipientBadgeCount))
+      : Promise.resolve(normalizeBadgeCount(input.recipientBadgeCount)),
+    getChatNotificationSettings(input.tenantId, input.recipientUid, notificationContactId)
   ]);
   const pushTokens = pushTokensSnapshot.docs
     .map((doc) => ({
@@ -220,6 +291,7 @@ export async function sendChatMessagePushNotification(
       deviceId: doc.id
     }))
     .filter((record) => isDeliverablePushToken(record));
+  const isMuted = isChatNotificationMuted(notificationSettings);
 
   await eventRef.set({
     actorUid: input.senderUid,
@@ -230,13 +302,21 @@ export async function sendChatMessagePushNotification(
     encryptedPreviewCount: input.notificationPreviewByDevice
       ? Object.keys(input.notificationPreviewByDevice).length
       : 0,
+    notificationAlertTone: notificationSettings.alertTone,
+    notificationContactId,
+    notificationMuteMode: notificationSettings.muteMode,
+    notificationMutedUntil: notificationSettings.mutedUntil,
     recipientUid: input.recipientUid,
     recipientBadgeCount: unreadBadgeCount,
-    status: pushTokens.length ? 'QUEUED' : 'NO_ACTIVE_TOKENS',
+    status: isMuted ? 'MUTED' : pushTokens.length ? 'QUEUED' : 'NO_ACTIVE_TOKENS',
     tenantId: input.tenantId,
-    tokenCount: pushTokens.length,
+    tokenCount: isMuted ? 0 : pushTokens.length,
     type: 'chat.message'
   });
+
+  if (isMuted) {
+    return;
+  }
 
   if (!pushTokens.length) {
     return;
@@ -255,10 +335,11 @@ export async function sendChatMessagePushNotification(
     const title = senderName || 'Synzapp';
     const baseData: Record<string, string> = {
       chatType: input.chatType || 'DIRECT',
-      contactId: input.notificationContactId || input.senderUid,
+      contactId: notificationContactId,
       conversationId: input.conversationId,
       envelopeId: input.envelopeId,
       badgeCount: String(unreadBadgeCount),
+      notificationAlertTone: notificationSettings.alertTone,
       notificationFallbackBody: notificationPreview ? 'New encrypted message' : 'New message',
       notificationSenderDisplayName: title,
       ...(senderProfilePhotoCacheKeys.primary
@@ -298,9 +379,9 @@ export async function sendChatMessagePushNotification(
           data,
           mutableContent: record.platform === 'ios',
           priority: 'high',
-          sound: 'default',
           title,
-          to: record.token || ''
+          to: record.token || '',
+          ...(notificationSettings.alertTone === 'silent' ? {} : { sound: 'default' as const })
         },
         record
       });
@@ -399,6 +480,64 @@ function normalizeBadgeCount(count: number): number {
   }
 
   return Math.max(0, Math.min(MAX_PUSH_BADGE_COUNT, Math.floor(count)));
+}
+
+function normalizeChatNotificationSettings(
+  contactId: string,
+  record: ChatNotificationSettingsRecord | null
+): ChatNotificationSettingsResponse {
+  const alertTone = isChatNotificationAlertTone(record?.alertTone) ? record.alertTone : 'default';
+  const muteMode = isChatNotificationMuteMode(record?.muteMode) ? record.muteMode : 'off';
+  const mutedUntil = typeof record?.mutedUntil === 'string' && record.mutedUntil.trim()
+    ? record.mutedUntil.trim()
+    : null;
+  const normalizedMuteMode = isMuteModeActive(muteMode, mutedUntil) ? muteMode : 'off';
+
+  return {
+    alertTone,
+    contactId,
+    muteMode: normalizedMuteMode,
+    mutedUntil: normalizedMuteMode === 'off' ? null : mutedUntil,
+    updatedAt: null
+  };
+}
+
+function getMutedUntilForMode(muteMode: ChatNotificationMuteMode, now: Date): string | null {
+  if (muteMode === 'off' || muteMode === 'always') {
+    return null;
+  }
+
+  return new Date(now.getTime() + MUTE_DURATION_MS[muteMode]).toISOString();
+}
+
+function isChatNotificationMuted(settings: ChatNotificationSettingsResponse): boolean {
+  return isMuteModeActive(settings.muteMode, settings.mutedUntil);
+}
+
+function isMuteModeActive(muteMode: ChatNotificationMuteMode, mutedUntil: string | null): boolean {
+  if (muteMode === 'always') {
+    return true;
+  }
+
+  if (muteMode === 'off') {
+    return false;
+  }
+
+  if (!mutedUntil) {
+    return false;
+  }
+
+  const mutedUntilMs = Date.parse(mutedUntil);
+
+  return Number.isFinite(mutedUntilMs) && mutedUntilMs > Date.now();
+}
+
+function isChatNotificationAlertTone(value: unknown): value is ChatNotificationAlertTone {
+  return value === 'chime' || value === 'default' || value === 'pulse' || value === 'silent';
+}
+
+function isChatNotificationMuteMode(value: unknown): value is ChatNotificationMuteMode {
+  return value === '1w' || value === '8h' || value === 'always' || value === 'off';
 }
 
 function getNotificationPreviewForDevice(
@@ -538,6 +677,20 @@ function getUserPushTokenRef(tenantId: string, uid: string, deviceId: string) {
     .doc(uid)
     .collection('pushTokens')
     .doc(deviceId);
+}
+
+function getChatNotificationSettingsRef(tenantId: string, uid: string, contactId: string) {
+  return firestore
+    .collection('organizations')
+    .doc(tenantId)
+    .collection('users')
+    .doc(uid)
+    .collection('chatNotificationSettings')
+    .doc(getChatNotificationSettingsDocumentId(contactId));
+}
+
+function getChatNotificationSettingsDocumentId(contactId: string): string {
+  return createHash('sha256').update(contactId).digest('hex');
 }
 
 function getDisplayName(user: FirebaseFirestore.DocumentData | null | undefined): string {
