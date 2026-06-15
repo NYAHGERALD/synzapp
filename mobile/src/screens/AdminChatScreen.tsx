@@ -218,6 +218,7 @@ interface AudioAttachmentPreviewState {
 
 type DirectoryFilter = 'Departments' | 'Roles';
 type FooterTab = 'Chats' | 'Groups' | 'Employees' | 'Settings' | 'You';
+type ChatListFilter = 'all' | 'favorites' | 'groups' | 'unread';
 type GroupCallMode = 'select' | 'voice' | 'video';
 type GroupCallOption = 'schedule' | 'selectPeople' | 'sendLink' | 'video' | 'voice';
 type InviteMode = 'single' | 'batch' | 'manual';
@@ -416,6 +417,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [isInvitingEmployees, setIsInvitingEmployees] = useState(false);
   const [isUpdatingEmployeeLifecycle, setIsUpdatingEmployeeLifecycle] = useState(false);
   const [chatContacts, setChatContacts] = useState<ChatContact[]>([]);
+  const [chatListFilter, setChatListFilter] = useState<ChatListFilter>('all');
   const [chatSearch, setChatSearch] = useState('');
   const [newChatSearch, setNewChatSearch] = useState('');
   const [addMembersSearch, setAddMembersSearch] = useState('');
@@ -524,6 +526,8 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const chatItems = chatContacts.map(mapChatContactToChatItem);
   const directChatContacts = chatContacts.filter((contact) => (contact.chatType || 'DIRECT') !== 'GROUP');
   const groupChatContacts = chatContacts.filter((contact) => contact.chatType === 'GROUP');
+  const unreadChatFilterCount = chatItems.reduce((total, chat) => total + Math.max(chat.unreadCount || 0, 0), 0);
+  const groupChatFilterCount = chatItems.filter((chat) => chat.chatType === 'GROUP').length;
   const selectedForwardMessageCount = Object.values(forwardSelectedMessageIds).filter(Boolean).length;
   const selectedForwardRecipientCount = Object.values(forwardRecipientIds).filter(Boolean).length;
   const employeeItems = approvedEmployees.map(mapApprovedEmployeeToListItem);
@@ -545,7 +549,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         ...(registeredDeviceId ? { 'X-Synzapp-Device-Id': registeredDeviceId } : {})
       }
     : undefined;
-  const filteredChatItems = filterChatItems(chatItems, chatSearch);
+  const filteredChatItems = filterChatItems(applyChatListFilter(chatItems, chatListFilter), chatSearch);
   const selectedNewGroupMembers = directChatContacts.filter((contact) => selectedNewGroupMemberIds[contact.contactId]);
   const activeGroupMemberContacts = selectedChat?.chatType === 'GROUP'
     ? mapGroupMembersToSelectableContacts(selectedChat.members || [], directChatContacts, currentUid)
@@ -1897,6 +1901,10 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
   function handleContactInfoUnavailableAction(title: string) {
     Alert.alert(title, 'This contact action is ready in the contact profile and will connect to the contact management service when that service is enabled.');
+  }
+
+  function handleChatsSectionUnavailableAction(title: string) {
+    Alert.alert(title, 'This chats section is ready in the Chats tab and will connect to the chat management service when that service is enabled.');
   }
 
   function handleOpenCommonGroupFromContactInfo(groupContact: ChatContact) {
@@ -4901,14 +4909,21 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         >
           {activeTab === 'Chats' ? (
             <ChatsTab
+              activeFilter={chatListFilter}
               chats={filteredChatItems}
+              groupCount={groupChatFilterCount}
               isLoading={isLoadingChats}
+              onChangeFilter={setChatListFilter}
+              onOpenArchived={() => handleChatsSectionUnavailableAction('Archived chats')}
               onOpenChat={(chat) => {
                 void handleOpenChat(chat);
               }}
+              onOpenNewChat={handleOpenNewChatModal}
+              onOpenSpam={() => handleChatsSectionUnavailableAction('Spam')}
               onSearchChange={setChatSearch}
               profilePhotoHeaders={profilePhotoHeaders}
               search={chatSearch}
+              unreadCount={unreadChatFilterCount}
             />
           ) : null}
 
@@ -8405,27 +8420,94 @@ function ChatSearchBar({
 }
 
 function ChatsTab({
+  activeFilter,
   chats,
+  groupCount,
   isLoading,
+  onChangeFilter,
+  onOpenArchived,
   onOpenChat,
+  onOpenNewChat,
+  onOpenSpam,
   onSearchChange,
   profilePhotoHeaders,
-  search
+  search,
+  unreadCount
 }: {
+  activeFilter: ChatListFilter;
   chats: ChatItem[];
+  groupCount: number;
   isLoading: boolean;
+  onChangeFilter: (filter: ChatListFilter) => void;
+  onOpenArchived: () => void;
   onOpenChat: (chat: ChatItem) => void;
+  onOpenNewChat: () => void;
+  onOpenSpam: () => void;
   onSearchChange: (value: string) => void;
   profilePhotoHeaders?: Record<string, string>;
   search: string;
+  unreadCount: number;
 }) {
   return (
     <View>
-      <ChatSearchBar
-        onChangeText={onSearchChange}
-        placeholder="Search"
-        value={search}
-      />
+      <View style={styles.chatsControls}>
+        <ChatSearchBar
+          onChangeText={onSearchChange}
+          placeholder="Ask Synzapp AI or search"
+          value={search}
+        />
+
+        <ScrollView
+          contentContainerStyle={styles.chatFilterContent}
+          horizontal
+          keyboardShouldPersistTaps="handled"
+          showsHorizontalScrollIndicator={false}
+          style={styles.chatFilterScroll}
+        >
+          <ChatFilterChip
+            isActive={activeFilter === 'all'}
+            label="All"
+            onPress={() => onChangeFilter('all')}
+          />
+          <ChatFilterChip
+            count={unreadCount}
+            isActive={activeFilter === 'unread'}
+            label="Unread"
+            onPress={() => onChangeFilter('unread')}
+          />
+          <ChatFilterChip
+            isActive={activeFilter === 'favorites'}
+            label="Favorites"
+            onPress={() => onChangeFilter('favorites')}
+          />
+          <ChatFilterChip
+            count={groupCount}
+            isActive={activeFilter === 'groups'}
+            label="Groups"
+            onPress={() => onChangeFilter('groups')}
+          />
+          <Pressable
+            accessibilityLabel="Start new chat"
+            accessibilityRole="button"
+            android_ripple={androidIconRipple}
+            onPress={onOpenNewChat}
+            style={({ pressed }) => [styles.chatFilterAddButton, pressed && styles.pressed]}
+          >
+            <Feather color={colors.ink} name="plus" size={18} />
+          </Pressable>
+        </ScrollView>
+
+        <ChatsUtilityRow
+          icon="message-circle"
+          label="Spam"
+          onPress={onOpenSpam}
+        />
+        <ChatsUtilityRow
+          icon="archive"
+          label="Archived"
+          onPress={onOpenArchived}
+        />
+      </View>
 
       {isLoading ? (
         <View style={styles.loadingRow}>
@@ -8448,6 +8530,68 @@ function ChatsTab({
         />
       ))}
     </View>
+  );
+}
+
+function ChatFilterChip({
+  count,
+  isActive,
+  label,
+  onPress
+}: {
+  count?: number;
+  isActive: boolean;
+  label: string;
+  onPress: () => void;
+}) {
+  const labelText = typeof count === 'number' && count > 0 ? `${label} ${count}` : label;
+
+  return (
+    <Pressable
+      accessibilityLabel={labelText}
+      accessibilityRole="button"
+      accessibilityState={{ selected: isActive }}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.chatFilterChip,
+        isActive && styles.chatFilterChipActive,
+        pressed && styles.pressed
+      ]}
+    >
+      <Text
+        numberOfLines={1}
+        style={[
+          styles.chatFilterChipText,
+          isActive && styles.chatFilterChipTextActive
+        ]}
+      >
+        {labelText}
+      </Text>
+    </Pressable>
+  );
+}
+
+function ChatsUtilityRow({
+  icon,
+  label,
+  onPress
+}: {
+  icon: keyof typeof Feather.glyphMap;
+  label: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityLabel={label}
+      accessibilityRole="button"
+      onPress={onPress}
+      style={({ pressed }) => [styles.chatsUtilityRow, pressed && styles.pressed]}
+    >
+      <View style={styles.chatsUtilityIcon}>
+        <Feather color="#64748B" name={icon} size={17} />
+      </View>
+      <Text numberOfLines={1} style={styles.chatsUtilityText}>{label}</Text>
+    </Pressable>
   );
 }
 
@@ -12739,6 +12883,26 @@ function getGroupCallPeopleTitle(mode: GroupCallMode): string {
   return 'Select people';
 }
 
+function applyChatListFilter(chats: ChatItem[], filter: ChatListFilter): ChatItem[] {
+  if (filter === 'unread') {
+    return chats.filter((chat) => (chat.unreadCount || 0) > 0);
+  }
+
+  if (filter === 'groups') {
+    return chats.filter((chat) => chat.chatType === 'GROUP');
+  }
+
+  if (filter === 'favorites') {
+    return chats.filter((chat) => isFavoriteChat(chat));
+  }
+
+  return chats;
+}
+
+function isFavoriteChat(_chat: ChatItem): boolean {
+  return false;
+}
+
 function filterChatItems(chats: ChatItem[], search: string): ChatItem[] {
   const query = normalizeSearchQuery(search);
 
@@ -13466,6 +13630,76 @@ const styles = StyleSheet.create({
     fontWeight: '400',
     minHeight: 40,
     paddingVertical: 7
+  },
+  chatsControls: {
+    borderBottomColor: '#E5E7EB',
+    borderBottomWidth: 1,
+    gap: 8,
+    marginBottom: 2,
+    paddingBottom: 8
+  },
+  chatFilterScroll: {
+    marginHorizontal: -2
+  },
+  chatFilterContent: {
+    alignItems: 'center',
+    gap: 7,
+    paddingHorizontal: 2,
+    paddingVertical: 1
+  },
+  chatFilterChip: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderColor: '#D7DEE8',
+    borderRadius: 14,
+    borderWidth: 1,
+    justifyContent: 'center',
+    minHeight: 28,
+    paddingHorizontal: 10
+  },
+  chatFilterChipActive: {
+    backgroundColor: '#D1FAE5',
+    borderColor: '#86EFAC'
+  },
+  chatFilterChipText: {
+    color: '#64748B',
+    fontSize: 13,
+    fontWeight: '600',
+    lineHeight: 17
+  },
+  chatFilterChipTextActive: {
+    color: '#047857'
+  },
+  chatFilterAddButton: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderColor: '#D7DEE8',
+    borderRadius: 14,
+    borderWidth: 1,
+    height: 28,
+    justifyContent: 'center',
+    width: 28
+  },
+  chatsUtilityRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 12,
+    minHeight: 36,
+    paddingHorizontal: 7,
+    paddingVertical: 3
+  },
+  chatsUtilityIcon: {
+    alignItems: 'center',
+    height: 28,
+    justifyContent: 'center',
+    width: 28
+  },
+  chatsUtilityText: {
+    color: '#64748B',
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '600',
+    lineHeight: 20
   },
   messageHeader: {
     alignItems: 'center',
