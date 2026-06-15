@@ -5587,6 +5587,7 @@ function SynzappAiAssistantScreen({
   const safeFirstName = profileName.trim().split(/\s+/)[0] || '';
   const greeting = safeFirstName ? `Hello, ${safeFirstName}` : 'Hello';
   const canSend = draft.trim().length > 0;
+  const [isKeyboardVisible, setIsKeyboardVisible] = useState(false);
 
   useEffect(() => {
     spinValue.setValue(0);
@@ -5625,6 +5626,18 @@ function SynzappAiAssistantScreen({
       pulseAnimation.stop();
     };
   }, [pulseValue, spinValue]);
+
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const showSubscription = Keyboard.addListener(showEvent, () => setIsKeyboardVisible(true));
+    const hideSubscription = Keyboard.addListener(hideEvent, () => setIsKeyboardVisible(false));
+
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, []);
 
   const rotation = spinValue.interpolate({
     inputRange: [0, 1],
@@ -5671,6 +5684,7 @@ function SynzappAiAssistantScreen({
           contentContainerStyle={styles.aiScrollContent}
           keyboardDismissMode={getKeyboardDismissMode()}
           keyboardShouldPersistTaps="handled"
+          onScrollBeginDrag={() => Keyboard.dismiss()}
           showsVerticalScrollIndicator={false}
           style={styles.aiScroll}
         >
@@ -5712,6 +5726,16 @@ function SynzappAiAssistantScreen({
 
         <View style={[styles.aiComposer, { paddingBottom: composerBottomPadding }]}>
           <View style={styles.aiInputBox}>
+            {isKeyboardVisible ? (
+              <Pressable
+                accessibilityLabel="Close keyboard"
+                accessibilityRole="button"
+                onPress={() => Keyboard.dismiss()}
+                style={({ pressed }) => [styles.aiComposerIconButton, pressed && styles.pressed]}
+              >
+                <Ionicons color="#64748B" name="chevron-down" size={22} />
+              </Pressable>
+            ) : null}
             <TextInput
               multiline
               onChangeText={onDraftChange}
@@ -6972,6 +6996,7 @@ function MessageThread({
     <View style={styles.messageScreen}>
       <ScrollView
         contentContainerStyle={styles.messageListContent}
+        keyboardDismissMode={getKeyboardDismissMode()}
         keyboardShouldPersistTaps="always"
         onContentSizeChange={() => {
           if (isAtLatestRef.current) {
@@ -6987,6 +7012,7 @@ function MessageThread({
             event.nativeEvent.contentSize.height
           );
         }}
+        onScrollBeginDrag={() => Keyboard.dismiss()}
         scrollEventThrottle={80}
         ref={scrollViewRef}
         showsVerticalScrollIndicator={false}
@@ -7106,11 +7132,16 @@ function MessageThread({
               replyTarget && styles.messageInputBoxWithReply
             ]}>
               <Pressable
-                accessibilityLabel="Open emoji"
+                accessibilityLabel={isKeyboardVisible ? 'Close keyboard' : 'Open emoji'}
                 accessibilityRole="button"
+                onPress={isKeyboardVisible ? () => Keyboard.dismiss() : undefined}
                 style={({ pressed }) => [styles.messageComposerIconButton, pressed && styles.pressed]}
               >
-                <Ionicons color="#8B95A5" name="happy-outline" size={23} />
+                <Ionicons
+                  color="#8B95A5"
+                  name={isKeyboardVisible ? 'chevron-down' : 'happy-outline'}
+                  size={isKeyboardVisible ? 22 : 23}
+                />
               </Pressable>
               <TextInput
                 editable={canChat}
@@ -14479,6 +14510,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: 0,
     paddingVertical: 7,
     textAlignVertical: 'top'
+  },
+  aiComposerIconButton: {
+    alignItems: 'center',
+    height: 34,
+    justifyContent: 'center',
+    marginBottom: 1,
+    width: 30
   },
   aiSendButton: {
     alignItems: 'center',
