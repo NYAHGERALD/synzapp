@@ -10,6 +10,7 @@ import { mergePermissions } from './permissionCatalog.js';
 
 interface OrganizationRecord {
   companyName?: string;
+  orgAdminName?: string;
   status?: string;
 }
 
@@ -65,6 +66,21 @@ export interface ChatContact {
   roleName: string;
   status: string;
   unreadCount: number;
+}
+
+export interface DirectChatContactDetails {
+  companyName: string;
+  contactId: string;
+  departmentAdminName: string | null;
+  departmentName: string | null;
+  displayName: string;
+  organizationAdminName: string | null;
+  phoneFormatted: string;
+  profilePhotoCacheKey: string | null;
+  profilePhotoUrl: string | null;
+  role: SynzappRole;
+  roleName: string;
+  status: string;
 }
 
 export interface CurrentUserProfile {
@@ -223,6 +239,47 @@ export async function getDirectChatContact(
     directChat === undefined ? chatContext.directChat : directChat,
     hasActiveDevice
   );
+}
+
+export async function getDirectChatContactDetails(
+  decodedToken: DecodedIdToken,
+  contactId: string
+): Promise<DirectChatContactDetails> {
+  const chatContext = await getDirectChatContext(decodedToken, contactId);
+  const organizationRef = firestore.collection('organizations').doc(chatContext.tenantId);
+  const organizationSnapshot = await organizationRef.get();
+  const organization = organizationSnapshot.exists
+    ? organizationSnapshot.data() as OrganizationRecord
+    : {};
+  const [authUser, departmentAdminName] = await Promise.all([
+    adminAuth.getUser(chatContext.contactId).catch(() => null),
+    getDepartmentAdminName(organizationRef, chatContext.contact)
+  ]);
+  const normalizedPhone = authUser?.phoneNumber ? normalizeE164Phone(authUser.phoneNumber) : '';
+  const displayName = getDisplayName(chatContext.contact);
+
+  return {
+    companyName: organization.companyName || 'Your organization',
+    contactId: chatContext.contactId,
+    departmentAdminName,
+    departmentName: chatContext.contact.departmentName || null,
+    displayName,
+    organizationAdminName: organization.orgAdminName || null,
+    phoneFormatted: normalizedPhone
+      ? formatPhoneNumber(normalizedPhone)
+      : chatContext.contact.phoneMasked || '*****',
+    profilePhotoCacheKey: chatContext.contact.profilePhotoStoragePath
+      ? buildProfilePhotoCacheKey(chatContext.contactId, chatContext.contact.profilePhotoVersion)
+      : null,
+    profilePhotoUrl: getChatContactProfilePhotoUrl(
+      chatContext.contactId,
+      chatContext.contact.profilePhotoStoragePath,
+      chatContext.contact.profilePhotoVersion
+    ),
+    role: chatContext.contact.role || 'EMPLOYEE',
+    roleName: formatProfileRoleName(chatContext.contact.roleName, chatContext.contact.role || 'EMPLOYEE'),
+    status: chatContext.contact.status || 'ACTIVE'
+  };
 }
 
 export async function getDirectChatRealtimeContext(
@@ -856,6 +913,36 @@ async function hasActiveDeviceForUser(tenantId: string, uid: string): Promise<bo
     .get();
 
   return !snapshot.empty;
+}
+
+async function getDepartmentAdminName(
+  organizationRef: FirebaseFirestore.DocumentReference,
+  contact: TenantUserRecord
+): Promise<string | null> {
+  if (!contact.departmentId) {
+    return null;
+  }
+
+  const snapshot = await organizationRef
+    .collection('users')
+    .where('status', '==', 'ACTIVE')
+    .where('departmentId', '==', contact.departmentId)
+    .get();
+  const adminNames = snapshot.docs
+    .map((doc) => doc.data() as TenantUserRecord)
+    .filter((user) => user.role === 'DEPT_ADMIN')
+    .map((user) => getDisplayName(user))
+    .filter(Boolean);
+
+  if (!adminNames.length) {
+    return null;
+  }
+
+  if (adminNames.length === 1) {
+    return adminNames[0];
+  }
+
+  return `${adminNames[0]} + ${adminNames.length - 1} more`;
 }
 
 async function getDirectChatContext(decodedToken: DecodedIdToken, contactId: string) {

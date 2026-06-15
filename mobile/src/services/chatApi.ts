@@ -36,6 +36,21 @@ export interface ChatContact {
   unreadCount: number;
 }
 
+export interface DirectChatContactDetails {
+  companyName: string;
+  contactId: string;
+  departmentAdminName: string | null;
+  departmentName: string | null;
+  displayName: string;
+  organizationAdminName: string | null;
+  phoneFormatted: string;
+  profilePhotoCacheKey: string | null;
+  profilePhotoUrl: string | null;
+  role: 'ORG_ADMIN' | 'DEPT_ADMIN' | 'EMPLOYEE' | 'SYSTEM_ADMIN';
+  roleName: string;
+  status: string;
+}
+
 export interface ChatGroupMember {
   displayName: string;
   initials: string;
@@ -325,6 +340,32 @@ export async function updateChatNotificationSettings(input: {
   const body = await response.json() as { settings?: ChatNotificationSettings };
 
   return normalizeChatNotificationSettings(body.settings, input.contactId);
+}
+
+export async function getDirectChatContactDetails(input: {
+  contactId: string;
+  idToken: string;
+}): Promise<DirectChatContactDetails> {
+  const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
+  const response = await fetch(
+    `${getSynzappApiBaseUrl()}/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/details`,
+    {
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${input.idToken}`,
+        ...deviceHeaders
+      },
+      method: 'GET'
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  const body = await response.json() as { details?: DirectChatContactDetails };
+
+  return normalizeDirectChatContactDetails(body.details, input.contactId);
 }
 
 export async function getChatTranscriptLanguage(input: {
@@ -823,6 +864,46 @@ function normalizeChatContact(contact: ChatContact): ChatContact {
     messagePermissionMode: contact.messagePermissionMode === 'ADMINS' ? 'ADMINS' : contact.messagePermissionMode === 'ALL_MEMBERS' ? 'ALL_MEMBERS' : undefined,
     phoneMasked: typeof contact.phoneMasked === 'string' && contact.phoneMasked.trim() ? contact.phoneMasked.trim() : null,
     profilePhotoUrl: normalizeSynzappApiUrl(contact.profilePhotoUrl)
+  };
+}
+
+function normalizeDirectChatContactDetails(
+  details: DirectChatContactDetails | undefined,
+  contactId: string
+): DirectChatContactDetails {
+  return {
+    companyName: typeof details?.companyName === 'string' && details.companyName.trim()
+      ? details.companyName.trim()
+      : 'Your organization',
+    contactId: typeof details?.contactId === 'string' && details.contactId.trim()
+      ? details.contactId.trim()
+      : contactId,
+    departmentAdminName: typeof details?.departmentAdminName === 'string' && details.departmentAdminName.trim()
+      ? details.departmentAdminName.trim()
+      : null,
+    departmentName: typeof details?.departmentName === 'string' && details.departmentName.trim()
+      ? details.departmentName.trim()
+      : null,
+    displayName: typeof details?.displayName === 'string' && details.displayName.trim()
+      ? details.displayName.trim()
+      : 'Synzapp contact',
+    organizationAdminName: typeof details?.organizationAdminName === 'string' && details.organizationAdminName.trim()
+      ? details.organizationAdminName.trim()
+      : null,
+    phoneFormatted: typeof details?.phoneFormatted === 'string' && details.phoneFormatted.trim()
+      ? details.phoneFormatted.trim()
+      : '*****',
+    profilePhotoCacheKey: typeof details?.profilePhotoCacheKey === 'string' && details.profilePhotoCacheKey.trim()
+      ? details.profilePhotoCacheKey.trim()
+      : null,
+    profilePhotoUrl: normalizeSynzappApiUrl(details?.profilePhotoUrl || null),
+    role: details?.role || 'EMPLOYEE',
+    roleName: typeof details?.roleName === 'string' && details.roleName.trim()
+      ? details.roleName.trim()
+      : 'Employee',
+    status: typeof details?.status === 'string' && details.status.trim()
+      ? details.status.trim()
+      : 'ACTIVE'
   };
 }
 

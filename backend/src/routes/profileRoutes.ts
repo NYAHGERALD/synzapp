@@ -12,6 +12,7 @@ import {
   getCurrentUserProfile,
   getCurrentUserProfilePhoto,
   getDirectChatContact,
+  getDirectChatContactDetails,
   getDirectChatMessageReactions,
   listCurrentUserChatContacts,
   updateDirectChatMessageReaction,
@@ -762,6 +763,21 @@ profileRouter.get('/chat/conversations/:contactId/encryption-context', verifyApp
     const context = await getDirectEncryptionContext(decodedToken, contactId, activeDevice.deviceId);
 
     res.json({ context });
+  } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.get('/chat/conversations/:contactId/details', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const contactId = Array.isArray(req.params.contactId)
+      ? req.params.contactId[0] || ''
+      : req.params.contactId || '';
+    const details = await getDirectChatContactDetails(decodedToken, contactId);
+
+    res.json({ details });
   } catch (error) {
     next(error);
   }

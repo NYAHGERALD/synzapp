@@ -93,7 +93,9 @@ import {
   createGroupChat,
   decryptRealtimeEncryptedEnvelopes,
   deleteChatMessageForMe,
+  DirectChatContactDetails,
   getChatNotificationSettings,
+  getDirectChatContactDetails,
   getChatMessages,
   getChatTranscriptLanguage,
   grantGroupChatHistoryKeys,
@@ -497,6 +499,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [isContactInfoModalOpen, setIsContactInfoModalOpen] = useState(false);
   const [isChatNotificationSettingsOpen, setIsChatNotificationSettingsOpen] = useState(false);
   const [isChatTranscriptLanguageOpen, setIsChatTranscriptLanguageOpen] = useState(false);
+  const [isDirectContactDetailsOpen, setIsDirectContactDetailsOpen] = useState(false);
   const [isGroupDetailsModalOpen, setIsGroupDetailsModalOpen] = useState(false);
   const [isGroupPermissionsModalOpen, setIsGroupPermissionsModalOpen] = useState(false);
   const [isGroupCallOptionsOpen, setIsGroupCallOptionsOpen] = useState(false);
@@ -530,6 +533,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [messageReactions, setMessageReactions] = useState<ChatMessageReactionMap>({});
   const [chatNotificationSettingsByContactId, setChatNotificationSettingsByContactId] = useState<Record<string, ChatNotificationSettings>>({});
   const [chatTranscriptLanguageByContactId, setChatTranscriptLanguageByContactId] = useState<Record<string, ChatTranscriptLanguageSetting>>({});
+  const [directContactDetailsByContactId, setDirectContactDetailsByContactId] = useState<Record<string, DirectChatContactDetails>>({});
   const [starredMessageIds, setStarredMessageIds] = useState<Record<string, boolean>>({});
   const [selectedChat, setSelectedChat] = useState<ChatItem | null>(null);
   const [isLoadingChats, setIsLoadingChats] = useState(false);
@@ -538,6 +542,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [isSavingChatNotificationSettings, setIsSavingChatNotificationSettings] = useState(false);
   const [isLoadingChatTranscriptLanguage, setIsLoadingChatTranscriptLanguage] = useState(false);
   const [isSavingChatTranscriptLanguage, setIsSavingChatTranscriptLanguage] = useState(false);
+  const [isLoadingDirectContactDetails, setIsLoadingDirectContactDetails] = useState(false);
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [isLoadingBatchContacts, setIsLoadingBatchContacts] = useState(false);
   const [isPickingInviteContact, setIsPickingInviteContact] = useState(false);
@@ -653,6 +658,9 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     : null;
   const activeDirectChatTranscriptLanguage = selectedChat && selectedChat.chatType !== 'GROUP'
     ? chatTranscriptLanguageByContactId[selectedChat.contactId] || null
+    : null;
+  const activeDirectContactDetails = selectedChat && selectedChat.chatType !== 'GROUP'
+    ? directContactDetailsByContactId[selectedChat.contactId] || null
     : null;
   const selectedGroupCallMemberCount = Object.values(selectedGroupCallMemberIds).filter(Boolean).length;
   const companyDisplayName = userProfile?.companyName || companyProfile?.companyName || 'Synzapp';
@@ -1824,6 +1832,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setSelectedChat(chat);
     setIsChatNotificationSettingsOpen(false);
     setIsChatTranscriptLanguageOpen(false);
+    setIsDirectContactDetailsOpen(false);
     setChatContacts((currentContacts) => currentContacts.map((contact) =>
       contact.contactId === chat.contactId
         ? { ...contact, unreadCount: 0 }
@@ -1931,6 +1940,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsContactInfoModalOpen(false);
     setIsChatNotificationSettingsOpen(false);
     setIsChatTranscriptLanguageOpen(false);
+    setIsDirectContactDetailsOpen(false);
     setIsGroupInfoModalOpen(true);
   }
 
@@ -1951,6 +1961,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsGroupInfoModalOpen(false);
     setIsChatNotificationSettingsOpen(false);
     setIsChatTranscriptLanguageOpen(false);
+    setIsDirectContactDetailsOpen(false);
     setIsContactInfoModalOpen(true);
   }
 
@@ -1958,6 +1969,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsContactInfoModalOpen(false);
     setIsChatNotificationSettingsOpen(false);
     setIsChatTranscriptLanguageOpen(false);
+    setIsDirectContactDetailsOpen(false);
   }
 
   function handleCloseChatNotificationSettings() {
@@ -2208,6 +2220,66 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       setError(getErrorMessage(nextError, 'Unable to update transcript language.'));
     } finally {
       setIsSavingChatTranscriptLanguage(false);
+    }
+  }
+
+  function handleCloseDirectContactDetails() {
+    const chat = selectedChatRef.current;
+
+    setIsDirectContactDetailsOpen(false);
+
+    if (chat && chat.chatType !== 'GROUP') {
+      setTimeout(() => {
+        if (selectedChatRef.current?.contactId === chat.contactId) {
+          setIsContactInfoModalOpen(true);
+        }
+      }, Platform.OS === 'ios' ? 260 : 120);
+    }
+  }
+
+  function handleOpenDirectContactDetails() {
+    const chat = selectedChatRef.current;
+
+    if (!chat || chat.chatType === 'GROUP') {
+      return;
+    }
+
+    setError(null);
+    setIsContactInfoModalOpen(false);
+    void loadDirectContactDetails(chat, true);
+
+    setTimeout(() => {
+      if (selectedChatRef.current?.contactId === chat.contactId) {
+        setIsDirectContactDetailsOpen(true);
+      }
+    }, Platform.OS === 'ios' ? 320 : 140);
+  }
+
+  async function loadDirectContactDetails(chat: ChatItem, showError = true) {
+    if (chat.chatType === 'GROUP') {
+      return;
+    }
+
+    setIsLoadingDirectContactDetails(true);
+
+    try {
+      const idToken = await getIdToken();
+      const details = await getDirectChatContactDetails({
+        contactId: chat.contactId,
+        idToken
+      });
+
+      setProfilePhotoAuthToken(idToken);
+      setDirectContactDetailsByContactId((currentDetails) => ({
+        ...currentDetails,
+        [chat.contactId]: details
+      }));
+    } catch (nextError) {
+      if (showError) {
+        setError(getErrorMessage(nextError, 'Unable to load contact details.'));
+      }
+    } finally {
+      setIsLoadingDirectContactDetails(false);
     }
   }
 
@@ -3906,6 +3978,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsContactInfoModalOpen(false);
     setIsChatNotificationSettingsOpen(false);
     setIsChatTranscriptLanguageOpen(false);
+    setIsDirectContactDetailsOpen(false);
     setIsGroupCallOptionsOpen(false);
     setIsGroupCallPeopleModalOpen(false);
     setIsGroupInfoModalOpen(false);
@@ -3934,6 +4007,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setIsContactInfoModalOpen(false);
     setIsChatNotificationSettingsOpen(false);
     setIsChatTranscriptLanguageOpen(false);
+    setIsDirectContactDetailsOpen(false);
     setIsGroupCallOptionsOpen(false);
     setIsGroupCallPeopleModalOpen(false);
     setIsGroupInfoModalOpen(false);
@@ -5697,7 +5771,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         onAddToGroup={() => handleContactInfoUnavailableAction('Add to group')}
         onClose={handleCloseContactInfo}
         onCreateGroup={() => handleContactInfoUnavailableAction('Create group')}
-        onOpenContactDetails={() => handleContactInfoUnavailableAction('Contact details')}
+        onOpenContactDetails={handleOpenDirectContactDetails}
         onOpenEdit={() => handleContactInfoUnavailableAction('Edit contact')}
         onOpenGroup={handleOpenCommonGroupFromContactInfo}
         onOpenNotifications={handleOpenChatNotificationSettings}
@@ -5735,6 +5809,19 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         }}
         search={chatTranscriptLanguageSearch}
         transcriptLanguage={activeDirectChatTranscriptLanguage}
+      />
+
+      <DirectContactDetailsModal
+        chat={selectedChat}
+        details={activeDirectContactDetails}
+        isLoading={isLoadingDirectContactDetails}
+        isOpen={isDirectContactDetailsOpen}
+        onAddToGroup={() => handleContactInfoUnavailableAction('Add to group')}
+        onClose={handleCloseDirectContactDetails}
+        onOpenEdit={() => handleContactInfoUnavailableAction('Edit contact')}
+        onStartVideoCall={() => handleContactInfoUnavailableAction('Video call')}
+        onStartVoiceCall={() => handleContactInfoUnavailableAction('Audio call')}
+        profilePhotoHeaders={profilePhotoHeaders}
       />
 
       <GroupInfoModal
@@ -10151,6 +10238,150 @@ function TranscriptLanguageRow({
         <Feather color="#22C55E" name="check" size={20} />
       ) : null}
     </Pressable>
+  );
+}
+
+function DirectContactDetailsModal({
+  chat,
+  details,
+  isLoading,
+  isOpen,
+  onAddToGroup,
+  onClose,
+  onOpenEdit,
+  onStartVideoCall,
+  onStartVoiceCall,
+  profilePhotoHeaders
+}: {
+  chat: ChatItem | null;
+  details: DirectChatContactDetails | null;
+  isLoading: boolean;
+  isOpen: boolean;
+  onAddToGroup: () => void;
+  onClose: () => void;
+  onOpenEdit: () => void;
+  onStartVideoCall: () => void;
+  onStartVoiceCall: () => void;
+  profilePhotoHeaders?: Record<string, string>;
+}) {
+  const insets = useSafeAreaInsets();
+  const modalTopPadding = getFullScreenModalTopPadding(insets.top);
+
+  if (!chat || chat.chatType === 'GROUP') {
+    return null;
+  }
+
+  const displayName = details?.displayName || chat.title;
+  const profilePhotoUrl = details?.profilePhotoUrl || chat.profilePhotoUrl;
+  const phoneNumber = details?.phoneFormatted || chat.phoneMasked || '*****';
+
+  return (
+    <Modal
+      allowSwipeDismissal={Platform.OS === 'ios'}
+      animationType="slide"
+      onRequestClose={onClose}
+      presentationStyle={getNativeFullHeightModalPresentationStyle()}
+      transparent={false}
+      visible={isOpen}
+    >
+      <View style={[styles.directContactDetailsScreen, { paddingTop: modalTopPadding }]}>
+        <View style={styles.directContactDetailsTopBar}>
+          <Pressable
+            accessibilityLabel="Edit contact"
+            accessibilityRole="button"
+            onPress={onOpenEdit}
+            style={({ pressed }) => [styles.groupInfoEditButton, pressed && styles.pressed]}
+          >
+            <Text style={styles.groupInfoEditText}>Edit</Text>
+          </Pressable>
+          <Pressable
+            accessibilityLabel="Close contact details"
+            accessibilityRole="button"
+            onPress={onClose}
+            style={({ pressed }) => [styles.groupInfoTopButton, pressed && styles.pressed]}
+          >
+            <Feather color={colors.ink} name="x" size={22} />
+          </Pressable>
+        </View>
+
+        <ScrollView
+          contentContainerStyle={styles.directContactDetailsContent}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={styles.directContactDetailsHero}>
+            <ProfileAvatar
+              headers={profilePhotoHeaders}
+              name={displayName}
+              size={104}
+              uri={profilePhotoUrl}
+            />
+            <Text numberOfLines={2} style={styles.directContactDetailsName}>{displayName}</Text>
+            <Text numberOfLines={1} style={styles.directContactDetailsRole}>
+              {details?.roleName || chat.roleName || 'Synzapp contact'}
+            </Text>
+          </View>
+
+          <View style={styles.directContactPhoneCard}>
+            <View style={styles.directContactPhoneText}>
+              <Text style={styles.directContactPhoneLabel}>mobile</Text>
+              <Text numberOfLines={1} style={styles.directContactPhoneNumber}>{phoneNumber}</Text>
+            </View>
+            <View style={styles.directContactPhoneActions}>
+              <Pressable
+                accessibilityLabel="Message contact"
+                accessibilityRole="button"
+                onPress={onClose}
+                style={({ pressed }) => [styles.directContactActionButton, pressed && styles.pressed]}
+              >
+                <Ionicons color={colors.primary} name="chatbubble" size={18} />
+              </Pressable>
+              <Pressable
+                accessibilityLabel="Video call contact"
+                accessibilityRole="button"
+                onPress={onStartVideoCall}
+                style={({ pressed }) => [styles.directContactActionButton, pressed && styles.pressed]}
+              >
+                <Feather color={colors.primary} name="video" size={18} />
+              </Pressable>
+              <Pressable
+                accessibilityLabel="Call contact"
+                accessibilityRole="button"
+                onPress={onStartVoiceCall}
+                style={({ pressed }) => [styles.directContactActionButton, pressed && styles.pressed]}
+              >
+                <Feather color={colors.primary} name="phone" size={18} />
+              </Pressable>
+            </View>
+          </View>
+
+          <View style={styles.directContactDetailsCard}>
+            <ProfileDetailRow label="Phone" value={phoneNumber} />
+            <ProfileDetailRow label="Company" value={details?.companyName || 'Your organization'} />
+            <ProfileDetailRow label="Department" value={details?.departmentName || 'Not assigned'} />
+            <ProfileDetailRow label="Org Admin" value={details?.organizationAdminName || 'Not assigned'} />
+            <ProfileDetailRow label="Dept Admin" value={details?.departmentAdminName || 'Not assigned'} />
+            <ProfileDetailRow label="Role" value={details?.roleName || chat.roleName || 'Employee'} />
+          </View>
+
+          <Pressable
+            accessibilityLabel={`Add ${displayName} to group`}
+            accessibilityRole="button"
+            onPress={onAddToGroup}
+            style={({ pressed }) => [styles.directContactAddGroupRow, pressed && styles.pressed]}
+          >
+            <Text style={styles.directContactAddGroupText}>Add to group</Text>
+          </Pressable>
+
+          {isLoading ? (
+            <View style={styles.notificationSettingsLoadingRow}>
+              <ActivityIndicator color={colors.primary} />
+              <Text style={styles.notificationSettingsLoadingText}>Loading contact details...</Text>
+            </View>
+          ) : null}
+        </ScrollView>
+      </View>
+    </Modal>
   );
 }
 
@@ -17481,6 +17712,105 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     paddingVertical: 18,
     textAlign: 'center'
+  },
+  directContactDetailsScreen: {
+    backgroundColor: '#F4F6F8',
+    flex: 1
+  },
+  directContactDetailsTopBar: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    minHeight: 52,
+    paddingHorizontal: 16
+  },
+  directContactDetailsContent: {
+    paddingBottom: 32,
+    paddingHorizontal: 14,
+    paddingTop: 12
+  },
+  directContactDetailsHero: {
+    alignItems: 'center',
+    minHeight: 194,
+    justifyContent: 'center',
+    paddingBottom: 20
+  },
+  directContactDetailsName: {
+    color: '#0B141A',
+    fontSize: 24,
+    fontWeight: '700',
+    lineHeight: 30,
+    marginTop: 14,
+    maxWidth: 320,
+    textAlign: 'center'
+  },
+  directContactDetailsRole: {
+    color: '#8B95A5',
+    fontSize: 14,
+    fontWeight: '500',
+    lineHeight: 19,
+    marginTop: 2,
+    textAlign: 'center'
+  },
+  directContactPhoneCard: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    flexDirection: 'row',
+    gap: 12,
+    minHeight: 58,
+    paddingHorizontal: 16,
+    paddingVertical: 9
+  },
+  directContactPhoneText: {
+    flex: 1,
+    minWidth: 0
+  },
+  directContactPhoneLabel: {
+    color: '#8B95A5',
+    fontSize: 12,
+    fontWeight: '500',
+    lineHeight: 16
+  },
+  directContactPhoneNumber: {
+    color: '#22C55E',
+    fontSize: 17,
+    fontWeight: '600',
+    lineHeight: 22
+  },
+  directContactPhoneActions: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8
+  },
+  directContactActionButton: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderRadius: 18,
+    height: 36,
+    justifyContent: 'center',
+    width: 36
+  },
+  directContactDetailsCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    marginTop: 12,
+    overflow: 'hidden',
+    paddingHorizontal: 14
+  },
+  directContactAddGroupRow: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    justifyContent: 'center',
+    marginTop: 12,
+    minHeight: 52,
+    paddingHorizontal: 16
+  },
+  directContactAddGroupText: {
+    color: '#22C55E',
+    fontSize: 16,
+    fontWeight: '500',
+    lineHeight: 21
   },
   groupInfoHero: {
     alignItems: 'center',
