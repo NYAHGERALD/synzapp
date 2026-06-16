@@ -226,6 +226,19 @@ const chatPreferenceBodySchema = z.object({
   'At least one chat preference is required.'
 );
 
+function getChatPreferenceAuditMetadata(
+  idField: 'contactId' | 'groupId',
+  idValue: string,
+  body: z.infer<typeof chatPreferenceBodySchema>
+) {
+  return {
+    ...(body.clear !== undefined ? { clear: body.clear === true } : {}),
+    [idField]: idValue,
+    ...(body.isArchived !== undefined ? { isArchived: body.isArchived } : {}),
+    ...(body.isFavorite !== undefined ? { isFavorite: body.isFavorite } : {})
+  };
+}
+
 const encryptedChatBackupBodySchema = z.object({
   algorithm: z.literal('nacl-secretbox+synzapp-chat-backup-v1'),
   backupCreatedAt: z.string().datetime(),
@@ -530,12 +543,7 @@ profileRouter.patch('/chat/groups/:groupId/preferences', verifyAppCheck, async (
 
     await writeAuditEvent({
       action: 'GROUP_CHAT_PREFERENCE_UPDATED',
-      metadata: {
-        clear: body.clear === true,
-        groupId,
-        isArchived: body.isArchived,
-        isFavorite: body.isFavorite
-      },
+      metadata: getChatPreferenceAuditMetadata('groupId', groupId, body),
       req,
       status: 'SUCCESS',
       tenantId: activeDevice.tenantId,
@@ -1008,12 +1016,7 @@ profileRouter.patch('/chat/conversations/:contactId/preferences', verifyAppCheck
 
     await writeAuditEvent({
       action: 'DIRECT_CHAT_PREFERENCE_UPDATED',
-      metadata: {
-        clear: body.clear === true,
-        contactId,
-        isArchived: body.isArchived,
-        isFavorite: body.isFavorite
-      },
+      metadata: getChatPreferenceAuditMetadata('contactId', contactId, body),
       req,
       status: 'SUCCESS',
       tenantId: activeDevice.tenantId,

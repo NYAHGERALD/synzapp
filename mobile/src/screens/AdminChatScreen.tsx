@@ -267,9 +267,9 @@ const MESSAGE_INPUT_MAX_HEIGHT = 140;
 const MESSAGE_INPUT_LINE_HEIGHT = 20;
 const MESSAGE_INPUT_VERTICAL_PADDING = 16;
 const MESSAGE_INPUT_BOX_EXTRA_HEIGHT = 4;
-const CHAT_ROW_LEFT_ACTION_WIDTH = 92;
-const CHAT_ROW_RIGHT_ACTION_WIDTH = 168;
-const CHAT_ROW_SWIPE_TRIGGER = 54;
+const CHAT_ROW_LEFT_ACTION_WIDTH = 112;
+const CHAT_ROW_RIGHT_ACTION_WIDTH = 216;
+const CHAT_ROW_SWIPE_TRIGGER = 28;
 const VOICE_NOTE_MIN_DURATION_MS = 700;
 const VOICE_NOTE_RECORDING_OPTIONS = RecordingPresets.LOW_QUALITY;
 const CHAT_AUDIO_PLAYBACK_MODE: AudioMode = {
@@ -1722,6 +1722,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     chat: ChatItem,
     input: {
       clear?: boolean;
+      failureMessage?: string;
       isArchived?: boolean;
       isFavorite?: boolean;
       optimisticContact?: Partial<ChatContact>;
@@ -1781,7 +1782,12 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       }
     } catch (nextError) {
       setChatContacts(previousContacts);
-      setError(getErrorMessage(nextError, 'Unable to update this chat.'));
+      const fallbackMessage = input.failureMessage || 'Unable to update this chat.';
+      const nextMessage = getErrorMessage(nextError, fallbackMessage);
+
+      setError(/something went wrong|unable to load chats/i.test(nextMessage)
+        ? fallbackMessage
+        : nextMessage);
     }
   }
 
@@ -1793,6 +1799,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     const nextArchived = !chat.isArchived;
 
     void updateChatPreferenceAndApply(chat, {
+      failureMessage: nextArchived ? 'Unable to archive this chat.' : 'Unable to unarchive this chat.',
       isArchived: nextArchived,
       optimisticContact: {
         isArchived: nextArchived
@@ -1808,6 +1815,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     const nextFavorite = !chat.isFavorite;
 
     void updateChatPreferenceAndApply(chat, {
+      failureMessage: nextFavorite ? 'Unable to add this chat to Favorites.' : 'Unable to remove this chat from Favorites.',
       isFavorite: nextFavorite,
       optimisticContact: {
         isFavorite: nextFavorite
@@ -1832,6 +1840,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           onPress: () => {
             void updateChatPreferenceAndApply(chat, {
               clear: true,
+              failureMessage: mode === 'delete' ? 'Unable to delete this chat for you.' : 'Unable to clear this chat for you.',
               optimisticContact: {
                 clearedAt: new Date().toISOString(),
                 isArchived: false,
@@ -14496,9 +14505,9 @@ function ChatRow({
   const closeSwipe = () => {
     offsetRef.current = 0;
     Animated.spring(translateX, {
-      damping: 18,
-      mass: 0.8,
-      stiffness: 220,
+      damping: 20,
+      mass: 0.75,
+      stiffness: 170,
       toValue: 0,
       useNativeDriver: true
     }).start();
@@ -14507,9 +14516,9 @@ function ChatRow({
   const snapSwipe = (toValue: number) => {
     offsetRef.current = toValue;
     Animated.spring(translateX, {
-      damping: 18,
-      mass: 0.8,
-      stiffness: 220,
+      damping: 20,
+      mass: 0.75,
+      stiffness: 170,
       toValue,
       useNativeDriver: true
     }).start();
@@ -14518,12 +14527,17 @@ function ChatRow({
   const panResponder = useMemo(() => PanResponder.create({
     onMoveShouldSetPanResponder: (_event, gestureState) =>
       canSwipe &&
-      Math.abs(gestureState.dx) > 10 &&
-      Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.45,
+      Math.abs(gestureState.dx) > 4 &&
+      Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.08,
     onMoveShouldSetPanResponderCapture: (_event, gestureState) =>
       canSwipe &&
-      Math.abs(gestureState.dx) > 12 &&
-      Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.45,
+      Math.abs(gestureState.dx) > 6 &&
+      Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.08,
+    onPanResponderGrant: () => {
+      translateX.stopAnimation((value) => {
+        offsetRef.current = value;
+      });
+    },
     onPanResponderMove: (_event, gestureState) => {
       const nextValue = Math.max(
         -CHAT_ROW_RIGHT_ACTION_WIDTH,
@@ -14533,12 +14547,15 @@ function ChatRow({
       translateX.setValue(nextValue);
     },
     onPanResponderRelease: (_event, gestureState) => {
-      if (gestureState.dx <= -CHAT_ROW_SWIPE_TRIGGER) {
+      const intendedLeft = gestureState.dx <= -CHAT_ROW_SWIPE_TRIGGER || gestureState.vx <= -0.18;
+      const intendedRight = gestureState.dx >= CHAT_ROW_SWIPE_TRIGGER || gestureState.vx >= 0.18;
+
+      if (intendedLeft) {
         snapSwipe(-CHAT_ROW_RIGHT_ACTION_WIDTH);
         return;
       }
 
-      if (gestureState.dx >= CHAT_ROW_SWIPE_TRIGGER) {
+      if (intendedRight) {
         snapSwipe(CHAT_ROW_LEFT_ACTION_WIDTH);
         return;
       }
@@ -14546,6 +14563,7 @@ function ChatRow({
       closeSwipe();
     },
     onPanResponderTerminate: closeSwipe,
+    onPanResponderTerminationRequest: () => false,
     onStartShouldSetPanResponder: () => false
   }), [canSwipe, translateX]);
 
@@ -19793,7 +19811,7 @@ const styles = StyleSheet.create({
   chatSwipeAction: {
     alignItems: 'center',
     justifyContent: 'center',
-    width: 84
+    width: CHAT_ROW_RIGHT_ACTION_WIDTH / 2
   },
   chatSwipeFavoriteAction: {
     backgroundColor: '#16A34A',
