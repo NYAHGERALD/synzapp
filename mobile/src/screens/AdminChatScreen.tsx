@@ -392,12 +392,6 @@ interface ChatSearchMatch {
   sentAt: string;
 }
 
-interface ChatSearchDateOption {
-  count: number;
-  dateKey: string;
-  label: string;
-}
-
 interface EmployeeActionOption {
   action: EmployeeAction;
   confirmButton: string;
@@ -434,6 +428,20 @@ const synzappAiSuggestions = [
   'Plan a work conversation',
   'Improve the tone of my writing',
   'Prepare a quick checklist'
+];
+const CHAT_SEARCH_MONTHS = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December'
 ];
 const chatNotificationMuteOptions: Array<{
   label: string;
@@ -8540,8 +8548,6 @@ function MessageThread({
 
       <ChatSearchDateModal
         currentDateKey={searchDateKey}
-        currentUid={currentUid}
-        groupMemberByUid={groupMemberByUid}
         isOpen={isSearchDateModalOpen}
         messages={messages}
         onClose={() => setIsSearchDateModalOpen(false)}
@@ -8619,30 +8625,61 @@ function ChatThreadSearchHeader({
 
 function ChatSearchDateModal({
   currentDateKey,
-  currentUid,
-  groupMemberByUid,
   isOpen,
   messages,
   onClose,
   onSelectDate
 }: {
   currentDateKey: string | null;
-  currentUid: string;
-  groupMemberByUid: Map<string, ChatGroupMember>;
   isOpen: boolean;
   messages: ChatMessage[];
   onClose: () => void;
   onSelectDate: (dateKey: string | null, targetMessageId?: string, shouldClose?: boolean) => void;
 }) {
-  const dateOptions = getChatSearchDateOptions(messages);
-  const activeDateKey = currentDateKey || dateOptions.at(-1)?.dateKey || null;
-  const visibleMessages = activeDateKey
-    ? getChatSearchMessagesForDate(messages, activeDateKey)
-    : [];
+  const defaultDateKey = currentDateKey || getLatestMessageDateKey(messages) || getTodayDateKey();
+  const defaultDateParts = parseDateKeyParts(defaultDateKey);
+  const [selectedMonth, setSelectedMonth] = useState(defaultDateParts.month);
+  const [selectedDay, setSelectedDay] = useState(defaultDateParts.day);
+  const [selectedYear, setSelectedYear] = useState(defaultDateParts.year);
+  const yearOptions = getChatSearchYearOptions(messages, selectedYear);
+  const dayOptions = getDayOptionsForMonth(selectedYear, selectedMonth);
+  const selectedDateKey = buildDateKey(selectedYear, selectedMonth, Math.min(selectedDay, dayOptions.at(-1) || selectedDay));
+  const visibleMessages = getChatSearchMessagesForDate(messages, selectedDateKey);
+  const hasMessagesOnSelectedDate = visibleMessages.length > 0;
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    const nextParts = parseDateKeyParts(currentDateKey || getLatestMessageDateKey(messages) || getTodayDateKey());
+
+    setSelectedMonth(nextParts.month);
+    setSelectedDay(nextParts.day);
+    setSelectedYear(nextParts.year);
+  }, [currentDateKey, isOpen, messages]);
+
+  useEffect(() => {
+    const maxDay = getDaysInMonth(selectedYear, selectedMonth);
+
+    if (selectedDay > maxDay) {
+      setSelectedDay(maxDay);
+    }
+  }, [selectedDay, selectedMonth, selectedYear]);
 
   if (!isOpen) {
     return null;
   }
+
+  const jumpToSelectedDate = () => {
+    const targetMessage = visibleMessages[0];
+
+    if (!targetMessage) {
+      return;
+    }
+
+    onSelectDate(selectedDateKey, targetMessage.messageId);
+  };
 
   return (
     <Modal
@@ -8672,83 +8709,105 @@ function ChatSearchDateModal({
             </Pressable>
           </View>
 
-          <ScrollView
-            contentContainerStyle={styles.chatSearchDateChips}
-            horizontal
-            keyboardShouldPersistTaps="handled"
-            showsHorizontalScrollIndicator={false}
-          >
-            {dateOptions.map((option) => (
-              <Pressable
-                accessibilityRole="button"
-                key={option.dateKey}
-                onPress={() => onSelectDate(option.dateKey, undefined, false)}
-                style={({ pressed }) => [
-                  styles.chatSearchDateChip,
-                  option.dateKey === activeDateKey && styles.chatSearchDateChipActive,
-                  pressed && styles.pressed
-                ]}
-              >
-                <Text
-                  numberOfLines={1}
-                  style={[
-                    styles.chatSearchDateChipText,
-                    option.dateKey === activeDateKey && styles.chatSearchDateChipTextActive
+          <View style={styles.chatSearchDatePickerWrap}>
+            <View pointerEvents="none" style={styles.chatSearchDatePickerSelection} />
+            <ScrollView
+              contentContainerStyle={styles.chatSearchPickerColumnContent}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+              style={styles.chatSearchPickerColumn}
+            >
+              {CHAT_SEARCH_MONTHS.map((month, index) => (
+                <Pressable
+                  accessibilityRole="button"
+                  key={month}
+                  onPress={() => setSelectedMonth(index)}
+                  style={({ pressed }) => [
+                    styles.chatSearchPickerItem,
+                    selectedMonth === index && styles.chatSearchPickerItemActive,
+                    pressed && styles.pressed
                   ]}
                 >
-                  {option.label}
-                </Text>
-                <Text
-                  style={[
-                    styles.chatSearchDateChipCount,
-                    option.dateKey === activeDateKey && styles.chatSearchDateChipTextActive
+                  <Text
+                    numberOfLines={1}
+                    style={[
+                      styles.chatSearchPickerText,
+                      selectedMonth === index && styles.chatSearchPickerTextActive
+                    ]}
+                  >
+                    {month}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+
+            <ScrollView
+              contentContainerStyle={styles.chatSearchPickerColumnContent}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+              style={styles.chatSearchPickerColumnNarrow}
+            >
+              {dayOptions.map((day) => (
+                <Pressable
+                  accessibilityRole="button"
+                  key={day}
+                  onPress={() => setSelectedDay(day)}
+                  style={({ pressed }) => [
+                    styles.chatSearchPickerItem,
+                    selectedDay === day && styles.chatSearchPickerItemActive,
+                    pressed && styles.pressed
                   ]}
                 >
-                  {option.count}
-                </Text>
-              </Pressable>
-            ))}
-          </ScrollView>
-
-          <ScrollView
-            keyboardShouldPersistTaps="handled"
-            showsVerticalScrollIndicator={false}
-            style={styles.chatSearchTimeList}
-          >
-            {visibleMessages.map((message) => (
-              <Pressable
-                accessibilityRole="button"
-                key={message.messageId}
-                onPress={() => onSelectDate(activeDateKey, message.messageId)}
-                style={({ pressed }) => [styles.chatSearchTimeRow, pressed && styles.pressed]}
-              >
-                <View style={styles.chatSearchTimeIcon}>
-                  <Feather color={colors.primary} name="clock" size={17} />
-                </View>
-                <View style={styles.chatText}>
-                  <Text numberOfLines={1} style={styles.chatSearchTimeTitle}>
-                    {formatMessageTime(message.sentAt)} - {getChatSearchSenderLabel(message.senderUid, currentUid, groupMemberByUid)}
+                  <Text
+                    style={[
+                      styles.chatSearchPickerText,
+                      selectedDay === day && styles.chatSearchPickerTextActive
+                    ]}
+                  >
+                    {day}
                   </Text>
-                  <Text numberOfLines={2} style={styles.chatSearchTimePreview}>
-                    {getMessageListPreview(message)}
-                  </Text>
-                </View>
-              </Pressable>
-            ))}
+                </Pressable>
+              ))}
+            </ScrollView>
 
-            {!visibleMessages.length ? (
-              <Text style={styles.batchEmpty}>No messages on this date</Text>
-            ) : null}
-          </ScrollView>
+            <ScrollView
+              contentContainerStyle={styles.chatSearchPickerColumnContent}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+              style={styles.chatSearchPickerColumnNarrow}
+            >
+              {yearOptions.map((year) => (
+                <Pressable
+                  accessibilityRole="button"
+                  key={year}
+                  onPress={() => setSelectedYear(year)}
+                  style={({ pressed }) => [
+                    styles.chatSearchPickerItem,
+                    selectedYear === year && styles.chatSearchPickerItemActive,
+                    pressed && styles.pressed
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.chatSearchPickerText,
+                      selectedYear === year && styles.chatSearchPickerTextActive
+                    ]}
+                  >
+                    {year}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+          </View>
 
           <Pressable
             accessibilityRole="button"
-            disabled={!activeDateKey || !visibleMessages.length}
-            onPress={() => onSelectDate(activeDateKey, visibleMessages[0]?.messageId)}
+            disabled={!hasMessagesOnSelectedDate}
+            onPress={jumpToSelectedDate}
             style={({ pressed }) => [
               styles.chatSearchJumpDateButton,
-              pressed && Boolean(activeDateKey && visibleMessages.length) && styles.pressed,
-              (!activeDateKey || !visibleMessages.length) && styles.disabled
+              pressed && hasMessagesOnSelectedDate && styles.pressed,
+              !hasMessagesOnSelectedDate && styles.disabled
             ]}
           >
             <Text style={styles.chatSearchJumpDateText}>Jump to date</Text>
@@ -16085,35 +16144,74 @@ function getChatSearchMatches({
     }));
 }
 
-function getChatSearchDateOptions(messages: ChatMessage[]): ChatSearchDateOption[] {
-  const optionByDateKey = new Map<string, ChatSearchDateOption>();
-
-  uniqueChatMessages(messages).forEach((message) => {
-    const dateKey = getMessageDateKey(message.sentAt);
-
-    if (!dateKey) {
-      return;
-    }
-
-    const existingOption = optionByDateKey.get(dateKey);
-
-    if (existingOption) {
-      existingOption.count += 1;
-      return;
-    }
-
-    optionByDateKey.set(dateKey, {
-      count: 1,
-      dateKey,
-      label: formatChatSearchDateLabel(dateKey)
-    });
-  });
-
-  return [...optionByDateKey.values()].sort((first, second) => first.dateKey.localeCompare(second.dateKey));
-}
-
 function getChatSearchMessagesForDate(messages: ChatMessage[], dateKey: string): ChatMessage[] {
   return uniqueChatMessages(messages).filter((message) => getMessageDateKey(message.sentAt) === dateKey);
+}
+
+function getLatestMessageDateKey(messages: ChatMessage[]): string {
+  const latestMessage = uniqueChatMessages(messages).at(-1);
+
+  return latestMessage ? getMessageDateKey(latestMessage.sentAt) : '';
+}
+
+function getTodayDateKey(): string {
+  return buildDateKey(new Date().getFullYear(), new Date().getMonth(), new Date().getDate());
+}
+
+function parseDateKeyParts(dateKey: string): { day: number; month: number; year: number } {
+  const [rawYear, rawMonth, rawDay] = dateKey.split('-').map((part) => Number.parseInt(part, 10));
+  const fallbackDate = new Date();
+  const year = Number.isFinite(rawYear) && rawYear > 0 ? rawYear : fallbackDate.getFullYear();
+  const month = Number.isFinite(rawMonth) && rawMonth >= 1 && rawMonth <= 12
+    ? rawMonth - 1
+    : fallbackDate.getMonth();
+  const maxDay = getDaysInMonth(year, month);
+  const day = Number.isFinite(rawDay) && rawDay >= 1
+    ? Math.min(rawDay, maxDay)
+    : fallbackDate.getDate();
+
+  return {
+    day,
+    month,
+    year
+  };
+}
+
+function getChatSearchYearOptions(messages: ChatMessage[], selectedYear: number): number[] {
+  const currentYear = new Date().getFullYear();
+  const years = new Set<number>([
+    selectedYear,
+    currentYear - 2,
+    currentYear - 1,
+    currentYear,
+    currentYear + 1
+  ]);
+
+  uniqueChatMessages(messages).forEach((message) => {
+    const year = parseDateKeyParts(getMessageDateKey(message.sentAt)).year;
+
+    if (year) {
+      years.add(year);
+    }
+  });
+
+  return [...years].sort((first, second) => first - second);
+}
+
+function getDayOptionsForMonth(year: number, month: number): number[] {
+  return Array.from({ length: getDaysInMonth(year, month) }, (_value, index) => index + 1);
+}
+
+function getDaysInMonth(year: number, month: number): number {
+  return new Date(year, month + 1, 0).getDate();
+}
+
+function buildDateKey(year: number, month: number, day: number): string {
+  return [
+    String(year).padStart(4, '0'),
+    String(month + 1).padStart(2, '0'),
+    String(day).padStart(2, '0')
+  ].join('-');
 }
 
 function getMessageListPreview(message: ChatMessage): string {
@@ -18417,82 +18515,70 @@ const styles = StyleSheet.create({
     right: 0,
     width: 40
   },
-  chatSearchDateChips: {
-    gap: 8,
-    paddingBottom: 10,
-    paddingTop: 2
-  },
-  chatSearchDateChip: {
+  chatSearchDatePickerWrap: {
     alignItems: 'center',
-    backgroundColor: '#FFFFFF',
-    borderColor: '#E5E7EB',
-    borderRadius: 18,
-    borderWidth: 1,
+    alignSelf: 'stretch',
     flexDirection: 'row',
-    gap: 6,
-    minHeight: 36,
-    paddingHorizontal: 12
-  },
-  chatSearchDateChipActive: {
-    backgroundColor: colors.primary,
-    borderColor: colors.primary
-  },
-  chatSearchDateChipText: {
-    color: colors.ink,
-    fontSize: 13,
-    fontWeight: '600',
-    lineHeight: 18
-  },
-  chatSearchDateChipTextActive: {
-    color: '#FFFFFF'
-  },
-  chatSearchDateChipCount: {
-    color: '#64748B',
-    fontSize: 12,
-    fontWeight: '400',
-    lineHeight: 16
-  },
-  chatSearchTimeList: {
-    flex: 1
-  },
-  chatSearchTimeRow: {
-    alignItems: 'center',
-    backgroundColor: '#FFFFFF',
-    borderBottomColor: '#E5E7EB',
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    flexDirection: 'row',
-    gap: 11,
-    minHeight: 62,
-    paddingHorizontal: 12,
-    paddingVertical: 8
-  },
-  chatSearchTimeIcon: {
-    alignItems: 'center',
-    backgroundColor: colors.primarySoft,
-    borderRadius: 19,
-    height: 38,
+    height: 184,
     justifyContent: 'center',
-    width: 38
+    marginHorizontal: -4,
+    marginTop: 10,
+    overflow: 'hidden',
+    position: 'relative'
   },
-  chatSearchTimeTitle: {
-    color: colors.ink,
-    fontSize: 15,
-    fontWeight: '600',
-    lineHeight: 20
+  chatSearchDatePickerSelection: {
+    backgroundColor: 'rgba(226, 232, 240, 0.72)',
+    borderRadius: 18,
+    height: 44,
+    left: 6,
+    position: 'absolute',
+    right: 6,
+    top: 70
   },
-  chatSearchTimePreview: {
-    color: '#64748B',
-    fontSize: 13,
+  chatSearchPickerColumn: {
+    flex: 1.38,
+    maxHeight: 184
+  },
+  chatSearchPickerColumnNarrow: {
+    flex: 0.9,
+    maxHeight: 184
+  },
+  chatSearchPickerColumnContent: {
+    alignItems: 'center',
+    paddingVertical: 70
+  },
+  chatSearchPickerItem: {
+    alignItems: 'center',
+    height: 44,
+    justifyContent: 'center',
+    minWidth: 78,
+    paddingHorizontal: 6
+  },
+  chatSearchPickerItemActive: {
+    opacity: 1
+  },
+  chatSearchPickerText: {
+    color: '#A8B0BC',
+    fontSize: 18,
     fontWeight: '400',
-    lineHeight: 18
+    lineHeight: 24,
+    textAlign: 'center'
+  },
+  chatSearchPickerTextActive: {
+    color: colors.ink,
+    fontSize: 20,
+    fontWeight: '600'
   },
   chatSearchJumpDateButton: {
     alignItems: 'center',
+    alignSelf: 'center',
     backgroundColor: '#22C55E',
     borderRadius: 22,
     justifyContent: 'center',
     minHeight: 46,
-    marginTop: 12
+    marginTop: 16,
+    maxWidth: 280,
+    width: '84%'
   },
   chatSearchJumpDateText: {
     color: '#FFFFFF',
