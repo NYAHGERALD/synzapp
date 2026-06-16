@@ -188,20 +188,6 @@ const styles = StyleSheet.create({
     fontWeight: '400',
     minHeight: 54
   },
-  errorBox: {
-    backgroundColor: 'rgba(254, 226, 226, 0.9)',
-    borderColor: 'rgba(185, 28, 28, 0.18)',
-    borderRadius: 10,
-    borderWidth: 1,
-    paddingHorizontal: 12,
-    paddingVertical: 10
-  },
-  errorText: {
-    color: colors.red,
-    fontSize: 14,
-    fontWeight: '400',
-    lineHeight: 19
-  },
   sendButton: {
     alignItems: 'center',
     alignSelf: 'center',

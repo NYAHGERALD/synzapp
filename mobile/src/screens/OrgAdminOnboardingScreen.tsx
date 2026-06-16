@@ -367,20 +367,6 @@ const styles = StyleSheet.create({
   nameField: {
     flex: 1
   },
-  errorBox: {
-    backgroundColor: 'rgba(254, 226, 226, 0.9)',
-    borderColor: 'rgba(185, 28, 28, 0.18)',
-    borderRadius: 8,
-    borderWidth: 1,
-    paddingHorizontal: 12,
-    paddingVertical: 10
-  },
-  errorText: {
-    color: colors.red,
-    fontSize: 14,
-    fontWeight: '400',
-    lineHeight: 19
-  },
   primaryButton: {
     alignItems: 'center',
     alignSelf: 'center',

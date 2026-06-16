@@ -33,7 +33,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.blueSoft
   },
   error: {
-    backgroundColor: colors.redSoft
+    backgroundColor: colors.amberSoft
   },
   success: {
     backgroundColor: colors.successSoft

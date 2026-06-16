@@ -18,6 +18,7 @@ import { OrgAdminCodeScreen } from './src/screens/OrgAdminCodeScreen';
 import { OrgAdminOnboardingScreen } from './src/screens/OrgAdminOnboardingScreen';
 import { OrgAdminPhoneScreen } from './src/screens/OrgAdminPhoneScreen';
 import { ProfileRoleSelectionScreen } from './src/screens/ProfileRoleSelectionScreen';
+import { DismissibleError } from './src/components/DismissibleError';
 import { getUserAuthMessage } from './src/services/authErrors';
 import {
   ACCESS_DENIED_MESSAGE,
@@ -158,9 +159,10 @@ export default function App() {
               ) : null}
 
               {!isRestoringSession && restoreError ? (
-                <View style={styles.restoreErrorBox}>
-                  <Text style={styles.restoreErrorText}>{restoreError}</Text>
-                </View>
+                <DismissibleError
+                  message={restoreError}
+                  onDismiss={() => setRestoreError(null)}
+                />
               ) : null}
 
               {!isRestoringSession && step === 'phone' ? (
@@ -253,23 +255,5 @@ const styles = StyleSheet.create({
     color: colors.muted,
     fontSize: 16,
     fontWeight: '400'
-  },
-  restoreErrorBox: {
-    alignSelf: 'center',
-    backgroundColor: colors.redSoft,
-    borderColor: 'rgba(185, 28, 28, 0.18)',
-    borderRadius: 8,
-    borderWidth: 1,
-    marginHorizontal: 26,
-    marginBottom: 18,
-    paddingHorizontal: 12,
-    paddingVertical: 10
-  },
-  restoreErrorText: {
-    color: colors.red,
-    fontSize: 14,
-    fontWeight: '400',
-    lineHeight: 19,
-    textAlign: 'center'
   }
 });
