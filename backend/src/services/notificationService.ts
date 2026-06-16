@@ -62,6 +62,11 @@ interface UpdateChatNotificationSettingsInput {
   muteMode: ChatNotificationMuteMode;
 }
 
+interface RecipientEnvelopeDeviceIdInput {
+  notificationPreviewByDevice?: Record<string, unknown>;
+  recipientDeviceIds?: string[];
+}
+
 interface SendChatMessagePushNotificationInput {
   chatType?: 'DIRECT' | 'GROUP';
   conversationId: string;
@@ -69,6 +74,7 @@ interface SendChatMessagePushNotificationInput {
   notificationPreviewByDevice?: Record<string, EncryptedNotificationPreviewRecord>;
   notificationContactId?: string;
   recipientBadgeCount?: number;
+  recipientDeviceIds?: string[];
   recipientUid: string;
   senderUid: string;
   senderKeyAgreementPublicKey?: string;
@@ -81,6 +87,7 @@ interface SendGroupChatMessagePushNotificationsInput {
   envelopeId: string;
   groupId: string;
   notificationPreviewByDevice?: Record<string, EncryptedNotificationPreviewRecord>;
+  recipientDeviceIds?: string[];
   recipientUids: string[];
   senderKeyAgreementPublicKey?: string;
   senderUid: string;
@@ -300,12 +307,14 @@ export async function sendChatMessagePushNotification(
     getChatArchiveSettings(input.tenantId, input.recipientUid),
     getChatUserPreference(input.tenantId, input.recipientUid, chatType, notificationContactId)
   ]);
-  const pushTokens = pushTokensSnapshot.docs
+  const recipientEnvelopeDeviceIds = getRecipientEnvelopeDeviceIds(input);
+  const deliverablePushTokens = pushTokensSnapshot.docs
     .map((doc) => ({
       ...(doc.data() as PushTokenRecord),
       deviceId: doc.id
     }))
     .filter((record) => isDeliverablePushToken(record));
+  const pushTokens = filterPushTokensForEncryptedEnvelope(deliverablePushTokens, input);
   const sentAtMs = Date.parse(input.sentAt);
   const isArchivedForRecipient = shouldTreatChatAsArchived(
     chatPreference,
@@ -330,9 +339,18 @@ export async function sendChatMessagePushNotification(
     notificationArchivedMode: archiveSettings.archivedNotificationMode,
     notificationMuteMode: notificationSettings.muteMode,
     notificationMutedUntil: notificationSettings.mutedUntil,
+    recipientEnvelopeDeviceCount: recipientEnvelopeDeviceIds.size,
     recipientUid: input.recipientUid,
     recipientBadgeCount: unreadBadgeCount,
-    status: isArchivedNotificationSuppressed ? 'ARCHIVED_SUPPRESSED' : isMuted ? 'MUTED' : pushTokens.length ? 'QUEUED' : 'NO_ACTIVE_TOKENS',
+    status: isArchivedNotificationSuppressed
+      ? 'ARCHIVED_SUPPRESSED'
+      : isMuted
+        ? 'MUTED'
+        : pushTokens.length
+          ? 'QUEUED'
+          : recipientEnvelopeDeviceIds.size
+            ? 'NO_ENVELOPE_DEVICE_TOKENS'
+            : 'NO_ACTIVE_TOKENS',
     tenantId: input.tenantId,
     tokenCount: isMuted ? 0 : pushTokens.length,
     type: 'chat.message'
@@ -463,6 +481,7 @@ export async function sendGroupChatMessagePushNotifications(
       envelopeId: input.envelopeId,
       notificationContactId: input.groupId,
       notificationPreviewByDevice: input.notificationPreviewByDevice,
+      recipientDeviceIds: input.recipientDeviceIds,
       recipientUid,
       senderKeyAgreementPublicKey: input.senderKeyAgreementPublicKey,
       senderUid: input.senderUid,
@@ -581,6 +600,37 @@ function getNotificationPreviewForDevice(
     notificationPreviewSenderKeyAgreementPublicKey: input.senderKeyAgreementPublicKey,
     notificationPreviewVersion: String(preview.version)
   };
+}
+
+export function filterPushTokensForEncryptedEnvelope<T extends { deviceId?: string }>(
+  pushTokens: T[],
+  input: RecipientEnvelopeDeviceIdInput
+): T[] {
+  const recipientEnvelopeDeviceIds = getRecipientEnvelopeDeviceIds(input);
+
+  if (!recipientEnvelopeDeviceIds.size) {
+    return pushTokens;
+  }
+
+  return pushTokens.filter((record) => recipientEnvelopeDeviceIds.has(record.deviceId || ''));
+}
+
+function getRecipientEnvelopeDeviceIds(input: RecipientEnvelopeDeviceIdInput): Set<string> {
+  const deviceIds = new Set<string>();
+
+  input.recipientDeviceIds?.forEach((deviceId) => {
+    if (deviceId) {
+      deviceIds.add(deviceId);
+    }
+  });
+
+  Object.keys(input.notificationPreviewByDevice || {}).forEach((deviceId) => {
+    if (deviceId) {
+      deviceIds.add(deviceId);
+    }
+  });
+
+  return deviceIds;
 }
 
 async function sendExpoPushBatch(messages: ExpoPushMessage[]): Promise<ExpoPushTicket[]> {
