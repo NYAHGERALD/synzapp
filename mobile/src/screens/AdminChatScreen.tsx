@@ -115,6 +115,7 @@ import {
   subscribeRealtimeConversation,
   unsubscribeRealtimeConversation,
   sendChatMessage,
+  updateChatPreference,
   updateChatMessageReaction,
   updateChatNotificationSettings,
   updateChatTranscriptLanguage
@@ -185,10 +186,13 @@ interface AdminChatScreenProps {
 
 interface ChatItem {
   chatType: 'DIRECT' | 'GROUP';
+  clearedAt?: string | null;
   contactId: string;
   hasActiveDevice: boolean;
   id: string;
+  isArchived?: boolean;
   isDepartmentDefault?: boolean;
+  isFavorite?: boolean;
   isOnline: boolean;
   lastMessageAt: string | null;
   lastSeenAt: string | null;
@@ -241,7 +245,8 @@ interface AudioAttachmentPreviewState {
 
 type DirectoryFilter = 'Departments' | 'Roles';
 type FooterTab = 'Chats' | 'Groups' | 'Employees' | 'Settings' | 'You';
-type ChatListFilter = 'all' | 'favorites' | 'groups' | 'unread';
+type ChatListFilter = 'all' | 'archived' | 'favorites' | 'groups' | 'unread';
+type ChatMoreActionTarget = ChatItem | null;
 type GroupCallMode = 'select' | 'voice' | 'video';
 type GroupCallOption = 'schedule' | 'selectPeople' | 'sendLink' | 'video' | 'voice';
 type InviteMode = 'single' | 'batch' | 'manual';
@@ -262,6 +267,9 @@ const MESSAGE_INPUT_MAX_HEIGHT = 140;
 const MESSAGE_INPUT_LINE_HEIGHT = 20;
 const MESSAGE_INPUT_VERTICAL_PADDING = 16;
 const MESSAGE_INPUT_BOX_EXTRA_HEIGHT = 4;
+const CHAT_ROW_LEFT_ACTION_WIDTH = 92;
+const CHAT_ROW_RIGHT_ACTION_WIDTH = 168;
+const CHAT_ROW_SWIPE_TRIGGER = 54;
 const VOICE_NOTE_MIN_DURATION_MS = 700;
 const VOICE_NOTE_RECORDING_OPTIONS = RecordingPresets.LOW_QUALITY;
 const CHAT_AUDIO_PLAYBACK_MODE: AudioMode = {
@@ -513,6 +521,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [isAiAssistantOpen, setIsAiAssistantOpen] = useState(false);
   const [aiAssistantDraft, setAiAssistantDraft] = useState('');
   const [isScreenKeyboardVisible, setIsScreenKeyboardVisible] = useState(false);
+  const [chatMoreActionTarget, setChatMoreActionTarget] = useState<ChatMoreActionTarget>(null);
   const [newChatSearch, setNewChatSearch] = useState('');
   const [addMembersSearch, setAddMembersSearch] = useState('');
   const [isNewChatModalOpen, setIsNewChatModalOpen] = useState(false);
@@ -650,8 +659,12 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const chatItems = chatContacts.map(mapChatContactToChatItem);
   const directChatContacts = chatContacts.filter((contact) => (contact.chatType || 'DIRECT') !== 'GROUP');
   const groupChatContacts = chatContacts.filter((contact) => contact.chatType === 'GROUP');
-  const unreadChatFilterCount = chatItems.reduce((total, chat) => total + Math.max(chat.unreadCount || 0, 0), 0);
-  const groupChatFilterCount = chatItems.filter((chat) => chat.chatType === 'GROUP').length;
+  const visibleConversationChatItems = chatItems.filter(shouldShowChatInList);
+  const activeConversationChatItems = visibleConversationChatItems.filter((chat) => !chat.isArchived);
+  const archivedConversationChatItems = visibleConversationChatItems.filter((chat) => chat.isArchived);
+  const unreadChatFilterCount = activeConversationChatItems.reduce((total, chat) => total + Math.max(chat.unreadCount || 0, 0), 0);
+  const groupChatFilterCount = activeConversationChatItems.filter((chat) => chat.chatType === 'GROUP').length;
+  const archivedChatFilterCount = archivedConversationChatItems.length;
   const selectedForwardMessageCount = Object.values(forwardSelectedMessageIds).filter(Boolean).length;
   const selectedForwardRecipientCount = Object.values(forwardRecipientIds).filter(Boolean).length;
   const employeeItems = approvedEmployees.map(mapApprovedEmployeeToListItem);
@@ -684,7 +697,13 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         ...(registeredDeviceId ? { 'X-Synzapp-Device-Id': registeredDeviceId } : {})
       }
     : undefined;
-  const filteredChatItems = filterChatItems(applyChatListFilter(chatItems, chatListFilter), chatSearch);
+  const filteredChatItems = filterChatItems(
+    applyChatListFilter(
+      chatListFilter === 'archived' ? archivedConversationChatItems : activeConversationChatItems,
+      chatListFilter
+    ),
+    chatSearch
+  );
   const selectedNewGroupMembers = directChatContacts.filter((contact) => selectedNewGroupMemberIds[contact.contactId]);
   const activeGroupMemberContacts = selectedChat?.chatType === 'GROUP'
     ? mapGroupMembersToSelectableContacts(selectedChat.members || [], directChatContacts, currentUid)
@@ -1697,6 +1716,149 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           }
         : contact
     ));
+  }
+
+  async function updateChatPreferenceAndApply(
+    chat: ChatItem,
+    input: {
+      clear?: boolean;
+      isArchived?: boolean;
+      isFavorite?: boolean;
+      optimisticContact?: Partial<ChatContact>;
+    }
+  ) {
+    if (!canUseChatListActions(chat)) {
+      return;
+    }
+
+    const previousContacts = chatContactsRef.current;
+    const existingContact = previousContacts.find((contact) => contact.contactId === chat.contactId);
+
+    if (existingContact && input.optimisticContact) {
+      setChatContacts((currentContacts) => upsertChatContact(currentContacts, {
+        ...existingContact,
+        ...input.optimisticContact
+      }));
+    }
+
+    try {
+      const idToken = await getIdToken();
+      const updatedContact = await updateChatPreference({
+        chatType: chat.chatType,
+        clear: input.clear,
+        contactId: chat.contactId,
+        idToken,
+        isArchived: input.isArchived,
+        isFavorite: input.isFavorite
+      });
+      const cachedContact = await cacheChatContactPhoto(updatedContact, idToken);
+
+      setProfilePhotoAuthToken(idToken);
+      setChatContacts((currentContacts) => upsertChatContact(currentContacts, cachedContact));
+
+      if (input.clear) {
+        const cachedConversation = await loadCachedChatConversation({
+          contactId: chat.contactId,
+          ownerUid: currentUid
+        }).catch(() => null);
+        await saveCachedChatConversation({
+          contact: cachedContact,
+          contactId: chat.contactId,
+          hiddenMessageIds: [
+            ...(cachedConversation?.messages || []),
+            ...(selectedChatRef.current?.contactId === chat.contactId ? messagesRef.current : [])
+          ]
+            .filter((message) => message.messageId)
+            .map((message) => message.messageId),
+          messages: [],
+          ownerUid: currentUid
+        }).catch(() => undefined);
+
+        if (selectedChatRef.current?.contactId === chat.contactId) {
+          setMessages([]);
+          setSelectedChat(mapChatContactToChatItem(cachedContact));
+        }
+      }
+    } catch (nextError) {
+      setChatContacts(previousContacts);
+      setError(getErrorMessage(nextError, 'Unable to update this chat.'));
+    }
+  }
+
+  function handleArchiveChat(chat: ChatItem) {
+    if (!canUseChatListActions(chat)) {
+      return;
+    }
+
+    const nextArchived = !chat.isArchived;
+
+    void updateChatPreferenceAndApply(chat, {
+      isArchived: nextArchived,
+      optimisticContact: {
+        isArchived: nextArchived
+      }
+    });
+  }
+
+  function handleToggleFavoriteChat(chat: ChatItem) {
+    if (!canUseChatListActions(chat)) {
+      return;
+    }
+
+    const nextFavorite = !chat.isFavorite;
+
+    void updateChatPreferenceAndApply(chat, {
+      isFavorite: nextFavorite,
+      optimisticContact: {
+        isFavorite: nextFavorite
+      }
+    });
+    setChatMoreActionTarget(null);
+  }
+
+  function handleClearChat(chat: ChatItem, mode: 'clear' | 'delete' = 'clear') {
+    if (!canUseChatListActions(chat)) {
+      return;
+    }
+
+    Alert.alert(
+      mode === 'delete' ? 'Delete chat?' : 'Clear chat?',
+      mode === 'delete'
+        ? `${chat.title} will be removed from your chat list. New messages will still appear later.`
+        : `Messages in ${chat.title} will be cleared for you on this device and any future device.`,
+      [
+        { style: 'cancel', text: 'Cancel' },
+        {
+          onPress: () => {
+            void updateChatPreferenceAndApply(chat, {
+              clear: true,
+              optimisticContact: {
+                clearedAt: new Date().toISOString(),
+                isArchived: false,
+                lastMessageAt: null,
+                preview: '',
+                unreadCount: 0
+              }
+            });
+            setChatMoreActionTarget(null);
+          },
+          style: 'destructive',
+          text: mode === 'delete' ? 'Delete' : 'Clear'
+        }
+      ]
+    );
+  }
+
+  function handleOpenChatInfoFromMore(chat: ChatItem) {
+    setChatMoreActionTarget(null);
+    selectedChatRef.current = chat;
+    setSelectedChat(chat);
+
+    if (chat.chatType === 'GROUP') {
+      setIsGroupInfoModalOpen(true);
+    } else {
+      setIsContactInfoModalOpen(true);
+    }
   }
 
   async function handleChatRealtimePayload(payload: string) {
@@ -4537,6 +4699,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setError(null);
     setSelectedChat(null);
     setIsAiAssistantOpen(false);
+    setChatMoreActionTarget(null);
     setIsLoadingMessages(false);
     setIsContactInfoModalOpen(false);
     setIsChatNotificationSettingsOpen(false);
@@ -5974,11 +6137,15 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           {activeTab === 'Chats' ? (
             <ChatsTab
               activeFilter={chatListFilter}
+              archivedCount={archivedChatFilterCount}
               chats={filteredChatItems}
               groupCount={groupChatFilterCount}
               isLoading={isLoadingChats}
               onChangeFilter={setChatListFilter}
-              onOpenArchived={() => handleChatsSectionUnavailableAction('Archived chats')}
+              onArchiveChat={handleArchiveChat}
+              onMoreChat={setChatMoreActionTarget}
+              onToggleFavoriteChat={handleToggleFavoriteChat}
+              onOpenArchived={() => setChatListFilter('archived')}
               onOpenChat={(chat) => {
                 void handleOpenChat(chat);
               }}
@@ -6567,6 +6734,16 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         }}
         recoveryKey={recoveryKeyDraft}
         visible={isRecoveryKeyModalOpen}
+      />
+
+      <ChatMoreActionsModal
+        chat={chatMoreActionTarget}
+        onArchive={handleArchiveChat}
+        onClear={(chat) => handleClearChat(chat, 'clear')}
+        onClose={() => setChatMoreActionTarget(null)}
+        onDelete={(chat) => handleClearChat(chat, 'delete')}
+        onOpenInfo={handleOpenChatInfoFromMore}
+        onToggleFavorite={handleToggleFavoriteChat}
       />
     </View>
   );
@@ -10434,29 +10611,37 @@ function ChatSearchBar({
 
 function ChatsTab({
   activeFilter,
+  archivedCount,
   chats,
   groupCount,
   isLoading,
   onChangeFilter,
+  onArchiveChat,
+  onMoreChat,
   onOpenArchived,
   onOpenChat,
   onOpenNewChat,
   onOpenSpam,
   onSearchChange,
+  onToggleFavoriteChat,
   profilePhotoHeaders,
   search,
   unreadCount
 }: {
   activeFilter: ChatListFilter;
+  archivedCount: number;
   chats: ChatItem[];
   groupCount: number;
   isLoading: boolean;
   onChangeFilter: (filter: ChatListFilter) => void;
+  onArchiveChat: (chat: ChatItem) => void;
+  onMoreChat: (chat: ChatItem) => void;
   onOpenArchived: () => void;
   onOpenChat: (chat: ChatItem) => void;
   onOpenNewChat: () => void;
   onOpenSpam: () => void;
   onSearchChange: (value: string) => void;
+  onToggleFavoriteChat: (chat: ChatItem) => void;
   profilePhotoHeaders?: Record<string, string>;
   search: string;
   unreadCount: number;
@@ -10499,6 +10684,12 @@ function ChatsTab({
             label="Groups"
             onPress={() => onChangeFilter('groups')}
           />
+          <ChatFilterChip
+            count={archivedCount}
+            isActive={activeFilter === 'archived'}
+            label="Archived"
+            onPress={() => onChangeFilter('archived')}
+          />
           <Pressable
             accessibilityLabel="Start new chat"
             accessibilityRole="button"
@@ -10538,7 +10729,10 @@ function ChatsTab({
         <ChatRow
           chat={chat}
           key={chat.id}
+          onArchive={() => onArchiveChat(chat)}
+          onMore={() => onMoreChat(chat)}
           onOpen={() => onOpenChat(chat)}
+          onToggleFavorite={() => onToggleFavoriteChat(chat)}
           profilePhotoHeaders={profilePhotoHeaders}
         />
       ))}
@@ -14282,49 +14476,297 @@ function RecoveryKeyModal({
 
 function ChatRow({
   chat,
+  onArchive,
+  onMore,
   onOpen,
+  onToggleFavorite,
   profilePhotoHeaders
 }: {
   chat: ChatItem;
+  onArchive: () => void;
+  onMore: () => void;
   onOpen: () => void;
+  onToggleFavorite: () => void;
   profilePhotoHeaders?: Record<string, string>;
+}) {
+  const translateX = useRef(new Animated.Value(0)).current;
+  const offsetRef = useRef(0);
+  const canSwipe = canUseChatListActions(chat);
+
+  const closeSwipe = () => {
+    offsetRef.current = 0;
+    Animated.spring(translateX, {
+      damping: 18,
+      mass: 0.8,
+      stiffness: 220,
+      toValue: 0,
+      useNativeDriver: true
+    }).start();
+  };
+
+  const snapSwipe = (toValue: number) => {
+    offsetRef.current = toValue;
+    Animated.spring(translateX, {
+      damping: 18,
+      mass: 0.8,
+      stiffness: 220,
+      toValue,
+      useNativeDriver: true
+    }).start();
+  };
+
+  const panResponder = useMemo(() => PanResponder.create({
+    onMoveShouldSetPanResponder: (_event, gestureState) =>
+      canSwipe &&
+      Math.abs(gestureState.dx) > 10 &&
+      Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.45,
+    onMoveShouldSetPanResponderCapture: (_event, gestureState) =>
+      canSwipe &&
+      Math.abs(gestureState.dx) > 12 &&
+      Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.45,
+    onPanResponderMove: (_event, gestureState) => {
+      const nextValue = Math.max(
+        -CHAT_ROW_RIGHT_ACTION_WIDTH,
+        Math.min(CHAT_ROW_LEFT_ACTION_WIDTH, offsetRef.current + gestureState.dx)
+      );
+
+      translateX.setValue(nextValue);
+    },
+    onPanResponderRelease: (_event, gestureState) => {
+      if (gestureState.dx <= -CHAT_ROW_SWIPE_TRIGGER) {
+        snapSwipe(-CHAT_ROW_RIGHT_ACTION_WIDTH);
+        return;
+      }
+
+      if (gestureState.dx >= CHAT_ROW_SWIPE_TRIGGER) {
+        snapSwipe(CHAT_ROW_LEFT_ACTION_WIDTH);
+        return;
+      }
+
+      closeSwipe();
+    },
+    onPanResponderTerminate: closeSwipe,
+    onStartShouldSetPanResponder: () => false
+  }), [canSwipe, translateX]);
+
+  useEffect(() => {
+    closeSwipe();
+  }, [chat.contactId, chat.isArchived, chat.isFavorite]);
+
+  const runSwipeAction = (action: () => void) => {
+    closeSwipe();
+    action();
+  };
+
+  return (
+    <View style={styles.chatSwipeShell}>
+      {canSwipe ? (
+        <View pointerEvents={offsetRef.current > 0 ? 'auto' : 'box-none'} style={styles.chatSwipeLeftActions}>
+          <Pressable
+            accessibilityLabel={chat.isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+            accessibilityRole="button"
+            onPress={() => runSwipeAction(onToggleFavorite)}
+            style={({ pressed }) => [styles.chatSwipeAction, styles.chatSwipeFavoriteAction, pressed && styles.pressed]}
+          >
+            <Feather color="#FFFFFF" name="star" size={21} />
+            <Text style={styles.chatSwipeActionText}>{chat.isFavorite ? 'Saved' : 'Favorite'}</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
+      {canSwipe ? (
+        <View style={styles.chatSwipeRightActions}>
+          <Pressable
+            accessibilityLabel="More chat actions"
+            accessibilityRole="button"
+            onPress={() => runSwipeAction(onMore)}
+            style={({ pressed }) => [styles.chatSwipeAction, styles.chatSwipeMoreAction, pressed && styles.pressed]}
+          >
+            <Feather color="#FFFFFF" name="more-horizontal" size={21} />
+            <Text style={styles.chatSwipeActionText}>More</Text>
+          </Pressable>
+          <Pressable
+            accessibilityLabel={chat.isArchived ? 'Unarchive chat' : 'Archive chat'}
+            accessibilityRole="button"
+            onPress={() => runSwipeAction(onArchive)}
+            style={({ pressed }) => [styles.chatSwipeAction, styles.chatSwipeArchiveAction, pressed && styles.pressed]}
+          >
+            <Feather color="#FFFFFF" name={chat.isArchived ? 'inbox' : 'archive'} size={20} />
+            <Text style={styles.chatSwipeActionText}>{chat.isArchived ? 'Unarchive' : 'Archive'}</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
+      <Animated.View
+        style={[
+          styles.chatSwipeContent,
+          { transform: [{ translateX }] }
+        ]}
+        {...(canSwipe ? panResponder.panHandlers : {})}
+      >
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => {
+            if (offsetRef.current !== 0) {
+              closeSwipe();
+              return;
+            }
+
+            onOpen();
+          }}
+          style={({ pressed }) => [
+            styles.chatRow,
+            styles.contactChatRow,
+            pressed && styles.pressed
+          ]}
+        >
+          <ProfileAvatar
+            headers={profilePhotoHeaders}
+            name={chat.title}
+            size={56}
+            uri={chat.profilePhotoUrl}
+          />
+
+          <View style={styles.chatText}>
+            <View style={styles.chatTitleRow}>
+              <Text numberOfLines={1} style={[styles.chatTitle, styles.chatListTitle]}>{chat.title}</Text>
+              {chat.isFavorite ? <Feather color="#F59E0B" name="star" size={13} /> : null}
+            </View>
+            {chat.preview ? (
+              <Text numberOfLines={2} style={styles.chatPreview}>{chat.preview}</Text>
+            ) : !chat.hasActiveDevice ? (
+              <Text numberOfLines={1} style={styles.chatPreview}>Waiting for secure device</Text>
+            ) : null}
+          </View>
+
+          <View style={styles.chatMeta}>
+            {chat.lastMessageAt ? (
+              <Text style={styles.chatTime}>{formatChatListTime(chat.lastMessageAt)}</Text>
+            ) : null}
+            {chat.unreadCount > 0 ? (
+              <View style={styles.unreadBadge}>
+                <Text style={styles.unreadText}>{chat.unreadCount > 99 ? '99+' : chat.unreadCount}</Text>
+              </View>
+            ) : null}
+          </View>
+        </Pressable>
+      </Animated.View>
+    </View>
+  );
+}
+
+function ChatMoreActionsModal({
+  chat,
+  onArchive,
+  onClear,
+  onClose,
+  onDelete,
+  onOpenInfo,
+  onToggleFavorite
+}: {
+  chat: ChatItem | null;
+  onArchive: (chat: ChatItem) => void;
+  onClear: (chat: ChatItem) => void;
+  onClose: () => void;
+  onDelete: (chat: ChatItem) => void;
+  onOpenInfo: (chat: ChatItem) => void;
+  onToggleFavorite: (chat: ChatItem) => void;
+}) {
+  if (!chat) {
+    return null;
+  }
+
+  const infoLabel = chat.chatType === 'GROUP' ? 'Group info' : 'Contact Info';
+
+  return (
+    <Modal
+      animationType="slide"
+      onRequestClose={onClose}
+      transparent
+      visible
+    >
+      <View style={styles.chatMoreRoot}>
+        <Pressable
+          accessibilityLabel="Close chat actions"
+          accessibilityRole="button"
+          onPress={onClose}
+          style={styles.chatMoreBackdrop}
+        />
+        <View style={styles.chatMoreSheet}>
+          <View style={styles.chatMoreHandle} />
+          <View style={styles.chatMoreHeader}>
+            <Text numberOfLines={1} style={styles.chatMoreTitle}>{chat.title}</Text>
+            <Pressable
+              accessibilityLabel="Close chat actions"
+              accessibilityRole="button"
+              onPress={onClose}
+              style={({ pressed }) => [styles.chatMoreCloseButton, pressed && styles.pressed]}
+            >
+              <Feather color={colors.ink} name="x" size={22} />
+            </Pressable>
+          </View>
+
+          <View style={styles.chatMoreActionGroup}>
+            <ChatMoreActionRow
+              icon={chat.chatType === 'GROUP' ? 'users' : 'user'}
+              label={infoLabel}
+              onPress={() => onOpenInfo(chat)}
+            />
+            <ChatMoreActionRow
+              icon="star"
+              label={chat.isFavorite ? 'Remove from Favorites' : 'Add to Favorites'}
+              onPress={() => onToggleFavorite(chat)}
+            />
+            <ChatMoreActionRow
+              icon={chat.isArchived ? 'inbox' : 'archive'}
+              label={chat.isArchived ? 'Unarchive chat' : 'Archive chat'}
+              onPress={() => {
+                onArchive(chat);
+                onClose();
+              }}
+            />
+            <ChatMoreActionRow
+              icon="trash"
+              label="Clear Chat"
+              onPress={() => onClear(chat)}
+            />
+            <ChatMoreActionRow
+              destructive
+              icon="trash-2"
+              label="Delete"
+              onPress={() => onDelete(chat)}
+            />
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function ChatMoreActionRow({
+  destructive,
+  icon,
+  label,
+  onPress
+}: {
+  destructive?: boolean;
+  icon: keyof typeof Feather.glyphMap;
+  label: string;
+  onPress: () => void;
 }) {
   return (
     <Pressable
+      accessibilityLabel={label}
       accessibilityRole="button"
-      onPress={onOpen}
-      style={({ pressed }) => [
-        styles.chatRow,
-        styles.contactChatRow,
-        pressed && styles.pressed
-      ]}
+      onPress={onPress}
+      style={({ pressed }) => [styles.chatMoreActionRow, pressed && styles.pressed]}
     >
-      <ProfileAvatar
-        headers={profilePhotoHeaders}
-        name={chat.title}
-        size={56}
-        uri={chat.profilePhotoUrl}
-      />
-
-      <View style={styles.chatText}>
-        <Text style={[styles.chatTitle, styles.chatListTitle]}>{chat.title}</Text>
-        {chat.preview ? (
-          <Text numberOfLines={2} style={styles.chatPreview}>{chat.preview}</Text>
-        ) : !chat.hasActiveDevice ? (
-          <Text numberOfLines={1} style={styles.chatPreview}>Waiting for secure device</Text>
-        ) : null}
+      <View style={[styles.chatMoreActionIcon, destructive && styles.chatMoreActionIconDestructive]}>
+        <Feather color={destructive ? '#DC2626' : colors.primary} name={icon} size={20} />
       </View>
-
-      <View style={styles.chatMeta}>
-        {chat.lastMessageAt ? (
-          <Text style={styles.chatTime}>{formatChatListTime(chat.lastMessageAt)}</Text>
-        ) : null}
-        {chat.unreadCount > 0 ? (
-          <View style={styles.unreadBadge}>
-            <Text style={styles.unreadText}>{chat.unreadCount > 99 ? '99+' : chat.unreadCount}</Text>
-          </View>
-        ) : null}
-      </View>
+      <Text style={[styles.chatMoreActionText, destructive && styles.chatMoreActionTextDestructive]}>
+        {label}
+      </Text>
     </Pressable>
   );
 }
@@ -15698,10 +16140,13 @@ function mapApprovedEmployeeToListItem(employee: ApprovedEmployee): EmployeeList
 function mapChatContactToChatItem(contact: ChatContact): ChatItem {
   return {
     chatType: contact.chatType === 'GROUP' ? 'GROUP' : 'DIRECT',
+    clearedAt: contact.clearedAt || null,
     contactId: contact.contactId,
     hasActiveDevice: contact.hasActiveDevice,
     id: `${contact.chatType === 'GROUP' ? 'group' : 'contact'}-${contact.contactId}`,
+    isArchived: contact.isArchived === true,
     isDepartmentDefault: contact.isDepartmentDefault === true,
+    isFavorite: contact.isFavorite === true,
     isOnline: contact.isOnline === true,
     lastMessageAt: contact.lastMessageAt,
     lastSeenAt: contact.lastSeenAt,
@@ -16015,6 +16460,10 @@ function getGroupCallPeopleTitle(mode: GroupCallMode): string {
 }
 
 function applyChatListFilter(chats: ChatItem[], filter: ChatListFilter): ChatItem[] {
+  if (filter === 'archived') {
+    return chats;
+  }
+
   if (filter === 'unread') {
     return chats.filter((chat) => (chat.unreadCount || 0) > 0);
   }
@@ -16030,8 +16479,25 @@ function applyChatListFilter(chats: ChatItem[], filter: ChatListFilter): ChatIte
   return chats;
 }
 
-function isFavoriteChat(_chat: ChatItem): boolean {
-  return false;
+function shouldShowChatInList(chat: ChatItem): boolean {
+  return Boolean(
+    chat.lastMessageAt ||
+    chat.preview.trim() ||
+    chat.unreadCount > 0
+  );
+}
+
+function isFavoriteChat(chat: ChatItem): boolean {
+  return chat.isFavorite === true;
+}
+
+function canUseChatListActions(chat: ChatItem): boolean {
+  if (chat.chatType !== 'GROUP') {
+    return true;
+  }
+
+  return chat.isDepartmentDefault !== true &&
+    chat.memberPolicy !== 'DEPARTMENT_PLUS_EXPLICIT';
 }
 
 function filterChatItems(chats: ChatItem[], search: string): ChatItem[] {
@@ -19298,6 +19764,54 @@ const styles = StyleSheet.create({
     minHeight: 72,
     paddingVertical: 8
   },
+  chatSwipeShell: {
+    backgroundColor: '#FFFFFF',
+    minHeight: 72,
+    overflow: 'hidden',
+    position: 'relative'
+  },
+  chatSwipeContent: {
+    backgroundColor: '#FFFFFF'
+  },
+  chatSwipeLeftActions: {
+    bottom: 0,
+    flexDirection: 'row',
+    left: 0,
+    position: 'absolute',
+    top: 0,
+    width: CHAT_ROW_LEFT_ACTION_WIDTH
+  },
+  chatSwipeRightActions: {
+    bottom: 0,
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    width: CHAT_ROW_RIGHT_ACTION_WIDTH
+  },
+  chatSwipeAction: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 84
+  },
+  chatSwipeFavoriteAction: {
+    backgroundColor: '#16A34A',
+    width: CHAT_ROW_LEFT_ACTION_WIDTH
+  },
+  chatSwipeMoreAction: {
+    backgroundColor: '#737373'
+  },
+  chatSwipeArchiveAction: {
+    backgroundColor: colors.primary
+  },
+  chatSwipeActionText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '600',
+    lineHeight: 16,
+    marginTop: 4
+  },
   avatar: {
     alignItems: 'center',
     borderRadius: 22,
@@ -19330,7 +19844,14 @@ const styles = StyleSheet.create({
     fontWeight: '400',
     lineHeight: 22
   },
+  chatTitleRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 5,
+    minWidth: 0
+  },
   chatListTitle: {
+    flexShrink: 1,
     color: '#0B141A',
     fontWeight: '600'
   },
@@ -19367,6 +19888,94 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '400',
     lineHeight: 14
+  },
+  chatMoreRoot: {
+    backgroundColor: 'rgba(15, 23, 42, 0.24)',
+    flex: 1,
+    justifyContent: 'flex-end'
+  },
+  chatMoreBackdrop: {
+    ...StyleSheet.absoluteFillObject
+  },
+  chatMoreSheet: {
+    backgroundColor: '#F4F6F8',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: '56%',
+    minHeight: 320,
+    paddingBottom: 18,
+    paddingHorizontal: 12,
+    shadowColor: '#0F172A',
+    shadowOffset: { height: -6, width: 0 },
+    shadowOpacity: 0.16,
+    shadowRadius: 18
+  },
+  chatMoreHandle: {
+    alignSelf: 'center',
+    backgroundColor: '#A8B0BC',
+    borderRadius: 2,
+    height: 4,
+    marginTop: 8,
+    width: 42
+  },
+  chatMoreHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    minHeight: 58,
+    paddingHorizontal: 4
+  },
+  chatMoreTitle: {
+    color: colors.ink,
+    flex: 1,
+    fontSize: 18,
+    fontWeight: '700',
+    lineHeight: 24,
+    textAlign: 'center'
+  },
+  chatMoreCloseButton: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
+    height: 40,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: 0,
+    width: 40
+  },
+  chatMoreActionGroup: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    overflow: 'hidden'
+  },
+  chatMoreActionRow: {
+    alignItems: 'center',
+    borderBottomColor: '#E5E7EB',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 12,
+    minHeight: 56,
+    paddingHorizontal: 14
+  },
+  chatMoreActionIcon: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderRadius: 18,
+    height: 36,
+    justifyContent: 'center',
+    width: 36
+  },
+  chatMoreActionIconDestructive: {
+    backgroundColor: '#FEE2E2'
+  },
+  chatMoreActionText: {
+    color: colors.ink,
+    flex: 1,
+    fontSize: 16,
+    fontWeight: '500',
+    lineHeight: 21
+  },
+  chatMoreActionTextDestructive: {
+    color: '#DC2626'
   },
   employeeRole: {
     color: '#64748B',

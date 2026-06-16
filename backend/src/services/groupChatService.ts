@@ -13,6 +13,15 @@ import {
   buildDepartmentSystemGroupId,
   buildDepartmentSystemGroupRecord
 } from './groupService.js';
+import {
+  buildChatPreferenceKey,
+  ChatUserPreference,
+  getChatUserPreference,
+  getDefaultChatUserPreference,
+  listChatUserPreferences,
+  updateChatUserPreference,
+  type UpdateChatUserPreferenceInput
+} from './chatUserPreferenceService.js';
 import type {
   ChatMessageReaction,
   ChatMessageReactionMap
@@ -30,12 +39,15 @@ export interface CreateGroupChatInput {
 
 export interface GroupChatContact {
   chatType: 'GROUP';
+  clearedAt: string | null;
   contactId: string;
   conversationId: string;
   displayName: string;
   hasActiveDevice: boolean;
   initials: string;
+  isArchived: boolean;
   isDepartmentDefault: boolean;
+  isFavorite: boolean;
   isOnline: boolean;
   lastMessageAt: string | null;
   lastSeenAt: string | null;
@@ -392,6 +404,7 @@ export async function listCurrentUserGroupChatContacts(
     .collection('groups')
     .where('status', '==', 'ACTIVE')
     .get();
+  const preferences = await listChatUserPreferences(context.tenantId, decodedToken.uid);
   const contacts: GroupChatContact[] = [];
 
   for (const doc of snapshot.docs) {
@@ -413,7 +426,8 @@ export async function listCurrentUserGroupChatContacts(
       doc.id,
       group,
       memberIds,
-      await countActiveRecipientDevices(context.tenantId, memberIds, decodedToken.uid)
+      await countActiveRecipientDevices(context.tenantId, memberIds, decodedToken.uid),
+      preferences.get(buildChatPreferenceKey('GROUP', doc.id))
     ));
   }
 
@@ -684,6 +698,7 @@ export async function listEncryptedGroupEnvelopesForDevice(
 
   const shouldMarkDelivered = options.markAsDelivered !== false;
   const shouldMarkRead = options.markAsRead !== false;
+  const preference = await getChatUserPreference(context.tenantId, decodedToken.uid, 'GROUP', context.groupId);
 
   const [envelopesSnapshot, hiddenMessageIds, activeGroupDevices] = await Promise.all([
     context.groupRef
@@ -704,6 +719,10 @@ export async function listEncryptedGroupEnvelopesForDevice(
     .map((doc) => {
       const record = doc.data() as EncryptedGroupEnvelopeRecord;
       const encryptedKeyForDevice = record.encryptedKeysByDevice?.[deviceId];
+
+      if (preference.clearedAtMs && record.sentAtMs && record.sentAtMs <= preference.clearedAtMs) {
+        return null;
+      }
 
       if (hiddenMessageIds.has(record.envelopeId || doc.id)) {
         return null;
@@ -1013,11 +1032,14 @@ export async function getGroupChatContact(
   groupId: string
 ): Promise<GroupChatContact> {
   const context = await getGroupChatContext(decodedToken, groupId);
-  const activeRecipientDeviceCount = await countActiveRecipientDevices(
-    context.tenantId,
-    context.memberIds,
-    decodedToken.uid
-  );
+  const [activeRecipientDeviceCount, preference] = await Promise.all([
+    countActiveRecipientDevices(
+      context.tenantId,
+      context.memberIds,
+      decodedToken.uid
+    ),
+    getChatUserPreference(context.tenantId, decodedToken.uid, 'GROUP', context.groupId)
+  ]);
 
   return buildHydratedGroupChatContact(
     decodedToken.uid,
@@ -1025,7 +1047,64 @@ export async function getGroupChatContact(
     context.groupId,
     context.group,
     context.memberIds,
-    activeRecipientDeviceCount
+    activeRecipientDeviceCount,
+    preference
+  );
+}
+
+export async function updateGroupChatPreferenceForCurrentUser(
+  decodedToken: DecodedIdToken,
+  groupId: string,
+  input: UpdateChatUserPreferenceInput
+): Promise<GroupChatContact> {
+  const context = await getGroupChatContext(decodedToken, groupId);
+
+  if (context.group.isDepartmentDefault === true || context.group.memberPolicy === 'DEPARTMENT_PLUS_EXPLICIT') {
+    throw authorizationError('Department group chats cannot be archived, cleared, or deleted.');
+  }
+
+  const preference = await updateChatUserPreference(
+    context.tenantId,
+    decodedToken.uid,
+    'GROUP',
+    context.groupId,
+    input
+  );
+  const activeRecipientDeviceCount = await countActiveRecipientDevices(
+    context.tenantId,
+    context.memberIds,
+    decodedToken.uid
+  );
+  const group = input.clear
+    ? {
+        ...context.group,
+        unreadCounts: {
+          ...(context.group.unreadCounts || {}),
+          [decodedToken.uid]: 0
+        }
+      }
+    : context.group;
+
+  if (input.clear) {
+    await context.groupRef.set({
+      lastReadAtByUser: {
+        [decodedToken.uid]: fieldValue.serverTimestamp()
+      },
+      unreadCounts: {
+        [decodedToken.uid]: 0
+      },
+      updatedAt: fieldValue.serverTimestamp()
+    }, { merge: true });
+  }
+
+  return buildHydratedGroupChatContact(
+    decodedToken.uid,
+    context.tenantId,
+    context.groupId,
+    group,
+    context.memberIds,
+    activeRecipientDeviceCount,
+    preference
   );
 }
 
@@ -1673,7 +1752,8 @@ async function buildHydratedGroupChatContact(
   groupId: string,
   group: TenantGroupRecord,
   memberIds: string[],
-  activeRecipientDeviceCount: number
+  activeRecipientDeviceCount: number,
+  preference?: ChatUserPreference
 ): Promise<GroupChatContact> {
   const members = await listGroupChatMemberProfiles(tenantId, groupId, memberIds);
 
@@ -1683,7 +1763,8 @@ async function buildHydratedGroupChatContact(
     group,
     memberIds,
     members,
-    activeRecipientDeviceCount
+    activeRecipientDeviceCount,
+    preference
   );
 }
 
@@ -1745,21 +1826,32 @@ function buildGroupChatContact(
   group: TenantGroupRecord,
   memberIds: string[],
   members: GroupChatMember[],
-  activeRecipientDeviceCount: number
+  activeRecipientDeviceCount: number,
+  preference?: ChatUserPreference
 ): GroupChatContact {
   const name = group.name || 'Group chat';
   const lastMessageSentAtMs = group.lastMessageSentAtMs || null;
+  const effectivePreference = preference || getDefaultChatUserPreference('', currentUid, 'GROUP', groupId);
+  const isCleared = Boolean(
+    lastMessageSentAtMs &&
+    effectivePreference.clearedAtMs &&
+    lastMessageSentAtMs <= effectivePreference.clearedAtMs
+  );
+  const visibleLastMessageSentAtMs = isCleared ? null : lastMessageSentAtMs;
 
   return {
     chatType: 'GROUP',
+    clearedAt: effectivePreference.clearedAtMs ? new Date(effectivePreference.clearedAtMs).toISOString() : null,
     contactId: groupId,
     conversationId: groupId,
     displayName: name,
     hasActiveDevice: activeRecipientDeviceCount > 0,
     initials: getInitials(name),
+    isArchived: effectivePreference.isArchived,
     isDepartmentDefault: group.isDepartmentDefault === true,
+    isFavorite: effectivePreference.isFavorite,
     isOnline: false,
-    lastMessageAt: lastMessageSentAtMs ? new Date(lastMessageSentAtMs).toISOString() : null,
+    lastMessageAt: visibleLastMessageSentAtMs ? new Date(visibleLastMessageSentAtMs).toISOString() : null,
     lastSeenAt: null,
     memberCount: memberIds.length,
     members,
@@ -1772,7 +1864,7 @@ function buildGroupChatContact(
     roleName: memberIds.length === 1 ? 'Group chat - 1 member' : `Group chat - ${memberIds.length} members`,
     status: group.status || 'ACTIVE',
     tenantId: group.tenantId || '',
-    unreadCount: group.unreadCounts?.[currentUid] || 0
+    unreadCount: isCleared ? 0 : group.unreadCounts?.[currentUid] || 0
   };
 }
 

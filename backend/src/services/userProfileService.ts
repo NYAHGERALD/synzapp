@@ -5,6 +5,15 @@ import { SynzappRole } from '../types/auth.js';
 import { formatPhoneNumber, maskPhoneNumber, normalizeE164Phone } from '../utils/phone.js';
 import { hashPhoneNumber } from '../utils/phoneHash.js';
 import { buildAuthSession } from './authSessionService.js';
+import {
+  buildChatPreferenceKey,
+  ChatUserPreference,
+  getChatUserPreference,
+  getDefaultChatUserPreference,
+  listChatUserPreferences,
+  updateChatUserPreference,
+  type UpdateChatUserPreferenceInput
+} from './chatUserPreferenceService.js';
 import { getChatPresenceForUser } from './chatPresenceService.js';
 import { mergePermissions } from './permissionCatalog.js';
 
@@ -50,11 +59,14 @@ interface UploadedProfilePhoto {
 }
 
 export interface ChatContact {
+  clearedAt: string | null;
   contactId: string;
   conversationId: string;
   displayName: string;
   hasActiveDevice: boolean;
   initials: string;
+  isArchived: boolean;
+  isFavorite: boolean;
   isOnline: boolean;
   lastMessageAt: string | null;
   lastSeenAt: string | null;
@@ -159,6 +171,7 @@ export async function listCurrentUserChatContacts(decodedToken: DecodedIdToken):
     .get();
 
   const visibleRoles = getVisibleChatContactRoles(context.role);
+  const preferences = await listChatUserPreferences(context.tenantId, decodedToken.uid);
 
   const visibleContacts = usersSnapshot.docs
     .filter((doc) => {
@@ -177,7 +190,8 @@ export async function listCurrentUserChatContacts(decodedToken: DecodedIdToken):
       doc.id,
       doc.data() as TenantUserRecord,
       directChat,
-      activeDeviceUserIds.has(doc.id)
+      activeDeviceUserIds.has(doc.id),
+      preferences.get(buildChatPreferenceKey('DIRECT', doc.id))
     );
   }));
 
@@ -204,6 +218,7 @@ export async function markDirectChatRead(
 ): Promise<ChatContact> {
   const chatContext = await getDirectChatContext(decodedToken, contactId);
   const hasActiveDevice = await hasActiveDeviceForUser(chatContext.tenantId, chatContext.contactId);
+  const preference = await getChatUserPreference(chatContext.tenantId, decodedToken.uid, 'DIRECT', chatContext.contactId);
 
   await chatContext.chatRef.set({
     lastReadAtByUser: {
@@ -221,7 +236,7 @@ export async function markDirectChatRead(
       ...(chatContext.directChat?.unreadCounts || {}),
       [decodedToken.uid]: 0
     }
-  }, hasActiveDevice);
+  }, hasActiveDevice, preference);
 }
 
 export async function getDirectChatContact(
@@ -230,14 +245,64 @@ export async function getDirectChatContact(
   directChat?: DirectChatRecord | null
 ): Promise<ChatContact> {
   const chatContext = await getDirectChatContext(decodedToken, contactId);
-  const hasActiveDevice = await hasActiveDeviceForUser(chatContext.tenantId, chatContext.contactId);
+  const [hasActiveDevice, preference] = await Promise.all([
+    hasActiveDeviceForUser(chatContext.tenantId, chatContext.contactId),
+    getChatUserPreference(chatContext.tenantId, decodedToken.uid, 'DIRECT', chatContext.contactId)
+  ]);
 
   return buildChatContact(
     decodedToken.uid,
     chatContext.contactId,
     chatContext.contact,
     directChat === undefined ? chatContext.directChat : directChat,
-    hasActiveDevice
+    hasActiveDevice,
+    preference
+  );
+}
+
+export async function updateDirectChatPreferenceForCurrentUser(
+  decodedToken: DecodedIdToken,
+  contactId: string,
+  input: UpdateChatUserPreferenceInput
+): Promise<ChatContact> {
+  const chatContext = await getDirectChatContext(decodedToken, contactId);
+  const preference = await updateChatUserPreference(
+    chatContext.tenantId,
+    decodedToken.uid,
+    'DIRECT',
+    chatContext.contactId,
+    input
+  );
+  const hasActiveDevice = await hasActiveDeviceForUser(chatContext.tenantId, chatContext.contactId);
+  const directChat = input.clear
+    ? {
+        ...(chatContext.directChat || {}),
+        unreadCounts: {
+          ...(chatContext.directChat?.unreadCounts || {}),
+          [decodedToken.uid]: 0
+        }
+      }
+    : chatContext.directChat;
+
+  if (input.clear) {
+    await chatContext.chatRef.set({
+      lastReadAtByUser: {
+        [decodedToken.uid]: fieldValue.serverTimestamp()
+      },
+      unreadCounts: {
+        [decodedToken.uid]: 0
+      },
+      updatedAt: fieldValue.serverTimestamp()
+    }, { merge: true });
+  }
+
+  return buildChatContact(
+    decodedToken.uid,
+    chatContext.contactId,
+    chatContext.contact,
+    directChat,
+    hasActiveDevice,
+    preference
   );
 }
 
@@ -425,6 +490,7 @@ export async function updateDirectChatMessageReaction(
   });
 
   const hasActiveDevice = await hasActiveDeviceForUser(chatContext.tenantId, chatContext.contactId);
+  const preference = await getChatUserPreference(chatContext.tenantId, decodedToken.uid, 'DIRECT', chatContext.contactId);
 
   return {
     contact: buildChatContact(
@@ -432,7 +498,8 @@ export async function updateDirectChatMessageReaction(
       chatContext.contactId,
       chatContext.contact,
       nextDirectChat || chatContext.directChat,
-      hasActiveDevice
+      hasActiveDevice,
+      preference
     ),
     messageReactions: mapDirectChatMessageReactions(nextDirectChat || chatContext.directChat)
   };
@@ -852,25 +919,36 @@ function buildChatContact(
   contactId: string,
   user: TenantUserRecord,
   directChat?: DirectChatRecord | null,
-  hasActiveDevice = false
+  hasActiveDevice = false,
+  preference?: ChatUserPreference
 ): ChatContact {
   const displayName = getDisplayName(user);
   const roleName = user.roleName || formatRoleName(user.role || 'EMPLOYEE');
   const lastMessageSentAtMs = directChat?.lastMessageSentAtMs || null;
-  const unreadCount = directChat?.unreadCounts?.[currentUid] || 0;
+  const effectivePreference = preference || getDefaultChatUserPreference('', currentUid, 'DIRECT', contactId);
+  const isCleared = Boolean(
+    lastMessageSentAtMs &&
+    effectivePreference.clearedAtMs &&
+    lastMessageSentAtMs <= effectivePreference.clearedAtMs
+  );
+  const visibleLastMessageSentAtMs = isCleared ? null : lastMessageSentAtMs;
+  const unreadCount = isCleared ? 0 : directChat?.unreadCounts?.[currentUid] || 0;
   const presence = getChatPresenceForUser(contactId);
 
   return {
+    clearedAt: effectivePreference.clearedAtMs ? new Date(effectivePreference.clearedAtMs).toISOString() : null,
     contactId,
     conversationId: buildDirectChatId(currentUid, contactId),
     displayName,
     hasActiveDevice,
     initials: getInitials(displayName),
+    isArchived: effectivePreference.isArchived,
+    isFavorite: effectivePreference.isFavorite,
     isOnline: presence.isOnline,
-    lastMessageAt: lastMessageSentAtMs ? new Date(lastMessageSentAtMs).toISOString() : null,
+    lastMessageAt: visibleLastMessageSentAtMs ? new Date(visibleLastMessageSentAtMs).toISOString() : null,
     lastSeenAt: presence.lastSeenAt,
     phoneMasked: user.phoneMasked || null,
-    preview: directChat?.lastMessageText || '',
+    preview: visibleLastMessageSentAtMs ? directChat?.lastMessageText || '' : '',
     profilePhotoCacheKey: user.profilePhotoStoragePath
       ? buildProfilePhotoCacheKey(contactId, user.profilePhotoVersion)
       : null,

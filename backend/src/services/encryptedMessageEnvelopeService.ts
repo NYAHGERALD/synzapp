@@ -4,6 +4,7 @@ import type { DocumentReference } from 'firebase-admin/firestore';
 import { fieldValue, firestore } from '../config/firebaseAdmin.js';
 import { SynzappRole } from '../types/auth.js';
 import { buildAuthSession } from './authSessionService.js';
+import { getChatUserPreference } from './chatUserPreferenceService.js';
 
 const ENCRYPTED_ENVELOPE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const READ_ENVELOPE_RECEIPT_GRACE_MS = 5 * 60 * 1000;
@@ -170,6 +171,7 @@ export async function listEncryptedDirectEnvelopesForDevice(
 
   const shouldMarkDelivered = options.markAsDelivered !== false;
   const shouldMarkRead = options.markAsRead !== false;
+  const preference = await getChatUserPreference(context.tenantId, decodedToken.uid, 'DIRECT', context.contactId);
 
   await cleanupRetainedEncryptedEnvelopes(context.chatRef);
 
@@ -185,6 +187,10 @@ export async function listEncryptedDirectEnvelopesForDevice(
     .map((doc) => {
       const record = doc.data() as EncryptedEnvelopeRecord;
       const encryptedKeyForDevice = record.encryptedKeysByDevice?.[deviceId];
+
+      if (preference.clearedAtMs && record.sentAtMs && record.sentAtMs <= preference.clearedAtMs) {
+        return null;
+      }
 
       if (!encryptedKeyForDevice) {
         return null;

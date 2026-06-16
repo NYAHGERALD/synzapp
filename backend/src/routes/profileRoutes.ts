@@ -15,6 +15,7 @@ import {
   getDirectChatContactDetails,
   getDirectChatMessageReactions,
   listCurrentUserChatContacts,
+  updateDirectChatPreferenceForCurrentUser,
   updateDirectChatMessageReaction,
   updateCurrentUserProfilePhoto
 } from '../services/userProfileService.js';
@@ -45,6 +46,7 @@ import {
   listCurrentUserGroupChatContacts,
   listEncryptedGroupEnvelopesForDevice,
   sendEncryptedGroupEnvelope,
+  updateGroupChatPreferenceForCurrentUser,
   updateGroupChatMessageReaction
 } from '../services/groupChatService.js';
 import {
@@ -211,6 +213,18 @@ const chatTranscriptLanguageCodeSchema = z.enum([
 const chatTranscriptLanguageBodySchema = z.object({
   languageCode: chatTranscriptLanguageCodeSchema
 });
+
+const chatPreferenceBodySchema = z.object({
+  clear: z.boolean().optional(),
+  isArchived: z.boolean().optional(),
+  isFavorite: z.boolean().optional()
+}).refine(
+  (value) =>
+    typeof value.clear === 'boolean' ||
+    typeof value.isArchived === 'boolean' ||
+    typeof value.isFavorite === 'boolean',
+  'At least one chat preference is required.'
+);
 
 const encryptedChatBackupBodySchema = z.object({
   algorithm: z.literal('nacl-secretbox+synzapp-chat-backup-v1'),
@@ -495,6 +509,44 @@ profileRouter.delete('/chat/groups/:groupId/members/me', verifyAppCheck, async (
       action: 'GROUP_CHAT_EXITED',
       metadata: { groupId },
       reason: error instanceof Error ? error.message : 'Group exit failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
+profileRouter.patch('/chat/groups/:groupId/preferences', verifyAppCheck, async (req, res, next) => {
+  const groupId = Array.isArray(req.params.groupId)
+    ? req.params.groupId[0] || ''
+    : req.params.groupId || '';
+
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    const body = chatPreferenceBodySchema.parse(req.body);
+    const contact = await updateGroupChatPreferenceForCurrentUser(decodedToken, groupId, body);
+
+    await writeAuditEvent({
+      action: 'GROUP_CHAT_PREFERENCE_UPDATED',
+      metadata: {
+        clear: body.clear === true,
+        groupId,
+        isArchived: body.isArchived,
+        isFavorite: body.isFavorite
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: activeDevice.tenantId,
+      uid: decodedToken.uid
+    });
+
+    res.json({ contact });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'GROUP_CHAT_PREFERENCE_UPDATED',
+      reason: error instanceof Error ? error.message : 'Group chat preference update failed',
       req,
       status: 'FAILED'
     }).catch(() => undefined);
@@ -939,6 +991,44 @@ profileRouter.get('/chat/conversations/:contactId/addable-groups', verifyAppChec
 
     res.json({ groups });
   } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.patch('/chat/conversations/:contactId/preferences', verifyAppCheck, async (req, res, next) => {
+  const contactId = Array.isArray(req.params.contactId)
+    ? req.params.contactId[0] || ''
+    : req.params.contactId || '';
+
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    const body = chatPreferenceBodySchema.parse(req.body);
+    const contact = await updateDirectChatPreferenceForCurrentUser(decodedToken, contactId, body);
+
+    await writeAuditEvent({
+      action: 'DIRECT_CHAT_PREFERENCE_UPDATED',
+      metadata: {
+        clear: body.clear === true,
+        contactId,
+        isArchived: body.isArchived,
+        isFavorite: body.isFavorite
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: activeDevice.tenantId,
+      uid: decodedToken.uid
+    });
+
+    res.json({ contact });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'DIRECT_CHAT_PREFERENCE_UPDATED',
+      reason: error instanceof Error ? error.message : 'Direct chat preference update failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
     next(error);
   }
 });

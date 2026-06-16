@@ -13,12 +13,15 @@ import {
 
 export interface ChatContact {
   chatType?: 'DIRECT' | 'GROUP';
+  clearedAt?: string | null;
   contactId: string;
   conversationId: string;
   displayName: string;
   hasActiveDevice: boolean;
   initials: string;
+  isArchived?: boolean;
   isDepartmentDefault?: boolean;
+  isFavorite?: boolean;
   isOnline: boolean;
   lastMessageAt: string | null;
   lastSeenAt: string | null;
@@ -296,6 +299,42 @@ export async function createGroupChat(input: {
       ...deviceHeaders
     },
     method: 'POST'
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  const body = await response.json() as { contact: ChatContact };
+
+  return normalizeChatContact(body.contact);
+}
+
+export async function updateChatPreference(input: {
+  chatType?: 'DIRECT' | 'GROUP';
+  clear?: boolean;
+  contactId: string;
+  idToken: string;
+  isArchived?: boolean;
+  isFavorite?: boolean;
+}): Promise<ChatContact> {
+  const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
+  const path = input.chatType === 'GROUP'
+    ? `/api/profile/chat/groups/${encodeURIComponent(input.contactId)}/preferences`
+    : `/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/preferences`;
+  const response = await fetch(`${getSynzappApiBaseUrl()}${path}`, {
+    body: JSON.stringify({
+      clear: input.clear,
+      isArchived: input.isArchived,
+      isFavorite: input.isFavorite
+    }),
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${input.idToken}`,
+      'Content-Type': 'application/json',
+      ...deviceHeaders
+    },
+    method: 'PATCH'
   });
 
   if (!response.ok) {
@@ -985,8 +1024,11 @@ function normalizeChatContact(contact: ChatContact): ChatContact {
   return {
     ...contact,
     chatType: contact.chatType === 'GROUP' ? 'GROUP' : 'DIRECT',
+    clearedAt: typeof contact.clearedAt === 'string' ? contact.clearedAt : null,
     hasActiveDevice: contact.hasActiveDevice !== false,
+    isArchived: contact.isArchived === true,
     isDepartmentDefault: contact.isDepartmentDefault === true,
+    isFavorite: contact.isFavorite === true,
     isOnline: contact.isOnline === true,
     lastSeenAt: typeof contact.lastSeenAt === 'string' ? contact.lastSeenAt : null,
     memberCount: Number.isFinite(contact.memberCount) ? Math.max(Math.round(contact.memberCount || 0), 0) : undefined,
