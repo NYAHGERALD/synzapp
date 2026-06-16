@@ -1,14 +1,13 @@
 import { createHash } from 'node:crypto';
 import { DecodedIdToken } from 'firebase-admin/auth';
-import type { DocumentReference } from 'firebase-admin/firestore';
 import { fieldValue, firestore } from '../config/firebaseAdmin.js';
 import { SynzappRole } from '../types/auth.js';
 import { buildAuthSession } from './authSessionService.js';
-import { getChatUserPreference } from './chatUserPreferenceService.js';
-
-const ENCRYPTED_ENVELOPE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const READ_ENVELOPE_RECEIPT_GRACE_MS = 5 * 60 * 1000;
-const DELIVERED_ENVELOPE_RETENTION_MS = 24 * 60 * 60 * 1000;
+import {
+  getChatUserPreference,
+  unarchiveChatUserPreferenceInTransaction
+} from './chatUserPreferenceService.js';
+import { getChatArchiveSettings } from './chatArchiveSettingsService.js';
 
 export interface SendEncryptedDirectEnvelopeInput {
   algorithm: string;
@@ -101,7 +100,7 @@ interface EncryptedEnvelopeRecord {
   deliveredAtMsByDevice?: Record<string, number>;
   encryptedKeysByDevice?: Record<string, string>;
   envelopeId?: string;
-  expiresAtMs?: number;
+  expiresAtMs?: number | null;
   keyVersion?: number;
   nonce?: string;
   notificationPreviewByDevice?: Record<string, EncryptedNotificationPreviewRecord>;
@@ -172,8 +171,6 @@ export async function listEncryptedDirectEnvelopesForDevice(
   const shouldMarkDelivered = options.markAsDelivered !== false;
   const shouldMarkRead = options.markAsRead !== false;
   const preference = await getChatUserPreference(context.tenantId, decodedToken.uid, 'DIRECT', context.contactId);
-
-  await cleanupRetainedEncryptedEnvelopes(context.chatRef);
 
   const envelopesSnapshot = await context.chatRef
     .collection('encryptedEnvelopes')
@@ -251,8 +248,6 @@ export async function listEncryptedDirectEnvelopesForDevice(
     }, { merge: true });
   }
 
-  await cleanupRetainedEncryptedEnvelopes(context.chatRef);
-
   return envelopes;
 }
 
@@ -282,7 +277,11 @@ export async function sendEncryptedDirectEnvelope(
 
   await assertActiveDevice(context.tenantId, decodedToken.uid, input.senderDeviceId);
   await assertActiveRecipientDevices(context.tenantId, context.contactId, uniqueRecipientDeviceIds);
-  const senderDevice = await getActiveDevice(context.tenantId, decodedToken.uid, input.senderDeviceId);
+  const [senderDevice, senderArchiveSettings, recipientArchiveSettings] = await Promise.all([
+    getActiveDevice(context.tenantId, decodedToken.uid, input.senderDeviceId),
+    getChatArchiveSettings(context.tenantId, decodedToken.uid),
+    getChatArchiveSettings(context.tenantId, context.contactId)
+  ]);
 
   if (!senderDevice?.keyAgreementPublicKey) {
     throw authorizationError('This device is not authorized.');
@@ -324,6 +323,26 @@ export async function sendEncryptedDirectEnvelope(
           tenantId: context.tenantId
         };
 
+    if (shouldUnarchiveDirectChatOnNewMessage(senderArchiveSettings)) {
+      unarchiveChatUserPreferenceInTransaction(
+        transaction,
+        context.tenantId,
+        decodedToken.uid,
+        'DIRECT',
+        context.contactId
+      );
+    }
+
+    if (shouldUnarchiveDirectChatOnNewMessage(recipientArchiveSettings)) {
+      unarchiveChatUserPreferenceInTransaction(
+        transaction,
+        context.tenantId,
+        context.contactId,
+        'DIRECT',
+        decodedToken.uid
+      );
+    }
+
     transaction.set(envelopeRef, {
       algorithm: input.algorithm,
       ciphertext: input.ciphertext,
@@ -331,7 +350,7 @@ export async function sendEncryptedDirectEnvelope(
       createdAt: fieldValue.serverTimestamp(),
       encryptedKeysByDevice: input.encryptedKeysByDevice,
       envelopeId: envelopeRef.id,
-      expiresAtMs: sentAtMs + ENCRYPTED_ENVELOPE_TTL_MS,
+      expiresAtMs: null,
       keyVersion: input.keyVersion,
       nonce: input.nonce,
       ...(input.notificationPreviewByDevice
@@ -374,7 +393,7 @@ export async function sendEncryptedDirectEnvelope(
       lastMessageSenderUid: decodedToken.uid,
       lastMessageSentAtMs: sentAtMs,
       lastMessageText: null,
-      serverEnvelopeExpiresAtMs: sentAtMs + ENCRYPTED_ENVELOPE_TTL_MS,
+      serverEnvelopeExpiresAtMs: null,
       unreadCounts: {
         [decodedToken.uid]: 0,
         [context.contactId]: fieldValue.increment(1)
@@ -443,74 +462,11 @@ async function getActiveDevice(
   };
 }
 
-async function cleanupRetainedEncryptedEnvelopes(chatRef: DocumentReference): Promise<void> {
-  const nowMs = Date.now();
-  const expiredSnapshot = await chatRef
-    .collection('encryptedEnvelopes')
-    .where('expiresAtMs', '<=', nowMs)
-    .limit(50)
-    .get();
-
-  const recentSnapshot = await chatRef
-    .collection('encryptedEnvelopes')
-    .orderBy('sentAtMs', 'asc')
-    .limit(100)
-    .get();
-  const refsToDelete = new Map<string, DocumentReference>();
-
-  expiredSnapshot.docs.forEach((doc) => {
-    refsToDelete.set(doc.ref.path, doc.ref);
-  });
-
-  recentSnapshot.docs.forEach((doc) => {
-    const record = doc.data() as EncryptedEnvelopeRecord;
-
-    if (shouldDeleteRetainedEnvelope(record, nowMs)) {
-      refsToDelete.set(doc.ref.path, doc.ref);
-    }
-  });
-
-  if (!refsToDelete.size) {
-    return;
-  }
-
-  const batch = firestore.batch();
-
-  refsToDelete.forEach((ref) => {
-    batch.delete(ref);
-  });
-
-  await batch.commit();
-}
-
-function shouldDeleteRetainedEnvelope(record: EncryptedEnvelopeRecord, nowMs: number): boolean {
-  if (record.expiresAtMs && record.expiresAtMs <= nowMs) {
-    return true;
-  }
-
-  const recipientDeviceIds = record.recipientDeviceIds || [];
-
-  if (!recipientDeviceIds.length) {
-    return false;
-  }
-
-  const readAtMsByDevice = record.readAtMsByDevice || {};
-  const readTimes = recipientDeviceIds.map((deviceId) => readAtMsByDevice[deviceId] || 0);
-
-  if (
-    readTimes.every(Boolean) &&
-    Math.max(...readTimes) + READ_ENVELOPE_RECEIPT_GRACE_MS <= nowMs
-  ) {
-    return true;
-  }
-
-  const deliveredAtMsByDevice = record.deliveredAtMsByDevice || {};
-  const deliveredTimes = recipientDeviceIds.map((deviceId) => deliveredAtMsByDevice[deviceId] || 0);
-
-  return (
-    deliveredTimes.every(Boolean) &&
-    Math.max(...deliveredTimes) + DELIVERED_ENVELOPE_RETENTION_MS <= nowMs
-  );
+function shouldUnarchiveDirectChatOnNewMessage(settings: {
+  keepArchivedWhenNewMessagesArrive: boolean;
+  unarchiveBehavior: string;
+}): boolean {
+  return !settings.keepArchivedWhenNewMessagesArrive && settings.unarchiveBehavior === 'NEW_MESSAGE';
 }
 
 function mapDevicePublicKey(device: DeviceKeyRecord): EncryptionDevicePublicKey {

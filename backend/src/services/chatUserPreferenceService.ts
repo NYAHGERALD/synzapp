@@ -1,3 +1,4 @@
+import type { Transaction } from 'firebase-admin/firestore';
 import { fieldValue, firestore } from '../config/firebaseAdmin.js';
 
 export type ChatPreferenceChatType = 'DIRECT' | 'GROUP';
@@ -180,6 +181,25 @@ export async function updateChatUserPreference(
   await ref.set(update, { merge: true });
 
   return getChatUserPreference(tenantId, uid, chatType, contactId);
+}
+
+export function unarchiveChatUserPreferenceInTransaction(
+  transaction: Transaction,
+  tenantId: string,
+  uid: string,
+  chatType: ChatPreferenceChatType,
+  contactId: string
+): void {
+  transaction.set(getChatUserPreferenceRef(tenantId, uid, chatType, contactId), {
+    archivedAt: null,
+    archivedAtMs: null,
+    chatType,
+    contactId,
+    isArchived: false,
+    tenantId,
+    uid,
+    updatedAt: fieldValue.serverTimestamp()
+  }, { merge: true });
 }
 
 function normalizeChatUserPreference(
