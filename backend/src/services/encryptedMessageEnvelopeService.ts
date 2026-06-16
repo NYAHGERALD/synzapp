@@ -56,6 +56,7 @@ export interface EncryptionDevicePublicKey {
 export interface DirectEncryptionContextResponse {
   recipientDevices: EncryptionDevicePublicKey[];
   senderDevice: EncryptionDevicePublicKey;
+  senderDevices: EncryptionDevicePublicKey[];
 }
 
 export interface EncryptedDirectEnvelopeForDevice {
@@ -149,9 +150,10 @@ export async function getDirectEncryptionContext(
   senderDeviceId: string
 ): Promise<DirectEncryptionContextResponse> {
   const context = await getEncryptedDirectContext(decodedToken, contactId);
-  const [senderDevice, recipientDevices] = await Promise.all([
+  const [senderDevice, recipientDevices, senderDevices] = await Promise.all([
     getActiveDevice(context.tenantId, decodedToken.uid, senderDeviceId),
-    listActiveDevicesForUser(context.tenantId, context.contactId)
+    listActiveDevicesForUser(context.tenantId, context.contactId),
+    listActiveDevicesForUser(context.tenantId, decodedToken.uid)
   ]);
 
   if (!senderDevice) {
@@ -164,7 +166,8 @@ export async function getDirectEncryptionContext(
 
   return {
     recipientDevices: recipientDevices.map(mapDevicePublicKey),
-    senderDevice: mapDevicePublicKey(senderDevice)
+    senderDevice: mapDevicePublicKey(senderDevice),
+    senderDevices: senderDevices.map(mapDevicePublicKey)
   };
 }
 

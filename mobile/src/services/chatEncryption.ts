@@ -94,6 +94,7 @@ export async function encryptChatText(input: {
   recipientDevices: EncryptionDevicePublicKey[];
   replyTo?: ChatReplyReference | null;
   senderDevice: EncryptionDevicePublicKey;
+  senderDevices?: EncryptionDevicePublicKey[];
   text: string;
 }): Promise<EncryptedMessageBody> {
   return encryptChatMessage(input);
@@ -108,6 +109,7 @@ export async function encryptChatMessage(input: {
   recipientDevices: EncryptionDevicePublicKey[];
   replyTo?: ChatReplyReference | null;
   senderDevice: EncryptionDevicePublicKey;
+  senderDevices?: EncryptionDevicePublicKey[];
   text?: string;
 }): Promise<EncryptedMessageBody> {
   const localDevice = await getLocalDeviceKeyMaterial(input.idToken);
@@ -161,6 +163,9 @@ export async function encryptChatMessage(input: {
   const devicesById = new Map<string, EncryptionDevicePublicKey>();
 
   input.recipientDevices.forEach((device) => {
+    devicesById.set(device.deviceId, device);
+  });
+  (input.senderDevices || []).forEach((device) => {
     devicesById.set(device.deviceId, device);
   });
   devicesById.set(input.senderDevice.deviceId, input.senderDevice);

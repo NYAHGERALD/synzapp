@@ -196,6 +196,11 @@ export function unarchiveChatUserPreferenceInTransaction(
     chatType,
     contactId,
     isArchived: false,
+    isSpam: false,
+    permanentlyDeletedAt: null,
+    permanentlyDeletedAtMs: null,
+    spammedAt: null,
+    spammedAtMs: null,
     tenantId,
     uid,
     updatedAt: fieldValue.serverTimestamp()

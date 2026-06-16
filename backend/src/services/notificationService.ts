@@ -173,8 +173,15 @@ export async function registerCurrentUserPushToken(
     .doc(decodedToken.uid)
     .collection('devices')
     .doc(activeDevice.deviceId);
+  const duplicatePushTokenCleanup = deactivateDuplicatePushTokensForUser(
+    activeDevice.tenantId,
+    decodedToken.uid,
+    activeDevice.deviceId,
+    safeToken
+  );
 
   await Promise.all([
+    duplicatePushTokenCleanup,
     userPushTokenRef.set({
       ...tokenRecord,
       createdAt: fieldValue.serverTimestamp(),
@@ -207,6 +214,68 @@ export async function registerCurrentUserPushToken(
     provider: input.provider,
     status: 'ACTIVE'
   };
+}
+
+async function deactivateDuplicatePushTokensForUser(
+  tenantId: string,
+  uid: string,
+  currentDeviceId: string,
+  token: string
+): Promise<void> {
+  const userRef = firestore
+    .collection('organizations')
+    .doc(tenantId)
+    .collection('users')
+    .doc(uid);
+  const snapshot = await userRef
+    .collection('pushTokens')
+    .where('token', '==', token)
+    .where('status', '==', 'ACTIVE')
+    .get();
+  const staleTokenDocs = snapshot.docs.filter((doc) => doc.id !== currentDeviceId);
+
+  if (!staleTokenDocs.length) {
+    return;
+  }
+
+  const update = {
+    deactivatedAt: fieldValue.serverTimestamp(),
+    replacedByDeviceId: currentDeviceId,
+    status: 'INACTIVE',
+    updatedAt: fieldValue.serverTimestamp()
+  };
+
+  await Promise.all(staleTokenDocs.flatMap((doc) => {
+    const staleDeviceId = doc.id;
+
+    return [
+      doc.ref.set(update, { merge: true }),
+      firestore
+        .collection('organizations')
+        .doc(tenantId)
+        .collection('deviceKeys')
+        .doc(staleDeviceId)
+        .set({
+          pushNotifications: {
+            replacedByDeviceId: currentDeviceId,
+            status: 'INACTIVE',
+            updatedAt: fieldValue.serverTimestamp()
+          },
+          updatedAt: fieldValue.serverTimestamp()
+        }, { merge: true }),
+      userRef
+        .collection('devices')
+        .doc(staleDeviceId)
+        .set({
+          pushNotifications: {
+            replacedByDeviceId: currentDeviceId,
+            status: 'INACTIVE',
+            updatedAt: fieldValue.serverTimestamp()
+          },
+          updatedAt: fieldValue.serverTimestamp()
+        }, { merge: true })
+    ];
+  }));
 }
 
 export async function deactivateCurrentUserPushToken(

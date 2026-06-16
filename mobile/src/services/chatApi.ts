@@ -243,6 +243,7 @@ export interface EncryptionDevicePublicKey {
 export interface ChatEncryptionContext {
   recipientDevices: EncryptionDevicePublicKey[];
   senderDevice: EncryptionDevicePublicKey;
+  senderDevices?: EncryptionDevicePublicKey[];
 }
 
 export interface EncryptedChatEnvelope {
@@ -851,6 +852,7 @@ export async function sendChatMessage(input: {
     recipientDevices: context.recipientDevices,
     replyTo: input.replyTo,
     senderDevice: context.senderDevice,
+    senderDevices: context.senderDevices,
     text
   });
   const path = input.chatType === 'GROUP'
