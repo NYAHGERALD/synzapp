@@ -22,6 +22,7 @@ export interface LocalConversationRecord {
 }
 
 export interface LocalChatContactListRecord {
+  confirmedAt?: string;
   contacts: ChatContact[];
   ownerUid: string;
   updatedAt: string;
@@ -66,7 +67,9 @@ export async function loadCachedChatContacts(input: {
     return [];
   }
 
-  return normalizeCachedChatContacts(record.contacts);
+  return normalizeCachedChatContacts(record.contacts).filter((contact) =>
+    record.confirmedAt || (contact.chatType || 'DIRECT') !== 'GROUP'
+  );
 }
 
 export async function saveCachedChatContacts(input: {
@@ -76,6 +79,7 @@ export async function saveCachedChatContacts(input: {
   const contacts = normalizeCachedChatContacts(input.contacts);
 
   const record: LocalChatContactListRecord = {
+    confirmedAt: new Date().toISOString(),
     contacts: contacts.slice(0, LOCAL_CACHED_CHAT_CONTACT_LIMIT),
     ownerUid: input.ownerUid,
     updatedAt: new Date().toISOString(),

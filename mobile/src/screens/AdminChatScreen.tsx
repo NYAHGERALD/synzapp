@@ -866,7 +866,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     chatContactsRef.current = chatContacts;
     void syncSynzappUnreadBadgeCount(chatContacts).catch(() => undefined);
 
-    if (!chatContacts.length && !hasResolvedChatContactsRef.current) {
+    if (!hasResolvedChatContactsRef.current) {
       return;
     }
 
@@ -1633,7 +1633,10 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       ]);
       const cachedConversationContacts = buildLocalChatContactsFromCachedConversations(
         cachedConversations,
-        pendingMessages
+        pendingMessages,
+        new Set(cachedChatContacts
+          .filter((contact) => contact.chatType === 'GROUP')
+          .map((contact) => contact.contactId))
       );
       const cachedContacts = mergeLoadedChatContactsWithVisibleState(
         cachedChatContacts,
@@ -1641,13 +1644,12 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         { preserveMissing: true }
       );
 
-      if (cachedContacts.length) {
+      if (cachedContacts.length && !hadVisibleContacts) {
         fallbackContacts = mergeLoadedChatContactsWithVisibleState(
           chatContactsRef.current,
           cachedContacts,
           { preserveMissing: true }
         );
-        hasResolvedChatContactsRef.current = true;
         setChatContacts(fallbackContacts);
         setIsLoadingChats(false);
       } else if (!hadVisibleContacts) {
@@ -1666,26 +1668,18 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         pendingMessages
       );
 
-      setProfilePhotoAuthToken(idToken);
+      const contactsWithCachedPhotos = await cacheChatContactPhotos(contactsWithLocalPreviews, idToken);
       const reconciledContacts = mergeLoadedChatContactsWithVisibleState(
         fallbackContacts.length ? fallbackContacts : chatContactsRef.current,
-        contactsWithLocalPreviews,
-        { preserveMissing: false }
-      );
-
-      hasResolvedChatContactsRef.current = true;
-      setChatContacts(reconciledContacts);
-
-      const contactsWithCachedPhotos = await cacheChatContactPhotos(contactsWithLocalPreviews, idToken);
-      const reconciledContactsWithPhotos = mergeLoadedChatContactsWithVisibleState(
-        reconciledContacts,
         contactsWithCachedPhotos,
         { preserveMissing: false }
       );
 
-      setChatContacts(reconciledContactsWithPhotos);
+      setProfilePhotoAuthToken(idToken);
+      hasResolvedChatContactsRef.current = true;
+      applyChatContactsIfChanged(reconciledContacts);
 
-      return reconciledContactsWithPhotos;
+      return reconciledContacts;
     } catch (nextError) {
       if (showError && !isNetworkUnavailableError(nextError)) {
         setError(getErrorMessage(nextError, 'Unable to load chats.'));
@@ -1695,6 +1689,12 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     } finally {
       setIsLoadingChats(false);
     }
+  }
+
+  function applyChatContactsIfChanged(nextContacts: ChatContact[]) {
+    setChatContacts((currentContacts) =>
+      areChatContactListsEqual(currentContacts, nextContacts) ? currentContacts : nextContacts
+    );
   }
 
   function applyVisibleChatContactUpdate(nextContact: ChatContact, shouldSelect: boolean) {
@@ -2092,6 +2092,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   }
 
   function removeUnavailableChatFromList(chat: ChatItem) {
+    hasResolvedChatContactsRef.current = true;
     setChatContacts((currentContacts) => currentContacts.filter((contact) => contact.contactId !== chat.contactId));
 
     if (selectedChatRef.current?.contactId === chat.contactId) {
@@ -16871,11 +16872,18 @@ function applyLocalChatPreview(contact: ChatContact, messages: ChatMessage[]): C
 
 function buildLocalChatContactsFromCachedConversations(
   cachedConversations: LocalConversationRecord[],
-  pendingMessages: PendingChatMessage[]
+  pendingMessages: PendingChatMessage[],
+  allowedCachedGroupContactIds: Set<string>
 ): ChatContact[] {
   const cachedContacts = cachedConversations
     .map((conversation) => conversation.contact)
-    .filter((contact): contact is ChatContact => Boolean(contact?.contactId));
+    .filter((contact): contact is ChatContact => {
+      if (!contact?.contactId) {
+        return false;
+      }
+
+      return (contact.chatType || 'DIRECT') !== 'GROUP' || allowedCachedGroupContactIds.has(contact.contactId);
+    });
 
   if (!cachedContacts.length) {
     return [];
@@ -16960,6 +16968,18 @@ function mergeChatContactVisibleState(
     };
   }
 
+  if (
+    currentPreview &&
+    currentContact.lastMessageAt &&
+    mergedContact.lastMessageAt &&
+    currentContact.lastMessageAt >= mergedContact.lastMessageAt
+  ) {
+    return {
+      ...mergedContact,
+      preview: currentContact.preview
+    };
+  }
+
   if (!currentPreview) {
     return mergedContact;
   }
@@ -17008,6 +17028,56 @@ function upsertChatContact(currentContacts: ChatContact[], nextContact: ChatCont
 
 function sortChatContacts(contacts: ChatContact[]): ChatContact[] {
   return [...contacts].sort(compareChatContacts);
+}
+
+function areChatContactListsEqual(firstContacts: ChatContact[], secondContacts: ChatContact[]): boolean {
+  if (firstContacts.length !== secondContacts.length) {
+    return false;
+  }
+
+  return firstContacts.every((firstContact, index) =>
+    getChatContactListFingerprint(firstContact) === getChatContactListFingerprint(secondContacts[index])
+  );
+}
+
+function getChatContactListFingerprint(contact: ChatContact): string {
+  return JSON.stringify({
+    chatType: contact.chatType || 'DIRECT',
+    clearedAt: contact.clearedAt || null,
+    contactId: contact.contactId,
+    conversationId: contact.conversationId,
+    displayName: contact.displayName,
+    hasActiveDevice: contact.hasActiveDevice,
+    initials: contact.initials,
+    isArchived: contact.isArchived === true,
+    isDepartmentDefault: contact.isDepartmentDefault === true,
+    isFavorite: contact.isFavorite === true,
+    isOnline: contact.isOnline === true,
+    lastMessageAt: contact.lastMessageAt || null,
+    lastSeenAt: contact.lastSeenAt || null,
+    memberCount: contact.memberCount || 0,
+    memberPolicy: contact.memberPolicy || null,
+    members: (contact.members || [])
+      .map((member) => ({
+        displayName: member.displayName,
+        initials: member.initials,
+        profilePhotoCacheKey: member.profilePhotoCacheKey || null,
+        profilePhotoUrl: member.profilePhotoUrl || null,
+        role: member.role,
+        roleName: member.roleName,
+        uid: member.uid
+      }))
+      .sort((first, second) => first.uid.localeCompare(second.uid)),
+    messagePermissionMode: contact.messagePermissionMode || null,
+    phoneMasked: contact.phoneMasked || null,
+    preview: contact.preview,
+    profilePhotoCacheKey: contact.profilePhotoCacheKey || null,
+    profilePhotoUrl: contact.profilePhotoUrl || null,
+    role: contact.role,
+    roleName: contact.roleName,
+    status: contact.status,
+    unreadCount: contact.unreadCount || 0
+  });
 }
 
 function compareChatContacts(first: ChatContact, second: ChatContact): number {
