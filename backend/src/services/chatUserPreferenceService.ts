@@ -151,6 +151,9 @@ export async function updateChatUserPreference(
       update.archivedAt = null;
       update.archivedAtMs = null;
       update.isArchived = false;
+    } else {
+      update.permanentlyDeletedAt = null;
+      update.permanentlyDeletedAtMs = null;
     }
   }
 
@@ -190,12 +193,24 @@ export function unarchiveChatUserPreferenceInTransaction(
   chatType: ChatPreferenceChatType,
   contactId: string
 ): void {
-  transaction.set(getChatUserPreferenceRef(tenantId, uid, chatType, contactId), {
-    archivedAt: null,
-    archivedAtMs: null,
+  reviveChatUserPreferenceInTransaction(transaction, tenantId, uid, chatType, contactId, {
+    unarchive: true
+  });
+}
+
+export function reviveChatUserPreferenceInTransaction(
+  transaction: Transaction,
+  tenantId: string,
+  uid: string,
+  chatType: ChatPreferenceChatType,
+  contactId: string,
+  options: {
+    unarchive?: boolean;
+  } = {}
+): void {
+  const update: Record<string, unknown> = {
     chatType,
     contactId,
-    isArchived: false,
     isSpam: false,
     permanentlyDeletedAt: null,
     permanentlyDeletedAtMs: null,
@@ -204,7 +219,15 @@ export function unarchiveChatUserPreferenceInTransaction(
     tenantId,
     uid,
     updatedAt: fieldValue.serverTimestamp()
-  }, { merge: true });
+  };
+
+  if (options.unarchive) {
+    update.archivedAt = null;
+    update.archivedAtMs = null;
+    update.isArchived = false;
+  }
+
+  transaction.set(getChatUserPreferenceRef(tenantId, uid, chatType, contactId), update, { merge: true });
 }
 
 function normalizeChatUserPreference(

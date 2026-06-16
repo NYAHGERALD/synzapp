@@ -712,10 +712,15 @@ export async function listEncryptedGroupEnvelopesForDevice(
   const shouldMarkRead = options.markAsRead !== false;
   const preference = await getChatUserPreference(context.tenantId, decodedToken.uid, 'GROUP', context.groupId);
 
+  const envelopesCollection = context.groupRef.collection('encryptedEnvelopes');
+  const envelopesQuery = preference.clearedAtMs
+    ? envelopesCollection
+        .where('sentAtMs', '>', preference.clearedAtMs)
+        .orderBy('sentAtMs', 'asc')
+    : envelopesCollection.orderBy('sentAtMs', 'asc');
+
   const [envelopesSnapshot, hiddenMessageIds, activeGroupDevices] = await Promise.all([
-    context.groupRef
-      .collection('encryptedEnvelopes')
-      .orderBy('sentAtMs', 'asc')
+    envelopesQuery
       .limit(options.limit || 500)
       .get(),
     getHiddenGroupMessageIds(context.groupRef, context.tenantId, decodedToken.uid),

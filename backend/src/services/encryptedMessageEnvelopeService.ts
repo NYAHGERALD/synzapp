@@ -5,7 +5,7 @@ import { SynzappRole } from '../types/auth.js';
 import { buildAuthSession } from './authSessionService.js';
 import {
   getChatUserPreference,
-  unarchiveChatUserPreferenceInTransaction
+  reviveChatUserPreferenceInTransaction
 } from './chatUserPreferenceService.js';
 import { getChatArchiveSettings } from './chatArchiveSettingsService.js';
 import { pickNotificationPreviewsForRecipientDevices } from './encryptedNotificationPreviewPolicy.js';
@@ -195,9 +195,13 @@ export async function listEncryptedDirectEnvelopesForDevice(
     .map((device) => device.deviceId || '')
     .filter(Boolean);
 
-  const envelopesSnapshot = await context.chatRef
-    .collection('encryptedEnvelopes')
-    .orderBy('sentAtMs', 'asc')
+  const envelopesCollection = context.chatRef.collection('encryptedEnvelopes');
+  const envelopesQuery = preference.clearedAtMs
+    ? envelopesCollection
+        .where('sentAtMs', '>', preference.clearedAtMs)
+        .orderBy('sentAtMs', 'asc')
+    : envelopesCollection.orderBy('sentAtMs', 'asc');
+  const envelopesSnapshot = await envelopesQuery
     .limit(options.limit || 100)
     .get();
   const nowMs = Date.now();
@@ -369,25 +373,23 @@ export async function sendEncryptedDirectEnvelope(
           createdAt: fieldValue.serverTimestamp()
         };
 
-    if (shouldUnarchiveDirectChatOnNewMessage(senderArchiveSettings)) {
-      unarchiveChatUserPreferenceInTransaction(
-        transaction,
-        context.tenantId,
-        decodedToken.uid,
-        'DIRECT',
-        context.contactId
-      );
-    }
+    reviveChatUserPreferenceInTransaction(
+      transaction,
+      context.tenantId,
+      decodedToken.uid,
+      'DIRECT',
+      context.contactId,
+      { unarchive: shouldUnarchiveDirectChatOnNewMessage(senderArchiveSettings) }
+    );
 
-    if (shouldUnarchiveDirectChatOnNewMessage(recipientArchiveSettings)) {
-      unarchiveChatUserPreferenceInTransaction(
-        transaction,
-        context.tenantId,
-        context.contactId,
-        'DIRECT',
-        decodedToken.uid
-      );
-    }
+    reviveChatUserPreferenceInTransaction(
+      transaction,
+      context.tenantId,
+      context.contactId,
+      'DIRECT',
+      decodedToken.uid,
+      { unarchive: shouldUnarchiveDirectChatOnNewMessage(recipientArchiveSettings) }
+    );
 
     transaction.set(envelopeRef, {
       algorithm: input.algorithm,
