@@ -37,6 +37,10 @@ import {
   useWindowDimensions,
   View
 } from 'react-native';
+import DateTimePicker, {
+  DateTimePickerAndroid,
+  type DateTimePickerEvent
+} from '@react-native-community/datetimepicker';
 import Feather from '@expo/vector-icons/Feather';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import EmojiPicker, { type EmojiType } from 'rn-emoji-keyboard';
@@ -428,20 +432,6 @@ const synzappAiSuggestions = [
   'Plan a work conversation',
   'Improve the tone of my writing',
   'Prepare a quick checklist'
-];
-const CHAT_SEARCH_MONTHS = [
-  'January',
-  'February',
-  'March',
-  'April',
-  'May',
-  'June',
-  'July',
-  'August',
-  'September',
-  'October',
-  'November',
-  'December'
 ];
 const chatNotificationMuteOptions: Array<{
   label: string;
@@ -8636,39 +8626,60 @@ function ChatSearchDateModal({
   onClose: () => void;
   onSelectDate: (dateKey: string | null, targetMessageId?: string, shouldClose?: boolean) => void;
 }) {
-  const defaultDateKey = currentDateKey || getLatestMessageDateKey(messages) || getTodayDateKey();
-  const defaultDateParts = parseDateKeyParts(defaultDateKey);
-  const [selectedMonth, setSelectedMonth] = useState(defaultDateParts.month);
-  const [selectedDay, setSelectedDay] = useState(defaultDateParts.day);
-  const [selectedYear, setSelectedYear] = useState(defaultDateParts.year);
-  const yearOptions = getChatSearchYearOptions(messages, selectedYear);
-  const dayOptions = getDayOptionsForMonth(selectedYear, selectedMonth);
-  const selectedDateKey = buildDateKey(selectedYear, selectedMonth, Math.min(selectedDay, dayOptions.at(-1) || selectedDay));
+  const defaultDateKey = currentDateKey || getLatestMessageDateKey(messages) || getMessageDateKeyFromDate(new Date());
+  const [selectedDate, setSelectedDate] = useState(() => getDateFromDateKey(defaultDateKey));
+  const didOpenRef = useRef(false);
+  const selectedDateKey = getMessageDateKeyFromDate(selectedDate);
   const visibleMessages = getChatSearchMessagesForDate(messages, selectedDateKey);
   const hasMessagesOnSelectedDate = visibleMessages.length > 0;
 
   useEffect(() => {
     if (!isOpen) {
+      didOpenRef.current = false;
+      if (Platform.OS === 'android') {
+        void DateTimePickerAndroid.dismiss('date').catch(() => undefined);
+      }
       return;
     }
 
-    const nextParts = parseDateKeyParts(currentDateKey || getLatestMessageDateKey(messages) || getTodayDateKey());
-
-    setSelectedMonth(nextParts.month);
-    setSelectedDay(nextParts.day);
-    setSelectedYear(nextParts.year);
-  }, [currentDateKey, isOpen, messages]);
-
-  useEffect(() => {
-    const maxDay = getDaysInMonth(selectedYear, selectedMonth);
-
-    if (selectedDay > maxDay) {
-      setSelectedDay(maxDay);
+    if (didOpenRef.current) {
+      return;
     }
-  }, [selectedDay, selectedMonth, selectedYear]);
+
+    didOpenRef.current = true;
+    const nextDate = getDateFromDateKey(currentDateKey || getLatestMessageDateKey(messages) || getMessageDateKeyFromDate(new Date()));
+    let androidOpenTimer: ReturnType<typeof setTimeout> | null = null;
+
+    setSelectedDate(nextDate);
+
+    if (Platform.OS === 'android') {
+      androidOpenTimer = setTimeout(() => openAndroidDatePicker(nextDate), 160);
+    }
+
+    return () => {
+      if (androidOpenTimer) {
+        clearTimeout(androidOpenTimer);
+      }
+    };
+  }, [currentDateKey, isOpen, messages]);
 
   if (!isOpen) {
     return null;
+  }
+
+  function handleNativeDateChange(event: DateTimePickerEvent, nextDate?: Date) {
+    if (event.type === 'set' && nextDate) {
+      setSelectedDate(normalizeChatSearchPickerDate(nextDate));
+    }
+  }
+
+  function openAndroidDatePicker(dateValue = selectedDate) {
+    DateTimePickerAndroid.open({
+      display: 'calendar',
+      mode: 'date',
+      onChange: handleNativeDateChange,
+      value: dateValue
+    });
   }
 
   const jumpToSelectedDate = () => {
@@ -8709,96 +8720,34 @@ function ChatSearchDateModal({
             </Pressable>
           </View>
 
-          <View style={styles.chatSearchDatePickerWrap}>
-            <View pointerEvents="none" style={styles.chatSearchDatePickerSelection} />
-            <ScrollView
-              contentContainerStyle={styles.chatSearchPickerColumnContent}
-              keyboardShouldPersistTaps="handled"
-              showsVerticalScrollIndicator={false}
-              style={styles.chatSearchPickerColumn}
+          {Platform.OS === 'android' ? (
+            <Pressable
+              accessibilityLabel="Choose date"
+              accessibilityRole="button"
+              onPress={() => openAndroidDatePicker()}
+              style={({ pressed }) => [styles.chatSearchAndroidDateButton, pressed && styles.pressed]}
             >
-              {CHAT_SEARCH_MONTHS.map((month, index) => (
-                <Pressable
-                  accessibilityRole="button"
-                  key={month}
-                  onPress={() => setSelectedMonth(index)}
-                  style={({ pressed }) => [
-                    styles.chatSearchPickerItem,
-                    selectedMonth === index && styles.chatSearchPickerItemActive,
-                    pressed && styles.pressed
-                  ]}
-                >
-                  <Text
-                    numberOfLines={1}
-                    style={[
-                      styles.chatSearchPickerText,
-                      selectedMonth === index && styles.chatSearchPickerTextActive
-                    ]}
-                  >
-                    {month}
-                  </Text>
-                </Pressable>
-              ))}
-            </ScrollView>
-
-            <ScrollView
-              contentContainerStyle={styles.chatSearchPickerColumnContent}
-              keyboardShouldPersistTaps="handled"
-              showsVerticalScrollIndicator={false}
-              style={styles.chatSearchPickerColumnNarrow}
-            >
-              {dayOptions.map((day) => (
-                <Pressable
-                  accessibilityRole="button"
-                  key={day}
-                  onPress={() => setSelectedDay(day)}
-                  style={({ pressed }) => [
-                    styles.chatSearchPickerItem,
-                    selectedDay === day && styles.chatSearchPickerItemActive,
-                    pressed && styles.pressed
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.chatSearchPickerText,
-                      selectedDay === day && styles.chatSearchPickerTextActive
-                    ]}
-                  >
-                    {day}
-                  </Text>
-                </Pressable>
-              ))}
-            </ScrollView>
-
-            <ScrollView
-              contentContainerStyle={styles.chatSearchPickerColumnContent}
-              keyboardShouldPersistTaps="handled"
-              showsVerticalScrollIndicator={false}
-              style={styles.chatSearchPickerColumnNarrow}
-            >
-              {yearOptions.map((year) => (
-                <Pressable
-                  accessibilityRole="button"
-                  key={year}
-                  onPress={() => setSelectedYear(year)}
-                  style={({ pressed }) => [
-                    styles.chatSearchPickerItem,
-                    selectedYear === year && styles.chatSearchPickerItemActive,
-                    pressed && styles.pressed
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.chatSearchPickerText,
-                      selectedYear === year && styles.chatSearchPickerTextActive
-                    ]}
-                  >
-                    {year}
-                  </Text>
-                </Pressable>
-              ))}
-            </ScrollView>
-          </View>
+              <View style={styles.chatSearchAndroidDateButtonIcon}>
+                <Feather color={colors.primary} name="calendar" size={20} />
+              </View>
+              <Text numberOfLines={1} style={styles.chatSearchAndroidDateButtonText}>
+                {formatChatSearchPickerDate(selectedDate)}
+              </Text>
+              <Feather color="#94A3B8" name="chevron-right" size={22} />
+            </Pressable>
+          ) : (
+            <View style={styles.chatSearchNativeDatePickerWrap}>
+              <DateTimePicker
+                display="spinner"
+                mode="date"
+                onChange={handleNativeDateChange}
+                style={styles.chatSearchNativeDatePicker}
+                textColor={colors.ink}
+                themeVariant="light"
+                value={selectedDate}
+              />
+            </View>
+          )}
 
           <Pressable
             accessibilityRole="button"
@@ -16154,56 +16103,34 @@ function getLatestMessageDateKey(messages: ChatMessage[]): string {
   return latestMessage ? getMessageDateKey(latestMessage.sentAt) : '';
 }
 
-function getTodayDateKey(): string {
-  return buildDateKey(new Date().getFullYear(), new Date().getMonth(), new Date().getDate());
-}
-
-function parseDateKeyParts(dateKey: string): { day: number; month: number; year: number } {
+function getDateFromDateKey(dateKey: string): Date {
   const [rawYear, rawMonth, rawDay] = dateKey.split('-').map((part) => Number.parseInt(part, 10));
   const fallbackDate = new Date();
   const year = Number.isFinite(rawYear) && rawYear > 0 ? rawYear : fallbackDate.getFullYear();
   const month = Number.isFinite(rawMonth) && rawMonth >= 1 && rawMonth <= 12
     ? rawMonth - 1
     : fallbackDate.getMonth();
-  const maxDay = getDaysInMonth(year, month);
   const day = Number.isFinite(rawDay) && rawDay >= 1
-    ? Math.min(rawDay, maxDay)
+    ? Math.min(rawDay, new Date(year, month + 1, 0).getDate())
     : fallbackDate.getDate();
 
-  return {
-    day,
-    month,
-    year
-  };
+  return new Date(year, month, day, 12);
 }
 
-function getChatSearchYearOptions(messages: ChatMessage[], selectedYear: number): number[] {
-  const currentYear = new Date().getFullYear();
-  const years = new Set<number>([
-    selectedYear,
-    currentYear - 2,
-    currentYear - 1,
-    currentYear,
-    currentYear + 1
-  ]);
+function normalizeChatSearchPickerDate(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 12);
+}
 
-  uniqueChatMessages(messages).forEach((message) => {
-    const year = parseDateKeyParts(getMessageDateKey(message.sentAt)).year;
+function getMessageDateKeyFromDate(date: Date): string {
+  return buildDateKey(date.getFullYear(), date.getMonth(), date.getDate());
+}
 
-    if (year) {
-      years.add(year);
-    }
+function formatChatSearchPickerDate(date: Date): string {
+  return date.toLocaleDateString([], {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric'
   });
-
-  return [...years].sort((first, second) => first - second);
-}
-
-function getDayOptionsForMonth(year: number, month: number): number[] {
-  return Array.from({ length: getDaysInMonth(year, month) }, (_value, index) => index + 1);
-}
-
-function getDaysInMonth(year: number, month: number): number {
-  return new Date(year, month + 1, 0).getDate();
 }
 
 function buildDateKey(year: number, month: number, day: number): string {
@@ -18475,7 +18402,7 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     maxHeight: '76%',
-    minHeight: 360,
+    minHeight: Platform.OS === 'android' ? 260 : 360,
     paddingBottom: 16,
     paddingHorizontal: 12,
     shadowColor: '#0F172A',
@@ -18515,59 +18442,43 @@ const styles = StyleSheet.create({
     right: 0,
     width: 40
   },
-  chatSearchDatePickerWrap: {
+  chatSearchNativeDatePickerWrap: {
     alignItems: 'center',
     alignSelf: 'stretch',
+    height: 216,
+    justifyContent: 'center',
+    marginTop: 2,
+    overflow: 'hidden'
+  },
+  chatSearchNativeDatePicker: {
+    alignSelf: 'stretch',
+    height: 216
+  },
+  chatSearchAndroidDateButton: {
+    alignItems: 'center',
+    alignSelf: 'stretch',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
     flexDirection: 'row',
-    height: 184,
-    justifyContent: 'center',
-    marginHorizontal: -4,
-    marginTop: 10,
-    overflow: 'hidden',
-    position: 'relative'
+    gap: 12,
+    marginTop: 16,
+    minHeight: 62,
+    paddingHorizontal: 14
   },
-  chatSearchDatePickerSelection: {
-    backgroundColor: 'rgba(226, 232, 240, 0.72)',
-    borderRadius: 18,
-    height: 44,
-    left: 6,
-    position: 'absolute',
-    right: 6,
-    top: 70
-  },
-  chatSearchPickerColumn: {
-    flex: 1.38,
-    maxHeight: 184
-  },
-  chatSearchPickerColumnNarrow: {
-    flex: 0.9,
-    maxHeight: 184
-  },
-  chatSearchPickerColumnContent: {
+  chatSearchAndroidDateButtonIcon: {
     alignItems: 'center',
-    paddingVertical: 70
-  },
-  chatSearchPickerItem: {
-    alignItems: 'center',
-    height: 44,
+    backgroundColor: colors.primarySoft,
+    borderRadius: 19,
+    height: 38,
     justifyContent: 'center',
-    minWidth: 78,
-    paddingHorizontal: 6
+    width: 38
   },
-  chatSearchPickerItemActive: {
-    opacity: 1
-  },
-  chatSearchPickerText: {
-    color: '#A8B0BC',
-    fontSize: 18,
-    fontWeight: '400',
-    lineHeight: 24,
-    textAlign: 'center'
-  },
-  chatSearchPickerTextActive: {
+  chatSearchAndroidDateButtonText: {
     color: colors.ink,
-    fontSize: 20,
-    fontWeight: '600'
+    flex: 1,
+    fontSize: 17,
+    fontWeight: '600',
+    lineHeight: 23
   },
   chatSearchJumpDateButton: {
     alignItems: 'center',
