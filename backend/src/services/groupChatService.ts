@@ -13,6 +13,7 @@ import {
   buildDepartmentSystemGroupId,
   buildDepartmentSystemGroupRecord
 } from './groupService.js';
+import { pickNotificationPreviewsForRecipientDevices } from './encryptedNotificationPreviewPolicy.js';
 import {
   buildChatPreferenceKey,
   ChatUserPreference,
@@ -928,6 +929,11 @@ export async function sendEncryptedGroupEnvelope(
     throw validationError('Recipient devices must be unique.');
   }
 
+  const notificationPreviewByDevice = pickNotificationPreviewsForRecipientDevices(
+    input.notificationPreviewByDevice,
+    uniqueRecipientDeviceIds
+  );
+
   const [senderDevice, expectedRecipientDevices] = await Promise.all([
     getActiveDevice(context.tenantId, decodedToken.uid, input.senderDeviceId),
     listActiveDevicesForGroupMembers(context.tenantId, context.memberIds, input.senderDeviceId)
@@ -945,10 +951,6 @@ export async function sendEncryptedGroupEnvelope(
   uniqueRecipientDeviceIds.forEach((deviceId) => {
     if (!input.encryptedKeysByDevice[deviceId]) {
       throw validationError('Encrypted key material is missing for a recipient device.');
-    }
-
-    if (input.notificationPreviewByDevice && !input.notificationPreviewByDevice[deviceId]) {
-      throw validationError('Encrypted notification preview is missing for a recipient device.');
     }
   });
 
@@ -980,8 +982,8 @@ export async function sendEncryptedGroupEnvelope(
       historyRetentionPolicy: 'DURABLE_GROUP_HISTORY',
       keyVersion: input.keyVersion,
       nonce: input.nonce,
-      ...(input.notificationPreviewByDevice
-        ? { notificationPreviewByDevice: input.notificationPreviewByDevice }
+      ...(Object.keys(notificationPreviewByDevice).length
+        ? { notificationPreviewByDevice }
         : {}),
       recipientDeviceIds: uniqueRecipientDeviceIds,
       recipientUids,
@@ -1028,7 +1030,9 @@ export async function sendEncryptedGroupEnvelope(
     conversationId: context.groupId,
     envelopeId: envelopeRef.id,
     keyVersion: input.keyVersion,
-    notificationPreviewByDevice: input.notificationPreviewByDevice,
+    notificationPreviewByDevice: Object.keys(notificationPreviewByDevice).length
+      ? notificationPreviewByDevice
+      : undefined,
     recipientDeviceIds: uniqueRecipientDeviceIds,
     recipientUids,
     senderDeviceId: input.senderDeviceId,
