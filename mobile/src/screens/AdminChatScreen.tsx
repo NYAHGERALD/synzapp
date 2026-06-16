@@ -272,6 +272,7 @@ const MESSAGE_INPUT_BOX_EXTRA_HEIGHT = 4;
 const CHAT_ROW_LEFT_ACTION_WIDTH = 112;
 const CHAT_ROW_RIGHT_ACTION_WIDTH = 216;
 const CHAT_ROW_SWIPE_TRIGGER = 28;
+const SPAM_ROW_ACTION_WIDTH = 118;
 const VOICE_NOTE_MIN_DURATION_MS = 700;
 const VOICE_NOTE_RECORDING_OPTIONS = RecordingPresets.LOW_QUALITY;
 const CHAT_AUDIO_PLAYBACK_MODE: AudioMode = {
@@ -1928,6 +1929,35 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           },
           style: 'destructive',
           text: 'Delete'
+        }
+      ]
+    );
+  }
+
+  function handlePutBackSpamChat(chat: ChatItem) {
+    if (!canUseChatListActions(chat) || isDeletingSpamChats) {
+      return;
+    }
+
+    Alert.alert(
+      'Put back chat?',
+      `${chat.title} will move back to your chat list.`,
+      [
+        { style: 'cancel', text: 'Cancel' },
+        {
+          onPress: () => {
+            void updateChatPreferenceAndApply(chat, {
+              failureMessage: 'Unable to put this chat back.',
+              isSpam: false,
+              optimisticContact: {
+                isArchived: false,
+                isSpam: false,
+                spammedAt: null
+              }
+            });
+            setSpamActionTarget(null);
+          },
+          text: 'Put back'
         }
       ]
     );
@@ -6342,6 +6372,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
                 isLoading={isLoadingChats}
                 onDelete={handlePermanentDeleteSpamChat}
                 onOpenChat={setSpamActionTarget}
+                onPutBack={handlePutBackSpamChat}
                 onSearchChange={setChatSearch}
                 profilePhotoHeaders={profilePhotoHeaders}
                 search={chatSearch}
@@ -11013,6 +11044,7 @@ function SpamChatsScreen({
   isLoading,
   onDelete,
   onOpenChat,
+  onPutBack,
   onSearchChange,
   profilePhotoHeaders,
   search
@@ -11022,6 +11054,7 @@ function SpamChatsScreen({
   isLoading: boolean;
   onDelete: (chat: ChatItem) => void;
   onOpenChat: (chat: ChatItem) => void;
+  onPutBack: (chat: ChatItem) => void;
   onSearchChange: (value: string) => void;
   profilePhotoHeaders?: Record<string, string>;
   search: string;
@@ -11057,6 +11090,7 @@ function SpamChatsScreen({
           key={chat.id}
           onDelete={() => onDelete(chat)}
           onOpen={() => onOpenChat(chat)}
+          onPutBack={() => onPutBack(chat)}
           profilePhotoHeaders={profilePhotoHeaders}
         />
       ))}
@@ -11069,73 +11103,142 @@ function SpamChatRow({
   isDeleting,
   onDelete,
   onOpen,
+  onPutBack,
   profilePhotoHeaders
 }: {
   chat: ChatItem;
   isDeleting: boolean;
   onDelete: () => void;
   onOpen: () => void;
+  onPutBack: () => void;
   profilePhotoHeaders?: Record<string, string>;
 }) {
   const spamTime = chat.spammedAt || chat.lastMessageAt;
+  const translateX = useRef(new Animated.Value(0)).current;
+  const offsetRef = useRef(0);
+
+  const closeSwipe = () => {
+    offsetRef.current = 0;
+    Animated.spring(translateX, {
+      damping: 20,
+      mass: 0.75,
+      stiffness: 170,
+      toValue: 0,
+      useNativeDriver: true
+    }).start();
+  };
+
+  const panResponder = useMemo(() => PanResponder.create({
+    onMoveShouldSetPanResponder: (_event, gestureState) =>
+      !isDeleting &&
+      Math.abs(gestureState.dx) > 4 &&
+      Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.08,
+    onMoveShouldSetPanResponderCapture: (_event, gestureState) =>
+      !isDeleting &&
+      Math.abs(gestureState.dx) > 6 &&
+      Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.08,
+    onPanResponderGrant: () => {
+      translateX.stopAnimation((value) => {
+        offsetRef.current = value;
+      });
+    },
+    onPanResponderMove: (_event, gestureState) => {
+      const nextValue = Math.max(
+        -SPAM_ROW_ACTION_WIDTH,
+        Math.min(SPAM_ROW_ACTION_WIDTH, offsetRef.current + gestureState.dx)
+      );
+
+      translateX.setValue(nextValue);
+    },
+    onPanResponderRelease: (_event, gestureState) => {
+      const intendedDelete = gestureState.dx <= -CHAT_ROW_SWIPE_TRIGGER || gestureState.vx <= -0.18;
+      const intendedPutBack = gestureState.dx >= CHAT_ROW_SWIPE_TRIGGER || gestureState.vx >= 0.18;
+
+      closeSwipe();
+
+      if (intendedDelete) {
+        onDelete();
+        return;
+      }
+
+      if (intendedPutBack) {
+        onPutBack();
+      }
+    },
+    onPanResponderTerminate: closeSwipe,
+    onPanResponderTerminationRequest: () => false,
+    onStartShouldSetPanResponder: () => false
+  }), [isDeleting, onDelete, onPutBack, translateX]);
+
+  useEffect(() => {
+    closeSwipe();
+  }, [chat.contactId, chat.isSpam, isDeleting]);
 
   return (
-    <Pressable
-      accessibilityLabel={`Open Spam details for ${chat.title}`}
-      accessibilityRole="button"
-      onPress={onOpen}
-      style={({ pressed }) => [styles.spamChatRow, pressed && styles.pressed]}
-    >
-      <ProfileAvatar
-        headers={profilePhotoHeaders}
-        name={chat.title}
-        size={50}
-        uri={chat.profilePhotoUrl}
-      />
-
-      <View style={styles.spamChatText}>
-        <View style={styles.chatTitleRow}>
-          <Text numberOfLines={1} style={[styles.chatTitle, styles.chatListTitle]}>{chat.title}</Text>
-          {chat.isFavorite ? <Feather color="#F59E0B" name="star" size={13} /> : null}
+    <View style={styles.spamSwipeShell}>
+      <View style={styles.spamSwipeLeftActions}>
+        <View style={[styles.spamSwipeAction, styles.spamSwipePutBackAction]}>
+          <Feather color="#FFFFFF" name="rotate-ccw" size={20} />
+          <Text style={styles.chatSwipeActionText}>Put back</Text>
         </View>
-        <View style={styles.spamChatSubtitleRow}>
-          <Feather color="#8B95A5" name="slash" size={13} />
-          <Text numberOfLines={1} style={styles.spamChatSubtitle}>
-            {chat.chatType === 'GROUP' ? 'Group moved to Spam' : 'Chat moved to Spam'}
-          </Text>
-        </View>
-        {chat.preview ? (
-          <Text numberOfLines={1} style={styles.chatPreview}>{chat.preview}</Text>
-        ) : null}
       </View>
 
-      <View style={styles.spamChatMeta}>
-        {spamTime ? (
-          <Text style={styles.chatTime}>{formatChatListTime(spamTime)}</Text>
-        ) : null}
-        {chat.unreadCount > 0 ? (
-          <View style={styles.unreadBadge}>
-            <Text style={styles.unreadText}>{chat.unreadCount > 99 ? '99+' : chat.unreadCount}</Text>
-          </View>
-        ) : null}
+      <View style={styles.spamSwipeRightActions}>
+        <View style={[styles.spamSwipeAction, styles.spamSwipeDeleteAction]}>
+          <Feather color="#FFFFFF" name="trash-2" size={20} />
+          <Text style={styles.chatSwipeActionText}>Delete</Text>
+        </View>
+      </View>
+
+      <Animated.View
+        style={[
+          styles.chatSwipeContent,
+          { transform: [{ translateX }] }
+        ]}
+        {...panResponder.panHandlers}
+      >
         <Pressable
-          accessibilityLabel={`Permanently delete ${chat.title}`}
+          accessibilityLabel={`Open Spam details for ${chat.title}`}
           accessibilityRole="button"
-          disabled={isDeleting}
-          onPress={(event) => {
-            event.stopPropagation();
-            onDelete();
-          }}
-          style={({ pressed }) => [
-            styles.spamRowDeleteButton,
-            pressed && !isDeleting && styles.pressed,
-            isDeleting && styles.disabled
-          ]}
+          onPress={onOpen}
+          style={({ pressed }) => [styles.spamChatRow, pressed && styles.pressed]}
         >
-          <Feather color="#DC2626" name="trash-2" size={17} />
+          <ProfileAvatar
+            headers={profilePhotoHeaders}
+            name={chat.title}
+            size={50}
+            uri={chat.profilePhotoUrl}
+          />
+
+          <View style={styles.spamChatText}>
+            <View style={styles.chatTitleRow}>
+              <Text numberOfLines={1} style={[styles.chatTitle, styles.chatListTitle]}>{chat.title}</Text>
+              {chat.isFavorite ? <Feather color="#F59E0B" name="star" size={13} /> : null}
+            </View>
+            <View style={styles.spamChatSubtitleRow}>
+              <Feather color="#8B95A5" name="slash" size={13} />
+              <Text numberOfLines={1} style={styles.spamChatSubtitle}>
+                {chat.chatType === 'GROUP' ? 'Group moved to Spam' : 'Chat moved to Spam'}
+              </Text>
+            </View>
+            {chat.preview ? (
+              <Text numberOfLines={1} style={styles.chatPreview}>{chat.preview}</Text>
+            ) : null}
+          </View>
+
+          <View style={styles.spamChatMeta}>
+            {spamTime ? (
+              <Text style={styles.chatTime}>{formatChatListTime(spamTime)}</Text>
+            ) : null}
+            {chat.unreadCount > 0 ? (
+              <View style={styles.unreadBadge}>
+                <Text style={styles.unreadText}>{chat.unreadCount > 99 ? '99+' : chat.unreadCount}</Text>
+              </View>
+            ) : null}
+          </View>
         </Pressable>
-      </View>
-    </Pressable>
+      </Animated.View>
+    </View>
   );
 }
 
@@ -18154,13 +18257,39 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     minWidth: 62
   },
-  spamRowDeleteButton: {
+  spamSwipeShell: {
+    backgroundColor: '#FFFFFF',
+    minHeight: 76,
+    overflow: 'hidden',
+    position: 'relative'
+  },
+  spamSwipeLeftActions: {
+    bottom: 0,
+    flexDirection: 'row',
+    left: 0,
+    position: 'absolute',
+    top: 0,
+    width: SPAM_ROW_ACTION_WIDTH
+  },
+  spamSwipeRightActions: {
+    bottom: 0,
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    width: SPAM_ROW_ACTION_WIDTH
+  },
+  spamSwipeAction: {
     alignItems: 'center',
-    backgroundColor: '#FEF2F2',
-    borderRadius: 16,
-    height: 32,
     justifyContent: 'center',
-    width: 32
+    width: SPAM_ROW_ACTION_WIDTH
+  },
+  spamSwipePutBackAction: {
+    backgroundColor: '#16A34A'
+  },
+  spamSwipeDeleteAction: {
+    backgroundColor: '#DC2626'
   },
   chatFilterScroll: {
     marginHorizontal: -2
