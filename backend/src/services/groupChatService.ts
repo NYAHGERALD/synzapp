@@ -1841,6 +1841,12 @@ function buildGroupChatContact(
     lastMessageSentAtMs <= effectivePreference.clearedAtMs
   );
   const visibleLastMessageSentAtMs = isCleared ? null : lastMessageSentAtMs;
+  const isArchived = Boolean(
+    effectivePreference.isArchived &&
+    (!lastMessageSentAtMs ||
+      !effectivePreference.archivedAtMs ||
+      lastMessageSentAtMs <= effectivePreference.archivedAtMs)
+  );
 
   return {
     chatType: 'GROUP',
@@ -1850,7 +1856,7 @@ function buildGroupChatContact(
     displayName: name,
     hasActiveDevice: activeRecipientDeviceCount > 0,
     initials: getInitials(name),
-    isArchived: effectivePreference.isArchived,
+    isArchived,
     isDepartmentDefault: group.isDepartmentDefault === true,
     isFavorite: effectivePreference.isFavorite,
     isSpam: effectivePreference.isSpam,

@@ -1,8 +1,10 @@
+import type { Transaction } from 'firebase-admin/firestore';
 import { fieldValue, firestore } from '../config/firebaseAdmin.js';
 
 export type ChatPreferenceChatType = 'DIRECT' | 'GROUP';
 
 export interface ChatUserPreference {
+  archivedAtMs: number | null;
   chatType: ChatPreferenceChatType;
   clearedAtMs: number | null;
   contactId: string;
@@ -23,6 +25,7 @@ export interface UpdateChatUserPreferenceInput {
 }
 
 interface ChatUserPreferenceRecord {
+  archivedAtMs?: number | null;
   chatType?: ChatPreferenceChatType;
   clearedAtMs?: number | null;
   contactId?: string;
@@ -48,6 +51,7 @@ export function getDefaultChatUserPreference(
   contactId: string
 ): ChatUserPreference {
   return {
+    archivedAtMs: null,
     chatType,
     clearedAtMs: null,
     contactId,
@@ -127,6 +131,10 @@ export async function updateChatUserPreference(
   };
 
   if (typeof input.isArchived === 'boolean') {
+    const archivedAtMs = input.isArchived ? Date.now() : null;
+
+    update.archivedAt = input.isArchived ? fieldValue.serverTimestamp() : null;
+    update.archivedAtMs = archivedAtMs;
     update.isArchived = input.isArchived;
   }
 
@@ -140,11 +148,15 @@ export async function updateChatUserPreference(
     update.spammedAtMs = input.isSpam ? Date.now() : null;
 
     if (input.isSpam) {
+      update.archivedAt = null;
+      update.archivedAtMs = null;
       update.isArchived = false;
     }
   }
 
   if (input.clear) {
+    update.archivedAt = null;
+    update.archivedAtMs = null;
     update.clearedAt = fieldValue.serverTimestamp();
     update.clearedAtMs = Date.now();
     update.isArchived = false;
@@ -155,6 +167,8 @@ export async function updateChatUserPreference(
 
     update.clearedAt = fieldValue.serverTimestamp();
     update.clearedAtMs = deletedAtMs;
+    update.archivedAt = null;
+    update.archivedAtMs = null;
     update.isArchived = false;
     update.isFavorite = false;
     update.isSpam = false;
@@ -169,6 +183,25 @@ export async function updateChatUserPreference(
   return getChatUserPreference(tenantId, uid, chatType, contactId);
 }
 
+export function unarchiveChatUserPreferenceInTransaction(
+  transaction: Transaction,
+  tenantId: string,
+  uid: string,
+  chatType: ChatPreferenceChatType,
+  contactId: string
+): void {
+  transaction.set(getChatUserPreferenceRef(tenantId, uid, chatType, contactId), {
+    archivedAt: null,
+    archivedAtMs: null,
+    chatType,
+    contactId,
+    isArchived: false,
+    tenantId,
+    uid,
+    updatedAt: fieldValue.serverTimestamp()
+  }, { merge: true });
+}
+
 function normalizeChatUserPreference(
   tenantId: string,
   uid: string,
@@ -176,6 +209,9 @@ function normalizeChatUserPreference(
   contactId: string,
   record: ChatUserPreferenceRecord | null
 ): ChatUserPreference {
+  const archivedAtMs = Number.isFinite(record?.archivedAtMs)
+    ? Math.max(Math.round(record?.archivedAtMs || 0), 0)
+    : null;
   const clearedAtMs = Number.isFinite(record?.clearedAtMs)
     ? Math.max(Math.round(record?.clearedAtMs || 0), 0)
     : null;
@@ -184,6 +220,7 @@ function normalizeChatUserPreference(
     : null;
 
   return {
+    archivedAtMs,
     chatType,
     clearedAtMs,
     contactId,

@@ -936,6 +936,12 @@ function buildChatContact(
   );
   const visibleLastMessageSentAtMs = isCleared ? null : lastMessageSentAtMs;
   const unreadCount = isCleared ? 0 : directChat?.unreadCounts?.[currentUid] || 0;
+  const isArchived = Boolean(
+    effectivePreference.isArchived &&
+    (!lastMessageSentAtMs ||
+      !effectivePreference.archivedAtMs ||
+      lastMessageSentAtMs <= effectivePreference.archivedAtMs)
+  );
   const presence = getChatPresenceForUser(contactId);
 
   return {
@@ -945,7 +951,7 @@ function buildChatContact(
     displayName,
     hasActiveDevice,
     initials: getInitials(displayName),
-    isArchived: effectivePreference.isArchived,
+    isArchived,
     isFavorite: effectivePreference.isFavorite,
     isSpam: effectivePreference.isSpam,
     isOnline: presence.isOnline,
