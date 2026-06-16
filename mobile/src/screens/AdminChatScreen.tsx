@@ -6397,6 +6397,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
                 onSearchChange={setChatSearch}
                 profilePhotoHeaders={profilePhotoHeaders}
                 search={chatSearch}
+                spamCount={spamConversationChatItems.length}
                 unreadCount={unreadChatFilterCount}
               />
             )
@@ -10924,6 +10925,7 @@ function ChatsTab({
   onToggleFavoriteChat,
   profilePhotoHeaders,
   search,
+  spamCount,
   unreadCount
 }: {
   activeFilter: ChatListFilter;
@@ -10942,6 +10944,7 @@ function ChatsTab({
   onToggleFavoriteChat: (chat: ChatItem) => void;
   profilePhotoHeaders?: Record<string, string>;
   search: string;
+  spamCount: number;
   unreadCount: number;
 }) {
   return (
@@ -10982,12 +10985,14 @@ function ChatsTab({
             label="Groups"
             onPress={() => onChangeFilter('groups')}
           />
-          <ChatFilterChip
-            count={archivedCount}
-            isActive={activeFilter === 'archived'}
-            label="Archived"
-            onPress={() => onChangeFilter('archived')}
-          />
+          {archivedCount > 0 ? (
+            <ChatFilterChip
+              count={archivedCount}
+              isActive={activeFilter === 'archived'}
+              label="Archived"
+              onPress={() => onChangeFilter('archived')}
+            />
+          ) : null}
           <Pressable
             accessibilityLabel="Start new chat"
             accessibilityRole="button"
@@ -10999,16 +11004,20 @@ function ChatsTab({
           </Pressable>
         </ScrollView>
 
-        <ChatsUtilityRow
-          icon="message-circle"
-          label="Spam"
-          onPress={onOpenSpam}
-        />
-        <ChatsUtilityRow
-          icon="archive"
-          label="Archived"
-          onPress={onOpenArchived}
-        />
+        {spamCount > 0 ? (
+          <ChatsUtilityRow
+            icon="message-circle"
+            label="Spam"
+            onPress={onOpenSpam}
+          />
+        ) : null}
+        {archivedCount > 0 ? (
+          <ChatsUtilityRow
+            icon="archive"
+            label="Archived"
+            onPress={onOpenArchived}
+          />
+        ) : null}
       </View>
 
       {isLoading && !chats.length ? (
