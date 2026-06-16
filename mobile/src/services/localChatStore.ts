@@ -21,6 +21,13 @@ export interface LocalConversationRecord {
   version: 1;
 }
 
+export interface LocalChatContactListRecord {
+  contacts: ChatContact[];
+  ownerUid: string;
+  updatedAt: string;
+  version: 1;
+}
+
 export interface PendingChatMessage {
   attempts: number;
   chatType?: 'DIRECT' | 'GROUP';
@@ -36,12 +43,54 @@ export interface PendingChatMessage {
 }
 
 const LOCAL_CHAT_KEY_STORAGE_KEY = 'synzapp.localChatKey.v1';
+const LOCAL_CACHED_CHAT_CONTACT_LIMIT = 500;
 const LOCAL_CACHED_MESSAGE_LIMIT = 1000;
 const LOCAL_HIDDEN_MESSAGE_LIMIT = 5000;
 const localChatSecureStoreOptions: SecureStore.SecureStoreOptions = {
   keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
   keychainService: 'synzapp.local.chat.v1'
 };
+
+export async function loadCachedChatContacts(input: {
+  ownerUid: string;
+}): Promise<ChatContact[]> {
+  const encryptedValue = await AsyncStorage.getItem(getChatContactsStorageKey(input.ownerUid));
+
+  if (!encryptedValue) {
+    return [];
+  }
+
+  const record = await decryptJson<LocalChatContactListRecord>(encryptedValue);
+
+  if (!record || record.version !== 1 || record.ownerUid !== input.ownerUid) {
+    return [];
+  }
+
+  return normalizeCachedChatContacts(record.contacts);
+}
+
+export async function saveCachedChatContacts(input: {
+  contacts: ChatContact[];
+  ownerUid: string;
+}): Promise<void> {
+  const contacts = normalizeCachedChatContacts(input.contacts);
+
+  if (!contacts.length) {
+    return;
+  }
+
+  const record: LocalChatContactListRecord = {
+    contacts: contacts.slice(0, LOCAL_CACHED_CHAT_CONTACT_LIMIT),
+    ownerUid: input.ownerUid,
+    updatedAt: new Date().toISOString(),
+    version: 1
+  };
+
+  await AsyncStorage.setItem(
+    getChatContactsStorageKey(input.ownerUid),
+    await encryptJson(record)
+  );
+}
 
 export async function loadCachedChatConversation(input: {
   contactId: string;
@@ -409,8 +458,31 @@ function getOutboxStorageKey(ownerUid: string): string {
   return `synzapp.localOutbox.v1.${sanitizeStorageKey(ownerUid)}`;
 }
 
+function getChatContactsStorageKey(ownerUid: string): string {
+  return `synzapp.localChatContacts.v1.${sanitizeStorageKey(ownerUid)}`;
+}
+
 function sanitizeStorageKey(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120);
+}
+
+function normalizeCachedChatContacts(contacts: ChatContact[] | undefined): ChatContact[] {
+  const contactById = new Map<string, ChatContact>();
+
+  (contacts || []).forEach((contact) => {
+    if (!contact?.contactId) {
+      return;
+    }
+
+    const existingContact = contactById.get(contact.contactId);
+
+    contactById.set(contact.contactId, {
+      ...(existingContact || {}),
+      ...contact
+    });
+  });
+
+  return [...contactById.values()].slice(0, LOCAL_CACHED_CHAT_CONTACT_LIMIT);
 }
 
 function normalizeCachedConversationRecord(record: LocalConversationRecord): LocalConversationRecord {

@@ -142,11 +142,13 @@ import {
 import {
   enqueuePendingChatMessage,
   hideCachedChatMessagesForMe,
+  loadCachedChatContacts,
   listCachedChatConversations,
   listPendingChatMessages,
   loadCachedChatConversation,
   loadHiddenChatMessageIds,
   removePendingChatMessage,
+  saveCachedChatContacts,
   saveCachedChatConversation,
   updatePendingChatMessage
 } from '../services/localChatStore';
@@ -568,7 +570,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [addToGroupTargetsByContactId, setAddToGroupTargetsByContactId] = useState<Record<string, AddableChatGroup[]>>({});
   const [starredMessageIds, setStarredMessageIds] = useState<Record<string, boolean>>({});
   const [selectedChat, setSelectedChat] = useState<ChatItem | null>(null);
-  const [isLoadingChats, setIsLoadingChats] = useState(false);
+  const [isLoadingChats, setIsLoadingChats] = useState(true);
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
   const [isLoadingChatNotificationSettings, setIsLoadingChatNotificationSettings] = useState(false);
   const [isSavingChatNotificationSettings, setIsSavingChatNotificationSettings] = useState(false);
@@ -619,6 +621,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [error, setError] = useState<string | null>(null);
   const backupSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isBackupSyncingRef = useRef(false);
+  const chatContactCacheTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pushNotificationRegistrationStartedRef = useRef(false);
   const realtimePresenceTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const realtimeReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -842,7 +845,30 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   useEffect(() => {
     chatContactsRef.current = chatContacts;
     void syncSynzappUnreadBadgeCount(chatContacts).catch(() => undefined);
-  }, [chatContacts]);
+
+    if (!chatContacts.length) {
+      return;
+    }
+
+    if (chatContactCacheTimerRef.current) {
+      clearTimeout(chatContactCacheTimerRef.current);
+    }
+
+    chatContactCacheTimerRef.current = setTimeout(() => {
+      void saveCachedChatContacts({
+        contacts: chatContacts,
+        ownerUid: currentUid
+      }).catch(() => undefined);
+      chatContactCacheTimerRef.current = null;
+    }, 350);
+
+    return () => {
+      if (chatContactCacheTimerRef.current) {
+        clearTimeout(chatContactCacheTimerRef.current);
+        chatContactCacheTimerRef.current = null;
+      }
+    };
+  }, [chatContacts, currentUid]);
 
   useEffect(() => {
     if (!selectedChat) {
@@ -856,6 +882,10 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     if (backupSyncTimerRef.current) {
       clearTimeout(backupSyncTimerRef.current);
       backupSyncTimerRef.current = null;
+    }
+    if (chatContactCacheTimerRef.current) {
+      clearTimeout(chatContactCacheTimerRef.current);
+      chatContactCacheTimerRef.current = null;
     }
   }, []);
 
@@ -1575,24 +1605,27 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     const hadVisibleContacts = chatContactsRef.current.length > 0;
     let fallbackContacts = chatContactsRef.current;
 
-    if (!hadVisibleContacts) {
-      setIsLoadingChats(true);
-    }
-
     try {
-      const [cachedConversations, pendingMessages] = await Promise.all([
+      const [cachedChatContacts, cachedConversations, pendingMessages] = await Promise.all([
+        loadCachedChatContacts({ ownerUid: currentUid }).catch(() => []),
         listCachedChatConversations({ ownerUid: currentUid }).catch(() => []),
         listPendingChatMessages({ ownerUid: currentUid }).catch(() => [])
       ]);
-      const cachedContacts = buildLocalChatContactsFromCachedConversations(
+      const cachedConversationContacts = buildLocalChatContactsFromCachedConversations(
         cachedConversations,
         pendingMessages
+      );
+      const cachedContacts = mergeLoadedChatContactsWithVisibleState(
+        cachedChatContacts,
+        cachedConversationContacts
       );
 
       if (cachedContacts.length) {
         fallbackContacts = mergeLoadedChatContactsWithVisibleState(chatContactsRef.current, cachedContacts);
         setChatContacts(fallbackContacts);
         setIsLoadingChats(false);
+      } else if (!hadVisibleContacts) {
+        setIsLoadingChats(true);
       }
 
       const idToken = await getIdToken();
@@ -1608,17 +1641,22 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       );
 
       setProfilePhotoAuthToken(idToken);
-      setChatContacts((currentContacts) =>
-        mergeLoadedChatContactsWithVisibleState(currentContacts, contactsWithLocalPreviews)
+      const reconciledContacts = mergeLoadedChatContactsWithVisibleState(
+        fallbackContacts.length ? fallbackContacts : chatContactsRef.current,
+        contactsWithLocalPreviews
       );
+
+      setChatContacts(reconciledContacts);
 
       const contactsWithCachedPhotos = await cacheChatContactPhotos(contactsWithLocalPreviews, idToken);
-
-      setChatContacts((currentContacts) =>
-        mergeLoadedChatContactsWithVisibleState(currentContacts, contactsWithCachedPhotos)
+      const reconciledContactsWithPhotos = mergeLoadedChatContactsWithVisibleState(
+        reconciledContacts,
+        contactsWithCachedPhotos
       );
 
-      return contactsWithCachedPhotos;
+      setChatContacts(reconciledContactsWithPhotos);
+
+      return reconciledContactsWithPhotos;
     } catch (nextError) {
       if (showError && !isNetworkUnavailableError(nextError)) {
         setError(getErrorMessage(nextError, 'Unable to load chats.'));
@@ -10484,7 +10522,7 @@ function ChatsTab({
         />
       </View>
 
-      {isLoading ? (
+      {isLoading && !chats.length ? (
         <View style={styles.loadingRow}>
           <ActivityIndicator color={colors.primary} />
         </View>
@@ -16371,11 +16409,16 @@ function mergeLoadedChatContactsWithVisibleState(
 ): ChatContact[] {
   const currentContactById = new Map(currentContacts.map((contact) => [contact.contactId, contact]));
 
-  return sortChatContacts(loadedContacts.map((loadedContact) => {
+  loadedContacts.forEach((loadedContact) => {
     const currentContact = currentContactById.get(loadedContact.contactId);
 
-    return mergeChatContactVisibleState(currentContact, loadedContact);
-  }));
+    currentContactById.set(
+      loadedContact.contactId,
+      mergeChatContactVisibleState(currentContact, loadedContact)
+    );
+  });
+
+  return sortChatContacts([...currentContactById.values()]);
 }
 
 function mergeChatContactVisibleState(
