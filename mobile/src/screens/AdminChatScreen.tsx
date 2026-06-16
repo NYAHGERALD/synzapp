@@ -193,6 +193,7 @@ interface ChatItem {
   isArchived?: boolean;
   isDepartmentDefault?: boolean;
   isFavorite?: boolean;
+  isSpam?: boolean;
   isOnline: boolean;
   lastMessageAt: string | null;
   lastSeenAt: string | null;
@@ -203,6 +204,7 @@ interface ChatItem {
   profilePhotoUrl?: string | null;
   preview: string;
   roleName?: string;
+  spammedAt?: string | null;
   status?: string;
   title: string;
   unreadCount: number;
@@ -518,6 +520,9 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [chatContacts, setChatContacts] = useState<ChatContact[]>([]);
   const [chatListFilter, setChatListFilter] = useState<ChatListFilter>('all');
   const [chatSearch, setChatSearch] = useState('');
+  const [isSpamScreenOpen, setIsSpamScreenOpen] = useState(false);
+  const [spamActionTarget, setSpamActionTarget] = useState<ChatItem | null>(null);
+  const [isDeletingSpamChats, setIsDeletingSpamChats] = useState(false);
   const [isAiAssistantOpen, setIsAiAssistantOpen] = useState(false);
   const [aiAssistantDraft, setAiAssistantDraft] = useState('');
   const [isScreenKeyboardVisible, setIsScreenKeyboardVisible] = useState(false);
@@ -661,8 +666,9 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const directChatContacts = chatContacts.filter((contact) => (contact.chatType || 'DIRECT') !== 'GROUP');
   const groupChatContacts = chatContacts.filter((contact) => contact.chatType === 'GROUP');
   const visibleConversationChatItems = chatItems.filter(shouldShowChatInList);
-  const activeConversationChatItems = visibleConversationChatItems.filter((chat) => !chat.isArchived);
-  const archivedConversationChatItems = visibleConversationChatItems.filter((chat) => chat.isArchived);
+  const spamConversationChatItems = visibleConversationChatItems.filter((chat) => chat.isSpam === true);
+  const activeConversationChatItems = visibleConversationChatItems.filter((chat) => !chat.isArchived && chat.isSpam !== true);
+  const archivedConversationChatItems = visibleConversationChatItems.filter((chat) => chat.isArchived && chat.isSpam !== true);
   const unreadChatFilterCount = activeConversationChatItems.reduce((total, chat) => total + Math.max(chat.unreadCount || 0, 0), 0);
   const groupChatFilterCount = activeConversationChatItems.filter((chat) => chat.chatType === 'GROUP').length;
   const archivedChatFilterCount = archivedConversationChatItems.length;
@@ -705,6 +711,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     ),
     chatSearch
   );
+  const filteredSpamChatItems = filterChatItems(spamConversationChatItems, chatSearch);
   const selectedNewGroupMembers = directChatContacts.filter((contact) => selectedNewGroupMemberIds[contact.contactId]);
   const activeGroupMemberContacts = selectedChat?.chatType === 'GROUP'
     ? mapGroupMembersToSelectableContacts(selectedChat.members || [], directChatContacts, currentUid)
@@ -864,7 +871,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
   useEffect(() => {
     chatContactsRef.current = chatContacts;
-    void syncSynzappUnreadBadgeCount(chatContacts).catch(() => undefined);
+    void syncSynzappUnreadBadgeCount(chatContacts.filter((contact) => contact.isSpam !== true)).catch(() => undefined);
 
     if (!hasResolvedChatContactsRef.current) {
       return;
@@ -1735,7 +1742,10 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       failureMessage?: string;
       isArchived?: boolean;
       isFavorite?: boolean;
+      isSpam?: boolean;
       optimisticContact?: Partial<ChatContact>;
+      permanentDelete?: boolean;
+      removeFromList?: boolean;
     }
   ) {
     if (!canUseChatListActions(chat)) {
@@ -1760,14 +1770,19 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         contactId: chat.contactId,
         idToken,
         isArchived: input.isArchived,
-        isFavorite: input.isFavorite
+        isFavorite: input.isFavorite,
+        isSpam: input.isSpam,
+        permanentDelete: input.permanentDelete
       });
       const cachedContact = await cacheChatContactPhoto(updatedContact, idToken);
 
       setProfilePhotoAuthToken(idToken);
-      setChatContacts((currentContacts) => upsertChatContact(currentContacts, cachedContact));
+      setChatContacts((currentContacts) => input.removeFromList
+        ? currentContacts.filter((contact) => contact.contactId !== chat.contactId)
+        : upsertChatContact(currentContacts, cachedContact)
+      );
 
-      if (input.clear) {
+      if (input.clear || input.permanentDelete) {
         const cachedConversation = await loadCachedChatConversation({
           contactId: chat.contactId,
           ownerUid: currentUid
@@ -1839,18 +1854,21 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       return;
     }
 
+    if (mode === 'delete') {
+      handleMoveChatToSpam(chat);
+      return;
+    }
+
     Alert.alert(
-      mode === 'delete' ? 'Delete chat?' : 'Clear chat?',
-      mode === 'delete'
-        ? `${chat.title} will be removed from your chat list. New messages will still appear later.`
-        : `Messages in ${chat.title} will be cleared for you on this device and any future device.`,
+      'Clear chat?',
+      `Messages in ${chat.title} will be cleared for you on this device and any future device.`,
       [
         { style: 'cancel', text: 'Cancel' },
         {
           onPress: () => {
             void updateChatPreferenceAndApply(chat, {
               clear: true,
-              failureMessage: mode === 'delete' ? 'Unable to delete this chat for you.' : 'Unable to clear this chat for you.',
+              failureMessage: 'Unable to clear this chat for you.',
               optimisticContact: {
                 clearedAt: new Date().toISOString(),
                 isArchived: false,
@@ -1862,7 +1880,139 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
             setChatMoreActionTarget(null);
           },
           style: 'destructive',
-          text: mode === 'delete' ? 'Delete' : 'Clear'
+          text: 'Clear'
+        }
+      ]
+    );
+  }
+
+  function handleOpenSpamScreen() {
+    setIsSpamScreenOpen(true);
+    setChatListFilter('all');
+    setChatSearch('');
+    setError(null);
+  }
+
+  function handleCloseSpamScreen() {
+    setIsSpamScreenOpen(false);
+    setSpamActionTarget(null);
+    setChatSearch('');
+    setError(null);
+  }
+
+  function handleMoveChatToSpam(chat: ChatItem) {
+    if (!canUseChatListActions(chat)) {
+      return;
+    }
+
+    Alert.alert(
+      'Delete chat?',
+      `${chat.title} will move to Spam, where you can permanently delete it for your account.`,
+      [
+        { style: 'cancel', text: 'Cancel' },
+        {
+          onPress: () => {
+            const spammedAt = new Date().toISOString();
+
+            void updateChatPreferenceAndApply(chat, {
+              failureMessage: 'Unable to move this chat to Spam.',
+              isSpam: true,
+              optimisticContact: {
+                isArchived: false,
+                isSpam: true,
+                spammedAt,
+                unreadCount: 0
+              }
+            });
+            setChatMoreActionTarget(null);
+          },
+          style: 'destructive',
+          text: 'Delete'
+        }
+      ]
+    );
+  }
+
+  function handlePermanentDeleteSpamChat(chat: ChatItem) {
+    if (!canUseChatListActions(chat) || isDeletingSpamChats) {
+      return;
+    }
+
+    Alert.alert(
+      'Permanently delete?',
+      `${chat.title} will be deleted for your account and removed from Spam.`,
+      [
+        { style: 'cancel', text: 'Cancel' },
+        {
+          onPress: () => {
+            setIsDeletingSpamChats(true);
+            void updateChatPreferenceAndApply(chat, {
+              failureMessage: 'Unable to permanently delete this chat.',
+              optimisticContact: {
+                clearedAt: new Date().toISOString(),
+                isArchived: false,
+                isFavorite: false,
+                isSpam: false,
+                lastMessageAt: null,
+                preview: '',
+                spammedAt: null,
+                unreadCount: 0
+              },
+              permanentDelete: true,
+              removeFromList: true
+            }).finally(() => {
+              setIsDeletingSpamChats(false);
+              setSpamActionTarget(null);
+            });
+          },
+          style: 'destructive',
+          text: 'Delete'
+        }
+      ]
+    );
+  }
+
+  function handlePermanentDeleteAllSpamChats() {
+    const deletableSpamChats = spamConversationChatItems.filter(canUseChatListActions);
+
+    if (!deletableSpamChats.length || isDeletingSpamChats) {
+      return;
+    }
+
+    Alert.alert(
+      'Delete all Spam chats?',
+      'All chats in Spam will be permanently deleted for your account.',
+      [
+        { style: 'cancel', text: 'Cancel' },
+        {
+          onPress: async () => {
+            setIsDeletingSpamChats(true);
+
+            try {
+              await Promise.all(deletableSpamChats.map((chat) =>
+                updateChatPreferenceAndApply(chat, {
+                  failureMessage: 'Unable to permanently delete all Spam chats.',
+                  optimisticContact: {
+                    clearedAt: new Date().toISOString(),
+                    isArchived: false,
+                    isFavorite: false,
+                    isSpam: false,
+                    lastMessageAt: null,
+                    preview: '',
+                    spammedAt: null,
+                    unreadCount: 0
+                  },
+                  permanentDelete: true,
+                  removeFromList: true
+                })
+              ));
+              setSpamActionTarget(null);
+            } finally {
+              setIsDeletingSpamChats(false);
+            }
+          },
+          style: 'destructive',
+          text: 'Delete'
         }
       ]
     );
@@ -4740,6 +4890,8 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setError(null);
     setSelectedChat(null);
     setIsAiAssistantOpen(false);
+    setIsSpamScreenOpen(false);
+    setSpamActionTarget(null);
     setChatMoreActionTarget(null);
     setIsLoadingMessages(false);
     setIsContactInfoModalOpen(false);
@@ -6064,6 +6216,13 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         <BackHeader onBack={() => setSettingsScreen('list')} />
       ) : activeTab === 'You' ? (
         <YouHeaderActions />
+      ) : activeTab === 'Chats' && isSpamScreenOpen ? (
+        <SpamHeader
+          isDeleting={isDeletingSpamChats}
+          onBack={handleCloseSpamScreen}
+          onDelete={handlePermanentDeleteAllSpamChats}
+          spamCount={spamConversationChatItems.length}
+        />
       ) : (
         <HeaderActions
           activeTab={activeTab}
@@ -6083,7 +6242,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         />
       )}
 
-      {!selectedChat && !isAiAssistantOpen && activeTab !== 'You' ? (
+      {!selectedChat && !isAiAssistantOpen && activeTab !== 'You' && !(activeTab === 'Chats' && isSpamScreenOpen) ? (
         <Text style={styles.title}>
           {activeTab === 'Settings' && settingsScreen === 'directory'
             ? 'Departments and roles'
@@ -6176,27 +6335,40 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           style={styles.tabScroll}
         >
           {activeTab === 'Chats' ? (
-            <ChatsTab
-              activeFilter={chatListFilter}
-              archivedCount={archivedChatFilterCount}
-              chats={filteredChatItems}
-              groupCount={groupChatFilterCount}
-              isLoading={isLoadingChats}
-              onChangeFilter={setChatListFilter}
-              onArchiveChat={handleArchiveChat}
-              onMoreChat={setChatMoreActionTarget}
-              onToggleFavoriteChat={handleToggleFavoriteChat}
-              onOpenArchived={() => setChatListFilter('archived')}
-              onOpenChat={(chat) => {
-                void handleOpenChat(chat);
-              }}
-              onOpenNewChat={handleOpenNewChatModal}
-              onOpenSpam={() => handleChatsSectionUnavailableAction('Spam')}
-              onSearchChange={setChatSearch}
-              profilePhotoHeaders={profilePhotoHeaders}
-              search={chatSearch}
-              unreadCount={unreadChatFilterCount}
-            />
+            isSpamScreenOpen ? (
+              <SpamChatsScreen
+                chats={filteredSpamChatItems}
+                isDeleting={isDeletingSpamChats}
+                isLoading={isLoadingChats}
+                onDelete={handlePermanentDeleteSpamChat}
+                onOpenChat={setSpamActionTarget}
+                onSearchChange={setChatSearch}
+                profilePhotoHeaders={profilePhotoHeaders}
+                search={chatSearch}
+              />
+            ) : (
+              <ChatsTab
+                activeFilter={chatListFilter}
+                archivedCount={archivedChatFilterCount}
+                chats={filteredChatItems}
+                groupCount={groupChatFilterCount}
+                isLoading={isLoadingChats}
+                onChangeFilter={setChatListFilter}
+                onArchiveChat={handleArchiveChat}
+                onMoreChat={setChatMoreActionTarget}
+                onToggleFavoriteChat={handleToggleFavoriteChat}
+                onOpenArchived={() => setChatListFilter('archived')}
+                onOpenChat={(chat) => {
+                  void handleOpenChat(chat);
+                }}
+                onOpenNewChat={handleOpenNewChatModal}
+                onOpenSpam={handleOpenSpamScreen}
+                onSearchChange={setChatSearch}
+                profilePhotoHeaders={profilePhotoHeaders}
+                search={chatSearch}
+                unreadCount={unreadChatFilterCount}
+              />
+            )
           ) : null}
 
           {activeTab === 'Groups' ? (
@@ -6378,7 +6550,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         </Pressable>
       ) : null}
 
-      {!selectedChat && !isAiAssistantOpen && activeTab === 'Chats' && !isScreenKeyboardVisible ? (
+      {!selectedChat && !isAiAssistantOpen && activeTab === 'Chats' && !isSpamScreenOpen && !isScreenKeyboardVisible ? (
         <Pressable
           accessibilityLabel="Ask Synzapp AI"
           accessibilityRole="button"
@@ -6775,6 +6947,14 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         }}
         recoveryKey={recoveryKeyDraft}
         visible={isRecoveryKeyModalOpen}
+      />
+
+      <SpamChatStatusModal
+        chat={spamActionTarget}
+        isDeleting={isDeletingSpamChats}
+        onClose={() => setSpamActionTarget(null)}
+        onDelete={handlePermanentDeleteSpamChat}
+        profilePhotoHeaders={profilePhotoHeaders}
       />
 
       <ChatMoreActionsModal
@@ -10625,6 +10805,52 @@ function BackHeader({ onBack }: { onBack: () => void }) {
   );
 }
 
+function SpamHeader({
+  isDeleting,
+  onBack,
+  onDelete,
+  spamCount
+}: {
+  isDeleting: boolean;
+  onBack: () => void;
+  onDelete: () => void;
+  spamCount: number;
+}) {
+  return (
+    <View style={styles.spamHeader}>
+      <Pressable
+        android_ripple={androidIconRipple}
+        accessibilityLabel="Back to chats"
+        accessibilityRole="button"
+        onPress={onBack}
+        style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}
+      >
+        <Text style={styles.backButtonText}>‹</Text>
+      </Pressable>
+
+      <Text numberOfLines={1} style={styles.spamHeaderTitle}>Spam</Text>
+
+      <Pressable
+        accessibilityLabel="Delete Spam chats"
+        accessibilityRole="button"
+        disabled={isDeleting || spamCount === 0}
+        onPress={onDelete}
+        style={({ pressed }) => [
+          styles.spamHeaderDeleteButton,
+          pressed && spamCount > 0 && !isDeleting && styles.pressed,
+          (isDeleting || spamCount === 0) && styles.disabled
+        ]}
+      >
+        {isDeleting ? (
+          <ActivityIndicator color={colors.primary} size="small" />
+        ) : (
+          <Text style={styles.spamHeaderDeleteText}>Delete</Text>
+        )}
+      </Pressable>
+    </View>
+  );
+}
+
 function ChatSearchBar({
   onChangeText,
   placeholder,
@@ -10778,6 +11004,138 @@ function ChatsTab({
         />
       ))}
     </View>
+  );
+}
+
+function SpamChatsScreen({
+  chats,
+  isDeleting,
+  isLoading,
+  onDelete,
+  onOpenChat,
+  onSearchChange,
+  profilePhotoHeaders,
+  search
+}: {
+  chats: ChatItem[];
+  isDeleting: boolean;
+  isLoading: boolean;
+  onDelete: (chat: ChatItem) => void;
+  onOpenChat: (chat: ChatItem) => void;
+  onSearchChange: (value: string) => void;
+  profilePhotoHeaders?: Record<string, string>;
+  search: string;
+}) {
+  return (
+    <View style={styles.spamScreen}>
+      <ChatSearchBar
+        onChangeText={onSearchChange}
+        placeholder="Search Spam"
+        value={search}
+      />
+
+      <Text style={styles.spamDescription}>
+        Deleted chats and normal groups are kept here until you permanently delete them for your account.
+      </Text>
+
+      {isLoading && !chats.length ? (
+        <View style={styles.loadingRow}>
+          <ActivityIndicator color={colors.primary} />
+        </View>
+      ) : null}
+
+      {!isLoading && !chats.length ? (
+        <View style={styles.emptyState}>
+          <Text style={styles.emptyTitle}>{search.trim() ? 'No Spam chats found' : 'No Spam chats'}</Text>
+        </View>
+      ) : null}
+
+      {chats.map((chat) => (
+        <SpamChatRow
+          chat={chat}
+          isDeleting={isDeleting}
+          key={chat.id}
+          onDelete={() => onDelete(chat)}
+          onOpen={() => onOpenChat(chat)}
+          profilePhotoHeaders={profilePhotoHeaders}
+        />
+      ))}
+    </View>
+  );
+}
+
+function SpamChatRow({
+  chat,
+  isDeleting,
+  onDelete,
+  onOpen,
+  profilePhotoHeaders
+}: {
+  chat: ChatItem;
+  isDeleting: boolean;
+  onDelete: () => void;
+  onOpen: () => void;
+  profilePhotoHeaders?: Record<string, string>;
+}) {
+  const spamTime = chat.spammedAt || chat.lastMessageAt;
+
+  return (
+    <Pressable
+      accessibilityLabel={`Open Spam details for ${chat.title}`}
+      accessibilityRole="button"
+      onPress={onOpen}
+      style={({ pressed }) => [styles.spamChatRow, pressed && styles.pressed]}
+    >
+      <ProfileAvatar
+        headers={profilePhotoHeaders}
+        name={chat.title}
+        size={50}
+        uri={chat.profilePhotoUrl}
+      />
+
+      <View style={styles.spamChatText}>
+        <View style={styles.chatTitleRow}>
+          <Text numberOfLines={1} style={[styles.chatTitle, styles.chatListTitle]}>{chat.title}</Text>
+          {chat.isFavorite ? <Feather color="#F59E0B" name="star" size={13} /> : null}
+        </View>
+        <View style={styles.spamChatSubtitleRow}>
+          <Feather color="#8B95A5" name="slash" size={13} />
+          <Text numberOfLines={1} style={styles.spamChatSubtitle}>
+            {chat.chatType === 'GROUP' ? 'Group moved to Spam' : 'Chat moved to Spam'}
+          </Text>
+        </View>
+        {chat.preview ? (
+          <Text numberOfLines={1} style={styles.chatPreview}>{chat.preview}</Text>
+        ) : null}
+      </View>
+
+      <View style={styles.spamChatMeta}>
+        {spamTime ? (
+          <Text style={styles.chatTime}>{formatChatListTime(spamTime)}</Text>
+        ) : null}
+        {chat.unreadCount > 0 ? (
+          <View style={styles.unreadBadge}>
+            <Text style={styles.unreadText}>{chat.unreadCount > 99 ? '99+' : chat.unreadCount}</Text>
+          </View>
+        ) : null}
+        <Pressable
+          accessibilityLabel={`Permanently delete ${chat.title}`}
+          accessibilityRole="button"
+          disabled={isDeleting}
+          onPress={(event) => {
+            event.stopPropagation();
+            onDelete();
+          }}
+          style={({ pressed }) => [
+            styles.spamRowDeleteButton,
+            pressed && !isDeleting && styles.pressed,
+            isDeleting && styles.disabled
+          ]}
+        >
+          <Feather color="#DC2626" name="trash-2" size={17} />
+        </Pressable>
+      </View>
+    </Pressable>
   );
 }
 
@@ -14793,6 +15151,108 @@ function ChatMoreActionsModal({
   );
 }
 
+function SpamChatStatusModal({
+  chat,
+  isDeleting,
+  onClose,
+  onDelete,
+  profilePhotoHeaders
+}: {
+  chat: ChatItem | null;
+  isDeleting: boolean;
+  onClose: () => void;
+  onDelete: (chat: ChatItem) => void;
+  profilePhotoHeaders?: Record<string, string>;
+}) {
+  if (!chat) {
+    return null;
+  }
+
+  return (
+    <Modal
+      animationType="slide"
+      onRequestClose={onClose}
+      transparent
+      visible
+    >
+      <View style={styles.chatMoreRoot}>
+        <Pressable
+          accessibilityLabel="Close Spam details"
+          accessibilityRole="button"
+          onPress={onClose}
+          style={styles.chatMoreBackdrop}
+        />
+        <View style={styles.spamStatusSheet}>
+          <Pressable
+            accessibilityLabel="Close Spam details"
+            accessibilityRole="button"
+            onPress={onClose}
+            style={({ pressed }) => [styles.spamStatusCloseButton, pressed && styles.pressed]}
+          >
+            <Feather color={colors.ink} name="x" size={24} />
+          </Pressable>
+
+          <View style={styles.spamStatusAvatarWrap}>
+            <ProfileAvatar
+              headers={profilePhotoHeaders}
+              name={chat.title}
+              size={70}
+              uri={chat.profilePhotoUrl}
+            />
+            <View style={styles.spamStatusBadge}>
+              <Feather color="#DC2626" name="slash" size={18} />
+            </View>
+          </View>
+
+          <Text numberOfLines={2} style={styles.spamStatusTitle}>
+            {chat.chatType === 'GROUP' ? 'This group is in Spam' : 'This chat is in Spam'}
+          </Text>
+
+          <View style={styles.spamStatusInfoList}>
+            <View style={styles.spamStatusInfoRow}>
+              <Feather color="#64748B" name="eye-off" size={18} />
+              <Text style={styles.spamStatusInfoText}>
+                It is hidden from your active chat list and unread badge.
+              </Text>
+            </View>
+            <View style={styles.spamStatusInfoRow}>
+              <Feather color="#64748B" name="lock" size={18} />
+              <Text style={styles.spamStatusInfoText}>
+                Permanent delete only removes it for your account.
+              </Text>
+            </View>
+          </View>
+
+          <Pressable
+            accessibilityLabel="Close Spam details"
+            accessibilityRole="button"
+            onPress={onClose}
+            style={({ pressed }) => [styles.spamStatusOkButton, pressed && styles.pressed]}
+          >
+            <Text style={styles.spamStatusOkText}>OK</Text>
+          </Pressable>
+
+          <Pressable
+            accessibilityLabel={`Permanently delete ${chat.title}`}
+            accessibilityRole="button"
+            disabled={isDeleting}
+            onPress={() => onDelete(chat)}
+            style={({ pressed }) => [
+              styles.spamStatusDeleteButton,
+              pressed && !isDeleting && styles.pressed,
+              isDeleting && styles.disabled
+            ]}
+          >
+            <Text style={styles.spamStatusDeleteText}>
+              {isDeleting ? 'Deleting...' : chat.chatType === 'GROUP' ? 'Delete group' : 'Delete chat'}
+            </Text>
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 function ChatMoreActionRow({
   destructive,
   icon,
@@ -16202,6 +16662,7 @@ function mapChatContactToChatItem(contact: ChatContact): ChatItem {
     isArchived: contact.isArchived === true,
     isDepartmentDefault: contact.isDepartmentDefault === true,
     isFavorite: contact.isFavorite === true,
+    isSpam: contact.isSpam === true,
     isOnline: contact.isOnline === true,
     lastMessageAt: contact.lastMessageAt,
     lastSeenAt: contact.lastSeenAt,
@@ -16212,6 +16673,7 @@ function mapChatContactToChatItem(contact: ChatContact): ChatItem {
     preview: contact.preview,
     profilePhotoUrl: contact.profilePhotoUrl,
     roleName: contact.roleName,
+    spammedAt: contact.spammedAt || null,
     status: contact.status,
     title: contact.displayName,
     unreadCount: contact.unreadCount || 0
@@ -16536,6 +16998,7 @@ function applyChatListFilter(chats: ChatItem[], filter: ChatListFilter): ChatIte
 
 function shouldShowChatInList(chat: ChatItem): boolean {
   return Boolean(
+    chat.isSpam === true ||
     chat.preview.trim() ||
     chat.unreadCount > 0
   );
@@ -17052,6 +17515,7 @@ function getChatContactListFingerprint(contact: ChatContact): string {
     isArchived: contact.isArchived === true,
     isDepartmentDefault: contact.isDepartmentDefault === true,
     isFavorite: contact.isFavorite === true,
+    isSpam: contact.isSpam === true,
     isOnline: contact.isOnline === true,
     lastMessageAt: contact.lastMessageAt || null,
     lastSeenAt: contact.lastSeenAt || null,
@@ -17075,6 +17539,7 @@ function getChatContactListFingerprint(contact: ChatContact): string {
     profilePhotoUrl: contact.profilePhotoUrl || null,
     role: contact.role,
     roleName: contact.roleName,
+    spammedAt: contact.spammedAt || null,
     status: contact.status,
     unreadCount: contact.unreadCount || 0
   });
@@ -17580,6 +18045,35 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     minHeight: 38
   },
+  spamHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    minHeight: 44,
+    position: 'relative'
+  },
+  spamHeaderTitle: {
+    color: colors.ink,
+    flex: 1,
+    fontSize: 17,
+    fontWeight: '700',
+    lineHeight: 22,
+    textAlign: 'center'
+  },
+  spamHeaderDeleteButton: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    justifyContent: 'center',
+    minHeight: 36,
+    minWidth: 74,
+    paddingHorizontal: 14
+  },
+  spamHeaderDeleteText: {
+    color: colors.ink,
+    fontSize: 16,
+    fontWeight: '600',
+    lineHeight: 20
+  },
   rightActions: {
     alignItems: 'center',
     flexDirection: 'row',
@@ -17611,6 +18105,62 @@ const styles = StyleSheet.create({
     gap: 8,
     marginBottom: 2,
     paddingBottom: 8
+  },
+  spamScreen: {
+    gap: 6,
+    paddingTop: 2
+  },
+  spamDescription: {
+    color: '#8B95A5',
+    fontSize: 13,
+    fontWeight: '400',
+    lineHeight: 18,
+    paddingHorizontal: 16,
+    paddingVertical: 5,
+    textAlign: 'center'
+  },
+  spamChatRow: {
+    alignItems: 'center',
+    borderBottomColor: '#E5E7EB',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 10,
+    minHeight: 76,
+    paddingHorizontal: 4,
+    paddingVertical: 8
+  },
+  spamChatText: {
+    flex: 1,
+    gap: 2,
+    minWidth: 0
+  },
+  spamChatSubtitleRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 4,
+    minWidth: 0
+  },
+  spamChatSubtitle: {
+    color: '#8B95A5',
+    flexShrink: 1,
+    fontSize: 13,
+    fontStyle: 'italic',
+    fontWeight: '400',
+    lineHeight: 17
+  },
+  spamChatMeta: {
+    alignItems: 'flex-end',
+    gap: 5,
+    justifyContent: 'center',
+    minWidth: 62
+  },
+  spamRowDeleteButton: {
+    alignItems: 'center',
+    backgroundColor: '#FEF2F2',
+    borderRadius: 16,
+    height: 32,
+    justifyContent: 'center',
+    width: 32
   },
   chatFilterScroll: {
     marginHorizontal: -2
@@ -20094,6 +20644,102 @@ const styles = StyleSheet.create({
   },
   chatMoreActionTextDestructive: {
     color: '#DC2626'
+  },
+  spamStatusSheet: {
+    alignItems: 'center',
+    backgroundColor: '#F4F6F8',
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    paddingBottom: 24,
+    paddingHorizontal: 18,
+    paddingTop: 28,
+    shadowColor: '#0F172A',
+    shadowOffset: { height: -6, width: 0 },
+    shadowOpacity: 0.16,
+    shadowRadius: 18
+  },
+  spamStatusCloseButton: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 22,
+    height: 44,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: 14,
+    top: 14,
+    width: 44
+  },
+  spamStatusAvatarWrap: {
+    marginBottom: 14,
+    marginTop: 8,
+    position: 'relative'
+  },
+  spamStatusBadge: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderColor: '#F4F6F8',
+    borderRadius: 16,
+    borderWidth: 2,
+    bottom: -2,
+    height: 32,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: -8,
+    width: 32
+  },
+  spamStatusTitle: {
+    color: colors.ink,
+    fontSize: 20,
+    fontWeight: '700',
+    lineHeight: 25,
+    marginBottom: 18,
+    maxWidth: 300,
+    textAlign: 'center'
+  },
+  spamStatusInfoList: {
+    gap: 14,
+    marginBottom: 22,
+    width: '100%'
+  },
+  spamStatusInfoRow: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    gap: 12,
+    paddingHorizontal: 8
+  },
+  spamStatusInfoText: {
+    color: '#334155',
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '400',
+    lineHeight: 20
+  },
+  spamStatusOkButton: {
+    alignItems: 'center',
+    alignSelf: 'stretch',
+    backgroundColor: colors.primary,
+    borderRadius: 22,
+    justifyContent: 'center',
+    minHeight: 44,
+    marginBottom: 10
+  },
+  spamStatusOkText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+    lineHeight: 20
+  },
+  spamStatusDeleteButton: {
+    alignItems: 'center',
+    alignSelf: 'stretch',
+    justifyContent: 'center',
+    minHeight: 42
+  },
+  spamStatusDeleteText: {
+    color: '#DC2626',
+    fontSize: 16,
+    fontWeight: '700',
+    lineHeight: 20
   },
   employeeRole: {
     color: '#64748B',

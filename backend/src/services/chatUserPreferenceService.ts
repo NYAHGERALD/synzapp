@@ -8,6 +8,8 @@ export interface ChatUserPreference {
   contactId: string;
   isArchived: boolean;
   isFavorite: boolean;
+  isSpam: boolean;
+  spammedAtMs: number | null;
   tenantId: string;
   uid: string;
 }
@@ -16,6 +18,8 @@ export interface UpdateChatUserPreferenceInput {
   clear?: boolean;
   isArchived?: boolean;
   isFavorite?: boolean;
+  isSpam?: boolean;
+  permanentDelete?: boolean;
 }
 
 interface ChatUserPreferenceRecord {
@@ -24,6 +28,8 @@ interface ChatUserPreferenceRecord {
   contactId?: string;
   isArchived?: boolean;
   isFavorite?: boolean;
+  isSpam?: boolean;
+  spammedAtMs?: number | null;
   tenantId?: string;
   uid?: string;
 }
@@ -47,6 +53,8 @@ export function getDefaultChatUserPreference(
     contactId,
     isArchived: false,
     isFavorite: false,
+    isSpam: false,
+    spammedAtMs: null,
     tenantId,
     uid
   };
@@ -126,10 +134,34 @@ export async function updateChatUserPreference(
     update.isFavorite = input.isFavorite;
   }
 
+  if (typeof input.isSpam === 'boolean') {
+    update.isSpam = input.isSpam;
+    update.spammedAt = input.isSpam ? fieldValue.serverTimestamp() : null;
+    update.spammedAtMs = input.isSpam ? Date.now() : null;
+
+    if (input.isSpam) {
+      update.isArchived = false;
+    }
+  }
+
   if (input.clear) {
     update.clearedAt = fieldValue.serverTimestamp();
     update.clearedAtMs = Date.now();
     update.isArchived = false;
+  }
+
+  if (input.permanentDelete) {
+    const deletedAtMs = Date.now();
+
+    update.clearedAt = fieldValue.serverTimestamp();
+    update.clearedAtMs = deletedAtMs;
+    update.isArchived = false;
+    update.isFavorite = false;
+    update.isSpam = false;
+    update.permanentlyDeletedAt = fieldValue.serverTimestamp();
+    update.permanentlyDeletedAtMs = deletedAtMs;
+    update.spammedAt = null;
+    update.spammedAtMs = null;
   }
 
   await ref.set(update, { merge: true });
@@ -147,6 +179,9 @@ function normalizeChatUserPreference(
   const clearedAtMs = Number.isFinite(record?.clearedAtMs)
     ? Math.max(Math.round(record?.clearedAtMs || 0), 0)
     : null;
+  const spammedAtMs = Number.isFinite(record?.spammedAtMs)
+    ? Math.max(Math.round(record?.spammedAtMs || 0), 0)
+    : null;
 
   return {
     chatType,
@@ -154,6 +189,8 @@ function normalizeChatUserPreference(
     contactId,
     isArchived: record?.isArchived === true,
     isFavorite: record?.isFavorite === true,
+    isSpam: record?.isSpam === true,
+    spammedAtMs,
     tenantId,
     uid
   };

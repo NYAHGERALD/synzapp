@@ -22,6 +22,7 @@ export interface ChatContact {
   isArchived?: boolean;
   isDepartmentDefault?: boolean;
   isFavorite?: boolean;
+  isSpam?: boolean;
   isOnline: boolean;
   lastMessageAt: string | null;
   lastSeenAt: string | null;
@@ -35,6 +36,7 @@ export interface ChatContact {
   profilePhotoUrl: string | null;
   role: 'ORG_ADMIN' | 'DEPT_ADMIN' | 'EMPLOYEE' | 'SYSTEM_ADMIN';
   roleName: string;
+  spammedAt?: string | null;
   status: string;
   unreadCount: number;
 }
@@ -317,6 +319,8 @@ export async function updateChatPreference(input: {
   idToken: string;
   isArchived?: boolean;
   isFavorite?: boolean;
+  isSpam?: boolean;
+  permanentDelete?: boolean;
 }): Promise<ChatContact> {
   const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
   const path = input.chatType === 'GROUP'
@@ -326,7 +330,9 @@ export async function updateChatPreference(input: {
     body: JSON.stringify({
       clear: input.clear,
       isArchived: input.isArchived,
-      isFavorite: input.isFavorite
+      isFavorite: input.isFavorite,
+      isSpam: input.isSpam,
+      permanentDelete: input.permanentDelete
     }),
     headers: {
       Accept: 'application/json',
@@ -1029,6 +1035,7 @@ function normalizeChatContact(contact: ChatContact): ChatContact {
     isArchived: contact.isArchived === true,
     isDepartmentDefault: contact.isDepartmentDefault === true,
     isFavorite: contact.isFavorite === true,
+    isSpam: contact.isSpam === true,
     isOnline: contact.isOnline === true,
     lastSeenAt: typeof contact.lastSeenAt === 'string' ? contact.lastSeenAt : null,
     memberCount: Number.isFinite(contact.memberCount) ? Math.max(Math.round(contact.memberCount || 0), 0) : undefined,
@@ -1036,7 +1043,8 @@ function normalizeChatContact(contact: ChatContact): ChatContact {
     memberPolicy: contact.memberPolicy === 'DEPARTMENT_PLUS_EXPLICIT' ? 'DEPARTMENT_PLUS_EXPLICIT' : contact.memberPolicy === 'EXPLICIT' ? 'EXPLICIT' : undefined,
     messagePermissionMode: contact.messagePermissionMode === 'ADMINS' ? 'ADMINS' : contact.messagePermissionMode === 'ALL_MEMBERS' ? 'ALL_MEMBERS' : undefined,
     phoneMasked: typeof contact.phoneMasked === 'string' && contact.phoneMasked.trim() ? contact.phoneMasked.trim() : null,
-    profilePhotoUrl: normalizeSynzappApiUrl(contact.profilePhotoUrl)
+    profilePhotoUrl: normalizeSynzappApiUrl(contact.profilePhotoUrl),
+    spammedAt: typeof contact.spammedAt === 'string' ? contact.spammedAt : null
   };
 }
 

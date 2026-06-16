@@ -67,6 +67,7 @@ export interface ChatContact {
   initials: string;
   isArchived: boolean;
   isFavorite: boolean;
+  isSpam: boolean;
   isOnline: boolean;
   lastMessageAt: string | null;
   lastSeenAt: string | null;
@@ -76,6 +77,7 @@ export interface ChatContact {
   profilePhotoUrl: string | null;
   role: SynzappRole;
   roleName: string;
+  spammedAt: string | null;
   status: string;
   unreadCount: number;
 }
@@ -274,7 +276,8 @@ export async function updateDirectChatPreferenceForCurrentUser(
     input
   );
   const hasActiveDevice = await hasActiveDeviceForUser(chatContext.tenantId, chatContext.contactId);
-  const directChat = input.clear
+  const shouldResetUnread = input.clear === true || input.permanentDelete === true || input.isSpam === true;
+  const directChat = shouldResetUnread
     ? {
         ...(chatContext.directChat || {}),
         unreadCounts: {
@@ -284,7 +287,7 @@ export async function updateDirectChatPreferenceForCurrentUser(
       }
     : chatContext.directChat;
 
-  if (input.clear) {
+  if (shouldResetUnread) {
     await chatContext.chatRef.set({
       lastReadAtByUser: {
         [decodedToken.uid]: fieldValue.serverTimestamp()
@@ -944,6 +947,7 @@ function buildChatContact(
     initials: getInitials(displayName),
     isArchived: effectivePreference.isArchived,
     isFavorite: effectivePreference.isFavorite,
+    isSpam: effectivePreference.isSpam,
     isOnline: presence.isOnline,
     lastMessageAt: visibleLastMessageSentAtMs ? new Date(visibleLastMessageSentAtMs).toISOString() : null,
     lastSeenAt: presence.lastSeenAt,
@@ -955,6 +959,7 @@ function buildChatContact(
     profilePhotoUrl: getChatContactProfilePhotoUrl(contactId, user.profilePhotoStoragePath, user.profilePhotoVersion),
     role: user.role || 'EMPLOYEE',
     roleName,
+    spammedAt: effectivePreference.spammedAtMs ? new Date(effectivePreference.spammedAtMs).toISOString() : null,
     status: user.status || 'ACTIVE',
     unreadCount
   };

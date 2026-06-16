@@ -48,6 +48,7 @@ export interface GroupChatContact {
   isArchived: boolean;
   isDepartmentDefault: boolean;
   isFavorite: boolean;
+  isSpam: boolean;
   isOnline: boolean;
   lastMessageAt: string | null;
   lastSeenAt: string | null;
@@ -60,6 +61,7 @@ export interface GroupChatContact {
   profilePhotoUrl: string | null;
   role: SynzappRole;
   roleName: string;
+  spammedAt: string | null;
   status: string;
   tenantId: string;
   unreadCount: number;
@@ -1075,7 +1077,8 @@ export async function updateGroupChatPreferenceForCurrentUser(
     context.memberIds,
     decodedToken.uid
   );
-  const group = input.clear
+  const shouldResetUnread = input.clear === true || input.permanentDelete === true || input.isSpam === true;
+  const group = shouldResetUnread
     ? {
         ...context.group,
         unreadCounts: {
@@ -1085,7 +1088,7 @@ export async function updateGroupChatPreferenceForCurrentUser(
       }
     : context.group;
 
-  if (input.clear) {
+  if (shouldResetUnread) {
     await context.groupRef.set({
       lastReadAtByUser: {
         [decodedToken.uid]: fieldValue.serverTimestamp()
@@ -1850,6 +1853,7 @@ function buildGroupChatContact(
     isArchived: effectivePreference.isArchived,
     isDepartmentDefault: group.isDepartmentDefault === true,
     isFavorite: effectivePreference.isFavorite,
+    isSpam: effectivePreference.isSpam,
     isOnline: false,
     lastMessageAt: visibleLastMessageSentAtMs ? new Date(visibleLastMessageSentAtMs).toISOString() : null,
     lastSeenAt: null,
@@ -1862,6 +1866,7 @@ function buildGroupChatContact(
     profilePhotoUrl: null,
     role: 'EMPLOYEE',
     roleName: memberIds.length === 1 ? 'Group chat - 1 member' : `Group chat - ${memberIds.length} members`,
+    spammedAt: effectivePreference.spammedAtMs ? new Date(effectivePreference.spammedAtMs).toISOString() : null,
     status: group.status || 'ACTIVE',
     tenantId: group.tenantId || '',
     unreadCount: isCleared ? 0 : group.unreadCounts?.[currentUid] || 0

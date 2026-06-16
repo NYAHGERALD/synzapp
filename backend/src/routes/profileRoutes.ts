@@ -217,12 +217,16 @@ const chatTranscriptLanguageBodySchema = z.object({
 const chatPreferenceBodySchema = z.object({
   clear: z.boolean().optional(),
   isArchived: z.boolean().optional(),
-  isFavorite: z.boolean().optional()
+  isFavorite: z.boolean().optional(),
+  isSpam: z.boolean().optional(),
+  permanentDelete: z.boolean().optional()
 }).refine(
   (value) =>
     typeof value.clear === 'boolean' ||
     typeof value.isArchived === 'boolean' ||
-    typeof value.isFavorite === 'boolean',
+    typeof value.isFavorite === 'boolean' ||
+    typeof value.isSpam === 'boolean' ||
+    typeof value.permanentDelete === 'boolean',
   'At least one chat preference is required.'
 );
 
@@ -235,7 +239,9 @@ function getChatPreferenceAuditMetadata(
     ...(body.clear !== undefined ? { clear: body.clear === true } : {}),
     [idField]: idValue,
     ...(body.isArchived !== undefined ? { isArchived: body.isArchived } : {}),
-    ...(body.isFavorite !== undefined ? { isFavorite: body.isFavorite } : {})
+    ...(body.isFavorite !== undefined ? { isFavorite: body.isFavorite } : {}),
+    ...(body.isSpam !== undefined ? { isSpam: body.isSpam } : {}),
+    ...(body.permanentDelete !== undefined ? { permanentDelete: body.permanentDelete === true } : {})
   };
 }
 
