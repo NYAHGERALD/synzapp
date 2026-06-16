@@ -252,6 +252,7 @@ export interface EncryptedChatEnvelope {
   clientMessageId: string;
   deliveryStatus: Exclude<ChatDeliveryStatus, 'queued'> | null;
   encryptedKeyForDevice: string;
+  encryptedKeysForCurrentUser?: Record<string, string>;
   envelopeId: string;
   historyKeyRecipientDevices?: EncryptionDevicePublicKey[];
   keyVersion: number;
@@ -1607,10 +1608,28 @@ function normalizeEncryptedEnvelope(envelope: EncryptedChatEnvelope): EncryptedC
   return {
     ...envelope,
     deliveryStatus,
+    encryptedKeysForCurrentUser: normalizeEncryptedKeysForCurrentUser(envelope.encryptedKeysForCurrentUser),
     historyKeyRecipientDevices: Array.isArray(envelope.historyKeyRecipientDevices)
       ? envelope.historyKeyRecipientDevices.map(normalizeEncryptionDevicePublicKey).filter((device) => Boolean(device.deviceId))
       : undefined
   };
+}
+
+function normalizeEncryptedKeysForCurrentUser(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([deviceId, encryptedKey]) =>
+      typeof deviceId === 'string' &&
+      Boolean(deviceId.trim()) &&
+      typeof encryptedKey === 'string' &&
+      Boolean(encryptedKey.trim())
+    )
+    .map(([deviceId, encryptedKey]) => [deviceId.trim(), (encryptedKey as string).trim()]);
+
+  return entries.length ? Object.fromEntries(entries) : undefined;
 }
 
 function normalizeEncryptionDevicePublicKey(device: EncryptionDevicePublicKey): EncryptionDevicePublicKey {

@@ -65,6 +65,7 @@ export interface EncryptedDirectEnvelopeForDevice {
   clientMessageId: string;
   deliveryStatus: 'delivered' | 'read' | 'sent' | null;
   encryptedKeyForDevice: string;
+  encryptedKeysForCurrentUser?: Record<string, string>;
   envelopeId: string;
   keyVersion: number;
   nonce: string;
@@ -186,7 +187,13 @@ export async function listEncryptedDirectEnvelopesForDevice(
 
   const shouldMarkDelivered = options.markAsDelivered !== false;
   const shouldMarkRead = options.markAsRead !== false;
-  const preference = await getChatUserPreference(context.tenantId, decodedToken.uid, 'DIRECT', context.contactId);
+  const [preference, currentUserDevices] = await Promise.all([
+    getChatUserPreference(context.tenantId, decodedToken.uid, 'DIRECT', context.contactId),
+    listActiveDevicesForUser(context.tenantId, decodedToken.uid)
+  ]);
+  const currentUserDeviceIds = currentUserDevices
+    .map((device) => device.deviceId || '')
+    .filter(Boolean);
 
   const envelopesSnapshot = await context.chatRef
     .collection('encryptedEnvelopes')
@@ -200,18 +207,26 @@ export async function listEncryptedDirectEnvelopesForDevice(
     .map((doc) => {
       const record = doc.data() as EncryptedEnvelopeRecord;
       const encryptedKeyForDevice = record.encryptedKeysByDevice?.[deviceId];
+      const encryptedKeysForCurrentUser = pickEncryptedKeysForDevices(
+        record.encryptedKeysByDevice,
+        currentUserDeviceIds
+      );
+      const fallbackEncryptedKeyForDevice = encryptedKeyForDevice ||
+        Object.values(encryptedKeysForCurrentUser)[0] ||
+        '';
 
       if (preference.clearedAtMs && record.sentAtMs && record.sentAtMs <= preference.clearedAtMs) {
         return null;
       }
 
-      if (!encryptedKeyForDevice) {
+      if (!fallbackEncryptedKeyForDevice) {
         return null;
       }
 
       if (record.senderUid !== decodedToken.uid) {
-        const deliveredAtMs = record.deliveredAtMsByDevice?.[deviceId];
-        const readAtMs = record.readAtMsByDevice?.[deviceId];
+        const deliveryMarkerDeviceIds = getRecipientDeliveryMarkerDeviceIds(record, encryptedKeysForCurrentUser);
+        const deliveredByDevice = record.deliveredAtMsByDevice || {};
+        const readByDevice = record.readAtMsByDevice || {};
         const deliveryUpdate: {
           deliveredAtMsByDevice?: Record<string, number>;
           readAtMsByDevice?: Record<string, number>;
@@ -221,20 +236,41 @@ export async function listEncryptedDirectEnvelopesForDevice(
           updatedAt: fieldValue.serverTimestamp()
         };
 
-        if (shouldMarkDelivered && !deliveredAtMs) {
-          deliveryUpdate.deliveredAtMsByDevice = {
-            [deviceId]: nowMs
-          };
+        if (shouldMarkDelivered) {
+          const nextDeliveredAtMsByDevice = Object.fromEntries(
+            deliveryMarkerDeviceIds
+              .filter((markerDeviceId) => !deliveredByDevice[markerDeviceId])
+              .map((markerDeviceId) => [markerDeviceId, nowMs])
+          );
+
+          if (Object.keys(nextDeliveredAtMsByDevice).length) {
+            deliveryUpdate.deliveredAtMsByDevice = nextDeliveredAtMsByDevice;
+          }
           deliveryUpdate.status = 'DELIVERED';
         }
 
-        if (shouldMarkRead && !readAtMs) {
-          deliveryUpdate.deliveredAtMsByDevice = {
-            [deviceId]: deliveredAtMs || nowMs
-          };
-          deliveryUpdate.readAtMsByDevice = {
-            [deviceId]: nowMs
-          };
+        if (shouldMarkRead) {
+          const nextDeliveredAtMsByDevice = Object.fromEntries(
+            deliveryMarkerDeviceIds
+              .filter((markerDeviceId) => !deliveredByDevice[markerDeviceId])
+              .map((markerDeviceId) => [markerDeviceId, nowMs])
+          );
+          const nextReadAtMsByDevice = Object.fromEntries(
+            deliveryMarkerDeviceIds
+              .filter((markerDeviceId) => !readByDevice[markerDeviceId])
+              .map((markerDeviceId) => [markerDeviceId, nowMs])
+          );
+
+          if (Object.keys(nextDeliveredAtMsByDevice).length) {
+            deliveryUpdate.deliveredAtMsByDevice = {
+              ...(deliveryUpdate.deliveredAtMsByDevice || {}),
+              ...nextDeliveredAtMsByDevice
+            };
+          }
+
+          if (Object.keys(nextReadAtMsByDevice).length) {
+            deliveryUpdate.readAtMsByDevice = nextReadAtMsByDevice;
+          }
           deliveryUpdate.status = 'READ';
         }
 
@@ -244,7 +280,13 @@ export async function listEncryptedDirectEnvelopesForDevice(
         }
       }
 
-      return mapEncryptedEnvelopeForDevice(decodedToken.uid, deviceId, doc.id, record, encryptedKeyForDevice);
+      return mapEncryptedEnvelopeForDevice(
+        decodedToken.uid,
+        doc.id,
+        record,
+        fallbackEncryptedKeyForDevice,
+        encryptedKeysForCurrentUser
+      );
     })
     .filter((envelope): envelope is EncryptedDirectEnvelopeForDevice => Boolean(envelope));
 
@@ -493,10 +535,10 @@ function mapDevicePublicKey(device: DeviceKeyRecord): EncryptionDevicePublicKey 
 
 function mapEncryptedEnvelopeForDevice(
   currentUid: string,
-  deviceId: string,
   fallbackId: string,
   record: EncryptedEnvelopeRecord,
-  encryptedKeyForDevice: string
+  encryptedKeyForDevice: string,
+  encryptedKeysForCurrentUser?: Record<string, string>
 ): EncryptedDirectEnvelopeForDevice {
   const sentAtMs = record.sentAtMs || Date.now();
 
@@ -506,6 +548,9 @@ function mapEncryptedEnvelopeForDevice(
     clientMessageId: record.clientMessageId || fallbackId,
     deliveryStatus: getEnvelopeDeliveryStatus(currentUid, record),
     encryptedKeyForDevice,
+    ...(encryptedKeysForCurrentUser && Object.keys(encryptedKeysForCurrentUser).length
+      ? { encryptedKeysForCurrentUser }
+      : {}),
     envelopeId: record.envelopeId || fallbackId,
     keyVersion: record.keyVersion || 1,
     nonce: record.nonce || '',
@@ -514,6 +559,37 @@ function mapEncryptedEnvelopeForDevice(
     senderUid: record.senderUid || '',
     sentAt: new Date(sentAtMs).toISOString()
   };
+}
+
+function pickEncryptedKeysForDevices(
+  encryptedKeysByDevice: Record<string, string> | undefined,
+  deviceIds: string[]
+): Record<string, string> {
+  if (!encryptedKeysByDevice || !deviceIds.length) {
+    return {};
+  }
+
+  const keys: Record<string, string> = {};
+
+  deviceIds.forEach((deviceId) => {
+    const encryptedKey = encryptedKeysByDevice[deviceId];
+
+    if (encryptedKey) {
+      keys[deviceId] = encryptedKey;
+    }
+  });
+
+  return keys;
+}
+
+function getRecipientDeliveryMarkerDeviceIds(
+  record: EncryptedEnvelopeRecord,
+  encryptedKeysForCurrentUser: Record<string, string>
+): string[] {
+  const recipientDeviceIds = new Set(record.recipientDeviceIds || []);
+
+  return Object.keys(encryptedKeysForCurrentUser)
+    .filter((deviceId) => recipientDeviceIds.has(deviceId));
 }
 
 function getEnvelopeDeliveryStatus(

@@ -222,6 +222,7 @@ export async function decryptChatEnvelopes(input: {
     });
 
     if (!decryptedPayload) {
+      logChatDecryptFailure(envelope);
       return null;
     }
 
@@ -335,8 +336,30 @@ function decryptMessageKeyForEnvelope(input: {
   envelope: EncryptedChatEnvelope;
   localDevicePrivateKey: Uint8Array;
 }): Uint8Array | null {
+  const encryptedKeys = getEnvelopeEncryptedKeyCandidates(input.envelope);
+
+  for (const encryptedKey of encryptedKeys) {
+    const messageKey = decryptMessageKeyCandidate(
+      input.envelope,
+      encryptedKey,
+      input.localDevicePrivateKey
+    );
+
+    if (messageKey) {
+      return messageKey;
+    }
+  }
+
+  return null;
+}
+
+function decryptMessageKeyCandidate(
+  envelope: EncryptedChatEnvelope,
+  encryptedKeyForDevice: string,
+  localDevicePrivateKey: Uint8Array
+): Uint8Array | null {
   try {
-    const keyPayload = JSON.parse(input.envelope.encryptedKeyForDevice) as Partial<EncryptedKeyPayload>;
+    const keyPayload = JSON.parse(encryptedKeyForDevice) as Partial<EncryptedKeyPayload>;
 
     if (keyPayload.version !== 1 || !keyPayload.ciphertext || !keyPayload.nonce) {
       return null;
@@ -345,12 +368,35 @@ function decryptMessageKeyForEnvelope(input: {
     return nacl.box.open(
       toByteArray(keyPayload.ciphertext),
       toByteArray(keyPayload.nonce),
-      toByteArray(input.envelope.senderKeyAgreementPublicKey),
-      input.localDevicePrivateKey
+      toByteArray(envelope.senderKeyAgreementPublicKey),
+      localDevicePrivateKey
     );
   } catch {
     return null;
   }
+}
+
+function getEnvelopeEncryptedKeyCandidates(envelope: EncryptedChatEnvelope): string[] {
+  const candidates = [
+    envelope.encryptedKeyForDevice,
+    ...Object.values(envelope.encryptedKeysForCurrentUser || {})
+  ].filter((encryptedKey) => typeof encryptedKey === 'string' && Boolean(encryptedKey.trim()));
+
+  return Array.from(new Set(candidates));
+}
+
+function logChatDecryptFailure(envelope: EncryptedChatEnvelope): void {
+  if (typeof __DEV__ === 'undefined' || !__DEV__) {
+    return;
+  }
+
+  console.warn('Unable to decrypt Synzapp chat envelope', {
+    candidateKeyCount: getEnvelopeEncryptedKeyCandidates(envelope).length,
+    envelopeId: envelope.envelopeId,
+    senderDeviceId: envelope.senderDeviceId,
+    senderUid: envelope.senderUid,
+    sentAt: envelope.sentAt
+  });
 }
 
 function parseDecryptedTextPayload(value: string): EncryptedChatPayload | null {
