@@ -73,6 +73,18 @@ export interface EncryptedDirectEnvelopeForDevice {
   sentAt: string;
 }
 
+export function buildDirectChatParticipantData(currentUid: string, contactId: string): {
+  participantIds: string[];
+  participants: Record<string, true>;
+} {
+  const participantIds = [currentUid, contactId].sort();
+
+  return {
+    participantIds,
+    participants: Object.fromEntries(participantIds.map((participantId) => [participantId, true]))
+  };
+}
+
 interface OrganizationRecord {
   status?: string;
 }
@@ -302,21 +314,14 @@ export async function sendEncryptedDirectEnvelope(
   const envelopeRef = context.chatRef.collection('encryptedEnvelopes').doc();
   const messageMetadataRef = context.chatRef.collection('messageMetadata').doc(envelopeRef.id);
   const sentAtMs = Date.now();
-  const participantIds = [decodedToken.uid, context.contactId].sort();
+  const { participantIds, participants } = buildDirectChatParticipantData(decodedToken.uid, context.contactId);
 
   await firestore.runTransaction(async (transaction) => {
     const chatSnapshot = await transaction.get(context.chatRef);
     const chatCreateData = chatSnapshot.exists
       ? {}
       : {
-          chatId: context.chatId,
-          createdAt: fieldValue.serverTimestamp(),
-          participantIds,
-          participants: {
-            [participantIds[0]]: true,
-            [participantIds[1]]: true
-          },
-          tenantId: context.tenantId
+          createdAt: fieldValue.serverTimestamp()
         };
 
     if (shouldUnarchiveDirectChatOnNewMessage(senderArchiveSettings)) {
@@ -383,13 +388,17 @@ export async function sendEncryptedDirectEnvelope(
 
     transaction.set(context.chatRef, {
       ...chatCreateData,
+      chatId: context.chatId,
       encryptionMode: 'E2EE',
       lastEncryptedEnvelopeId: envelopeRef.id,
       lastMessageId: envelopeRef.id,
       lastMessageSenderUid: decodedToken.uid,
       lastMessageSentAtMs: sentAtMs,
       lastMessageText: null,
+      participantIds,
+      participants,
       serverEnvelopeExpiresAtMs: null,
+      tenantId: context.tenantId,
       unreadCounts: {
         [decodedToken.uid]: 0,
         [context.contactId]: fieldValue.increment(1)

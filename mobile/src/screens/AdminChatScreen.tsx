@@ -196,8 +196,10 @@ interface ChatItem {
   chatType: 'DIRECT' | 'GROUP';
   clearedAt?: string | null;
   contactId: string;
+  conversationId: string;
   hasActiveDevice: boolean;
   id: string;
+  initials: string;
   isArchived?: boolean;
   isDepartmentDefault?: boolean;
   isFavorite?: boolean;
@@ -209,8 +211,10 @@ interface ChatItem {
   members?: ChatGroupMember[];
   memberPolicy?: 'DEPARTMENT_PLUS_EXPLICIT' | 'EXPLICIT';
   phoneMasked?: string | null;
+  profilePhotoCacheKey?: string | null;
   profilePhotoUrl?: string | null;
   preview: string;
+  role?: ChatContact['role'];
   roleName?: string;
   spammedAt?: string | null;
   status?: string;
@@ -4029,7 +4033,32 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setChatContacts((currentContacts) => upsertChatContact(currentContacts, contactWithLocalPreview));
   }
 
-  function addVisibleLocalMessage(contactId: string, message: ChatMessage) {
+  async function saveOptimisticLocalMessage(chat: ChatItem, message: ChatMessage) {
+    const cachedConversation = await loadCachedChatConversation({
+      contactId: chat.contactId,
+      ownerUid: currentUid
+    }).catch(() => null);
+    const nextMessages = uniqueChatMessages([
+      ...(cachedConversation?.messages || []),
+      message
+    ]);
+    const fallbackContact = mapChatItemToChatContact(chat);
+    const contactWithLocalPreview = applyLocalChatPreview(
+      cachedConversation?.contact || fallbackContact,
+      nextMessages
+    );
+
+    await saveCachedChatConversation({
+      contact: contactWithLocalPreview,
+      contactId: chat.contactId,
+      messages: nextMessages,
+      ownerUid: currentUid
+    });
+  }
+
+  function addVisibleLocalMessage(chat: ChatItem, message: ChatMessage) {
+    const contactId = chat.contactId;
+
     if (selectedChatRef.current?.contactId === contactId) {
       setMessages((currentMessages) => uniqueChatMessages([...currentMessages, message]));
       setSelectedChat((currentChat) => currentChat?.contactId === contactId
@@ -4042,15 +4071,16 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     }
 
     setChatContacts((currentContacts) => {
-      const contact = currentContacts.find((currentContact) => currentContact.contactId === contactId);
+      const contact = currentContacts.find((currentContact) => currentContact.contactId === contactId) ||
+        mapChatItemToChatContact(chat);
 
-      return contact
-        ? upsertChatContact(currentContacts, applyLocalChatPreview(contact, [message]))
-        : currentContacts;
+      return upsertChatContact(currentContacts, applyLocalChatPreview(contact, [message]));
     });
   }
 
-  function replaceVisibleLocalMessage(contactId: string, messageId: string, replacement: ChatMessage) {
+  function replaceVisibleLocalMessage(chat: ChatItem, messageId: string, replacement: ChatMessage) {
+    const contactId = chat.contactId;
+
     if (selectedChatRef.current?.contactId === contactId) {
       setMessages((currentMessages) => uniqueChatMessages(currentMessages.map((message) =>
         message.messageId === messageId ? replacement : message
@@ -4065,11 +4095,10 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     }
 
     setChatContacts((currentContacts) => {
-      const contact = currentContacts.find((currentContact) => currentContact.contactId === contactId);
+      const contact = currentContacts.find((currentContact) => currentContact.contactId === contactId) ||
+        mapChatItemToChatContact(chat);
 
-      return contact
-        ? upsertChatContact(currentContacts, applyLocalChatPreview(contact, [replacement]))
-        : currentContacts;
+      return upsertChatContact(currentContacts, applyLocalChatPreview(contact, [replacement]));
     });
   }
 
@@ -4535,7 +4564,8 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       setMessageDraft('');
     }
     setReplyTarget(null);
-    addVisibleLocalMessage(activeChat.contactId, optimisticMessage);
+    addVisibleLocalMessage(activeChat, optimisticMessage);
+    await saveOptimisticLocalMessage(activeChat, optimisticMessage).catch(() => undefined);
     activeLocalSendQueueIdsRef.current.add(pendingMessage.queueId);
 
     try {
@@ -4609,7 +4639,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           queueId: pendingMessage.queueId,
           status: 'failed'
         });
-        replaceVisibleLocalMessage(activeChat.contactId, pendingMessage.queueId, pendingMessage.message);
+        replaceVisibleLocalMessage(activeChat, pendingMessage.queueId, pendingMessage.message);
         return;
       }
 
@@ -17651,8 +17681,10 @@ function mapChatContactToChatItem(contact: ChatContact): ChatItem {
     chatType: contact.chatType === 'GROUP' ? 'GROUP' : 'DIRECT',
     clearedAt: contact.clearedAt || null,
     contactId: contact.contactId,
+    conversationId: contact.conversationId,
     hasActiveDevice: contact.hasActiveDevice,
     id: `${contact.chatType === 'GROUP' ? 'group' : 'contact'}-${contact.contactId}`,
+    initials: contact.initials,
     isArchived: contact.isArchived === true,
     isDepartmentDefault: contact.isDepartmentDefault === true,
     isFavorite: contact.isFavorite === true,
@@ -17664,13 +17696,46 @@ function mapChatContactToChatItem(contact: ChatContact): ChatItem {
     members: contact.members,
     memberPolicy: contact.memberPolicy,
     phoneMasked: contact.phoneMasked || null,
+    profilePhotoCacheKey: contact.profilePhotoCacheKey,
     preview: contact.preview || '',
     profilePhotoUrl: contact.profilePhotoUrl,
+    role: contact.role,
     roleName: contact.roleName,
     spammedAt: contact.spammedAt || null,
     status: contact.status,
     title: contact.displayName,
     unreadCount: contact.unreadCount || 0
+  };
+}
+
+function mapChatItemToChatContact(chat: ChatItem): ChatContact {
+  return {
+    chatType: chat.chatType,
+    clearedAt: chat.clearedAt || null,
+    contactId: chat.contactId,
+    conversationId: chat.conversationId,
+    displayName: chat.title,
+    hasActiveDevice: chat.hasActiveDevice,
+    initials: chat.initials || getInitials(chat.title),
+    isArchived: chat.isArchived === true,
+    isDepartmentDefault: chat.isDepartmentDefault === true,
+    isFavorite: chat.isFavorite === true,
+    isSpam: chat.isSpam === true,
+    isOnline: chat.isOnline === true,
+    lastMessageAt: chat.lastMessageAt,
+    lastSeenAt: chat.lastSeenAt,
+    memberCount: chat.memberCount,
+    members: chat.members,
+    memberPolicy: chat.memberPolicy,
+    phoneMasked: chat.phoneMasked || null,
+    preview: chat.preview || '',
+    profilePhotoCacheKey: chat.profilePhotoCacheKey || null,
+    profilePhotoUrl: chat.profilePhotoUrl || null,
+    role: chat.role || 'EMPLOYEE',
+    roleName: chat.roleName || '',
+    spammedAt: chat.spammedAt || null,
+    status: chat.status || 'ACTIVE',
+    unreadCount: chat.unreadCount || 0
   };
 }
 
