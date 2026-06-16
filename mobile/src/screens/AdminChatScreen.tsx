@@ -11610,8 +11610,8 @@ function ArchiveSelectableChatRow({
           <Text numberOfLines={1} style={[styles.chatTitle, styles.chatListTitle]}>{chat.title}</Text>
           {chat.isFavorite ? <Feather color="#F59E0B" name="star" size={13} /> : null}
         </View>
-        {chat.preview ? (
-          <Text numberOfLines={2} style={styles.chatPreview}>{chat.preview}</Text>
+        {getChatListPreviewText(chat) ? (
+          <Text numberOfLines={2} style={styles.chatPreview}>{getChatListPreviewText(chat)}</Text>
         ) : null}
       </View>
 
@@ -12105,8 +12105,8 @@ function SpamChatRow({
                 {chat.chatType === 'GROUP' ? 'Group moved to Spam' : 'Chat moved to Spam'}
               </Text>
             </View>
-            {chat.preview ? (
-              <Text numberOfLines={1} style={styles.chatPreview}>{chat.preview}</Text>
+            {getChatListPreviewText(chat) ? (
+              <Text numberOfLines={1} style={styles.chatPreview}>{getChatListPreviewText(chat)}</Text>
             ) : null}
           </View>
 
@@ -16034,8 +16034,8 @@ function ChatRow({
               <Text numberOfLines={1} style={[styles.chatTitle, styles.chatListTitle]}>{chat.title}</Text>
               {chat.isFavorite ? <Feather color="#F59E0B" name="star" size={13} /> : null}
             </View>
-            {chat.preview ? (
-              <Text numberOfLines={2} style={styles.chatPreview}>{chat.preview}</Text>
+            {getChatListPreviewText(chat) ? (
+              <Text numberOfLines={2} style={styles.chatPreview}>{getChatListPreviewText(chat)}</Text>
             ) : !chat.hasActiveDevice ? (
               <Text numberOfLines={1} style={styles.chatPreview}>Waiting for secure device</Text>
             ) : null}
@@ -17664,7 +17664,7 @@ function mapChatContactToChatItem(contact: ChatContact): ChatItem {
     members: contact.members,
     memberPolicy: contact.memberPolicy,
     phoneMasked: contact.phoneMasked || null,
-    preview: contact.preview,
+    preview: contact.preview || '',
     profilePhotoUrl: contact.profilePhotoUrl,
     roleName: contact.roleName,
     spammedAt: contact.spammedAt || null,
@@ -17993,9 +17993,20 @@ function applyChatListFilter(chats: ChatItem[], filter: ChatListFilter): ChatIte
 function shouldShowChatInList(chat: ChatItem): boolean {
   return Boolean(
     chat.isSpam === true ||
+    chat.lastMessageAt ||
     chat.preview.trim() ||
     chat.unreadCount > 0
   );
+}
+
+function getChatListPreviewText(chat: ChatItem): string {
+  const preview = chat.preview.trim();
+
+  if (preview) {
+    return preview;
+  }
+
+  return chat.lastMessageAt ? 'Message' : '';
 }
 
 function isFavoriteChat(chat: ChatItem): boolean {
