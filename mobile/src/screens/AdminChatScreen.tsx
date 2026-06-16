@@ -640,6 +640,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const activeMediaDownloadPromisesRef = useRef<Map<string, Promise<string | null>>>(new Map());
   const chatContactsRef = useRef<ChatContact[]>([]);
   const chatOpenRequestIdRef = useRef(0);
+  const hasResolvedChatContactsRef = useRef(false);
   const realtimeReadyRef = useRef(false);
   const realtimeSocketRef = useRef<WebSocket | null>(null);
   const selectedChatRef = useRef<ChatItem | null>(null);
@@ -865,7 +866,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     chatContactsRef.current = chatContacts;
     void syncSynzappUnreadBadgeCount(chatContacts).catch(() => undefined);
 
-    if (!chatContacts.length) {
+    if (!chatContacts.length && !hasResolvedChatContactsRef.current) {
       return;
     }
 
@@ -1636,11 +1637,17 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       );
       const cachedContacts = mergeLoadedChatContactsWithVisibleState(
         cachedChatContacts,
-        cachedConversationContacts
+        cachedConversationContacts,
+        { preserveMissing: true }
       );
 
       if (cachedContacts.length) {
-        fallbackContacts = mergeLoadedChatContactsWithVisibleState(chatContactsRef.current, cachedContacts);
+        fallbackContacts = mergeLoadedChatContactsWithVisibleState(
+          chatContactsRef.current,
+          cachedContacts,
+          { preserveMissing: true }
+        );
+        hasResolvedChatContactsRef.current = true;
         setChatContacts(fallbackContacts);
         setIsLoadingChats(false);
       } else if (!hadVisibleContacts) {
@@ -1662,15 +1669,18 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       setProfilePhotoAuthToken(idToken);
       const reconciledContacts = mergeLoadedChatContactsWithVisibleState(
         fallbackContacts.length ? fallbackContacts : chatContactsRef.current,
-        contactsWithLocalPreviews
+        contactsWithLocalPreviews,
+        { preserveMissing: false }
       );
 
+      hasResolvedChatContactsRef.current = true;
       setChatContacts(reconciledContacts);
 
       const contactsWithCachedPhotos = await cacheChatContactPhotos(contactsWithLocalPreviews, idToken);
       const reconciledContactsWithPhotos = mergeLoadedChatContactsWithVisibleState(
         reconciledContacts,
-        contactsWithCachedPhotos
+        contactsWithCachedPhotos,
+        { preserveMissing: false }
       );
 
       setChatContacts(reconciledContactsWithPhotos);
@@ -2079,6 +2089,19 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     }
 
     unsubscribeRealtimeConversation(socket);
+  }
+
+  function removeUnavailableChatFromList(chat: ChatItem) {
+    setChatContacts((currentContacts) => currentContacts.filter((contact) => contact.contactId !== chat.contactId));
+
+    if (selectedChatRef.current?.contactId === chat.contactId) {
+      selectedChatRef.current = null;
+      setSelectedChat(null);
+      setMessages([]);
+      setMessageReactions({});
+      setReplyTarget(null);
+      setMessageDraft('');
+    }
   }
 
   async function handleOpenChat(chat: ChatItem) {
@@ -3412,7 +3435,15 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       queueEncryptedChatBackup();
       void syncPendingMessagesForChat(chat.contactId);
     } catch (nextError) {
-      if (showError && isActiveChatOpenRequest(openRequestId, chat.contactId) && !isNetworkUnavailableError(nextError)) {
+      const isActiveRequest = isActiveChatOpenRequest(openRequestId, chat.contactId);
+
+      if (isActiveRequest && isChatUnavailableForCurrentUserError(nextError)) {
+        removeUnavailableChatFromList(chat);
+        setIsLoadingMessages(false);
+        return;
+      }
+
+      if (showError && isActiveRequest && !isNetworkUnavailableError(nextError)) {
         setError(getErrorMessage(nextError, 'Unable to open chat.'));
       }
     } finally {
@@ -15384,6 +15415,11 @@ function isNetworkUnavailableError(error: unknown): boolean {
     /network request failed|failed to fetch|networkerror|internet connection|offline|timed out|connection/i.test(error.message);
 }
 
+function isChatUnavailableForCurrentUserError(error: unknown): boolean {
+  return error instanceof Error &&
+    /chat.*not found|not available for your account|no longer have access|not a member|access.*group/i.test(error.message);
+}
+
 function getRecipientDeviceNotReadyMessage(name: string): string {
   return `${name} needs to open Synzapp once before encrypted chat is available.`;
 }
@@ -16499,7 +16535,6 @@ function applyChatListFilter(chats: ChatItem[], filter: ChatListFilter): ChatIte
 
 function shouldShowChatInList(chat: ChatItem): boolean {
   return Boolean(
-    chat.lastMessageAt ||
     chat.preview.trim() ||
     chat.unreadCount > 0
   );
@@ -16816,9 +16851,9 @@ function getNativeFullHeightModalPresentationStyle(): 'fullScreen' | 'pageSheet'
 function applyLocalChatPreview(contact: ChatContact, messages: ChatMessage[]): ChatContact {
   const localMessages = uniqueChatMessages(messages);
   const latestMessage = localMessages.at(-1);
-  const receivedPreview = getReceivedChatTextPreview(localMessages);
+  const latestPreview = latestMessage ? getMessageListPreview(latestMessage) : '';
 
-  if (!latestMessage && !receivedPreview) {
+  if (!latestMessage && !latestPreview) {
     return contact;
   }
 
@@ -16830,17 +16865,8 @@ function applyLocalChatPreview(contact: ChatContact, messages: ChatMessage[]): C
   return {
     ...contact,
     lastMessageAt,
-    preview: receivedPreview || contact.preview
+    preview: latestPreview || contact.preview
   };
-}
-
-function getReceivedChatTextPreview(messages: ChatMessage[]): string {
-  return messages
-    .filter((message) => !message.isMine)
-    .map(getChatMessageTextPreview)
-    .filter(Boolean)
-    .slice(-2)
-    .join('\n');
 }
 
 function buildLocalChatContactsFromCachedConversations(
@@ -16889,20 +16915,24 @@ function applyLocalChatPreviewsToContacts(
 
 function mergeLoadedChatContactsWithVisibleState(
   currentContacts: ChatContact[],
-  loadedContacts: ChatContact[]
+  loadedContacts: ChatContact[],
+  options: { preserveMissing?: boolean } = {}
 ): ChatContact[] {
   const currentContactById = new Map(currentContacts.map((contact) => [contact.contactId, contact]));
+  const nextContactById = options.preserveMissing === false
+    ? new Map<string, ChatContact>()
+    : new Map(currentContactById);
 
   loadedContacts.forEach((loadedContact) => {
     const currentContact = currentContactById.get(loadedContact.contactId);
 
-    currentContactById.set(
+    nextContactById.set(
       loadedContact.contactId,
       mergeChatContactVisibleState(currentContact, loadedContact)
     );
   });
 
-  return sortChatContacts([...currentContactById.values()]);
+  return sortChatContacts([...nextContactById.values()]);
 }
 
 function mergeChatContactVisibleState(

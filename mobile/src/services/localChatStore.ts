@@ -75,10 +75,6 @@ export async function saveCachedChatContacts(input: {
 }): Promise<void> {
   const contacts = normalizeCachedChatContacts(input.contacts);
 
-  if (!contacts.length) {
-    return;
-  }
-
   const record: LocalChatContactListRecord = {
     contacts: contacts.slice(0, LOCAL_CACHED_CHAT_CONTACT_LIMIT),
     ownerUid: input.ownerUid,
