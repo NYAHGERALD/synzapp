@@ -94,6 +94,11 @@ export type ChatDeliveryStatus = 'delivered' | 'queued' | 'read' | 'sent';
 export type ChatRealtimeErrorCode = 'SESSION_UNVERIFIED';
 export type ChatNotificationAlertTone = 'chime' | 'default' | 'pulse' | 'silent';
 export type ChatNotificationMuteMode = '1w' | '8h' | 'always' | 'off';
+export type ArchivedNotificationMode = 'ALL_MESSAGES' | 'DIRECT_REPLIES_ONLY' | 'MENTIONS_ONLY' | 'NONE';
+export type ArchiveBadgeMode = 'HIDE' | 'MENTIONS_ONLY' | 'UNREAD_COUNT';
+export type ArchiveInactiveDuration = 'AFTER_30_DAYS' | 'AFTER_7_DAYS' | 'AFTER_90_DAYS' | 'CUSTOM' | 'NEVER';
+export type ArchiveUnreadDisplayMode = 'HIDE' | 'MENTIONS_ONLY' | 'TOTAL_UNREAD';
+export type ArchiveUnarchiveBehavior = 'DIRECT_REPLY' | 'MANUAL_ONLY' | 'MENTION' | 'NEW_MESSAGE';
 export type ChatTranscriptLanguageCode =
   | 'ar-SA'
   | 'da-DK'
@@ -130,6 +135,29 @@ export interface ChatNotificationSettings {
 export interface ChatTranscriptLanguageSetting {
   contactId: string;
   languageCode: ChatTranscriptLanguageCode;
+  updatedAt: string | null;
+}
+
+export interface ChatArchiveSettings {
+  adminControls: {
+    configureRetentionRequirements: boolean;
+    preventArchivedChatDeletion: boolean;
+    setCompanyWideArchivePolicies: boolean;
+    viewArchivedCompanyChats: boolean;
+  };
+  archiveBadgeMode: ArchiveBadgeMode;
+  autoArchiveInactive: ArchiveInactiveDuration;
+  archivedNotificationMode: ArchivedNotificationMode;
+  customAutoArchiveDays: number | null;
+  keepArchivedWhenNewMessagesArrive: boolean;
+  smartRules: {
+    archiveClosedProjectGroups: boolean;
+    archiveDepartedEmployeeChats: boolean;
+    archiveInactiveChats: boolean;
+    archiveMutedGroupsAfterTime: boolean;
+  };
+  unreadDisplayMode: ArchiveUnreadDisplayMode;
+  unarchiveBehavior: ArchiveUnarchiveBehavior;
   updatedAt: string | null;
 }
 
@@ -542,6 +570,51 @@ export async function exitGroupChat(input: {
     groupId: typeof body.groupId === 'string' ? body.groupId : input.groupId,
     tenantId: typeof body.tenantId === 'string' ? body.tenantId : ''
   };
+}
+
+export async function getChatArchiveSettings(idToken: string): Promise<ChatArchiveSettings> {
+  const deviceHeaders = await getRegisteredDeviceHeaders(idToken);
+  const response = await fetch(`${getSynzappApiBaseUrl()}/api/profile/chat/archive-settings`, {
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${idToken}`,
+      ...deviceHeaders
+    },
+    method: 'GET'
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  const body = await response.json() as { archiveSettings?: ChatArchiveSettings };
+
+  return normalizeChatArchiveSettings(body.archiveSettings);
+}
+
+export async function updateChatArchiveSettings(input: {
+  archiveSettings: Partial<ChatArchiveSettings>;
+  idToken: string;
+}): Promise<ChatArchiveSettings> {
+  const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
+  const response = await fetch(`${getSynzappApiBaseUrl()}/api/profile/chat/archive-settings`, {
+    body: JSON.stringify(input.archiveSettings),
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${input.idToken}`,
+      'Content-Type': 'application/json',
+      ...deviceHeaders
+    },
+    method: 'PUT'
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  const body = await response.json() as { archiveSettings?: ChatArchiveSettings };
+
+  return normalizeChatArchiveSettings(body.archiveSettings);
 }
 
 export async function getChatTranscriptLanguage(input: {
@@ -1148,6 +1221,78 @@ function normalizeChatNotificationSettings(
       ? settings.updatedAt.trim()
       : null
   };
+}
+
+function normalizeChatArchiveSettings(settings: ChatArchiveSettings | undefined): ChatArchiveSettings {
+  const unarchiveBehavior = isArchiveUnarchiveBehavior(settings?.unarchiveBehavior)
+    ? settings.unarchiveBehavior
+    : 'NEW_MESSAGE';
+
+  return {
+    adminControls: {
+      configureRetentionRequirements: settings?.adminControls?.configureRetentionRequirements === true,
+      preventArchivedChatDeletion: settings?.adminControls?.preventArchivedChatDeletion === true,
+      setCompanyWideArchivePolicies: settings?.adminControls?.setCompanyWideArchivePolicies === true,
+      viewArchivedCompanyChats: settings?.adminControls?.viewArchivedCompanyChats === true
+    },
+    archiveBadgeMode: isArchiveBadgeMode(settings?.archiveBadgeMode)
+      ? settings.archiveBadgeMode
+      : 'UNREAD_COUNT',
+    autoArchiveInactive: isArchiveInactiveDuration(settings?.autoArchiveInactive)
+      ? settings.autoArchiveInactive
+      : 'NEVER',
+    archivedNotificationMode: isArchivedNotificationMode(settings?.archivedNotificationMode)
+      ? settings.archivedNotificationMode
+      : 'ALL_MESSAGES',
+    customAutoArchiveDays: typeof settings?.customAutoArchiveDays === 'number' && Number.isFinite(settings.customAutoArchiveDays)
+      ? Math.max(1, Math.round(settings.customAutoArchiveDays))
+      : null,
+    keepArchivedWhenNewMessagesArrive: settings?.keepArchivedWhenNewMessagesArrive === true ||
+      unarchiveBehavior !== 'NEW_MESSAGE',
+    smartRules: {
+      archiveClosedProjectGroups: settings?.smartRules?.archiveClosedProjectGroups === true,
+      archiveDepartedEmployeeChats: settings?.smartRules?.archiveDepartedEmployeeChats === true,
+      archiveInactiveChats: settings?.smartRules?.archiveInactiveChats === true,
+      archiveMutedGroupsAfterTime: settings?.smartRules?.archiveMutedGroupsAfterTime === true
+    },
+    unreadDisplayMode: isArchiveUnreadDisplayMode(settings?.unreadDisplayMode)
+      ? settings.unreadDisplayMode
+      : 'TOTAL_UNREAD',
+    unarchiveBehavior,
+    updatedAt: typeof settings?.updatedAt === 'string' && settings.updatedAt.trim()
+      ? settings.updatedAt.trim()
+      : null
+  };
+}
+
+function isArchivedNotificationMode(value: unknown): value is ArchivedNotificationMode {
+  return value === 'ALL_MESSAGES' ||
+    value === 'DIRECT_REPLIES_ONLY' ||
+    value === 'MENTIONS_ONLY' ||
+    value === 'NONE';
+}
+
+function isArchiveBadgeMode(value: unknown): value is ArchiveBadgeMode {
+  return value === 'HIDE' || value === 'MENTIONS_ONLY' || value === 'UNREAD_COUNT';
+}
+
+function isArchiveInactiveDuration(value: unknown): value is ArchiveInactiveDuration {
+  return value === 'AFTER_30_DAYS' ||
+    value === 'AFTER_7_DAYS' ||
+    value === 'AFTER_90_DAYS' ||
+    value === 'CUSTOM' ||
+    value === 'NEVER';
+}
+
+function isArchiveUnreadDisplayMode(value: unknown): value is ArchiveUnreadDisplayMode {
+  return value === 'HIDE' || value === 'MENTIONS_ONLY' || value === 'TOTAL_UNREAD';
+}
+
+function isArchiveUnarchiveBehavior(value: unknown): value is ArchiveUnarchiveBehavior {
+  return value === 'DIRECT_REPLY' ||
+    value === 'MANUAL_ONLY' ||
+    value === 'MENTION' ||
+    value === 'NEW_MESSAGE';
 }
 
 function isMuteModeCurrentlyActive(muteMode: ChatNotificationMuteMode, mutedUntil: string | null): boolean {

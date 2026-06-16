@@ -22,6 +22,11 @@ import {
   updateChatUserPreference,
   type UpdateChatUserPreferenceInput
 } from './chatUserPreferenceService.js';
+import {
+  ChatArchiveSettings,
+  getChatArchiveSettings,
+  shouldTreatChatAsArchived
+} from './chatArchiveSettingsService.js';
 import type {
   ChatMessageReaction,
   ChatMessageReactionMap
@@ -406,7 +411,10 @@ export async function listCurrentUserGroupChatContacts(
     .collection('groups')
     .where('status', '==', 'ACTIVE')
     .get();
-  const preferences = await listChatUserPreferences(context.tenantId, decodedToken.uid);
+  const [preferences, archiveSettings] = await Promise.all([
+    listChatUserPreferences(context.tenantId, decodedToken.uid),
+    getChatArchiveSettings(context.tenantId, decodedToken.uid)
+  ]);
   const contacts: GroupChatContact[] = [];
 
   for (const doc of snapshot.docs) {
@@ -429,7 +437,8 @@ export async function listCurrentUserGroupChatContacts(
       group,
       memberIds,
       await countActiveRecipientDevices(context.tenantId, memberIds, decodedToken.uid),
-      preferences.get(buildChatPreferenceKey('GROUP', doc.id))
+      preferences.get(buildChatPreferenceKey('GROUP', doc.id)),
+      archiveSettings
     ));
   }
 
@@ -1034,13 +1043,14 @@ export async function getGroupChatContact(
   groupId: string
 ): Promise<GroupChatContact> {
   const context = await getGroupChatContext(decodedToken, groupId);
-  const [activeRecipientDeviceCount, preference] = await Promise.all([
+  const [activeRecipientDeviceCount, preference, archiveSettings] = await Promise.all([
     countActiveRecipientDevices(
       context.tenantId,
       context.memberIds,
       decodedToken.uid
     ),
-    getChatUserPreference(context.tenantId, decodedToken.uid, 'GROUP', context.groupId)
+    getChatUserPreference(context.tenantId, decodedToken.uid, 'GROUP', context.groupId),
+    getChatArchiveSettings(context.tenantId, decodedToken.uid)
   ]);
 
   return buildHydratedGroupChatContact(
@@ -1050,7 +1060,8 @@ export async function getGroupChatContact(
     context.group,
     context.memberIds,
     activeRecipientDeviceCount,
-    preference
+    preference,
+    archiveSettings
   );
 }
 
@@ -1072,11 +1083,14 @@ export async function updateGroupChatPreferenceForCurrentUser(
     context.groupId,
     input
   );
-  const activeRecipientDeviceCount = await countActiveRecipientDevices(
-    context.tenantId,
-    context.memberIds,
-    decodedToken.uid
-  );
+  const [activeRecipientDeviceCount, archiveSettings] = await Promise.all([
+    countActiveRecipientDevices(
+      context.tenantId,
+      context.memberIds,
+      decodedToken.uid
+    ),
+    getChatArchiveSettings(context.tenantId, decodedToken.uid)
+  ]);
   const shouldResetUnread = input.clear === true || input.permanentDelete === true || input.isSpam === true;
   const group = shouldResetUnread
     ? {
@@ -1107,7 +1121,8 @@ export async function updateGroupChatPreferenceForCurrentUser(
     group,
     context.memberIds,
     activeRecipientDeviceCount,
-    preference
+    preference,
+    archiveSettings
   );
 }
 
@@ -1756,7 +1771,8 @@ async function buildHydratedGroupChatContact(
   group: TenantGroupRecord,
   memberIds: string[],
   activeRecipientDeviceCount: number,
-  preference?: ChatUserPreference
+  preference?: ChatUserPreference,
+  archiveSettings?: ChatArchiveSettings
 ): Promise<GroupChatContact> {
   const members = await listGroupChatMemberProfiles(tenantId, groupId, memberIds);
 
@@ -1767,7 +1783,8 @@ async function buildHydratedGroupChatContact(
     memberIds,
     members,
     activeRecipientDeviceCount,
-    preference
+    preference,
+    archiveSettings
   );
 }
 
@@ -1830,7 +1847,8 @@ function buildGroupChatContact(
   memberIds: string[],
   members: GroupChatMember[],
   activeRecipientDeviceCount: number,
-  preference?: ChatUserPreference
+  preference?: ChatUserPreference,
+  archiveSettings?: ChatArchiveSettings
 ): GroupChatContact {
   const name = group.name || 'Group chat';
   const lastMessageSentAtMs = group.lastMessageSentAtMs || null;
@@ -1841,12 +1859,7 @@ function buildGroupChatContact(
     lastMessageSentAtMs <= effectivePreference.clearedAtMs
   );
   const visibleLastMessageSentAtMs = isCleared ? null : lastMessageSentAtMs;
-  const isArchived = Boolean(
-    effectivePreference.isArchived &&
-    (!lastMessageSentAtMs ||
-      !effectivePreference.archivedAtMs ||
-      lastMessageSentAtMs <= effectivePreference.archivedAtMs)
-  );
+  const isArchived = shouldTreatChatAsArchived(effectivePreference, lastMessageSentAtMs, archiveSettings);
 
   return {
     chatType: 'GROUP',

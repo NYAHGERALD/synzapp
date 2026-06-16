@@ -14,6 +14,11 @@ import {
   updateChatUserPreference,
   type UpdateChatUserPreferenceInput
 } from './chatUserPreferenceService.js';
+import {
+  ChatArchiveSettings,
+  getChatArchiveSettings,
+  shouldTreatChatAsArchived
+} from './chatArchiveSettingsService.js';
 import { getChatPresenceForUser } from './chatPresenceService.js';
 import { mergePermissions } from './permissionCatalog.js';
 
@@ -173,7 +178,10 @@ export async function listCurrentUserChatContacts(decodedToken: DecodedIdToken):
     .get();
 
   const visibleRoles = getVisibleChatContactRoles(context.role);
-  const preferences = await listChatUserPreferences(context.tenantId, decodedToken.uid);
+  const [preferences, archiveSettings] = await Promise.all([
+    listChatUserPreferences(context.tenantId, decodedToken.uid),
+    getChatArchiveSettings(context.tenantId, decodedToken.uid)
+  ]);
 
   const visibleContacts = usersSnapshot.docs
     .filter((doc) => {
@@ -193,7 +201,8 @@ export async function listCurrentUserChatContacts(decodedToken: DecodedIdToken):
       doc.data() as TenantUserRecord,
       directChat,
       activeDeviceUserIds.has(doc.id),
-      preferences.get(buildChatPreferenceKey('DIRECT', doc.id))
+      preferences.get(buildChatPreferenceKey('DIRECT', doc.id)),
+      archiveSettings
     );
   }));
 
@@ -219,8 +228,11 @@ export async function markDirectChatRead(
   contactId: string
 ): Promise<ChatContact> {
   const chatContext = await getDirectChatContext(decodedToken, contactId);
-  const hasActiveDevice = await hasActiveDeviceForUser(chatContext.tenantId, chatContext.contactId);
-  const preference = await getChatUserPreference(chatContext.tenantId, decodedToken.uid, 'DIRECT', chatContext.contactId);
+  const [hasActiveDevice, preference, archiveSettings] = await Promise.all([
+    hasActiveDeviceForUser(chatContext.tenantId, chatContext.contactId),
+    getChatUserPreference(chatContext.tenantId, decodedToken.uid, 'DIRECT', chatContext.contactId),
+    getChatArchiveSettings(chatContext.tenantId, decodedToken.uid)
+  ]);
 
   await chatContext.chatRef.set({
     lastReadAtByUser: {
@@ -238,7 +250,7 @@ export async function markDirectChatRead(
       ...(chatContext.directChat?.unreadCounts || {}),
       [decodedToken.uid]: 0
     }
-  }, hasActiveDevice, preference);
+  }, hasActiveDevice, preference, archiveSettings);
 }
 
 export async function getDirectChatContact(
@@ -247,9 +259,10 @@ export async function getDirectChatContact(
   directChat?: DirectChatRecord | null
 ): Promise<ChatContact> {
   const chatContext = await getDirectChatContext(decodedToken, contactId);
-  const [hasActiveDevice, preference] = await Promise.all([
+  const [hasActiveDevice, preference, archiveSettings] = await Promise.all([
     hasActiveDeviceForUser(chatContext.tenantId, chatContext.contactId),
-    getChatUserPreference(chatContext.tenantId, decodedToken.uid, 'DIRECT', chatContext.contactId)
+    getChatUserPreference(chatContext.tenantId, decodedToken.uid, 'DIRECT', chatContext.contactId),
+    getChatArchiveSettings(chatContext.tenantId, decodedToken.uid)
   ]);
 
   return buildChatContact(
@@ -258,7 +271,8 @@ export async function getDirectChatContact(
     chatContext.contact,
     directChat === undefined ? chatContext.directChat : directChat,
     hasActiveDevice,
-    preference
+    preference,
+    archiveSettings
   );
 }
 
@@ -275,7 +289,10 @@ export async function updateDirectChatPreferenceForCurrentUser(
     chatContext.contactId,
     input
   );
-  const hasActiveDevice = await hasActiveDeviceForUser(chatContext.tenantId, chatContext.contactId);
+  const [hasActiveDevice, archiveSettings] = await Promise.all([
+    hasActiveDeviceForUser(chatContext.tenantId, chatContext.contactId),
+    getChatArchiveSettings(chatContext.tenantId, decodedToken.uid)
+  ]);
   const shouldResetUnread = input.clear === true || input.permanentDelete === true || input.isSpam === true;
   const directChat = shouldResetUnread
     ? {
@@ -305,7 +322,8 @@ export async function updateDirectChatPreferenceForCurrentUser(
     chatContext.contact,
     directChat,
     hasActiveDevice,
-    preference
+    preference,
+    archiveSettings
   );
 }
 
@@ -492,8 +510,11 @@ export async function updateDirectChatMessageReaction(
     }, { merge: true });
   });
 
-  const hasActiveDevice = await hasActiveDeviceForUser(chatContext.tenantId, chatContext.contactId);
-  const preference = await getChatUserPreference(chatContext.tenantId, decodedToken.uid, 'DIRECT', chatContext.contactId);
+  const [hasActiveDevice, preference, archiveSettings] = await Promise.all([
+    hasActiveDeviceForUser(chatContext.tenantId, chatContext.contactId),
+    getChatUserPreference(chatContext.tenantId, decodedToken.uid, 'DIRECT', chatContext.contactId),
+    getChatArchiveSettings(chatContext.tenantId, decodedToken.uid)
+  ]);
 
   return {
     contact: buildChatContact(
@@ -502,7 +523,8 @@ export async function updateDirectChatMessageReaction(
       chatContext.contact,
       nextDirectChat || chatContext.directChat,
       hasActiveDevice,
-      preference
+      preference,
+      archiveSettings
     ),
     messageReactions: mapDirectChatMessageReactions(nextDirectChat || chatContext.directChat)
   };
@@ -923,7 +945,8 @@ function buildChatContact(
   user: TenantUserRecord,
   directChat?: DirectChatRecord | null,
   hasActiveDevice = false,
-  preference?: ChatUserPreference
+  preference?: ChatUserPreference,
+  archiveSettings?: ChatArchiveSettings
 ): ChatContact {
   const displayName = getDisplayName(user);
   const roleName = user.roleName || formatRoleName(user.role || 'EMPLOYEE');
@@ -936,12 +959,7 @@ function buildChatContact(
   );
   const visibleLastMessageSentAtMs = isCleared ? null : lastMessageSentAtMs;
   const unreadCount = isCleared ? 0 : directChat?.unreadCounts?.[currentUid] || 0;
-  const isArchived = Boolean(
-    effectivePreference.isArchived &&
-    (!lastMessageSentAtMs ||
-      !effectivePreference.archivedAtMs ||
-      lastMessageSentAtMs <= effectivePreference.archivedAtMs)
-  );
+  const isArchived = shouldTreatChatAsArchived(effectivePreference, lastMessageSentAtMs, archiveSettings);
   const presence = getChatPresenceForUser(contactId);
 
   return {

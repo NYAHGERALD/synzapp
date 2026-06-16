@@ -4,10 +4,7 @@ import type { DocumentReference } from 'firebase-admin/firestore';
 import { fieldValue, firestore } from '../config/firebaseAdmin.js';
 import { SynzappRole } from '../types/auth.js';
 import { buildAuthSession } from './authSessionService.js';
-import {
-  getChatUserPreference,
-  unarchiveChatUserPreferenceInTransaction
-} from './chatUserPreferenceService.js';
+import { getChatUserPreference } from './chatUserPreferenceService.js';
 
 const ENCRYPTED_ENVELOPE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const READ_ENVELOPE_RECEIPT_GRACE_MS = 5 * 60 * 1000;
@@ -320,21 +317,6 @@ export async function sendEncryptedDirectEnvelope(
           },
           tenantId: context.tenantId
         };
-
-    unarchiveChatUserPreferenceInTransaction(
-      transaction,
-      context.tenantId,
-      decodedToken.uid,
-      'DIRECT',
-      context.contactId
-    );
-    unarchiveChatUserPreferenceInTransaction(
-      transaction,
-      context.tenantId,
-      context.contactId,
-      'DIRECT',
-      decodedToken.uid
-    );
 
     transaction.set(envelopeRef, {
       algorithm: input.algorithm,

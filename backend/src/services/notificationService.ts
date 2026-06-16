@@ -4,6 +4,11 @@ import { createHash } from 'crypto';
 import { adminApp, fieldValue, firestore } from '../config/firebaseAdmin.js';
 import { DevicePlatform, verifyActiveRegisteredDevice } from './deviceIdentityService.js';
 import type { EncryptedNotificationPreviewRecord } from './encryptedMessageEnvelopeService.js';
+import { getChatUserPreference } from './chatUserPreferenceService.js';
+import {
+  getChatArchiveSettings,
+  shouldTreatChatAsArchived
+} from './chatArchiveSettingsService.js';
 
 type PushProvider = 'expo' | 'fcm';
 type PushTokenStatus = 'ACTIVE' | 'INACTIVE';
@@ -272,7 +277,15 @@ export async function sendChatMessagePushNotification(
   const organizationRef = firestore.collection('organizations').doc(input.tenantId);
   const eventRef = organizationRef.collection('notificationEvents').doc();
   const notificationContactId = input.notificationContactId || input.senderUid;
-  const [senderSnapshot, pushTokensSnapshot, unreadBadgeCount, notificationSettings] = await Promise.all([
+  const chatType = input.chatType === 'GROUP' ? 'GROUP' : 'DIRECT';
+  const [
+    senderSnapshot,
+    pushTokensSnapshot,
+    unreadBadgeCount,
+    notificationSettings,
+    archiveSettings,
+    chatPreference
+  ] = await Promise.all([
     organizationRef.collection('users').doc(input.senderUid).get(),
     organizationRef
       .collection('users')
@@ -283,7 +296,9 @@ export async function sendChatMessagePushNotification(
     input.recipientBadgeCount === undefined
       ? getUnreadChatBadgeCount(input.tenantId, input.recipientUid)
       : Promise.resolve(normalizeBadgeCount(input.recipientBadgeCount)),
-    getChatNotificationSettings(input.tenantId, input.recipientUid, notificationContactId)
+    getChatNotificationSettings(input.tenantId, input.recipientUid, notificationContactId),
+    getChatArchiveSettings(input.tenantId, input.recipientUid),
+    getChatUserPreference(input.tenantId, input.recipientUid, chatType, notificationContactId)
   ]);
   const pushTokens = pushTokensSnapshot.docs
     .map((doc) => ({
@@ -291,7 +306,15 @@ export async function sendChatMessagePushNotification(
       deviceId: doc.id
     }))
     .filter((record) => isDeliverablePushToken(record));
-  const isMuted = isChatNotificationMuted(notificationSettings);
+  const sentAtMs = Date.parse(input.sentAt);
+  const isArchivedForRecipient = shouldTreatChatAsArchived(
+    chatPreference,
+    Number.isFinite(sentAtMs) ? sentAtMs : null,
+    archiveSettings
+  );
+  const isArchivedNotificationSuppressed = isArchivedForRecipient &&
+    archiveSettings.archivedNotificationMode === 'NONE';
+  const isMuted = isArchivedNotificationSuppressed || isChatNotificationMuted(notificationSettings);
 
   await eventRef.set({
     actorUid: input.senderUid,
@@ -304,11 +327,12 @@ export async function sendChatMessagePushNotification(
       : 0,
     notificationAlertTone: notificationSettings.alertTone,
     notificationContactId,
+    notificationArchivedMode: archiveSettings.archivedNotificationMode,
     notificationMuteMode: notificationSettings.muteMode,
     notificationMutedUntil: notificationSettings.mutedUntil,
     recipientUid: input.recipientUid,
     recipientBadgeCount: unreadBadgeCount,
-    status: isMuted ? 'MUTED' : pushTokens.length ? 'QUEUED' : 'NO_ACTIVE_TOKENS',
+    status: isArchivedNotificationSuppressed ? 'ARCHIVED_SUPPRESSED' : isMuted ? 'MUTED' : pushTokens.length ? 'QUEUED' : 'NO_ACTIVE_TOKENS',
     tenantId: input.tenantId,
     tokenCount: isMuted ? 0 : pushTokens.length,
     type: 'chat.message'

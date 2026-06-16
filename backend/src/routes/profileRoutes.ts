@@ -73,6 +73,10 @@ import {
   updateChatTranscriptLanguage,
   type ChatTranscriptLanguageCode
 } from '../services/chatTranscriptLanguageService.js';
+import {
+  getChatArchiveSettings,
+  updateChatArchiveSettings
+} from '../services/chatArchiveSettingsService.js';
 import { writeAuditEvent } from '../services/auditService.js';
 
 const profileRouter = Router();
@@ -228,6 +232,31 @@ const chatPreferenceBodySchema = z.object({
     typeof value.isSpam === 'boolean' ||
     typeof value.permanentDelete === 'boolean',
   'At least one chat preference is required.'
+);
+
+const chatArchiveSettingsBodySchema = z.object({
+  adminControls: z.object({
+    configureRetentionRequirements: z.boolean().optional(),
+    preventArchivedChatDeletion: z.boolean().optional(),
+    setCompanyWideArchivePolicies: z.boolean().optional(),
+    viewArchivedCompanyChats: z.boolean().optional()
+  }).optional(),
+  archiveBadgeMode: z.enum(['HIDE', 'MENTIONS_ONLY', 'UNREAD_COUNT']).optional(),
+  autoArchiveInactive: z.enum(['AFTER_30_DAYS', 'AFTER_7_DAYS', 'AFTER_90_DAYS', 'CUSTOM', 'NEVER']).optional(),
+  archivedNotificationMode: z.enum(['ALL_MESSAGES', 'DIRECT_REPLIES_ONLY', 'MENTIONS_ONLY', 'NONE']).optional(),
+  customAutoArchiveDays: z.number().int().min(1).max(365).nullable().optional(),
+  keepArchivedWhenNewMessagesArrive: z.boolean().optional(),
+  smartRules: z.object({
+    archiveClosedProjectGroups: z.boolean().optional(),
+    archiveDepartedEmployeeChats: z.boolean().optional(),
+    archiveInactiveChats: z.boolean().optional(),
+    archiveMutedGroupsAfterTime: z.boolean().optional()
+  }).optional(),
+  unreadDisplayMode: z.enum(['HIDE', 'MENTIONS_ONLY', 'TOTAL_UNREAD']).optional(),
+  unarchiveBehavior: z.enum(['DIRECT_REPLY', 'MANUAL_ONLY', 'MENTION', 'NEW_MESSAGE']).optional()
+}).refine(
+  (value) => Object.keys(value).length > 0,
+  'At least one archive setting is required.'
 );
 
 function getChatPreferenceAuditMetadata(
@@ -1005,6 +1034,47 @@ profileRouter.get('/chat/conversations/:contactId/addable-groups', verifyAppChec
 
     res.json({ groups });
   } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.get('/chat/archive-settings', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    const archiveSettings = await getChatArchiveSettings(activeDevice.tenantId, decodedToken.uid);
+
+    res.json({ archiveSettings });
+  } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.put('/chat/archive-settings', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    const body = chatArchiveSettingsBodySchema.parse(req.body);
+    const archiveSettings = await updateChatArchiveSettings(activeDevice.tenantId, decodedToken.uid, body);
+
+    await writeAuditEvent({
+      action: 'CHAT_ARCHIVE_SETTINGS_UPDATED',
+      metadata: body,
+      req,
+      status: 'SUCCESS',
+      tenantId: activeDevice.tenantId,
+      uid: decodedToken.uid
+    });
+
+    res.json({ archiveSettings });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'CHAT_ARCHIVE_SETTINGS_UPDATED',
+      reason: error instanceof Error ? error.message : 'Chat archive settings update failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
     next(error);
   }
 });

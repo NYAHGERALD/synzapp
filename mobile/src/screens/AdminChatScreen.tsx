@@ -82,6 +82,12 @@ import {
 import {
   AddableChatGroup,
   addContactToGroupChat,
+  ArchiveBadgeMode,
+  ArchiveInactiveDuration,
+  ArchivedNotificationMode,
+  ArchiveUnreadDisplayMode,
+  ArchiveUnarchiveBehavior,
+  ChatArchiveSettings,
   ChatContact,
   ChatDeliveryStatus,
   ChatGroupMember,
@@ -101,6 +107,7 @@ import {
   deleteChatMessageForMe,
   DirectChatContactDetails,
   exitGroupChat,
+  getChatArchiveSettings,
   getChatNotificationSettings,
   getDirectChatContactDetails,
   getChatMessages,
@@ -114,6 +121,7 @@ import {
   sendRealtimePresenceHeartbeat,
   subscribeRealtimeConversation,
   unsubscribeRealtimeConversation,
+  updateChatArchiveSettings,
   sendChatMessage,
   updateChatPreference,
   updateChatMessageReaction,
@@ -249,6 +257,12 @@ type DirectoryFilter = 'Departments' | 'Roles';
 type FooterTab = 'Chats' | 'Groups' | 'Employees' | 'Settings' | 'You';
 type ChatListFilter = 'all' | 'archived' | 'favorites' | 'groups' | 'unread';
 type ChatMoreActionTarget = ChatItem | null;
+type ArchiveSelectionMap = Record<string, boolean>;
+type ArchiveSettingsOption<T extends string> = {
+  description?: string;
+  label: string;
+  value: T;
+};
 type GroupCallMode = 'select' | 'voice' | 'video';
 type GroupCallOption = 'schedule' | 'selectPeople' | 'sendLink' | 'video' | 'voice';
 type InviteMode = 'single' | 'batch' | 'manual';
@@ -489,6 +503,57 @@ const chatTranscriptLanguageOptions: TranscriptLanguageOption[] = [
   { code: 'es-MX', label: 'Spanish (Mexico)', status: 'available' },
   { code: 'es-ES', label: 'Spanish (Spain)', status: 'available' }
 ];
+const defaultChatArchiveSettings: ChatArchiveSettings = {
+  adminControls: {
+    configureRetentionRequirements: false,
+    preventArchivedChatDeletion: false,
+    setCompanyWideArchivePolicies: false,
+    viewArchivedCompanyChats: false
+  },
+  archiveBadgeMode: 'UNREAD_COUNT',
+  autoArchiveInactive: 'NEVER',
+  archivedNotificationMode: 'ALL_MESSAGES',
+  customAutoArchiveDays: null,
+  keepArchivedWhenNewMessagesArrive: false,
+  smartRules: {
+    archiveClosedProjectGroups: false,
+    archiveDepartedEmployeeChats: false,
+    archiveInactiveChats: false,
+    archiveMutedGroupsAfterTime: false
+  },
+  unreadDisplayMode: 'TOTAL_UNREAD',
+  unarchiveBehavior: 'NEW_MESSAGE',
+  updatedAt: null
+};
+const archivedNotificationModeOptions: Array<ArchiveSettingsOption<ArchivedNotificationMode>> = [
+  { label: 'All messages', value: 'ALL_MESSAGES' },
+  { label: 'Mentions only', value: 'MENTIONS_ONLY' },
+  { label: 'Direct replies only', value: 'DIRECT_REPLIES_ONLY' },
+  { label: 'No notifications', value: 'NONE' }
+];
+const archiveUnreadDisplayOptions: Array<ArchiveSettingsOption<ArchiveUnreadDisplayMode>> = [
+  { label: 'Show total unread count', value: 'TOTAL_UNREAD' },
+  { label: 'Show mention count only', value: 'MENTIONS_ONLY' },
+  { label: 'Hide unread count', value: 'HIDE' }
+];
+const archiveInactiveDurationOptions: Array<ArchiveSettingsOption<ArchiveInactiveDuration>> = [
+  { label: 'Never', value: 'NEVER' },
+  { label: 'After 7 days', value: 'AFTER_7_DAYS' },
+  { label: 'After 30 days', value: 'AFTER_30_DAYS' },
+  { label: 'After 90 days', value: 'AFTER_90_DAYS' },
+  { label: 'Custom duration', value: 'CUSTOM' }
+];
+const archiveBadgeModeOptions: Array<ArchiveSettingsOption<ArchiveBadgeMode>> = [
+  { label: 'Show unread count on Archive folder', value: 'UNREAD_COUNT' },
+  { label: 'Show mention count only', value: 'MENTIONS_ONLY' },
+  { label: 'Hide badge', value: 'HIDE' }
+];
+const archiveUnarchiveBehaviorOptions: Array<ArchiveSettingsOption<ArchiveUnarchiveBehavior>> = [
+  { label: 'Manual only', value: 'MANUAL_ONLY' },
+  { label: 'Unarchive on new message', value: 'NEW_MESSAGE' },
+  { label: 'Unarchive on mention', value: 'MENTION' },
+  { label: 'Unarchive on direct reply', value: 'DIRECT_REPLY' }
+];
 const androidButtonRipple = { borderless: false, color: 'rgba(15, 118, 110, 0.14)' } as const;
 const androidIconRipple = { borderless: true, color: 'rgba(15, 118, 110, 0.14)' } as const;
 
@@ -524,6 +589,14 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [isSpamScreenOpen, setIsSpamScreenOpen] = useState(false);
   const [spamActionTarget, setSpamActionTarget] = useState<ChatItem | null>(null);
   const [isDeletingSpamChats, setIsDeletingSpamChats] = useState(false);
+  const [isArchiveScreenOpen, setIsArchiveScreenOpen] = useState(false);
+  const [isArchiveEditMenuOpen, setIsArchiveEditMenuOpen] = useState(false);
+  const [isArchiveSelectionMode, setIsArchiveSelectionMode] = useState(false);
+  const [selectedArchivedChatIds, setSelectedArchivedChatIds] = useState<ArchiveSelectionMap>({});
+  const [isArchiveSettingsOpen, setIsArchiveSettingsOpen] = useState(false);
+  const [chatArchiveSettings, setChatArchiveSettings] = useState<ChatArchiveSettings>(defaultChatArchiveSettings);
+  const [isLoadingArchiveSettings, setIsLoadingArchiveSettings] = useState(false);
+  const [isSavingArchiveSettings, setIsSavingArchiveSettings] = useState(false);
   const [isAiAssistantOpen, setIsAiAssistantOpen] = useState(false);
   const [aiAssistantDraft, setAiAssistantDraft] = useState('');
   const [isScreenKeyboardVisible, setIsScreenKeyboardVisible] = useState(false);
@@ -673,6 +746,8 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const unreadChatFilterCount = activeConversationChatItems.reduce((total, chat) => total + Math.max(chat.unreadCount || 0, 0), 0);
   const groupChatFilterCount = activeConversationChatItems.filter((chat) => chat.chatType === 'GROUP').length;
   const archivedChatFilterCount = archivedConversationChatItems.length;
+  const archivedUnreadTotal = archivedConversationChatItems.reduce((total, chat) => total + Math.max(chat.unreadCount || 0, 0), 0);
+  const archivedBadgeCount = chatArchiveSettings.archiveBadgeMode === 'UNREAD_COUNT' ? archivedUnreadTotal : 0;
   const selectedForwardMessageCount = Object.values(forwardSelectedMessageIds).filter(Boolean).length;
   const selectedForwardRecipientCount = Object.values(forwardRecipientIds).filter(Boolean).length;
   const employeeItems = approvedEmployees.map(mapApprovedEmployeeToListItem);
@@ -707,12 +782,16 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     : undefined;
   const filteredChatItems = filterChatItems(
     applyChatListFilter(
-      chatListFilter === 'archived' ? archivedConversationChatItems : activeConversationChatItems,
+      activeConversationChatItems,
       chatListFilter
     ),
     chatSearch
   );
+  const filteredArchivedChatItems = filterChatItems(archivedConversationChatItems, chatSearch);
   const filteredSpamChatItems = filterChatItems(spamConversationChatItems, chatSearch);
+  const selectedArchivedChatCount = archivedConversationChatItems.filter((chat) =>
+    selectedArchivedChatIds[chat.contactId]
+  ).length;
   const selectedNewGroupMembers = directChatContacts.filter((contact) => selectedNewGroupMemberIds[contact.contactId]);
   const activeGroupMemberContacts = selectedChat?.chatType === 'GROUP'
     ? mapGroupMembersToSelectableContacts(selectedChat.members || [], directChatContacts, currentUid)
@@ -747,6 +826,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   useEffect(() => {
     void configureSynzappNotificationHandling();
     void loadUserProfile(false);
+    void loadArchiveSettings(false);
   }, []);
 
   useEffect(() => {
@@ -1889,6 +1969,10 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
   function handleOpenSpamScreen() {
     setIsSpamScreenOpen(true);
+    setIsArchiveScreenOpen(false);
+    setIsArchiveEditMenuOpen(false);
+    setIsArchiveSelectionMode(false);
+    setSelectedArchivedChatIds({});
     setChatListFilter('all');
     setChatSearch('');
     setError(null);
@@ -1899,6 +1983,176 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setSpamActionTarget(null);
     setChatSearch('');
     setError(null);
+  }
+
+  function handleOpenArchivedScreen() {
+    setIsArchiveScreenOpen(true);
+    setIsSpamScreenOpen(false);
+    setIsArchiveSelectionMode(false);
+    setIsArchiveEditMenuOpen(false);
+    setSelectedArchivedChatIds({});
+    setChatListFilter('all');
+    setChatSearch('');
+    setError(null);
+    void loadArchiveSettings(false);
+  }
+
+  function handleCloseArchivedScreen() {
+    setIsArchiveScreenOpen(false);
+    setIsArchiveEditMenuOpen(false);
+    setIsArchiveSelectionMode(false);
+    setSelectedArchivedChatIds({});
+    setChatSearch('');
+    setError(null);
+  }
+
+  async function loadArchiveSettings(showError = true) {
+    setIsLoadingArchiveSettings(true);
+
+    try {
+      const idToken = await getIdToken();
+      const nextSettings = await getChatArchiveSettings(idToken);
+
+      setChatArchiveSettings(nextSettings);
+    } catch (nextError) {
+      if (showError) {
+        setError(getErrorMessage(nextError, 'Unable to load archive settings.'));
+      }
+    } finally {
+      setIsLoadingArchiveSettings(false);
+    }
+  }
+
+  async function saveArchiveSettings(nextSettings: ChatArchiveSettings) {
+    setIsSavingArchiveSettings(true);
+    setError(null);
+
+    try {
+      const idToken = await getIdToken();
+      const savedSettings = await updateChatArchiveSettings({
+        archiveSettings: nextSettings,
+        idToken
+      });
+
+      setChatArchiveSettings(savedSettings);
+      await loadChatContacts(false);
+      setIsArchiveSettingsOpen(false);
+    } catch (nextError) {
+      setError(getErrorMessage(nextError, 'Unable to save archive settings.'));
+    } finally {
+      setIsSavingArchiveSettings(false);
+    }
+  }
+
+  function handleOpenArchiveSettings() {
+    setIsArchiveEditMenuOpen(false);
+    setIsArchiveSettingsOpen(true);
+    void loadArchiveSettings(false);
+  }
+
+  function handleStartArchiveSelection() {
+    setIsArchiveEditMenuOpen(false);
+    setIsArchiveSelectionMode(true);
+    setSelectedArchivedChatIds({});
+  }
+
+  function handleDoneArchiveSelection() {
+    setIsArchiveSelectionMode(false);
+    setSelectedArchivedChatIds({});
+  }
+
+  function toggleArchivedChatSelection(chat: ChatItem) {
+    setSelectedArchivedChatIds((currentSelection) => ({
+      ...currentSelection,
+      [chat.contactId]: !currentSelection[chat.contactId]
+    }));
+  }
+
+  function getSelectedArchivedChats(): ChatItem[] {
+    return archivedConversationChatItems.filter((chat) => selectedArchivedChatIds[chat.contactId]);
+  }
+
+  async function handleUnarchiveSelectedChats() {
+    const selectedChats = getSelectedArchivedChats().filter(canUseChatListActions);
+
+    if (!selectedChats.length) {
+      return;
+    }
+
+    await Promise.all(selectedChats.map((chat) => updateChatPreferenceAndApply(chat, {
+      failureMessage: 'Unable to unarchive selected chats.',
+      isArchived: false,
+      optimisticContact: {
+        isArchived: false
+      }
+    })));
+    handleDoneArchiveSelection();
+  }
+
+  async function handleReadSelectedArchivedChats() {
+    const selectedUnreadChats = getSelectedArchivedChats().filter((chat) => chat.unreadCount > 0);
+
+    if (!selectedUnreadChats.length) {
+      return;
+    }
+
+    try {
+      const idToken = await getIdToken();
+
+      for (const chat of selectedUnreadChats) {
+        const result = await getChatMessages({
+          chatType: chat.chatType,
+          contactId: chat.contactId,
+          currentUid,
+          idToken
+        });
+        const cachedContact = await cacheChatContactPhoto(result.contact, idToken);
+
+        setChatContacts((currentContacts) => upsertChatContact(currentContacts, {
+          ...cachedContact,
+          unreadCount: 0
+        }));
+      }
+
+      handleDoneArchiveSelection();
+    } catch (nextError) {
+      setError(getErrorMessage(nextError, 'Unable to mark archived chats as read.'));
+    }
+  }
+
+  function handleDeleteSelectedArchivedChats() {
+    const selectedChats = getSelectedArchivedChats().filter(canUseChatListActions);
+
+    if (!selectedChats.length) {
+      return;
+    }
+
+    Alert.alert(
+      'Delete selected chats?',
+      'Selected chats will move to Spam, where you can permanently delete them for your account.',
+      [
+        { style: 'cancel', text: 'Cancel' },
+        {
+          onPress: async () => {
+            const spammedAt = new Date().toISOString();
+
+            await Promise.all(selectedChats.map((chat) => updateChatPreferenceAndApply(chat, {
+              failureMessage: 'Unable to move selected chats to Spam.',
+              isSpam: true,
+              optimisticContact: {
+                isArchived: false,
+                isSpam: true,
+                spammedAt,
+                unreadCount: 0
+              }
+            })));
+            handleDoneArchiveSelection();
+          },
+          style: 'destructive',
+          text: 'Delete'
+        }
+      ]
+    );
   }
 
   function handleMoveChatToSpam(chat: ChatItem) {
@@ -4921,6 +5175,10 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setSelectedChat(null);
     setIsAiAssistantOpen(false);
     setIsSpamScreenOpen(false);
+    setIsArchiveScreenOpen(false);
+    setIsArchiveEditMenuOpen(false);
+    setIsArchiveSelectionMode(false);
+    setSelectedArchivedChatIds({});
     setSpamActionTarget(null);
     setChatMoreActionTarget(null);
     setIsLoadingMessages(false);
@@ -6246,6 +6504,18 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         <BackHeader onBack={() => setSettingsScreen('list')} />
       ) : activeTab === 'You' ? (
         <YouHeaderActions />
+      ) : activeTab === 'Chats' && isArchiveScreenOpen ? (
+        <ArchiveHeader
+          isEditMenuOpen={isArchiveEditMenuOpen}
+          isSelectionMode={isArchiveSelectionMode}
+          onBack={handleCloseArchivedScreen}
+          onCloseEditMenu={() => setIsArchiveEditMenuOpen(false)}
+          onDoneSelection={handleDoneArchiveSelection}
+          onEditArchive={handleOpenArchiveSettings}
+          onSelectChats={handleStartArchiveSelection}
+          onToggleEditMenu={() => setIsArchiveEditMenuOpen((isOpen) => !isOpen)}
+          selectedCount={selectedArchivedChatCount}
+        />
       ) : activeTab === 'Chats' && isSpamScreenOpen ? (
         <SpamHeader
           isDeleting={isDeletingSpamChats}
@@ -6272,7 +6542,10 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         />
       )}
 
-      {!selectedChat && !isAiAssistantOpen && activeTab !== 'You' && !(activeTab === 'Chats' && isSpamScreenOpen) ? (
+      {!selectedChat &&
+      !isAiAssistantOpen &&
+      activeTab !== 'You' &&
+      !(activeTab === 'Chats' && (isSpamScreenOpen || isArchiveScreenOpen)) ? (
         <Text style={styles.title}>
           {activeTab === 'Settings' && settingsScreen === 'directory'
             ? 'Departments and roles'
@@ -6365,7 +6638,33 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           style={styles.tabScroll}
         >
           {activeTab === 'Chats' ? (
-            isSpamScreenOpen ? (
+            isArchiveScreenOpen ? (
+              <ArchivedChatsScreen
+                archiveSettings={chatArchiveSettings}
+                chats={filteredArchivedChatItems}
+                isLoading={isLoadingChats}
+                isLoadingSettings={isLoadingArchiveSettings}
+                isSelectionMode={isArchiveSelectionMode}
+                onArchiveChat={handleArchiveChat}
+                onDeleteSelected={handleDeleteSelectedArchivedChats}
+                onMarkSelectedRead={() => {
+                  void handleReadSelectedArchivedChats();
+                }}
+                onMoreChat={setChatMoreActionTarget}
+                onOpenChat={(chat) => {
+                  void handleOpenChat(chat);
+                }}
+                onSearchChange={setChatSearch}
+                onToggleFavoriteChat={handleToggleFavoriteChat}
+                onToggleSelection={toggleArchivedChatSelection}
+                onUnarchiveSelected={() => {
+                  void handleUnarchiveSelectedChats();
+                }}
+                profilePhotoHeaders={profilePhotoHeaders}
+                search={chatSearch}
+                selectedChatIds={selectedArchivedChatIds}
+              />
+            ) : isSpamScreenOpen ? (
               <SpamChatsScreen
                 chats={filteredSpamChatItems}
                 isDeleting={isDeletingSpamChats}
@@ -6380,6 +6679,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
             ) : (
               <ChatsTab
                 activeFilter={chatListFilter}
+                archivedBadgeCount={archivedBadgeCount}
                 archivedCount={archivedChatFilterCount}
                 chats={filteredChatItems}
                 groupCount={groupChatFilterCount}
@@ -6388,7 +6688,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
                 onArchiveChat={handleArchiveChat}
                 onMoreChat={setChatMoreActionTarget}
                 onToggleFavoriteChat={handleToggleFavoriteChat}
-                onOpenArchived={() => setChatListFilter('archived')}
+                onOpenArchived={handleOpenArchivedScreen}
                 onOpenChat={(chat) => {
                   void handleOpenChat(chat);
                 }}
@@ -6582,7 +6882,12 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         </Pressable>
       ) : null}
 
-      {!selectedChat && !isAiAssistantOpen && activeTab === 'Chats' && !isSpamScreenOpen && !isScreenKeyboardVisible ? (
+      {!selectedChat &&
+      !isAiAssistantOpen &&
+      activeTab === 'Chats' &&
+      !isSpamScreenOpen &&
+      !isArchiveScreenOpen &&
+      !isScreenKeyboardVisible ? (
         <Pressable
           accessibilityLabel="Ask Synzapp AI"
           accessibilityRole="button"
@@ -6915,6 +7220,17 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         onClose={() => setIsGroupSwitcherModalOpen(false)}
         onOpenGroup={handleOpenGroupFromSwitcher}
         selectedGroupId={selectedChat?.contactId || null}
+      />
+
+      <ArchiveSettingsModal
+        isLoading={isLoadingArchiveSettings}
+        isOpen={isArchiveSettingsOpen}
+        isSaving={isSavingArchiveSettings}
+        onClose={() => setIsArchiveSettingsOpen(false)}
+        onSave={(settings) => {
+          void saveArchiveSettings(settings);
+        }}
+        settings={chatArchiveSettings}
       />
 
       <NativeOptionPickerModal picker={nativeOptionPicker} />
@@ -10883,6 +11199,112 @@ function SpamHeader({
   );
 }
 
+function ArchiveHeader({
+  isEditMenuOpen,
+  isSelectionMode,
+  onBack,
+  onCloseEditMenu,
+  onDoneSelection,
+  onEditArchive,
+  onSelectChats,
+  onToggleEditMenu,
+  selectedCount
+}: {
+  isEditMenuOpen: boolean;
+  isSelectionMode: boolean;
+  onBack: () => void;
+  onCloseEditMenu: () => void;
+  onDoneSelection: () => void;
+  onEditArchive: () => void;
+  onSelectChats: () => void;
+  onToggleEditMenu: () => void;
+  selectedCount: number;
+}) {
+  return (
+    <View style={styles.archiveHeaderWrap}>
+      <View style={styles.spamHeader}>
+        <Pressable
+          android_ripple={androidIconRipple}
+          accessibilityLabel="Back to chats"
+          accessibilityRole="button"
+          onPress={onBack}
+          style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}
+        >
+          <Text style={styles.backButtonText}>‹</Text>
+        </Pressable>
+
+        <Text numberOfLines={1} style={styles.spamHeaderTitle}>
+          {isSelectionMode && selectedCount > 0 ? `${selectedCount} selected` : 'Archived'}
+        </Text>
+
+        {isSelectionMode ? (
+          <Pressable
+            accessibilityLabel="Done selecting archived chats"
+            accessibilityRole="button"
+            onPress={onDoneSelection}
+            style={({ pressed }) => [styles.archiveHeaderIconButton, pressed && styles.pressed]}
+          >
+            <Feather color={colors.ink} name="check" size={22} />
+          </Pressable>
+        ) : (
+          <Pressable
+            accessibilityLabel="Edit archive"
+            accessibilityRole="button"
+            onPress={onToggleEditMenu}
+            style={({ pressed }) => [styles.spamHeaderDeleteButton, pressed && styles.pressed]}
+          >
+            <Text style={styles.spamHeaderDeleteText}>Edit</Text>
+          </Pressable>
+        )}
+      </View>
+
+      {isEditMenuOpen ? (
+        <>
+          <Pressable
+            accessibilityLabel="Close archive edit menu"
+            accessibilityRole="button"
+            onPress={onCloseEditMenu}
+            style={styles.archiveEditBackdrop}
+          />
+          <View style={styles.archiveEditMenu}>
+            <ArchiveEditMenuRow
+              icon="check-circle"
+              label="Select chats"
+              onPress={onSelectChats}
+            />
+            <ArchiveEditMenuRow
+              icon="settings"
+              label="Edit archive settings"
+              onPress={onEditArchive}
+            />
+          </View>
+        </>
+      ) : null}
+    </View>
+  );
+}
+
+function ArchiveEditMenuRow({
+  icon,
+  label,
+  onPress
+}: {
+  icon: keyof typeof Feather.glyphMap;
+  label: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      onPress={onPress}
+      style={({ pressed }) => [styles.archiveEditMenuRow, pressed && styles.pressed]}
+    >
+      <Feather color={colors.ink} name={icon} size={17} />
+      <Text style={styles.archiveEditMenuText}>{label}</Text>
+    </Pressable>
+  );
+}
+
 function ChatSearchBar({
   onChangeText,
   placeholder,
@@ -10910,6 +11332,7 @@ function ChatSearchBar({
 
 function ChatsTab({
   activeFilter,
+  archivedBadgeCount,
   archivedCount,
   chats,
   groupCount,
@@ -10929,6 +11352,7 @@ function ChatsTab({
   unreadCount
 }: {
   activeFilter: ChatListFilter;
+  archivedBadgeCount: number;
   archivedCount: number;
   chats: ChatItem[];
   groupCount: number;
@@ -10985,14 +11409,6 @@ function ChatsTab({
             label="Groups"
             onPress={() => onChangeFilter('groups')}
           />
-          {archivedCount > 0 ? (
-            <ChatFilterChip
-              count={archivedCount}
-              isActive={activeFilter === 'archived'}
-              label="Archived"
-              onPress={() => onChangeFilter('archived')}
-            />
-          ) : null}
           <Pressable
             accessibilityLabel="Start new chat"
             accessibilityRole="button"
@@ -11013,6 +11429,7 @@ function ChatsTab({
         ) : null}
         {archivedCount > 0 ? (
           <ChatsUtilityRow
+            count={archivedBadgeCount}
             icon="archive"
             label="Archived"
             onPress={onOpenArchived}
@@ -11044,6 +11461,464 @@ function ChatsTab({
         />
       ))}
     </View>
+  );
+}
+
+function ArchivedChatsScreen({
+  archiveSettings,
+  chats,
+  isLoading,
+  isLoadingSettings,
+  isSelectionMode,
+  onArchiveChat,
+  onDeleteSelected,
+  onMarkSelectedRead,
+  onMoreChat,
+  onOpenChat,
+  onSearchChange,
+  onToggleFavoriteChat,
+  onToggleSelection,
+  onUnarchiveSelected,
+  profilePhotoHeaders,
+  search,
+  selectedChatIds
+}: {
+  archiveSettings: ChatArchiveSettings;
+  chats: ChatItem[];
+  isLoading: boolean;
+  isLoadingSettings: boolean;
+  isSelectionMode: boolean;
+  onArchiveChat: (chat: ChatItem) => void;
+  onDeleteSelected: () => void;
+  onMarkSelectedRead: () => void;
+  onMoreChat: (chat: ChatItem) => void;
+  onOpenChat: (chat: ChatItem) => void;
+  onSearchChange: (value: string) => void;
+  onToggleFavoriteChat: (chat: ChatItem) => void;
+  onToggleSelection: (chat: ChatItem) => void;
+  onUnarchiveSelected: () => void;
+  profilePhotoHeaders?: Record<string, string>;
+  search: string;
+  selectedChatIds: ArchiveSelectionMap;
+}) {
+  const selectedCount = chats.filter((chat) => selectedChatIds[chat.contactId]).length;
+  const selectedUnreadCount = chats.reduce((total, chat) =>
+    selectedChatIds[chat.contactId] ? total + Math.max(chat.unreadCount || 0, 0) : total, 0);
+  const helperText = archiveSettings.keepArchivedWhenNewMessagesArrive
+    ? 'These chats stay archived when new messages are received.'
+    : 'New messages move archived chats back to Chats.';
+
+  return (
+    <View style={styles.archiveScreen}>
+      <ChatSearchBar
+        onChangeText={onSearchChange}
+        placeholder="Search Archived"
+        value={search}
+      />
+
+      <Text style={styles.archiveDescription}>
+        {isLoadingSettings ? 'Loading archive settings...' : helperText}
+      </Text>
+
+      {isLoading && !chats.length ? (
+        <View style={styles.loadingRow}>
+          <ActivityIndicator color={colors.primary} />
+        </View>
+      ) : null}
+
+      {!isLoading && !chats.length ? (
+        <View style={styles.emptyState}>
+          <Text style={styles.emptyTitle}>{search.trim() ? 'No archived chats found' : 'No archived chats'}</Text>
+        </View>
+      ) : null}
+
+      {chats.map((chat) => (
+        isSelectionMode ? (
+          <ArchiveSelectableChatRow
+            chat={chat}
+            isSelected={selectedChatIds[chat.contactId] === true}
+            key={chat.id}
+            onPress={() => onToggleSelection(chat)}
+            profilePhotoHeaders={profilePhotoHeaders}
+          />
+        ) : (
+          <ChatRow
+            chat={chat}
+            key={chat.id}
+            onArchive={() => onArchiveChat(chat)}
+            onMore={() => onMoreChat(chat)}
+            onOpen={() => onOpenChat(chat)}
+            onToggleFavorite={() => onToggleFavoriteChat(chat)}
+            profilePhotoHeaders={profilePhotoHeaders}
+          />
+        )
+      ))}
+
+      {isSelectionMode ? (
+        <View style={styles.archiveSelectionBar}>
+          <ArchiveSelectionAction
+            disabled={selectedCount === 0}
+            label="Unarchive"
+            onPress={onUnarchiveSelected}
+          />
+          <ArchiveSelectionAction
+            disabled={selectedUnreadCount === 0}
+            label="Read"
+            onPress={onMarkSelectedRead}
+          />
+          <ArchiveSelectionAction
+            destructive
+            disabled={selectedCount === 0}
+            label="Delete"
+            onPress={onDeleteSelected}
+          />
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function ArchiveSelectableChatRow({
+  chat,
+  isSelected,
+  onPress,
+  profilePhotoHeaders
+}: {
+  chat: ChatItem;
+  isSelected: boolean;
+  onPress: () => void;
+  profilePhotoHeaders?: Record<string, string>;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      onPress={onPress}
+      style={({ pressed }) => [styles.archiveSelectableRow, pressed && styles.pressed]}
+    >
+      <View style={[styles.archiveRoundCheck, isSelected && styles.archiveRoundCheckSelected]}>
+        {isSelected ? <Feather color="#FFFFFF" name="check" size={14} /> : null}
+      </View>
+      <ProfileAvatar
+        headers={profilePhotoHeaders}
+        name={chat.title}
+        size={56}
+        uri={chat.profilePhotoUrl}
+      />
+
+      <View style={styles.chatText}>
+        <View style={styles.chatTitleRow}>
+          <Text numberOfLines={1} style={[styles.chatTitle, styles.chatListTitle]}>{chat.title}</Text>
+          {chat.isFavorite ? <Feather color="#F59E0B" name="star" size={13} /> : null}
+        </View>
+        {chat.preview ? (
+          <Text numberOfLines={2} style={styles.chatPreview}>{chat.preview}</Text>
+        ) : null}
+      </View>
+
+      <View style={styles.chatMeta}>
+        {chat.lastMessageAt ? (
+          <Text style={styles.chatTime}>{formatChatListTime(chat.lastMessageAt)}</Text>
+        ) : null}
+        {chat.unreadCount > 0 ? (
+          <View style={styles.unreadBadge}>
+            <Text style={styles.unreadText}>{chat.unreadCount > 99 ? '99+' : chat.unreadCount}</Text>
+          </View>
+        ) : null}
+      </View>
+    </Pressable>
+  );
+}
+
+function ArchiveSelectionAction({
+  destructive,
+  disabled,
+  label,
+  onPress
+}: {
+  destructive?: boolean;
+  disabled: boolean;
+  label: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      disabled={disabled}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.archiveSelectionAction,
+        pressed && !disabled && styles.pressed,
+        disabled && styles.disabled
+      ]}
+    >
+      <Text style={[
+        styles.archiveSelectionActionText,
+        destructive && styles.archiveSelectionActionTextDestructive
+      ]}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
+function ArchiveSettingsModal({
+  isLoading,
+  isOpen,
+  isSaving,
+  onClose,
+  onSave,
+  settings
+}: {
+  isLoading: boolean;
+  isOpen: boolean;
+  isSaving: boolean;
+  onClose: () => void;
+  onSave: (settings: ChatArchiveSettings) => void;
+  settings: ChatArchiveSettings;
+}) {
+  const insets = useSafeAreaInsets();
+  const [draft, setDraft] = useState<ChatArchiveSettings>(settings);
+
+  useEffect(() => {
+    if (isOpen) {
+      setDraft(settings);
+    }
+  }, [isOpen, settings]);
+
+  const updateDraft = (patch: Partial<ChatArchiveSettings>) => {
+    setDraft((currentDraft) => ({
+      ...currentDraft,
+      ...patch
+    }));
+  };
+
+  const updateSmartRule = (key: keyof ChatArchiveSettings['smartRules']) => {
+    setDraft((currentDraft) => ({
+      ...currentDraft,
+      smartRules: {
+        ...currentDraft.smartRules,
+        [key]: !currentDraft.smartRules[key]
+      }
+    }));
+  };
+
+  const selectUnarchiveBehavior = (value: ArchiveUnarchiveBehavior) => {
+    updateDraft({
+      keepArchivedWhenNewMessagesArrive: value !== 'NEW_MESSAGE',
+      unarchiveBehavior: value
+    });
+  };
+
+  const selectKeepArchived = (shouldKeep: boolean) => {
+    updateDraft({
+      keepArchivedWhenNewMessagesArrive: shouldKeep,
+      unarchiveBehavior: shouldKeep ? 'MANUAL_ONLY' : 'NEW_MESSAGE'
+    });
+  };
+
+  return (
+    <Modal
+      allowSwipeDismissal={Platform.OS === 'ios'}
+      animationType="slide"
+      onRequestClose={onClose}
+      presentationStyle={getNativeFullHeightModalPresentationStyle()}
+      transparent={false}
+      visible={isOpen}
+    >
+      <View style={[styles.archiveSettingsScreen, { paddingTop: getFullScreenModalTopPadding(insets.top) }]}>
+        <View style={styles.archiveSettingsHeader}>
+          <Pressable
+            accessibilityLabel="Close archive settings"
+            accessibilityRole="button"
+            disabled={isSaving}
+            onPress={onClose}
+            style={({ pressed }) => [styles.backButton, pressed && !isSaving && styles.pressed]}
+          >
+            <Text style={styles.backButtonText}>‹</Text>
+          </Pressable>
+          <Text numberOfLines={1} style={styles.archiveSettingsTitle}>Archive settings</Text>
+          <Pressable
+            accessibilityLabel="Save archive settings"
+            accessibilityRole="button"
+            disabled={isSaving || isLoading}
+            onPress={() => onSave(draft)}
+            style={({ pressed }) => [
+              styles.archiveSettingsSaveButton,
+              pressed && !isSaving && !isLoading && styles.pressed,
+              (isSaving || isLoading) && styles.disabled
+            ]}
+          >
+            {isSaving ? (
+              <ActivityIndicator color={colors.primary} size="small" />
+            ) : (
+              <Text style={styles.archiveSettingsSaveText}>Save</Text>
+            )}
+          </Pressable>
+        </View>
+
+        <ScrollView
+          contentContainerStyle={styles.archiveSettingsContent}
+          showsVerticalScrollIndicator={false}
+        >
+          <ArchiveSettingsSection title="Keep Archived When New Messages Arrive">
+            <ArchiveOptionRow
+              isSelected={draft.keepArchivedWhenNewMessagesArrive}
+              label="On"
+              onPress={() => selectKeepArchived(true)}
+            />
+            <ArchiveOptionRow
+              isSelected={!draft.keepArchivedWhenNewMessagesArrive}
+              label="Off (Automatically unarchive)"
+              onPress={() => selectKeepArchived(false)}
+            />
+          </ArchiveSettingsSection>
+
+          <ArchiveSettingsSection title="Notifications for Archived Chats">
+            {archivedNotificationModeOptions.map((option) => (
+              <ArchiveOptionRow
+                isSelected={draft.archivedNotificationMode === option.value}
+                key={option.value}
+                label={option.label}
+                onPress={() => updateDraft({ archivedNotificationMode: option.value })}
+              />
+            ))}
+          </ArchiveSettingsSection>
+
+          <ArchiveSettingsSection title="Unread Count Display">
+            {archiveUnreadDisplayOptions.map((option) => (
+              <ArchiveOptionRow
+                isSelected={draft.unreadDisplayMode === option.value}
+                key={option.value}
+                label={option.label}
+                onPress={() => updateDraft({ unreadDisplayMode: option.value })}
+              />
+            ))}
+          </ArchiveSettingsSection>
+
+          <ArchiveSettingsSection title="Auto Archive Inactive Chats">
+            {archiveInactiveDurationOptions.map((option) => (
+              <ArchiveOptionRow
+                isSelected={draft.autoArchiveInactive === option.value}
+                key={option.value}
+                label={option.label}
+                onPress={() => updateDraft({
+                  autoArchiveInactive: option.value,
+                  customAutoArchiveDays: option.value === 'CUSTOM' ? draft.customAutoArchiveDays || 30 : null
+                })}
+              />
+            ))}
+          </ArchiveSettingsSection>
+
+          <ArchiveSettingsSection title="Archive Badge Settings">
+            {archiveBadgeModeOptions.map((option) => (
+              <ArchiveOptionRow
+                isSelected={draft.archiveBadgeMode === option.value}
+                key={option.value}
+                label={option.label}
+                onPress={() => updateDraft({ archiveBadgeMode: option.value })}
+              />
+            ))}
+          </ArchiveSettingsSection>
+
+          <ArchiveSettingsSection title="Smart Archive Rules">
+            <ArchiveToggleRow
+              isChecked={draft.smartRules.archiveInactiveChats}
+              label="Archive inactive chats automatically"
+              onPress={() => updateSmartRule('archiveInactiveChats')}
+            />
+            <ArchiveToggleRow
+              isChecked={draft.smartRules.archiveClosedProjectGroups}
+              label="Archive closed project groups"
+              onPress={() => updateSmartRule('archiveClosedProjectGroups')}
+            />
+            <ArchiveToggleRow
+              isChecked={draft.smartRules.archiveDepartedEmployeeChats}
+              label="Archive chats from departed employees"
+              onPress={() => updateSmartRule('archiveDepartedEmployeeChats')}
+            />
+            <ArchiveToggleRow
+              isChecked={draft.smartRules.archiveMutedGroupsAfterTime}
+              label="Archive muted groups after specified time"
+              onPress={() => updateSmartRule('archiveMutedGroupsAfterTime')}
+            />
+          </ArchiveSettingsSection>
+
+          <ArchiveSettingsSection title="Unarchive Behavior">
+            {archiveUnarchiveBehaviorOptions.map((option) => (
+              <ArchiveOptionRow
+                isSelected={draft.unarchiveBehavior === option.value}
+                key={option.value}
+                label={option.label}
+                onPress={() => selectUnarchiveBehavior(option.value)}
+              />
+            ))}
+          </ArchiveSettingsSection>
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+}
+
+function ArchiveSettingsSection({
+  children,
+  title
+}: {
+  children: React.ReactNode;
+  title: string;
+}) {
+  return (
+    <View style={styles.archiveSettingsSection}>
+      <Text style={styles.archiveSettingsSectionTitle}>{title}</Text>
+      <View style={styles.archiveSettingsGroup}>
+        {children}
+      </View>
+    </View>
+  );
+}
+
+function ArchiveOptionRow({
+  isSelected,
+  label,
+  onPress
+}: {
+  isSelected: boolean;
+  label: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      onPress={onPress}
+      style={({ pressed }) => [styles.archiveSettingsRow, pressed && styles.pressed]}
+    >
+      <Text style={styles.archiveSettingsRowText}>{label}</Text>
+      <View style={[styles.archiveSettingsRadio, isSelected && styles.archiveSettingsRadioSelected]}>
+        {isSelected ? <View style={styles.archiveSettingsRadioDot} /> : null}
+      </View>
+    </Pressable>
+  );
+}
+
+function ArchiveToggleRow({
+  isChecked,
+  label,
+  onPress
+}: {
+  isChecked: boolean;
+  label: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      onPress={onPress}
+      style={({ pressed }) => [styles.archiveSettingsRow, pressed && styles.pressed]}
+    >
+      <Text style={styles.archiveSettingsRowText}>{label}</Text>
+      <View style={[styles.archiveSettingsCheckbox, isChecked && styles.archiveSettingsCheckboxSelected]}>
+        {isChecked ? <Feather color="#FFFFFF" name="check" size={14} /> : null}
+      </View>
+    </Pressable>
   );
 }
 
@@ -11290,10 +12165,12 @@ function ChatFilterChip({
 }
 
 function ChatsUtilityRow({
+  count,
   icon,
   label,
   onPress
 }: {
+  count?: number;
   icon: keyof typeof Feather.glyphMap;
   label: string;
   onPress: () => void;
@@ -11309,6 +12186,11 @@ function ChatsUtilityRow({
         <Feather color="#64748B" name={icon} size={17} />
       </View>
       <Text numberOfLines={1} style={styles.chatsUtilityText}>{label}</Text>
+      {typeof count === 'number' && count > 0 ? (
+        <View style={styles.unreadBadge}>
+          <Text style={styles.unreadText}>{count > 99 ? '99+' : count}</Text>
+        </View>
+      ) : null}
     </Pressable>
   );
 }
@@ -18186,6 +19068,54 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     lineHeight: 20
   },
+  archiveHeaderWrap: {
+    position: 'relative',
+    zIndex: 20
+  },
+  archiveHeaderIconButton: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    height: 36,
+    justifyContent: 'center',
+    width: 44
+  },
+  archiveEditBackdrop: {
+    bottom: -800,
+    left: -10,
+    position: 'absolute',
+    right: -10,
+    top: 44
+  },
+  archiveEditMenu: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    minWidth: 214,
+    overflow: 'hidden',
+    position: 'absolute',
+    right: 4,
+    shadowColor: '#0F172A',
+    shadowOffset: { height: 8, width: 0 },
+    shadowOpacity: 0.15,
+    shadowRadius: 18,
+    top: 44,
+    zIndex: 25
+  },
+  archiveEditMenuRow: {
+    alignItems: 'center',
+    borderBottomColor: '#E5E7EB',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 12,
+    minHeight: 48,
+    paddingHorizontal: 14
+  },
+  archiveEditMenuText: {
+    color: colors.ink,
+    fontSize: 15,
+    fontWeight: '500',
+    lineHeight: 20
+  },
   rightActions: {
     alignItems: 'center',
     flexDirection: 'row',
@@ -18221,6 +19151,68 @@ const styles = StyleSheet.create({
   spamScreen: {
     gap: 6,
     paddingTop: 2
+  },
+  archiveScreen: {
+    gap: 6,
+    paddingTop: 2
+  },
+  archiveDescription: {
+    color: '#8B95A5',
+    fontSize: 13,
+    fontWeight: '400',
+    lineHeight: 18,
+    paddingHorizontal: 16,
+    paddingVertical: 5,
+    textAlign: 'center'
+  },
+  archiveSelectableRow: {
+    alignItems: 'center',
+    borderBottomColor: '#E5E7EB',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 10,
+    minHeight: 76,
+    paddingHorizontal: 4,
+    paddingVertical: 8
+  },
+  archiveRoundCheck: {
+    alignItems: 'center',
+    borderColor: '#CBD5E1',
+    borderRadius: 10,
+    borderWidth: 1.5,
+    height: 20,
+    justifyContent: 'center',
+    width: 20
+  },
+  archiveRoundCheckSelected: {
+    backgroundColor: '#22C55E',
+    borderColor: '#22C55E'
+  },
+  archiveSelectionBar: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 12,
+    justifyContent: 'space-between',
+    paddingHorizontal: 4,
+    paddingTop: 18
+  },
+  archiveSelectionAction: {
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 22,
+    flex: 1,
+    justifyContent: 'center',
+    minHeight: 44,
+    paddingHorizontal: 12
+  },
+  archiveSelectionActionText: {
+    color: colors.ink,
+    fontSize: 15,
+    fontWeight: '600',
+    lineHeight: 20
+  },
+  archiveSelectionActionTextDestructive: {
+    color: '#EF4444'
   },
   spamDescription: {
     color: '#8B95A5',
@@ -20782,6 +21774,107 @@ const styles = StyleSheet.create({
   },
   chatMoreActionTextDestructive: {
     color: '#DC2626'
+  },
+  archiveSettingsScreen: {
+    backgroundColor: '#F4F6F8',
+    flex: 1
+  },
+  archiveSettingsHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    minHeight: 54,
+    paddingHorizontal: 14
+  },
+  archiveSettingsTitle: {
+    color: colors.ink,
+    flex: 1,
+    fontSize: 17,
+    fontWeight: '700',
+    lineHeight: 22,
+    textAlign: 'center'
+  },
+  archiveSettingsSaveButton: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    justifyContent: 'center',
+    minHeight: 36,
+    minWidth: 66,
+    paddingHorizontal: 14
+  },
+  archiveSettingsSaveText: {
+    color: colors.primary,
+    fontSize: 16,
+    fontWeight: '700',
+    lineHeight: 20
+  },
+  archiveSettingsContent: {
+    gap: 16,
+    paddingBottom: 28,
+    paddingHorizontal: 14,
+    paddingTop: 10
+  },
+  archiveSettingsSection: {
+    gap: 8
+  },
+  archiveSettingsSectionTitle: {
+    color: '#64748B',
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 19,
+    paddingHorizontal: 4
+  },
+  archiveSettingsGroup: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    overflow: 'hidden'
+  },
+  archiveSettingsRow: {
+    alignItems: 'center',
+    borderBottomColor: '#E5E7EB',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 12,
+    minHeight: 54,
+    paddingHorizontal: 14
+  },
+  archiveSettingsRowText: {
+    color: colors.ink,
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '500',
+    lineHeight: 20
+  },
+  archiveSettingsRadio: {
+    alignItems: 'center',
+    borderColor: '#CBD5E1',
+    borderRadius: 10,
+    borderWidth: 1.5,
+    height: 20,
+    justifyContent: 'center',
+    width: 20
+  },
+  archiveSettingsRadioSelected: {
+    borderColor: '#22C55E'
+  },
+  archiveSettingsRadioDot: {
+    backgroundColor: '#22C55E',
+    borderRadius: 5,
+    height: 10,
+    width: 10
+  },
+  archiveSettingsCheckbox: {
+    alignItems: 'center',
+    borderColor: '#CBD5E1',
+    borderRadius: 10,
+    borderWidth: 1.5,
+    height: 20,
+    justifyContent: 'center',
+    width: 20
+  },
+  archiveSettingsCheckboxSelected: {
+    backgroundColor: '#22C55E',
+    borderColor: '#22C55E'
   },
   spamStatusSheet: {
     alignItems: 'center',
