@@ -616,13 +616,14 @@ export function filterPushTokensForEncryptedEnvelope<T extends { deviceId?: stri
 }
 
 function getRecipientEnvelopeDeviceIds(input: RecipientEnvelopeDeviceIdInput): Set<string> {
-  const deviceIds = new Set<string>();
+  const recipientDeviceIds = (input.recipientDeviceIds || [])
+    .filter((deviceId) => Boolean(deviceId));
 
-  input.recipientDeviceIds?.forEach((deviceId) => {
-    if (deviceId) {
-      deviceIds.add(deviceId);
-    }
-  });
+  if (recipientDeviceIds.length) {
+    return new Set(recipientDeviceIds);
+  }
+
+  const deviceIds = new Set<string>();
 
   Object.keys(input.notificationPreviewByDevice || {}).forEach((deviceId) => {
     if (deviceId) {

@@ -298,6 +298,12 @@ export async function sendEncryptedDirectEnvelope(
     }
   });
 
+  Object.keys(input.notificationPreviewByDevice || {}).forEach((deviceId) => {
+    if (!uniqueRecipientDeviceIds.includes(deviceId)) {
+      throw validationError('Encrypted notification preview is not allowed for devices outside the recipient list.');
+    }
+  });
+
   const envelopeRef = context.chatRef.collection('encryptedEnvelopes').doc();
   const messageMetadataRef = context.chatRef.collection('messageMetadata').doc(envelopeRef.id);
   const sentAtMs = Date.now();

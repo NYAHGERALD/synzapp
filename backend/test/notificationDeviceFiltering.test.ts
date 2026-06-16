@@ -14,6 +14,9 @@ describe('chat notification device filtering', () => {
       notificationPreviewByDevice: {
         device_in_envelope: {
           algorithm: 'synzapp-notification-preview-v1'
+        },
+        stale_device: {
+          algorithm: 'synzapp-notification-preview-v1'
         }
       },
       recipientDeviceIds: ['device_in_envelope']
