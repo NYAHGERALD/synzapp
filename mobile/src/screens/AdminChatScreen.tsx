@@ -5483,6 +5483,29 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     });
   }
 
+  async function handleOpenSettingsOptions() {
+    const options = [
+      ...(canDeleteOrganization
+        ? [{ id: 'delete-organization', label: 'Delete Organization' }]
+        : [])
+    ];
+
+    if (!options.length) {
+      Alert.alert('Settings options', 'No additional settings actions are available for this account yet.');
+      return;
+    }
+
+    const selectedOption = await selectScreenOption(
+      'Settings options',
+      options,
+      (option) => option.label
+    );
+
+    if (selectedOption?.id === 'delete-organization') {
+      handleOpenDeleteOrganization();
+    }
+  }
+
   function updateOrganizationDeletionModal(patch: Partial<OrganizationDeletionModalState>) {
     setOrganizationDeletionModal((currentState) => (
       currentState ? { ...currentState, ...patch } : currentState
@@ -6800,6 +6823,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           canInviteEmployees={canInviteEmployees}
           hasInviteDraft={Boolean(inviteDraft)}
           isInvitingEmployees={isInvitingEmployees || isPickingInviteContact}
+          onOpenOptions={activeTab === 'Settings' ? handleOpenSettingsOptions : undefined}
           onOpenNewChat={handleOpenNewChatModal}
           onBatchImportEmployees={() => {
             void handleInviteEmployee('batch');
@@ -7007,14 +7031,11 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
 
           {activeTab === 'Settings' && settingsScreen === 'list' ? (
             <SettingsList
-              canDeleteOrganization={canDeleteOrganization}
               canManageCompanyProfile={canManageCompanyProfile}
               canManageDirectory={canManageDirectory}
               canManageGroups={canManageGroups}
               canManageSecurity={canManageSecurity}
               canManageUsers={canManageUsers}
-              isDeletingOrganization={isRequestingOrganizationDeletion || isDeletingOrganization}
-              onDeleteOrganization={handleOpenDeleteOrganization}
               onOpenChatBackup={handleOpenChatBackupSettings}
               onOpenCompanyProfile={handleOpenCompanyProfileSettings}
               onOpenDepartmentAdminPermissions={handleOpenDepartmentAdminPermissions}
@@ -7838,6 +7859,7 @@ function HeaderActions({
   onBatchImportEmployees,
   onInviteEmployee,
   onManualAddEmployee,
+  onOpenOptions,
   onOpenNewChat
 }: {
   activeTab: FooterTab;
@@ -7847,6 +7869,7 @@ function HeaderActions({
   onBatchImportEmployees: () => void;
   onInviteEmployee: () => void;
   onManualAddEmployee: () => void;
+  onOpenOptions?: () => void;
   onOpenNewChat: () => void;
 }) {
   const employeeActionDisabled = isInvitingEmployees || hasInviteDraft;
@@ -7857,6 +7880,7 @@ function HeaderActions({
         android_ripple={androidIconRipple}
         accessibilityLabel="Open options"
         accessibilityRole="button"
+        onPress={onOpenOptions}
         style={({ pressed }) => [styles.roundIconButton, pressed && styles.pressed]}
       >
         <Ionicons color={colors.primary} name="ellipsis-horizontal-circle-outline" size={23} />
@@ -15300,14 +15324,11 @@ function ProfileDetailRow({ label, value }: { label: string; value: string }) {
 }
 
 function SettingsList({
-  canDeleteOrganization,
   canManageCompanyProfile,
   canManageDirectory,
   canManageGroups,
   canManageUsers,
   canManageSecurity,
-  isDeletingOrganization,
-  onDeleteOrganization,
   onOpenChatBackup,
   onOpenCompanyProfile,
   onOpenDepartmentAdminPermissions,
@@ -15317,14 +15338,11 @@ function SettingsList({
   onOpenRolePermissions,
   onOpenSecurity
 }: {
-  canDeleteOrganization: boolean;
   canManageCompanyProfile: boolean;
   canManageDirectory: boolean;
   canManageGroups: boolean;
   canManageUsers: boolean;
   canManageSecurity: boolean;
-  isDeletingOrganization: boolean;
-  onDeleteOrganization: () => void;
   onOpenChatBackup: () => void;
   onOpenCompanyProfile: () => void;
   onOpenDepartmentAdminPermissions: () => void;
@@ -15404,23 +15422,6 @@ function SettingsList({
         subtitle="Encrypted chat history"
         title="Chat backup"
       />
-      {canDeleteOrganization ? (
-        <Pressable
-          accessibilityRole="button"
-          disabled={isDeletingOrganization}
-          onPress={onDeleteOrganization}
-          style={({ pressed }) => [
-            styles.deleteOrganizationButton,
-            pressed && !isDeletingOrganization && styles.pressed,
-            isDeletingOrganization && styles.disabled
-          ]}
-        >
-          <Feather color="#FFFFFF" name="trash-2" size={18} />
-          <Text style={styles.deleteOrganizationButtonText}>
-            {isDeletingOrganization ? 'Preparing deletion...' : 'Delete Organization'}
-          </Text>
-        </Pressable>
-      ) : null}
     </View>
   );
 }
@@ -23812,24 +23813,6 @@ const styles = StyleSheet.create({
   },
   settingsList: {
     paddingTop: 4
-  },
-  deleteOrganizationButton: {
-    alignItems: 'center',
-    alignSelf: 'stretch',
-    backgroundColor: '#DC2626',
-    borderRadius: 999,
-    flexDirection: 'row',
-    gap: 9,
-    justifyContent: 'center',
-    marginTop: 28,
-    minHeight: 50,
-    paddingHorizontal: 18
-  },
-  deleteOrganizationButtonText: {
-    color: '#FFFFFF',
-    fontSize: 16,
-    fontWeight: '600',
-    lineHeight: 20
   },
   organizationDeletionOverlay: {
     alignItems: 'center',
