@@ -135,6 +135,14 @@ export default function App() {
     void signOutOrgAdmin().catch(() => undefined);
   }, []);
 
+  const handleOrganizationDeleted = useCallback(() => {
+    setRestoreError(null);
+    setPhoneSession(null);
+    setVerifiedAdmin(null);
+    clearRegisteredDeviceIdentityCache();
+    setStep('phone');
+  }, []);
+
   return (
     <SafeAreaProvider style={styles.safeAreaProvider}>
       <SafeAreaView style={styles.safeArea}>
@@ -147,6 +155,7 @@ export default function App() {
           {!isRestoringSession && step === 'chat' && verifiedAdmin ? (
             <AdminChatScreen
               verifiedAdmin={verifiedAdmin}
+              onOrganizationDeleted={handleOrganizationDeleted}
               onSessionInvalid={handleSessionInvalid}
             />
           ) : (
@@ -217,6 +226,10 @@ function getProfileStepFromBackendRole(verifiedAdmin: VerifiedOrgAdmin): AuthSte
 
   if (role && status === 'ACTIVE' && profileComplete) {
     return 'chat';
+  }
+
+  if (role === 'ORG_ADMIN' && verifiedAdmin.session.user.tenantId) {
+    return 'employee';
   }
 
   if (role === 'ORG_ADMIN') {

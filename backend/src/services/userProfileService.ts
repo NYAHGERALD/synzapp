@@ -5,6 +5,7 @@ import { SynzappRole } from '../types/auth.js';
 import { formatPhoneNumber, maskPhoneNumber, normalizeE164Phone } from '../utils/phone.js';
 import { hashPhoneNumber } from '../utils/phoneHash.js';
 import { buildAuthSession } from './authSessionService.js';
+import { buildDepartmentSystemGroupId, buildDepartmentSystemGroupRecord } from './groupService.js';
 import {
   buildChatPreferenceKey,
   ChatUserPreference,
@@ -22,9 +23,15 @@ import {
 } from './chatArchiveSettingsService.js';
 import { getChatPresenceForUser } from './chatPresenceService.js';
 import { mergePermissions } from './permissionCatalog.js';
+import {
+  buildHumanResourcesDepartmentRecord,
+  HUMAN_RESOURCES_DEPARTMENT_ID,
+  HUMAN_RESOURCES_DEPARTMENT_NAME
+} from './tenantDefaults.js';
 
 interface OrganizationRecord {
   companyName?: string;
+  createdBy?: string;
   orgAdminName?: string;
   status?: string;
 }
@@ -112,6 +119,7 @@ export interface CurrentUserProfile {
   departmentId: string | null;
   departmentName: string | null;
   displayName: string;
+  isTenantOwner: boolean;
   phoneFormatted: string;
   phoneMasked: string;
   permissions: string[];
@@ -698,6 +706,15 @@ async function getCurrentUserContext(decodedToken: DecodedIdToken) {
     throw authorizationError('Your profile is not active.');
   }
 
+  if (user.role === 'ORG_ADMIN' && user.departmentId !== HUMAN_RESOURCES_DEPARTMENT_ID) {
+    await ensureOrgAdminHumanResourcesMembership(tenantId, decodedToken.uid);
+    user = {
+      ...user,
+      departmentId: HUMAN_RESOURCES_DEPARTMENT_ID,
+      departmentName: HUMAN_RESOURCES_DEPARTMENT_NAME
+    };
+  }
+
   let effectiveRole = user.role || role;
   let effectivePermissions = mergePermissions(session.user.permissions || [], user.permissions || []);
   const approvedPhone = await getCurrentUserApprovedPhone(tenantId, decodedToken, user);
@@ -759,6 +776,57 @@ async function getCurrentUserContext(decodedToken: DecodedIdToken) {
   };
 }
 
+async function ensureOrgAdminHumanResourcesMembership(tenantId: string, uid: string): Promise<void> {
+  const organizationRef = firestore.collection('organizations').doc(tenantId);
+  const departmentRef = organizationRef
+    .collection('departments')
+    .doc(HUMAN_RESOURCES_DEPARTMENT_ID);
+  const groupRef = organizationRef
+    .collection('groups')
+    .doc(buildDepartmentSystemGroupId(HUMAN_RESOURCES_DEPARTMENT_ID));
+  const userRef = organizationRef.collection('users').doc(uid);
+  const identityRef = firestore.collection('identityDirectory').doc(uid);
+
+  await firestore.runTransaction(async (transaction) => {
+    const [departmentSnapshot, groupSnapshot] = await Promise.all([
+      transaction.get(departmentRef),
+      transaction.get(groupRef)
+    ]);
+
+    if (!departmentSnapshot.exists) {
+      transaction.set(departmentRef, {
+        ...buildHumanResourcesDepartmentRecord({
+          createdBy: uid,
+          tenantId
+        }),
+        createdAt: fieldValue.serverTimestamp(),
+        updatedAt: fieldValue.serverTimestamp()
+      });
+    }
+
+    if (!groupSnapshot.exists) {
+      transaction.set(groupRef, buildDepartmentSystemGroupRecord({
+        createdBy: uid,
+        departmentId: HUMAN_RESOURCES_DEPARTMENT_ID,
+        departmentName: HUMAN_RESOURCES_DEPARTMENT_NAME,
+        description: 'Default organization administration department group',
+        tenantId
+      }));
+    }
+
+    transaction.set(userRef, {
+      departmentId: HUMAN_RESOURCES_DEPARTMENT_ID,
+      departmentName: HUMAN_RESOURCES_DEPARTMENT_NAME,
+      updatedAt: fieldValue.serverTimestamp()
+    }, { merge: true });
+
+    transaction.set(identityRef, {
+      departmentId: HUMAN_RESOURCES_DEPARTMENT_ID,
+      updatedAt: fieldValue.serverTimestamp()
+    }, { merge: true });
+  });
+}
+
 async function getCurrentUserApprovedPhone(
   tenantId: string,
   decodedToken: DecodedIdToken,
@@ -813,7 +881,7 @@ function areStringArraysEqual(first: string[], second: string[]): boolean {
 }
 
 function isEmployeeAccessRole(role: SynzappRole): boolean {
-  return role === 'EMPLOYEE' || role === 'DEPT_ADMIN';
+  return role === 'EMPLOYEE' || role === 'DEPT_ADMIN' || role === 'ORG_ADMIN';
 }
 
 async function buildCurrentUserProfile(
@@ -829,6 +897,7 @@ async function buildCurrentUserProfile(
     departmentId: context.user.departmentId || null,
     departmentName: context.user.departmentName || null,
     displayName: getDisplayName(context.user),
+    isTenantOwner: context.organization.createdBy === decodedToken.uid,
     phoneFormatted: normalizedPhone ? formatPhoneNumber(normalizedPhone) : context.user.phoneMasked || '*****',
     phoneMasked: context.user.phoneMasked || maskPhoneNumber(normalizedPhone),
     permissions: context.permissions,
@@ -1117,7 +1186,7 @@ function buildDirectChatId(uid: string, contactId: string): string {
 
 function getVisibleChatContactRoles(role: SynzappRole): SynzappRole[] {
   if (role === 'ORG_ADMIN') {
-    return ['EMPLOYEE', 'DEPT_ADMIN'];
+    return ['ORG_ADMIN', 'EMPLOYEE', 'DEPT_ADMIN'];
   }
 
   if (role === 'DEPT_ADMIN') {

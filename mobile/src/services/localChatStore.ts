@@ -195,6 +195,25 @@ export async function restoreCachedChatConversations(input: {
   };
 }
 
+export async function clearLocalChatDataForOwner(input: {
+  ownerUid: string;
+}): Promise<void> {
+  const keys = await AsyncStorage.getAllKeys();
+  const safeOwnerUid = sanitizeStorageKey(input.ownerUid);
+  const ownerPrefixes = [
+    `synzapp.localChat.v1.${safeOwnerUid}.`,
+    `synzapp.localChatContacts.v1.${safeOwnerUid}`,
+    `synzapp.localOutbox.v1.${safeOwnerUid}`
+  ];
+  const matchingKeys = keys.filter((key) =>
+    ownerPrefixes.some((prefix) => key === prefix || key.startsWith(prefix))
+  );
+
+  if (matchingKeys.length) {
+    await AsyncStorage.multiRemove(matchingKeys);
+  }
+}
+
 export async function loadHiddenChatMessageIds(input: {
   contactId: string;
   ownerUid: string;

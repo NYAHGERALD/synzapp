@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { BlurView } from 'expo-blur';
 import * as Clipboard from 'expo-clipboard';
 import * as Contacts from 'expo-contacts';
+import type { FirebaseAuthTypes } from '@react-native-firebase/auth';
 import {
   RecordingPresets,
   requestRecordingPermissionsAsync,
@@ -49,6 +50,7 @@ import { DismissibleError } from '../components/DismissibleError';
 import {
   ApprovedEmployee,
   CompanyProfile,
+  confirmOrganizationDeletion,
   createDepartment,
   createRole,
   createTenantGroup,
@@ -64,6 +66,8 @@ import {
   listTenantGroups,
   listTenantDevices,
   listRoles,
+  OrganizationDeletionChallenge,
+  requestOrganizationDeletionChallenge,
   revokeTenantDevice,
   updateCompanyLogo,
   updateCompanyProfile,
@@ -78,7 +82,7 @@ import {
   TenantDevice,
   TenantGroup,
   TenantRole
-	} from '../services/adminApi';
+} from '../services/adminApi';
 import {
   AddableChatGroup,
   addContactToGroupChat,
@@ -138,6 +142,7 @@ import {
 } from '../services/chatBackup';
 import { ACCESS_DENIED_MESSAGE } from '../services/backendAuth';
 import {
+  clearRegisteredDeviceIdentityCache,
   ensureRegisteredDeviceIdentity,
   getRegisteredDeviceId
 } from '../services/deviceIdentity';
@@ -151,6 +156,7 @@ import {
 } from '../services/profileApi';
 import {
   enqueuePendingChatMessage,
+  clearLocalChatDataForOwner,
   hideCachedChatMessagesForMe,
   loadCachedChatContacts,
   listCachedChatConversations,
@@ -185,10 +191,15 @@ import {
   registerDevicePushNotifications,
   syncSynzappUnreadBadgeCount
 } from '../services/pushNotifications';
+import {
+  sendReauthenticationPhoneCode,
+  signOutOrgAdmin
+} from '../services/phoneAuth';
 import { VerifiedOrgAdmin } from '../types/auth';
 import { colors } from '../theme/colors';
 
 interface AdminChatScreenProps {
+  onOrganizationDeleted: () => void;
   onSessionInvalid: (message?: string) => void;
   verifiedAdmin: VerifiedOrgAdmin;
 }
@@ -418,6 +429,17 @@ interface InviteDraft {
   role: TenantRole;
 }
 
+type OrganizationDeletionStep = 'warning' | 'otp' | 'verified' | 'deleting';
+
+interface OrganizationDeletionModalState {
+  challenge: OrganizationDeletionChallenge | null;
+  confirmationText: string;
+  error: string | null;
+  otpCode: string;
+  step: OrganizationDeletionStep;
+  verifiedIdToken: string | null;
+}
+
 type EmployeeAction = EmployeeLifecycleAction | 'ASSIGN_DEPT_ADMIN' | 'REMOVE_DEPT_ADMIN' | 'CHANGE_ROLE';
 
 type MessageListModalMode = 'search' | 'starred';
@@ -563,7 +585,7 @@ const archiveUnarchiveBehaviorOptions: Array<ArchiveSettingsOption<ArchiveUnarch
 const androidButtonRipple = { borderless: false, color: 'rgba(15, 118, 110, 0.14)' } as const;
 const androidIconRipple = { borderless: true, color: 'rgba(15, 118, 110, 0.14)' } as const;
 
-export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatScreenProps) {
+export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verifiedAdmin }: AdminChatScreenProps) {
   const insets = useSafeAreaInsets();
   const { height } = useWindowDimensions();
   const [activeTab, setActiveTab] = useState<FooterTab>('Chats');
@@ -712,6 +734,11 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [newGroupDepartment, setNewGroupDepartment] = useState<TenantDepartment | null>(null);
   const [companyAddressDraft, setCompanyAddressDraft] = useState('');
   const [companyNameDraft, setCompanyNameDraft] = useState('');
+  const [organizationDeletionModal, setOrganizationDeletionModal] = useState<OrganizationDeletionModalState | null>(null);
+  const [organizationDeletionConfirmation, setOrganizationDeletionConfirmation] = useState<FirebaseAuthTypes.ConfirmationResult | null>(null);
+  const [isRequestingOrganizationDeletion, setIsRequestingOrganizationDeletion] = useState(false);
+  const [isVerifyingOrganizationDeletionOtp, setIsVerifyingOrganizationDeletionOtp] = useState(false);
+  const [isDeletingOrganization, setIsDeletingOrganization] = useState(false);
   const [recoveryKeyDraft, setRecoveryKeyDraft] = useState('');
   const [error, setError] = useState<string | null>(null);
   const backupSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -724,6 +751,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const activeLocalSendQueueIdsRef = useRef<Set<string>>(new Set());
   const pendingSyncContactIdsRef = useRef<Set<string>>(new Set());
   const activeMediaDownloadPromisesRef = useRef<Map<string, Promise<string | null>>>(new Map());
+  const organizationDeletionProgressAnim = useRef(new Animated.Value(0)).current;
   const chatContactsRef = useRef<ChatContact[]>([]);
   const chatOpenRequestIdRef = useRef(0);
   const hasResolvedChatContactsRef = useRef(false);
@@ -741,6 +769,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const canManageGroups = hasPermission(permissions, 'groups.manage') || hasPermission(permissions, 'groups.create');
   const canManageSecurity = hasPermission(permissions, 'security.manage');
   const canViewEmployees = canInviteEmployees || canManageUsers;
+  const canDeleteOrganization = userProfile?.isTenantOwner === true;
   const visibleFooterTabs: FooterTab[] = canViewEmployees
     ? ['Chats', 'Groups', 'Employees', 'Settings', 'You']
     : ['Chats', 'Groups', 'Settings', 'You'];
@@ -949,6 +978,31 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   useEffect(() => {
     selectedChatRef.current = selectedChat;
   }, [selectedChat]);
+
+  useEffect(() => {
+    if (organizationDeletionModal?.step !== 'deleting') {
+      organizationDeletionProgressAnim.stopAnimation();
+      organizationDeletionProgressAnim.setValue(0);
+      return;
+    }
+
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(organizationDeletionProgressAnim, {
+          duration: 1200,
+          easing: Easing.inOut(Easing.ease),
+          toValue: 0.92,
+          useNativeDriver: false
+        }),
+        Animated.timing(organizationDeletionProgressAnim, {
+          duration: 420,
+          easing: Easing.out(Easing.ease),
+          toValue: 0.18,
+          useNativeDriver: false
+        })
+      ])
+    ).start();
+  }, [organizationDeletionModal?.step, organizationDeletionProgressAnim]);
 
   useEffect(() => {
     activeTrashSegmentIdRef.current = activeTrashSegmentId;
@@ -5412,6 +5466,156 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     }
   }
 
+  function handleOpenDeleteOrganization() {
+    if (!canDeleteOrganization) {
+      Alert.alert('Owner access required', 'Only the organization owner can delete this organization.');
+      return;
+    }
+
+    setOrganizationDeletionConfirmation(null);
+    setOrganizationDeletionModal({
+      challenge: null,
+      confirmationText: '',
+      error: null,
+      otpCode: '',
+      step: 'warning',
+      verifiedIdToken: null
+    });
+  }
+
+  function updateOrganizationDeletionModal(patch: Partial<OrganizationDeletionModalState>) {
+    setOrganizationDeletionModal((currentState) => (
+      currentState ? { ...currentState, ...patch } : currentState
+    ));
+  }
+
+  async function handleSendOrganizationDeletionOtp() {
+    if (!organizationDeletionModal || isRequestingOrganizationDeletion) {
+      return;
+    }
+
+    try {
+      setIsRequestingOrganizationDeletion(true);
+      updateOrganizationDeletionModal({ error: null });
+
+      const idToken = await verifiedAdmin.firebaseUser.getIdToken(true);
+      const challenge = await requestOrganizationDeletionChallenge(idToken);
+      const confirmation = await sendReauthenticationPhoneCode(
+        verifiedAdmin.firebaseUser,
+        verifiedAdmin.phoneNumber
+      );
+
+      setOrganizationDeletionConfirmation(confirmation);
+      setOrganizationDeletionModal({
+        challenge,
+        confirmationText: '',
+        error: null,
+        otpCode: '',
+        step: 'otp',
+        verifiedIdToken: null
+      });
+    } catch (nextError) {
+      updateOrganizationDeletionModal({
+        error: getErrorMessage(nextError, 'Unable to send the verification code.')
+      });
+    } finally {
+      setIsRequestingOrganizationDeletion(false);
+    }
+  }
+
+  async function handleVerifyOrganizationDeletionOtp() {
+    if (
+      !organizationDeletionModal?.challenge ||
+      !organizationDeletionConfirmation ||
+      isVerifyingOrganizationDeletionOtp
+    ) {
+      return;
+    }
+
+    if (organizationDeletionModal.otpCode.trim().length < 4) {
+      updateOrganizationDeletionModal({ error: 'Enter the verification code sent to your phone.' });
+      return;
+    }
+
+    if (
+      normalizeOrganizationDeletionConfirmation(organizationDeletionModal.confirmationText) !==
+      normalizeOrganizationDeletionConfirmation(organizationDeletionModal.challenge.requiredConfirmation)
+    ) {
+      updateOrganizationDeletionModal({
+        error: `Type ${organizationDeletionModal.challenge.requiredConfirmation} to confirm.`
+      });
+      return;
+    }
+
+    try {
+      setIsVerifyingOrganizationDeletionOtp(true);
+      updateOrganizationDeletionModal({ error: null });
+      await organizationDeletionConfirmation.confirm(organizationDeletionModal.otpCode.trim());
+      const verifiedIdToken = await verifiedAdmin.firebaseUser.getIdToken(true);
+
+      updateOrganizationDeletionModal({
+        step: 'verified',
+        verifiedIdToken
+      });
+    } catch (nextError) {
+      updateOrganizationDeletionModal({
+        error: getErrorMessage(nextError, 'The verification code could not be confirmed.')
+      });
+    } finally {
+      setIsVerifyingOrganizationDeletionOtp(false);
+    }
+  }
+
+  async function handleProceedOrganizationDeletion() {
+    if (
+      !organizationDeletionModal?.challenge ||
+      !organizationDeletionModal.verifiedIdToken ||
+      isDeletingOrganization
+    ) {
+      return;
+    }
+
+    try {
+      setIsDeletingOrganization(true);
+      updateOrganizationDeletionModal({
+        error: null,
+        step: 'deleting'
+      });
+
+      await confirmOrganizationDeletion({
+        challengeId: organizationDeletionModal.challenge.challengeId,
+        confirmationText: organizationDeletionModal.confirmationText,
+        idToken: organizationDeletionModal.verifiedIdToken
+      });
+      await clearLocalChatDataForOwner({ ownerUid: currentUid }).catch(() => undefined);
+      clearRegisteredDeviceIdentityCache();
+      setOrganizationDeletionModal(null);
+      setOrganizationDeletionConfirmation(null);
+
+      Alert.alert(
+        'Organization deleted',
+        'The organization and its tenant data have been deleted. You will be returned to the login screen.',
+        [
+          {
+            text: 'OK',
+            onPress: () => {
+              void signOutOrgAdmin()
+                .catch(() => undefined)
+                .finally(onOrganizationDeleted);
+            }
+          }
+        ]
+      );
+    } catch (nextError) {
+      updateOrganizationDeletionModal({
+        error: getErrorMessage(nextError, 'Unable to delete this organization.'),
+        step: 'verified'
+      });
+    } finally {
+      setIsDeletingOrganization(false);
+    }
+  }
+
   async function handleUpdateCompanyLogo() {
     if (isSavingCompanyLogo || !canManageCompanyProfile) {
       return;
@@ -6803,11 +7007,14 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
           {activeTab === 'Settings' && settingsScreen === 'list' ? (
             <SettingsList
+              canDeleteOrganization={canDeleteOrganization}
               canManageCompanyProfile={canManageCompanyProfile}
               canManageDirectory={canManageDirectory}
               canManageGroups={canManageGroups}
               canManageSecurity={canManageSecurity}
               canManageUsers={canManageUsers}
+              isDeletingOrganization={isRequestingOrganizationDeletion || isDeletingOrganization}
+              onDeleteOrganization={handleOpenDeleteOrganization}
               onOpenChatBackup={handleOpenChatBackupSettings}
               onOpenCompanyProfile={handleOpenCompanyProfileSettings}
               onOpenDepartmentAdminPermissions={handleOpenDepartmentAdminPermissions}
@@ -7364,6 +7571,39 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         visible={isRecoveryKeyModalOpen}
       />
 
+      <OrganizationDeletionModal
+        isDeleting={isDeletingOrganization}
+        isRequesting={isRequestingOrganizationDeletion}
+        isVerifying={isVerifyingOrganizationDeletionOtp}
+        onCancel={() => {
+          if (isDeletingOrganization) {
+            return;
+          }
+
+          setOrganizationDeletionModal(null);
+          setOrganizationDeletionConfirmation(null);
+        }}
+        onChangeConfirmationText={(confirmationText) => updateOrganizationDeletionModal({
+          confirmationText,
+          error: null
+        })}
+        onChangeOtpCode={(otpCode) => updateOrganizationDeletionModal({
+          error: null,
+          otpCode
+        })}
+        onProceed={() => {
+          void handleProceedOrganizationDeletion();
+        }}
+        onSendOtp={() => {
+          void handleSendOrganizationDeletionOtp();
+        }}
+        onVerifyOtp={() => {
+          void handleVerifyOrganizationDeletionOtp();
+        }}
+        progressAnim={organizationDeletionProgressAnim}
+        state={organizationDeletionModal}
+      />
+
       <SpamChatStatusModal
         chat={spamActionTarget}
         isDeleting={isDeletingSpamChats}
@@ -7383,6 +7623,210 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         onToggleFavorite={handleToggleFavoriteChat}
       />
     </View>
+  );
+}
+
+function OrganizationDeletionModal({
+  isDeleting,
+  isRequesting,
+  isVerifying,
+  onCancel,
+  onChangeConfirmationText,
+  onChangeOtpCode,
+  onProceed,
+  onSendOtp,
+  onVerifyOtp,
+  progressAnim,
+  state
+}: {
+  isDeleting: boolean;
+  isRequesting: boolean;
+  isVerifying: boolean;
+  onCancel: () => void;
+  onChangeConfirmationText: (value: string) => void;
+  onChangeOtpCode: (value: string) => void;
+  onProceed: () => void;
+  onSendOtp: () => void;
+  onVerifyOtp: () => void;
+  progressAnim: Animated.Value;
+  state: OrganizationDeletionModalState | null;
+}) {
+  if (!state) {
+    return null;
+  }
+
+  const challenge = state.challenge;
+  const requiredConfirmation = challenge?.requiredConfirmation || '';
+  const canVerify = Boolean(
+    challenge &&
+    state.otpCode.trim().length >= 4 &&
+    normalizeOrganizationDeletionConfirmation(state.confirmationText) ===
+      normalizeOrganizationDeletionConfirmation(requiredConfirmation)
+  );
+  const progressWidth = progressAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['14%', '92%']
+  });
+
+  return (
+    <Modal
+      animationType="fade"
+      onRequestClose={onCancel}
+      transparent
+      visible
+    >
+      <View style={styles.organizationDeletionOverlay}>
+        <View style={styles.organizationDeletionCard}>
+          {state.step !== 'deleting' ? (
+            <Pressable
+              accessibilityLabel="Close delete organization"
+              accessibilityRole="button"
+              disabled={isRequesting || isVerifying}
+              onPress={onCancel}
+              style={({ pressed }) => [
+                styles.organizationDeletionClose,
+                pressed && !(isRequesting || isVerifying) && styles.pressed,
+                (isRequesting || isVerifying) && styles.disabled
+              ]}
+            >
+              <Feather color="#334155" name="x" size={20} />
+            </Pressable>
+          ) : null}
+
+          {state.step === 'warning' ? (
+            <>
+              <View style={styles.organizationDeletionIcon}>
+                <Feather color="#FFFFFF" name="alert-triangle" size={25} />
+              </View>
+              <Text style={styles.organizationDeletionTitle}>Delete organization?</Text>
+              <Text style={styles.organizationDeletionBody}>
+                This permanently deletes organization chats, employees, encrypted files, devices, groups, departments, and tenant settings. This action cannot be reversed.
+              </Text>
+              <Text style={styles.organizationDeletionBody}>
+                We will send a verification code to the organization owner phone number before allowing deletion.
+              </Text>
+              {state.error ? (
+                <Text style={styles.organizationDeletionError}>{state.error}</Text>
+              ) : null}
+              <View style={styles.organizationDeletionActions}>
+                <Pressable
+                  accessibilityRole="button"
+                  disabled={isRequesting}
+                  onPress={onCancel}
+                  style={({ pressed }) => [
+                    styles.organizationDeletionSecondaryButton,
+                    pressed && !isRequesting && styles.pressed,
+                    isRequesting && styles.disabled
+                  ]}
+                >
+                  <Text style={styles.organizationDeletionSecondaryText}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  disabled={isRequesting}
+                  onPress={onSendOtp}
+                  style={({ pressed }) => [
+                    styles.organizationDeletionDangerButton,
+                    pressed && !isRequesting && styles.pressed,
+                    isRequesting && styles.disabled
+                  ]}
+                >
+                  <Text style={styles.organizationDeletionDangerText}>
+                    {isRequesting ? 'Sending...' : 'Send OTP'}
+                  </Text>
+                </Pressable>
+              </View>
+            </>
+          ) : null}
+
+          {state.step === 'otp' && challenge ? (
+            <>
+              <Text style={styles.organizationDeletionTitle}>Verify deletion</Text>
+              <Text style={styles.organizationDeletionBody}>
+                Enter the verification code sent to your phone, then type the confirmation phrase below.
+              </Text>
+              <SettingsInput
+                keyboardType="number-pad"
+                onChangeText={onChangeOtpCode}
+                placeholder="Verification code"
+                value={state.otpCode}
+              />
+              <Text style={styles.organizationDeletionHint}>
+                Type {challenge.requiredConfirmation}
+              </Text>
+              <SettingsInput
+                autoCapitalize="characters"
+                onChangeText={onChangeConfirmationText}
+                placeholder={challenge.requiredConfirmation}
+                value={state.confirmationText}
+              />
+              {state.error ? (
+                <Text style={styles.organizationDeletionError}>{state.error}</Text>
+              ) : null}
+              <Pressable
+                accessibilityRole="button"
+                disabled={!canVerify || isVerifying}
+                onPress={onVerifyOtp}
+                style={({ pressed }) => [
+                  styles.organizationDeletionDangerButton,
+                  pressed && canVerify && !isVerifying && styles.pressed,
+                  (!canVerify || isVerifying) && styles.disabled
+                ]}
+              >
+                <Text style={styles.organizationDeletionDangerText}>
+                  {isVerifying ? 'Verifying...' : 'Verify account'}
+                </Text>
+              </Pressable>
+            </>
+          ) : null}
+
+          {state.step === 'verified' && challenge ? (
+            <>
+              <View style={styles.organizationDeletionVerifiedIcon}>
+                <Feather color="#FFFFFF" name="check" size={25} />
+              </View>
+              <Text style={styles.organizationDeletionTitle}>Account verified</Text>
+              <Text style={styles.organizationDeletionBody}>
+                Your account was verified. Proceeding will permanently delete {challenge.companyName} and sign out every user in this organization.
+              </Text>
+              {state.error ? (
+                <Text style={styles.organizationDeletionError}>{state.error}</Text>
+              ) : null}
+              <Pressable
+                accessibilityRole="button"
+                disabled={isDeleting}
+                onPress={onProceed}
+                style={({ pressed }) => [
+                  styles.organizationDeletionDangerButton,
+                  pressed && !isDeleting && styles.pressed,
+                  isDeleting && styles.disabled
+                ]}
+              >
+                <Text style={styles.organizationDeletionDangerText}>Proceed</Text>
+              </Pressable>
+            </>
+          ) : null}
+
+          {state.step === 'deleting' ? (
+            <>
+              <Text style={styles.organizationDeletionTitle}>Deleting organization</Text>
+              <Text style={styles.organizationDeletionBody}>
+                Hang tight while we delete this tenant and its data. Keep the app open until this finishes.
+              </Text>
+              <View style={styles.organizationDeletionProgressTrack}>
+                <Animated.View
+                  style={[
+                    styles.organizationDeletionProgressFill,
+                    { width: progressWidth }
+                  ]}
+                />
+              </View>
+              <Text style={styles.organizationDeletionHint}>Securely signing users out and purging tenant data...</Text>
+            </>
+          ) : null}
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -14856,11 +15300,14 @@ function ProfileDetailRow({ label, value }: { label: string; value: string }) {
 }
 
 function SettingsList({
+  canDeleteOrganization,
   canManageCompanyProfile,
   canManageDirectory,
   canManageGroups,
   canManageUsers,
   canManageSecurity,
+  isDeletingOrganization,
+  onDeleteOrganization,
   onOpenChatBackup,
   onOpenCompanyProfile,
   onOpenDepartmentAdminPermissions,
@@ -14870,11 +15317,14 @@ function SettingsList({
   onOpenRolePermissions,
   onOpenSecurity
 }: {
+  canDeleteOrganization: boolean;
   canManageCompanyProfile: boolean;
   canManageDirectory: boolean;
   canManageGroups: boolean;
   canManageUsers: boolean;
   canManageSecurity: boolean;
+  isDeletingOrganization: boolean;
+  onDeleteOrganization: () => void;
   onOpenChatBackup: () => void;
   onOpenCompanyProfile: () => void;
   onOpenDepartmentAdminPermissions: () => void;
@@ -14954,6 +15404,23 @@ function SettingsList({
         subtitle="Encrypted chat history"
         title="Chat backup"
       />
+      {canDeleteOrganization ? (
+        <Pressable
+          accessibilityRole="button"
+          disabled={isDeletingOrganization}
+          onPress={onDeleteOrganization}
+          style={({ pressed }) => [
+            styles.deleteOrganizationButton,
+            pressed && !isDeletingOrganization && styles.pressed,
+            isDeletingOrganization && styles.disabled
+          ]}
+        >
+          <Feather color="#FFFFFF" name="trash-2" size={18} />
+          <Text style={styles.deleteOrganizationButtonText}>
+            {isDeletingOrganization ? 'Preparing deletion...' : 'Delete Organization'}
+          </Text>
+        </Pressable>
+      ) : null}
     </View>
   );
 }
@@ -16463,10 +16930,14 @@ function ManualInviteModal({
 }
 
 function SettingsInput({
+  autoCapitalize = 'words',
+  keyboardType,
   onChangeText,
   placeholder,
   value
 }: {
+  autoCapitalize?: React.ComponentProps<typeof TextInput>['autoCapitalize'];
+  keyboardType?: React.ComponentProps<typeof TextInput>['keyboardType'];
   onChangeText: (value: string) => void;
   placeholder: string;
   value: string;
@@ -16474,8 +16945,9 @@ function SettingsInput({
   return (
     <View style={styles.settingsInputBox}>
       <TextInput
-        autoCapitalize="words"
+        autoCapitalize={autoCapitalize}
         autoCorrect={false}
+        keyboardType={keyboardType}
         onChangeText={onChangeText}
         placeholder={placeholder}
         placeholderTextColor="#8B95A5"
@@ -18967,6 +19439,10 @@ function formatSettingValue(value: string): string {
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
     .join(' ') || 'Not set';
+}
+
+function normalizeOrganizationDeletionConfirmation(value: string): string {
+  return value.trim().replace(/\s+/g, ' ').toUpperCase();
 }
 
 function getContactDisplayName(contact: Contacts.ExistingContact): string | undefined {
@@ -23336,6 +23812,144 @@ const styles = StyleSheet.create({
   },
   settingsList: {
     paddingTop: 4
+  },
+  deleteOrganizationButton: {
+    alignItems: 'center',
+    alignSelf: 'stretch',
+    backgroundColor: '#DC2626',
+    borderRadius: 999,
+    flexDirection: 'row',
+    gap: 9,
+    justifyContent: 'center',
+    marginTop: 28,
+    minHeight: 50,
+    paddingHorizontal: 18
+  },
+  deleteOrganizationButtonText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '600',
+    lineHeight: 20
+  },
+  organizationDeletionOverlay: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(15, 23, 42, 0.34)',
+    flex: 1,
+    justifyContent: 'center',
+    padding: 20
+  },
+  organizationDeletionCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 26,
+    gap: 13,
+    maxWidth: 420,
+    padding: 22,
+    position: 'relative',
+    width: '100%'
+  },
+  organizationDeletionClose: {
+    alignItems: 'center',
+    backgroundColor: '#F1F5F9',
+    borderRadius: 18,
+    height: 36,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: 14,
+    top: 14,
+    width: 36,
+    zIndex: 2
+  },
+  organizationDeletionIcon: {
+    alignItems: 'center',
+    backgroundColor: '#DC2626',
+    borderRadius: 24,
+    height: 48,
+    justifyContent: 'center',
+    width: 48
+  },
+  organizationDeletionVerifiedIcon: {
+    alignItems: 'center',
+    backgroundColor: colors.primary,
+    borderRadius: 24,
+    height: 48,
+    justifyContent: 'center',
+    width: 48
+  },
+  organizationDeletionTitle: {
+    color: colors.ink,
+    fontSize: 20,
+    fontWeight: '700',
+    lineHeight: 25,
+    paddingRight: 40
+  },
+  organizationDeletionBody: {
+    color: '#475569',
+    fontSize: 14,
+    fontWeight: '400',
+    lineHeight: 20
+  },
+  organizationDeletionHint: {
+    color: '#64748B',
+    fontSize: 13,
+    fontWeight: '500',
+    lineHeight: 18
+  },
+  organizationDeletionError: {
+    backgroundColor: '#FEF3C7',
+    borderRadius: 12,
+    color: '#92400E',
+    fontSize: 13,
+    fontWeight: '500',
+    lineHeight: 18,
+    paddingHorizontal: 12,
+    paddingVertical: 9
+  },
+  organizationDeletionActions: {
+    flexDirection: 'row',
+    gap: 10,
+    justifyContent: 'flex-end'
+  },
+  organizationDeletionSecondaryButton: {
+    alignItems: 'center',
+    backgroundColor: '#E5E7EB',
+    borderRadius: 999,
+    justifyContent: 'center',
+    minHeight: 44,
+    minWidth: 108,
+    paddingHorizontal: 16
+  },
+  organizationDeletionSecondaryText: {
+    color: '#334155',
+    fontSize: 15,
+    fontWeight: '600',
+    lineHeight: 19
+  },
+  organizationDeletionDangerButton: {
+    alignItems: 'center',
+    backgroundColor: '#DC2626',
+    borderRadius: 999,
+    justifyContent: 'center',
+    minHeight: 44,
+    minWidth: 132,
+    paddingHorizontal: 18
+  },
+  organizationDeletionDangerText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '700',
+    lineHeight: 19
+  },
+  organizationDeletionProgressTrack: {
+    backgroundColor: '#E5E7EB',
+    borderRadius: 999,
+    height: 10,
+    overflow: 'hidden',
+    width: '100%'
+  },
+  organizationDeletionProgressFill: {
+    backgroundColor: colors.primary,
+    borderRadius: 999,
+    height: '100%'
   },
   permissionSettingsList: {
     paddingTop: 4

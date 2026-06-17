@@ -384,10 +384,6 @@ async function isGroupVisibleToUser(
   group: TenantGroupResponse,
   groupRef: DocumentReference
 ): Promise<boolean> {
-  if (context.role === 'ORG_ADMIN') {
-    return true;
-  }
-
   if (
     group.memberPolicy === 'DEPARTMENT_PLUS_EXPLICIT' &&
     group.autoMembershipDepartmentId &&

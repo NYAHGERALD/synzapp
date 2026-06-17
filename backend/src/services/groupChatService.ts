@@ -1568,7 +1568,7 @@ function canAddMemberToGroup(
     group.isDepartmentDefault === true &&
     group.memberPolicy === 'DEPARTMENT_PLUS_EXPLICIT'
   ) {
-    return true;
+    return context.user.departmentId === group.autoMembershipDepartmentId;
   }
 
   return group.createdBy === context.uid;
@@ -1607,9 +1607,7 @@ function mapGroupChatAddableGroup(
 
 async function ensureDepartmentSystemGroupsForUser(context: Awaited<ReturnType<typeof getActiveUserContext>>): Promise<void> {
   const organizationRef = firestore.collection('organizations').doc(context.tenantId);
-  const departmentSnapshots = context.role === 'ORG_ADMIN'
-    ? (await organizationRef.collection('departments').where('status', '==', 'ACTIVE').get()).docs
-    : context.user.departmentId
+  const departmentSnapshots = context.user.departmentId
       ? await firestore.getAll(organizationRef.collection('departments').doc(context.user.departmentId))
       : [];
   const activeDepartments = departmentSnapshots
@@ -2196,7 +2194,7 @@ function assertExactRecipientDevices(
 
 function getVisibleChatContactRoles(role: SynzappRole): SynzappRole[] {
   if (role === 'ORG_ADMIN') {
-    return ['EMPLOYEE', 'DEPT_ADMIN'];
+    return ['ORG_ADMIN', 'EMPLOYEE', 'DEPT_ADMIN'];
   }
 
   if (role === 'DEPT_ADMIN') {

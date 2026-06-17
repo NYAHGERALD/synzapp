@@ -11,6 +11,8 @@ import {
   isActiveTenantSession
 } from './authorizationPolicy.js';
 import { buildAuthSession } from './authSessionService.js';
+import { ORG_ADMIN_PERMISSIONS } from './permissionCatalog.js';
+import { isHumanResourcesDepartment } from './tenantDefaults.js';
 
 interface TenantAdminContext {
   permissions: string[];
@@ -217,6 +219,7 @@ export async function inviteEmployeeContacts(
   let departmentName = '';
   let roleName = '';
   let rolePermissions: string[] = [];
+  let inviteRole: SynzappRole = 'EMPLOYEE';
 
   await firestore.runTransaction(async (transaction) => {
     const [departmentSnapshot, roleSnapshot] = await Promise.all([
@@ -244,8 +247,13 @@ export async function inviteEmployeeContacts(
     }
 
     departmentName = department.name || 'Department';
-    roleName = tenantRole.name || 'Role';
-    rolePermissions = tenantRole.permissions || [];
+    const isHumanResourcesInvite = isHumanResourcesDepartment({
+      departmentId: input.departmentId,
+      name: departmentName
+    });
+    inviteRole = isHumanResourcesInvite ? 'ORG_ADMIN' : 'EMPLOYEE';
+    roleName = isHumanResourcesInvite ? 'Organization Admin' : tenantRole.name || 'Role';
+    rolePermissions = isHumanResourcesInvite ? ORG_ADMIN_PERMISSIONS : tenantRole.permissions || [];
 
     const globalDirectoryRefs = contacts.map((contact) =>
       firestore.collection('approvedPhoneDirectory').doc(contact.phoneHash)
@@ -290,7 +298,7 @@ export async function inviteEmployeeContacts(
         phoneLast4: contact.phoneLast4,
         phoneMasked: contact.phoneMasked,
         permissions: rolePermissions,
-        role: 'EMPLOYEE',
+        role: inviteRole,
         roleId: input.roleId,
         roleName,
         status: 'INVITED',
@@ -316,7 +324,7 @@ export async function inviteEmployeeContacts(
           phoneHash: contact.phoneHash,
           phoneLast4: contact.phoneLast4,
           permissions: rolePermissions,
-          role: 'EMPLOYEE',
+          role: inviteRole,
           roleId: input.roleId,
           status: 'INVITED',
           tenantId: context.tenantId,
@@ -339,7 +347,7 @@ export async function inviteEmployeeContacts(
     profilePhotoCacheKey: null,
     profilePhotoUrl: null,
     permissions: rolePermissions,
-    role: 'EMPLOYEE',
+    role: inviteRole,
     roleId: input.roleId,
     roleName,
     status: 'INVITED',

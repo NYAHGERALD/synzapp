@@ -218,7 +218,7 @@ async function getApprovedEmployeeContext(decodedToken: DecodedIdToken) {
 
   if (
     !globalApprovedPhone?.tenantId ||
-    (globalApprovedPhone.role !== 'EMPLOYEE' && globalApprovedPhone.role !== 'DEPT_ADMIN')
+    !isApprovedEmployeeProfileRole(globalApprovedPhone.role)
   ) {
     throw authorizationError('This phone number is not approved for employee access.');
   }
@@ -256,7 +256,7 @@ async function getApprovedEmployeeContext(decodedToken: DecodedIdToken) {
 
   if (
     approvedPhone.tenantId !== globalApprovedPhone.tenantId ||
-    (approvedRole !== 'EMPLOYEE' && approvedRole !== 'DEPT_ADMIN')
+    !isApprovedEmployeeProfileRole(approvedRole)
   ) {
     throw authorizationError('This employee access is not active.');
   }
@@ -287,6 +287,10 @@ async function getApprovedEmployeeContext(decodedToken: DecodedIdToken) {
     phoneLast4,
     phoneMasked
   };
+}
+
+function isApprovedEmployeeProfileRole(role: SynzappRole | undefined): role is SynzappRole {
+  return role === 'EMPLOYEE' || role === 'DEPT_ADMIN' || role === 'ORG_ADMIN';
 }
 
 async function uploadProfilePhoto(

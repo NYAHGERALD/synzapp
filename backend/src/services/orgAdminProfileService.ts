@@ -9,18 +9,13 @@ import {
 import { AuthSessionResponse } from '../types/auth.js';
 import { getPhoneLast4, maskPhoneNumber, normalizeE164Phone } from '../utils/phone.js';
 import { hashPhoneNumber } from '../utils/phoneHash.js';
-
-const ORG_ADMIN_PERMISSIONS = [
-  'tenant.read',
-  'tenant.update',
-  'users.invite',
-  'users.manage',
-  'departments.manage',
-  'roles.manage',
-  'groups.manage',
-  'audit.read',
-  'security.manage'
-];
+import { buildDepartmentSystemGroupId, buildDepartmentSystemGroupRecord } from './groupService.js';
+import { ORG_ADMIN_PERMISSIONS } from './permissionCatalog.js';
+import {
+  buildHumanResourcesDepartmentRecord,
+  HUMAN_RESOURCES_DEPARTMENT_ID,
+  HUMAN_RESOURCES_DEPARTMENT_NAME
+} from './tenantDefaults.js';
 
 interface CreateOrgAdminProfileInput {
   companyName: string;
@@ -85,6 +80,12 @@ export async function createOrgAdminProfile(
     const identityRef = firestore.collection('identityDirectory').doc(uid);
     const organizationRef = firestore.collection('organizations').doc(tenantId);
     const organizationNameRef = firestore.collection('organizationNameDirectory').doc(companySlug);
+    const humanResourcesDepartmentRef = organizationRef
+      .collection('departments')
+      .doc(HUMAN_RESOURCES_DEPARTMENT_ID);
+    const humanResourcesGroupRef = organizationRef
+      .collection('groups')
+      .doc(buildDepartmentSystemGroupId(HUMAN_RESOURCES_DEPARTMENT_ID));
     const userRef = organizationRef.collection('users').doc(uid);
 
     const [identitySnapshot, organizationNameSnapshot] = await Promise.all([
@@ -124,9 +125,27 @@ export async function createOrgAdminProfile(
       updatedAt: fieldValue.serverTimestamp()
     });
 
+    transaction.set(humanResourcesDepartmentRef, {
+      ...buildHumanResourcesDepartmentRecord({
+        createdBy: uid,
+        tenantId
+      }),
+      createdAt: fieldValue.serverTimestamp(),
+      updatedAt: fieldValue.serverTimestamp()
+    });
+
+    transaction.set(humanResourcesGroupRef, buildDepartmentSystemGroupRecord({
+      createdBy: uid,
+      departmentId: HUMAN_RESOURCES_DEPARTMENT_ID,
+      departmentName: HUMAN_RESOURCES_DEPARTMENT_NAME,
+      description: 'Default organization administration department group',
+      tenantId
+    }));
+
     transaction.set(userRef, {
       createdAt: fieldValue.serverTimestamp(),
-      departmentId: null,
+      departmentId: HUMAN_RESOURCES_DEPARTMENT_ID,
+      departmentName: HUMAN_RESOURCES_DEPARTMENT_NAME,
       displayName,
       firstName: input.adminFirstName.trim(),
       firebaseUid: uid,
@@ -141,6 +160,7 @@ export async function createOrgAdminProfile(
       profilePhotoStoragePath: profilePhoto?.storagePath || null,
       profilePhotoVersion,
       role: 'ORG_ADMIN',
+      roleName: 'Organization Admin',
       status: 'ACTIVE',
       tenantId,
       updatedAt: fieldValue.serverTimestamp()
@@ -149,6 +169,7 @@ export async function createOrgAdminProfile(
     transaction.set(identityRef, {
       claimsVersion,
       createdAt: fieldValue.serverTimestamp(),
+      departmentId: HUMAN_RESOURCES_DEPARTMENT_ID,
       displayName,
       permissions: ORG_ADMIN_PERMISSIONS,
       phoneLast4,
@@ -182,6 +203,7 @@ export async function createOrgAdminProfile(
       claimsRefreshed: true,
       nextStep: 'OPEN_APP',
       user: {
+        departmentId: HUMAN_RESOURCES_DEPARTMENT_ID,
         uid,
         phoneMasked,
         tenantId,

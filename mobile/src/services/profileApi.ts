@@ -29,6 +29,7 @@ export interface CurrentUserProfile {
   departmentId: string | null;
   departmentName: string | null;
   displayName: string;
+  isTenantOwner: boolean;
   phoneFormatted: string;
   phoneMasked: string;
   permissions: string[];
@@ -254,6 +255,7 @@ function normalizeCurrentUserProfile(profile: CurrentUserProfile): CurrentUserPr
   return {
     ...profile,
     departmentId: profile.departmentId ?? null,
+    isTenantOwner: profile.isTenantOwner === true,
     permissions: profile.permissions || [],
     profilePhotoUrl: normalizeSynzappApiUrl(profile.profilePhotoUrl)
   };

@@ -4,6 +4,18 @@ export interface PermissionCatalogItem {
   title: string;
 }
 
+export const ORG_ADMIN_PERMISSIONS = [
+  'tenant.read',
+  'tenant.update',
+  'users.invite',
+  'users.manage',
+  'departments.manage',
+  'roles.manage',
+  'groups.manage',
+  'audit.read',
+  'security.manage'
+];
+
 export const ROLE_PERMISSION_CATALOG: PermissionCatalogItem[] = [
   {
     description: 'Create department-scoped chat groups where allowed by role and scope.',

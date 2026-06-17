@@ -32,6 +32,10 @@ import {
   updateCompanyProfile
 } from '../services/companyProfileService.js';
 import {
+  deleteOrganizationForTenantOwner,
+  requestOrganizationDeletionChallenge
+} from '../services/organizationDeletionService.js';
+import {
   listDepartmentAdminPermissionCatalog,
   updateEmployeeDepartmentAdminPermissions
 } from '../services/departmentAdminPermissionService.js';
@@ -117,6 +121,11 @@ const companyProfileBodySchema = z.object({
 
 const companyLogoBodySchema = z.object({
   companyLogoDataUrl: z.string().min(32).max(1_500_000)
+});
+
+const organizationDeletionBodySchema = z.object({
+  challengeId: z.string().trim().min(8).max(80),
+  confirmationText: z.string().trim().min(8).max(160)
 });
 
 const deviceIdParamSchema = z.string().trim().regex(/^[A-Za-z0-9_-]{16,128}$/);
@@ -213,6 +222,68 @@ adminRouter.post('/company-profile/logo', verifyAppCheck, async (req, res, next)
     await writeAuditEvent({
       action: 'COMPANY_LOGO_UPDATED',
       reason: error instanceof Error ? error.message : 'Company logo update failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
+adminRouter.post('/organization-deletion/challenge', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const challenge = await requestOrganizationDeletionChallenge(decodedToken);
+
+    await writeAuditEvent({
+      action: 'ORGANIZATION_DELETION_CHALLENGE_CREATED',
+      metadata: {
+        challengeId: challenge.challengeId,
+        expiresAt: challenge.expiresAt
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: challenge.tenantId,
+      uid: decodedToken.uid
+    });
+
+    res.status(201).json({ challenge });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'ORGANIZATION_DELETION_CHALLENGE_CREATED',
+      reason: error instanceof Error ? error.message : 'Organization deletion challenge failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
+adminRouter.post('/organization-deletion/confirm', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const body = organizationDeletionBodySchema.parse(req.body);
+    const result = await deleteOrganizationForTenantOwner(decodedToken, body);
+
+    await writeAuditEvent({
+      action: 'ORGANIZATION_DELETED',
+      metadata: {
+        tenantId: result.tenantId,
+        revokedUserCount: result.revokedUserCount
+      },
+      req,
+      status: 'SUCCESS',
+      uid: decodedToken.uid
+    });
+
+    res.json({ result });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'ORGANIZATION_DELETED',
+      reason: error instanceof Error ? error.message : 'Organization deletion failed',
       req,
       status: 'FAILED'
     }).catch(() => undefined);

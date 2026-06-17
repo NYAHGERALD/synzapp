@@ -1,6 +1,7 @@
 import {
   FirebaseAuthTypes,
   onAuthStateChanged,
+  reauthenticateWithPhoneNumber,
   signInWithPhoneNumber,
   signOut
 } from '@react-native-firebase/auth';
@@ -39,6 +40,19 @@ export async function verifyOrgAdminPhoneCode(
     true,
     'login'
   );
+}
+
+export async function sendReauthenticationPhoneCode(
+  user: FirebaseAuthTypes.User,
+  phoneNumber: string
+): Promise<FirebaseAuthTypes.ConfirmationResult> {
+  const safePhoneNumber = (user.phoneNumber || phoneNumber).trim();
+
+  if (!safePhoneNumber) {
+    throw new Error('A verified phone number is required.');
+  }
+
+  return reauthenticateWithPhoneNumber(user, safePhoneNumber);
 }
 
 export function subscribeToOrgAdminAuthState(

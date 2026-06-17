@@ -92,6 +92,20 @@ export interface CompanyProfile {
   updatedAt: string | null;
 }
 
+export interface OrganizationDeletionChallenge {
+  challengeId: string;
+  companyName: string;
+  expiresAt: string;
+  requiredConfirmation: string;
+  tenantId: string;
+}
+
+export interface OrganizationDeletionResult {
+  deleted: boolean;
+  revokedUserCount: number;
+  tenantId: string;
+}
+
 interface CreateTenantRecordInput {
   description?: string;
   idToken: string;
@@ -261,6 +275,35 @@ export async function updateCompanyLogo(input: {
   const body = await response.json() as { companyProfile: CompanyProfile };
 
   return normalizeCompanyProfile(body.companyProfile);
+}
+
+export async function requestOrganizationDeletionChallenge(
+  idToken: string
+): Promise<OrganizationDeletionChallenge> {
+  const response = await adminFetch('/api/admin/organization-deletion/challenge', idToken, {
+    body: JSON.stringify({}),
+    method: 'POST'
+  });
+  const body = await response.json() as { challenge: OrganizationDeletionChallenge };
+
+  return body.challenge;
+}
+
+export async function confirmOrganizationDeletion(input: {
+  challengeId: string;
+  confirmationText: string;
+  idToken: string;
+}): Promise<OrganizationDeletionResult> {
+  const response = await adminFetch('/api/admin/organization-deletion/confirm', input.idToken, {
+    body: JSON.stringify({
+      challengeId: input.challengeId,
+      confirmationText: input.confirmationText
+    }),
+    method: 'POST'
+  });
+  const body = await response.json() as { result: OrganizationDeletionResult };
+
+  return body.result;
 }
 
 export async function inviteEmployeeContacts(
