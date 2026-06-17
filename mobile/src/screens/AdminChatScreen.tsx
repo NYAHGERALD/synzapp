@@ -1028,7 +1028,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     chatContactCacheTimerRef.current = setTimeout(() => {
       void saveCachedChatContacts({
         contacts: chatContacts,
-        ownerUid: currentUid
+        ...getLocalChatScope()
       }).catch(() => undefined);
       chatContactCacheTimerRef.current = null;
     }, 350);
@@ -1039,7 +1039,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         chatContactCacheTimerRef.current = null;
       }
     };
-  }, [chatContacts, currentUid]);
+  }, [chatContacts, currentUid, userProfile?.tenantId, verifiedAdmin.session.user.tenantId]);
 
   useEffect(() => {
     if (!selectedChat) {
@@ -1215,6 +1215,13 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
 
   function getActiveTenantId(): string {
     return userProfile?.tenantId || verifiedAdmin.session.user.tenantId || '';
+  }
+
+  function getLocalChatScope(): { ownerUid: string; tenantId: string } {
+    return {
+      ownerUid: currentUid,
+      tenantId: getActiveTenantId()
+    };
   }
 
   function queueEncryptedChatBackup() {
@@ -1778,9 +1785,9 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
 
     try {
       const [cachedChatContacts, cachedConversations, pendingMessages] = await Promise.all([
-        loadCachedChatContacts({ ownerUid: currentUid }).catch(() => []),
-        listCachedChatConversations({ ownerUid: currentUid }).catch(() => []),
-        listPendingChatMessages({ ownerUid: currentUid }).catch(() => [])
+        loadCachedChatContacts({ ...getLocalChatScope() }).catch(() => []),
+        listCachedChatConversations({ ...getLocalChatScope() }).catch(() => []),
+        listPendingChatMessages({ ...getLocalChatScope() }).catch(() => [])
       ]);
       const cachedConversationContacts = buildLocalChatContactsFromCachedConversations(
         cachedConversations,
@@ -1929,7 +1936,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       if (input.clear || input.permanentDelete || input.isSpam === true) {
         const cachedConversation = await loadCachedChatConversation({
           contactId: chat.contactId,
-          ownerUid: currentUid
+          ...getLocalChatScope()
         }).catch(() => null);
         await saveCachedChatConversation({
           contact: cachedContact,
@@ -1941,7 +1948,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
             .filter((message) => message.messageId)
             .map((message) => message.messageId),
           messages: [],
-          ownerUid: currentUid
+          ...getLocalChatScope()
         }).catch(() => undefined);
 
         if (selectedChatRef.current?.contactId === chat.contactId) {
@@ -2433,7 +2440,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       if (deliveredMessagesWithReactions.length) {
         const cachedConversation = await loadCachedChatConversation({
           contactId: nextContact.contactId,
-          ownerUid: currentUid
+          ...getLocalChatScope()
         }).catch(() => null);
         const mergedMessages = uniqueChatMessages([
           ...(cachedConversation?.messages || []),
@@ -2452,14 +2459,14 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           contact: nextContact,
           contactId: nextContact.contactId,
           messages: visibleMergedMessages,
-          ownerUid: currentUid
+          ...getLocalChatScope()
         });
         queueEncryptedChatBackup();
         queueMediaDownloadsForMessages(nextContact.contactId, visibleMergedMessages, nextContact.chatType || 'DIRECT');
       } else if (shouldMarkRead) {
         const cachedConversation = await loadCachedChatConversation({
           contactId: nextContact.contactId,
-          ownerUid: currentUid
+          ...getLocalChatScope()
         }).catch(() => null);
         const reactedMessages = await filterHiddenMessagesForChat(nextContact.contactId, applyReactionMapToMessages(
           cachedConversation?.messages || messagesRef.current,
@@ -2476,7 +2483,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
             contact: nextContact,
             contactId: nextContact.contactId,
             messages: reactedMessages,
-            ownerUid: currentUid
+            ...getLocalChatScope()
           });
           queueEncryptedChatBackup();
         }
@@ -2498,11 +2505,11 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       const [cachedConversation, pendingMessages] = await Promise.all([
         loadCachedChatConversation({
           contactId: event.contactId,
-          ownerUid: currentUid
+          ...getLocalChatScope()
         }).catch(() => null),
         listPendingChatMessages({
           contactId: event.contactId,
-          ownerUid: currentUid
+          ...getLocalChatScope()
         })
       ]);
       const eventIdToken = await getIdToken();
@@ -2550,7 +2557,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         contact: contactWithLocalPreview,
         contactId: event.contactId,
         messages: visiblePersistedMessages,
-        ownerUid: currentUid
+        ...getLocalChatScope()
       });
       queueEncryptedChatBackup();
       queueMediaDownloadsForMessages(event.contactId, nextMessages, event.contact.chatType || 'DIRECT');
@@ -3836,7 +3843,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   async function filterHiddenMessagesForChat(contactId: string, messages: ChatMessage[]): Promise<ChatMessage[]> {
     const hiddenMessageIds = await loadHiddenChatMessageIds({
       contactId,
-      ownerUid: currentUid
+      ...getLocalChatScope()
     }).catch(() => []);
 
     if (!hiddenMessageIds.length) {
@@ -3853,11 +3860,11 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       const [cachedConversation, pendingMessages] = await Promise.all([
         loadCachedChatConversation({
           contactId: chat.contactId,
-          ownerUid: currentUid
+          ...getLocalChatScope()
         }),
         listPendingChatMessages({
           contactId: chat.contactId,
-          ownerUid: currentUid
+          ...getLocalChatScope()
         })
       ]);
       const nextMessages = uniqueChatMessages([
@@ -3911,11 +3918,11 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         : await Promise.all([
             loadCachedChatConversation({
               contactId: chat.contactId,
-              ownerUid: currentUid
+              ...getLocalChatScope()
             }).catch(() => null),
             listPendingChatMessages({
               contactId: chat.contactId,
-              ownerUid: currentUid
+              ...getLocalChatScope()
             })
           ]);
       const serverMessages = applyReactionMapToMessages(uniqueChatMessages(result.messages), result.messageReactions);
@@ -3951,7 +3958,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           contact: contactWithLocalPreview,
           contactId: chat.contactId,
           messages: visiblePersistedMessages,
-          ownerUid: currentUid
+          ...getLocalChatScope()
         });
         queueEncryptedChatBackup();
         void syncPendingMessagesForChat(chat.contactId);
@@ -3985,7 +3992,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     try {
       const pendingMessages = await listPendingChatMessages({
         contactId,
-        ownerUid: currentUid
+        ...getLocalChatScope()
       });
       const syncablePendingMessages = pendingMessages.filter((pendingMessage) =>
         !activeLocalSendQueueIdsRef.current.has(pendingMessage.queueId)
@@ -4000,7 +4007,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       for (const pendingMessage of syncablePendingMessages) {
         await updatePendingChatMessage({
           lastError: null,
-          ownerUid: currentUid,
+          ...getLocalChatScope(),
           queueId: pendingMessage.queueId,
           status: 'sending'
         });
@@ -4040,7 +4047,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           const cachedContact = await cacheChatContactPhoto(result.contact, idToken);
 
           await removePendingChatMessage({
-            ownerUid: currentUid,
+            ...getLocalChatScope(),
             queueId: pendingMessage.queueId
           });
 
@@ -4054,7 +4061,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         } catch (syncError) {
           await updatePendingChatMessage({
             lastError: getErrorMessage(syncError, 'Unable to sync queued message.'),
-            ownerUid: currentUid,
+            ...getLocalChatScope(),
             queueId: pendingMessage.queueId,
             status: 'failed'
           });
@@ -4067,7 +4074,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
 
   async function syncAllPendingMessages() {
     const pendingMessages = await listPendingChatMessages({
-      ownerUid: currentUid
+      ...getLocalChatScope()
     }).catch(() => []);
     const contactIds = Array.from(new Set(pendingMessages.map((pendingMessage) => pendingMessage.contactId)));
 
@@ -4084,7 +4091,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   }) {
     const cachedConversation = await loadCachedChatConversation({
       contactId: input.contactId,
-      ownerUid: currentUid
+      ...getLocalChatScope()
     }).catch(() => null);
     const pendingLocalMessage = [
       ...(cachedConversation?.messages || []),
@@ -4101,7 +4108,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       contact: contactWithLocalPreview,
       contactId: input.contactId,
       messages: nextCachedMessages.filter((message) => message.deliveryStatus !== 'queued'),
-      ownerUid: currentUid
+      ...getLocalChatScope()
     });
     queueEncryptedChatBackup();
 
@@ -4119,7 +4126,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   async function saveOptimisticLocalMessage(chat: ChatItem, message: ChatMessage) {
     const cachedConversation = await loadCachedChatConversation({
       contactId: chat.contactId,
-      ownerUid: currentUid
+      ...getLocalChatScope()
     }).catch(() => null);
     const nextMessages = uniqueChatMessages([
       ...(cachedConversation?.messages || []),
@@ -4135,7 +4142,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       contact: contactWithLocalPreview,
       contactId: chat.contactId,
       messages: nextMessages,
-      ownerUid: currentUid
+      ...getLocalChatScope()
     });
   }
 
@@ -4355,7 +4362,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   ) {
     const cachedConversation = await loadCachedChatConversation({
       contactId,
-      ownerUid: currentUid
+      ...getLocalChatScope()
     }).catch(() => null);
 
     if (!cachedConversation) {
@@ -4370,7 +4377,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           ? applyMediaUpdateToMessage(message, media, mediaIndex)
           : message
       ),
-      ownerUid: currentUid
+      ...getLocalChatScope()
     });
   }
 
@@ -4611,7 +4618,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           transferProgress: 0,
           transferStatus: 'queued'
         })),
-        ownerUid: currentUid,
+        ...getLocalChatScope(),
         replyTo: replyReference,
         senderUid: currentUid,
         text
@@ -4689,7 +4696,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       const cachedContact = await cacheChatContactPhoto(result.contact, idToken);
 
       await removePendingChatMessage({
-        ownerUid: currentUid,
+        ...getLocalChatScope(),
         queueId: pendingMessage.queueId
       });
 
@@ -4703,7 +4710,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     } catch (nextError) {
       if (isRecipientDeviceNotReadyError(nextError)) {
         await removePendingChatMessage({
-          ownerUid: currentUid,
+          ...getLocalChatScope(),
           queueId: pendingMessage.queueId
         }).catch(() => undefined);
         removeVisibleLocalMessage(activeChat.contactId, pendingMessage.queueId);
@@ -4722,7 +4729,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       if (isNetworkUnavailableError(nextError)) {
         await updatePendingChatMessage({
           lastError: getErrorMessage(nextError, 'Network unavailable.'),
-          ownerUid: currentUid,
+          ...getLocalChatScope(),
           queueId: pendingMessage.queueId,
           status: 'failed'
         });
@@ -4731,7 +4738,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       }
 
       await removePendingChatMessage({
-        ownerUid: currentUid,
+        ...getLocalChatScope(),
         queueId: pendingMessage.queueId
       }).catch(() => undefined);
       removeVisibleLocalMessage(activeChat.contactId, pendingMessage.queueId);
@@ -4858,7 +4865,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         contact: cachedContact,
         contactId: activeChat.contactId,
         messages: nextMessages,
-        ownerUid: currentUid
+        ...getLocalChatScope()
       });
       queueEncryptedChatBackup();
     } catch {
@@ -5131,7 +5138,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   }) {
     const cachedConversation = await loadCachedChatConversation({
       contactId: input.contactId,
-      ownerUid: currentUid
+      ...getLocalChatScope()
     }).catch(() => null);
     const nextMessages = uniqueChatMessages([
       ...(cachedConversation?.messages || []),
@@ -5143,7 +5150,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       contact: contactWithLocalPreview,
       contactId: input.contactId,
       messages: nextMessages,
-      ownerUid: currentUid
+      ...getLocalChatScope()
     });
     queueEncryptedChatBackup();
 
@@ -5224,7 +5231,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
 
     if (message.deliveryStatus === 'queued') {
       await removePendingChatMessage({
-        ownerUid: currentUid,
+        ...getLocalChatScope(),
         queueId: message.messageId
       }).catch(() => undefined);
     }
@@ -5232,7 +5239,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     await hideCachedChatMessagesForMe({
       contactId: chat.contactId,
       messageIds: hiddenMessageIds,
-      ownerUid: currentUid
+      ...getLocalChatScope()
     }).catch(() => undefined);
 
     if (chat.chatType === 'GROUP' && message.deliveryStatus !== 'queued') {
@@ -5258,7 +5265,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         await hideCachedChatMessagesForMe({
           contactId: chat.contactId,
           messageIds: hiddenMessageIds,
-          ownerUid: currentUid
+          ...getLocalChatScope()
         }).catch(() => undefined);
       } catch (nextError) {
         setError(getErrorMessage(
@@ -5273,7 +5280,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       contactId: chat.contactId,
       hiddenMessageIds,
       messages: nextMessages.filter((currentMessage) => currentMessage.deliveryStatus !== 'queued'),
-      ownerUid: currentUid
+      ...getLocalChatScope()
     }).then(() => {
       queueEncryptedChatBackup();
     }).catch(() => undefined);
@@ -5610,7 +5617,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         confirmationText: organizationDeletionModal.confirmationText,
         idToken: organizationDeletionModal.verifiedIdToken
       });
-      await clearLocalChatDataForOwner({ ownerUid: currentUid }).catch(() => undefined);
+      await clearLocalChatDataForOwner({ ...getLocalChatScope() }).catch(() => undefined);
       clearRegisteredDeviceIdentityCache();
       setOrganizationDeletionModal(null);
       setOrganizationDeletionConfirmation(null);

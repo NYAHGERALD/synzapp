@@ -69,7 +69,10 @@ export async function createEncryptedChatBackup(input: {
   tenantId: string;
 }): Promise<EncryptedChatBackupResult> {
   const recoveryKeyResult = await getOrCreateChatBackupRecoveryKey();
-  const conversations = await listCachedChatConversations({ ownerUid: input.ownerUid });
+  const conversations = await listCachedChatConversations({
+    ownerUid: input.ownerUid,
+    tenantId: input.tenantId
+  });
   const backupCreatedAt = new Date().toISOString();
   const plaintext: ChatBackupPlaintext = {
     backupCreatedAt,
@@ -196,7 +199,8 @@ export async function restoreLatestEncryptedChatBackup(input: {
 
   const restored = await restoreCachedChatConversations({
     conversations: backup.conversations,
-    ownerUid: input.ownerUid
+    ownerUid: input.ownerUid,
+    tenantId: input.tenantId
   });
 
   await storeChatBackupRecoveryKey(recoveryKey);

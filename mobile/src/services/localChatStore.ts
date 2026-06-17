@@ -11,12 +11,18 @@ interface EncryptedPayload {
   version: 1;
 }
 
+interface LocalChatScope {
+  ownerUid: string;
+  tenantId: string;
+}
+
 export interface LocalConversationRecord {
   contact: ChatContact | null;
   contactId: string;
   hiddenMessageIds?: string[];
   messages: ChatMessage[];
   ownerUid: string;
+  tenantId: string;
   updatedAt: string;
   version: 1;
 }
@@ -25,6 +31,7 @@ export interface LocalChatContactListRecord {
   confirmedAt?: string;
   contacts: ChatContact[];
   ownerUid: string;
+  tenantId: string;
   updatedAt: string;
   version: 1;
 }
@@ -39,6 +46,7 @@ export interface PendingChatMessage {
   ownerUid: string;
   queueId: string;
   status: 'failed' | 'pending' | 'sending';
+  tenantId: string;
   text: string;
   version: 1;
 }
@@ -54,8 +62,15 @@ const localChatSecureStoreOptions: SecureStore.SecureStoreOptions = {
 
 export async function loadCachedChatContacts(input: {
   ownerUid: string;
+  tenantId: string;
 }): Promise<ChatContact[]> {
-  const encryptedValue = await AsyncStorage.getItem(getChatContactsStorageKey(input.ownerUid));
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    return [];
+  }
+
+  const encryptedValue = await AsyncStorage.getItem(getChatContactsStorageKey(scope));
 
   if (!encryptedValue) {
     return [];
@@ -63,7 +78,7 @@ export async function loadCachedChatContacts(input: {
 
   const record = await decryptJson<LocalChatContactListRecord>(encryptedValue);
 
-  if (!record || record.version !== 1 || record.ownerUid !== input.ownerUid) {
+  if (!isMatchingLocalChatRecord(record, scope)) {
     return [];
   }
 
@@ -75,19 +90,27 @@ export async function loadCachedChatContacts(input: {
 export async function saveCachedChatContacts(input: {
   contacts: ChatContact[];
   ownerUid: string;
+  tenantId: string;
 }): Promise<void> {
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    return;
+  }
+
   const contacts = normalizeCachedChatContacts(input.contacts);
 
   const record: LocalChatContactListRecord = {
     confirmedAt: new Date().toISOString(),
     contacts: contacts.slice(0, LOCAL_CACHED_CHAT_CONTACT_LIMIT),
-    ownerUid: input.ownerUid,
+    ownerUid: scope.ownerUid,
+    tenantId: scope.tenantId,
     updatedAt: new Date().toISOString(),
     version: 1
   };
 
   await AsyncStorage.setItem(
-    getChatContactsStorageKey(input.ownerUid),
+    getChatContactsStorageKey(scope),
     await encryptJson(record)
   );
 }
@@ -95,6 +118,7 @@ export async function saveCachedChatContacts(input: {
 export async function loadCachedChatConversation(input: {
   contactId: string;
   ownerUid: string;
+  tenantId: string;
 }): Promise<LocalConversationRecord | null> {
   const record = await loadRawCachedChatConversation(input);
 
@@ -107,10 +131,18 @@ export async function saveCachedChatConversation(input: {
   hiddenMessageIds?: string[];
   messages: ChatMessage[];
   ownerUid: string;
+  tenantId: string;
 }): Promise<void> {
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    return;
+  }
+
   const existingRecord = await loadRawCachedChatConversation({
     contactId: input.contactId,
-    ownerUid: input.ownerUid
+    ownerUid: scope.ownerUid,
+    tenantId: scope.tenantId
   });
   const hiddenMessageIds = normalizeHiddenMessageIds([
     ...(existingRecord?.hiddenMessageIds || []),
@@ -124,22 +156,30 @@ export async function saveCachedChatConversation(input: {
     messages: uniqueMessages(input.messages)
       .filter((message) => !hiddenMessageIdSet.has(message.messageId))
       .slice(-LOCAL_CACHED_MESSAGE_LIMIT),
-    ownerUid: input.ownerUid,
+    ownerUid: scope.ownerUid,
+    tenantId: scope.tenantId,
     updatedAt: new Date().toISOString(),
     version: 1
   };
 
   await AsyncStorage.setItem(
-    getConversationStorageKey(input.ownerUid, input.contactId),
+    getConversationStorageKey(scope, input.contactId),
     await encryptJson(record)
   );
 }
 
 export async function listCachedChatConversations(input: {
   ownerUid: string;
+  tenantId: string;
 }): Promise<LocalConversationRecord[]> {
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    return [];
+  }
+
   const keys = await AsyncStorage.getAllKeys();
-  const conversationKeyPrefix = getConversationStorageKeyPrefix(input.ownerUid);
+  const conversationKeyPrefix = getConversationStorageKeyPrefix(scope);
   const conversationRecords = await Promise.all(
     keys
       .filter((key) => key.startsWith(conversationKeyPrefix))
@@ -152,7 +192,7 @@ export async function listCachedChatConversations(input: {
 
         const record = await decryptJson<LocalConversationRecord>(encryptedValue);
 
-        if (!record || record.version !== 1 || record.ownerUid !== input.ownerUid || !record.contactId) {
+        if (!isMatchingLocalChatRecord(record, scope) || !record.contactId) {
           return null;
         }
 
@@ -168,10 +208,20 @@ export async function listCachedChatConversations(input: {
 export async function restoreCachedChatConversations(input: {
   conversations: LocalConversationRecord[];
   ownerUid: string;
+  tenantId: string;
 }): Promise<{ conversationCount: number; messageCount: number }> {
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    return {
+      conversationCount: 0,
+      messageCount: 0
+    };
+  }
+
   const safeConversations = input.conversations.filter((conversation) =>
     conversation.version === 1 &&
-    conversation.ownerUid === input.ownerUid &&
+    isMatchingLocalChatRecord(conversation, scope) &&
     Boolean(conversation.contactId)
   );
   let messageCount = 0;
@@ -185,7 +235,8 @@ export async function restoreCachedChatConversations(input: {
       contactId: conversation.contactId,
       hiddenMessageIds: conversation.hiddenMessageIds,
       messages,
-      ownerUid: input.ownerUid
+      ownerUid: scope.ownerUid,
+      tenantId: scope.tenantId
     });
   }));
 
@@ -197,13 +248,17 @@ export async function restoreCachedChatConversations(input: {
 
 export async function clearLocalChatDataForOwner(input: {
   ownerUid: string;
+  tenantId?: string;
 }): Promise<void> {
   const keys = await AsyncStorage.getAllKeys();
   const safeOwnerUid = sanitizeStorageKey(input.ownerUid);
   const ownerPrefixes = [
     `synzapp.localChat.v1.${safeOwnerUid}.`,
+    `synzapp.localChat.v2.${safeOwnerUid}.`,
     `synzapp.localChatContacts.v1.${safeOwnerUid}`,
-    `synzapp.localOutbox.v1.${safeOwnerUid}`
+    `synzapp.localChatContacts.v2.${safeOwnerUid}.`,
+    `synzapp.localOutbox.v1.${safeOwnerUid}`,
+    `synzapp.localOutbox.v2.${safeOwnerUid}.`
   ];
   const matchingKeys = keys.filter((key) =>
     ownerPrefixes.some((prefix) => key === prefix || key.startsWith(prefix))
@@ -217,6 +272,7 @@ export async function clearLocalChatDataForOwner(input: {
 export async function loadHiddenChatMessageIds(input: {
   contactId: string;
   ownerUid: string;
+  tenantId: string;
 }): Promise<string[]> {
   const record = await loadRawCachedChatConversation(input);
 
@@ -227,10 +283,18 @@ export async function hideCachedChatMessagesForMe(input: {
   contactId: string;
   messageIds: string[];
   ownerUid: string;
+  tenantId: string;
 }): Promise<LocalConversationRecord | null> {
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    return null;
+  }
+
   const existingRecord = await loadRawCachedChatConversation({
     contactId: input.contactId,
-    ownerUid: input.ownerUid
+    ownerUid: scope.ownerUid,
+    tenantId: scope.tenantId
   });
   const hiddenMessageIds = normalizeHiddenMessageIds([
     ...(existingRecord?.hiddenMessageIds || []),
@@ -244,13 +308,14 @@ export async function hideCachedChatMessagesForMe(input: {
     messages: uniqueMessages(existingRecord?.messages || [])
       .filter((message) => !hiddenMessageIdSet.has(message.messageId))
       .slice(-LOCAL_CACHED_MESSAGE_LIMIT),
-    ownerUid: input.ownerUid,
+    ownerUid: scope.ownerUid,
+    tenantId: scope.tenantId,
     updatedAt: new Date().toISOString(),
     version: 1
   };
 
   await AsyncStorage.setItem(
-    getConversationStorageKey(input.ownerUid, input.contactId),
+    getConversationStorageKey(scope, input.contactId),
     await encryptJson(nextRecord)
   );
 
@@ -260,8 +325,15 @@ export async function hideCachedChatMessagesForMe(input: {
 export async function listPendingChatMessages(input: {
   contactId?: string;
   ownerUid: string;
+  tenantId: string;
 }): Promise<PendingChatMessage[]> {
-  const encryptedValue = await AsyncStorage.getItem(getOutboxStorageKey(input.ownerUid));
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    return [];
+  }
+
+  const encryptedValue = await AsyncStorage.getItem(getOutboxStorageKey(scope));
 
   if (!encryptedValue) {
     return [];
@@ -276,7 +348,8 @@ export async function listPendingChatMessages(input: {
   return messages
     .filter((message) =>
       message.version === 1 &&
-      message.ownerUid === input.ownerUid &&
+      message.ownerUid === scope.ownerUid &&
+      message.tenantId === scope.tenantId &&
       (!input.contactId || message.contactId === input.contactId)
     )
     .sort((first, second) => first.createdAt.localeCompare(second.createdAt));
@@ -289,10 +362,17 @@ export async function enqueuePendingChatMessage(input: {
   media?: ChatMessage['media'];
   mediaItems?: ChatMessage['mediaItems'];
   ownerUid: string;
+  tenantId: string;
   replyTo?: ChatMessage['replyTo'];
   senderUid: string;
   text?: string;
 }): Promise<PendingChatMessage> {
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    throw new Error('A company session is required before sending messages.');
+  }
+
   const createdAt = new Date().toISOString();
   const queueId = `queued_${Date.now()}_${randomHex(6)}`;
   const text = input.text || '';
@@ -316,27 +396,35 @@ export async function enqueuePendingChatMessage(input: {
       sentAt: createdAt,
       text
     },
-    ownerUid: input.ownerUid,
+    ownerUid: scope.ownerUid,
     queueId,
     status: 'pending',
+    tenantId: scope.tenantId,
     text,
     version: 1
   };
-  const currentMessages = await listPendingChatMessages({ ownerUid: input.ownerUid });
+  const currentMessages = await listPendingChatMessages(scope);
 
-  await savePendingChatMessages(input.ownerUid, [...currentMessages, pendingMessage]);
+  await savePendingChatMessages(scope, [...currentMessages, pendingMessage]);
 
   return pendingMessage;
 }
 
 export async function removePendingChatMessage(input: {
   ownerUid: string;
+  tenantId: string;
   queueId: string;
 }): Promise<void> {
-  const currentMessages = await listPendingChatMessages({ ownerUid: input.ownerUid });
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    return;
+  }
+
+  const currentMessages = await listPendingChatMessages(scope);
 
   await savePendingChatMessages(
-    input.ownerUid,
+    scope,
     currentMessages.filter((message) => message.queueId !== input.queueId)
   );
 }
@@ -346,8 +434,15 @@ export async function updatePendingChatMessage(input: {
   ownerUid: string;
   queueId: string;
   status: PendingChatMessage['status'];
+  tenantId: string;
 }): Promise<PendingChatMessage | null> {
-  const currentMessages = await listPendingChatMessages({ ownerUid: input.ownerUid });
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    return null;
+  }
+
+  const currentMessages = await listPendingChatMessages(scope);
   let updatedMessage: PendingChatMessage | null = null;
   const nextMessages = currentMessages.map((message) => {
     if (message.queueId !== input.queueId) {
@@ -364,18 +459,18 @@ export async function updatePendingChatMessage(input: {
     return updatedMessage;
   });
 
-  await savePendingChatMessages(input.ownerUid, nextMessages);
+  await savePendingChatMessages(scope, nextMessages);
 
   return updatedMessage;
 }
 
-async function savePendingChatMessages(ownerUid: string, messages: PendingChatMessage[]): Promise<void> {
+async function savePendingChatMessages(scope: LocalChatScope, messages: PendingChatMessage[]): Promise<void> {
   const safeMessages = messages
-    .filter((message) => message.ownerUid === ownerUid)
+    .filter((message) => message.ownerUid === scope.ownerUid && message.tenantId === scope.tenantId)
     .slice(-200);
 
   await AsyncStorage.setItem(
-    getOutboxStorageKey(ownerUid),
+    getOutboxStorageKey(scope),
     await encryptJson(safeMessages)
   );
 }
@@ -383,8 +478,15 @@ async function savePendingChatMessages(ownerUid: string, messages: PendingChatMe
 async function loadRawCachedChatConversation(input: {
   contactId: string;
   ownerUid: string;
+  tenantId: string;
 }): Promise<LocalConversationRecord | null> {
-  const encryptedValue = await AsyncStorage.getItem(getConversationStorageKey(input.ownerUid, input.contactId));
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    return null;
+  }
+
+  const encryptedValue = await AsyncStorage.getItem(getConversationStorageKey(scope, input.contactId));
 
   if (!encryptedValue) {
     return null;
@@ -392,7 +494,7 @@ async function loadRawCachedChatConversation(input: {
 
   const record = await decryptJson<LocalConversationRecord>(encryptedValue);
 
-  if (!record || record.version !== 1 || record.ownerUid !== input.ownerUid || record.contactId !== input.contactId) {
+  if (!isMatchingLocalChatRecord(record, scope) || record.contactId !== input.contactId) {
     return null;
   }
 
@@ -465,20 +567,46 @@ async function getOrCreateLocalChatKey(): Promise<Uint8Array> {
   return key;
 }
 
-function getConversationStorageKey(ownerUid: string, contactId: string): string {
-  return `${getConversationStorageKeyPrefix(ownerUid)}${sanitizeStorageKey(contactId)}`;
+function getConversationStorageKey(scope: LocalChatScope, contactId: string): string {
+  return `${getConversationStorageKeyPrefix(scope)}${sanitizeStorageKey(contactId)}`;
 }
 
-function getConversationStorageKeyPrefix(ownerUid: string): string {
-  return `synzapp.localChat.v1.${sanitizeStorageKey(ownerUid)}.`;
+function getConversationStorageKeyPrefix(scope: LocalChatScope): string {
+  return `synzapp.localChat.v2.${sanitizeStorageKey(scope.ownerUid)}.${sanitizeStorageKey(scope.tenantId)}.`;
 }
 
-function getOutboxStorageKey(ownerUid: string): string {
-  return `synzapp.localOutbox.v1.${sanitizeStorageKey(ownerUid)}`;
+function getOutboxStorageKey(scope: LocalChatScope): string {
+  return `synzapp.localOutbox.v2.${sanitizeStorageKey(scope.ownerUid)}.${sanitizeStorageKey(scope.tenantId)}`;
 }
 
-function getChatContactsStorageKey(ownerUid: string): string {
-  return `synzapp.localChatContacts.v1.${sanitizeStorageKey(ownerUid)}`;
+function getChatContactsStorageKey(scope: LocalChatScope): string {
+  return `synzapp.localChatContacts.v2.${sanitizeStorageKey(scope.ownerUid)}.${sanitizeStorageKey(scope.tenantId)}`;
+}
+
+function normalizeLocalChatScope(input: {
+  ownerUid?: string | null;
+  tenantId?: string | null;
+}): LocalChatScope | null {
+  const ownerUid = typeof input.ownerUid === 'string' ? input.ownerUid.trim() : '';
+  const tenantId = typeof input.tenantId === 'string' ? input.tenantId.trim() : '';
+
+  if (!ownerUid || !tenantId) {
+    return null;
+  }
+
+  return {
+    ownerUid,
+    tenantId
+  };
+}
+
+function isMatchingLocalChatRecord(
+  record: Partial<LocalConversationRecord | LocalChatContactListRecord> | null | undefined,
+  scope: LocalChatScope
+): record is LocalConversationRecord & LocalChatContactListRecord {
+  return record?.version === 1 &&
+    record.ownerUid === scope.ownerUid &&
+    record.tenantId === scope.tenantId;
 }
 
 function sanitizeStorageKey(value: string): string {
