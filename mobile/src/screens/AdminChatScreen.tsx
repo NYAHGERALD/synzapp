@@ -9056,7 +9056,7 @@ function MessageThread({
   };
 
   return (
-    <View style={styles.messageScreen}>
+    <View style={styles.messageScreen} accessibilityState={{ busy: isLoading }}>
       {isSearchOpen ? (
         <ChatThreadSearchHeader
           inputRef={searchInputRef}
@@ -9099,12 +9099,6 @@ function MessageThread({
         showsVerticalScrollIndicator={false}
         style={styles.messageList}
       >
-        {isLoading ? (
-          <View style={styles.messageLoadingRow}>
-            <ActivityIndicator color={colors.primary} />
-          </View>
-        ) : null}
-
         {threadItems.map((item) => (
           item.type === 'date' ? (
             <View key={item.id} style={styles.messageDateRow}>
@@ -20206,11 +20200,6 @@ const styles = StyleSheet.create({
   },
   chatSearchDateButtonActive: {
     backgroundColor: colors.primary
-  },
-  messageLoadingRow: {
-    alignItems: 'center',
-    minHeight: 42,
-    justifyContent: 'center'
   },
   scrollToLatestButton: {
     alignItems: 'center',
