@@ -143,6 +143,7 @@ interface ListEncryptedDirectEnvelopeOptions {
   limit?: number;
   markAsDelivered?: boolean;
   markAsRead?: boolean;
+  trashSegmentId?: string | null;
 }
 
 export async function getDirectEncryptionContext(
@@ -191,16 +192,33 @@ export async function listEncryptedDirectEnvelopesForDevice(
     getChatUserPreference(context.tenantId, decodedToken.uid, 'DIRECT', context.contactId),
     listActiveDevicesForUser(context.tenantId, decodedToken.uid)
   ]);
+  const trashSegment = options.trashSegmentId
+    ? preference.trashSegments.find((segment) => segment.segmentId === options.trashSegmentId)
+    : null;
   const currentUserDeviceIds = currentUserDevices
     .map((device) => device.deviceId || '')
     .filter(Boolean);
 
   const envelopesCollection = context.chatRef.collection('encryptedEnvelopes');
-  const envelopesQuery = preference.clearedAtMs
-    ? envelopesCollection
-        .where('sentAtMs', '>', preference.clearedAtMs)
-        .orderBy('sentAtMs', 'asc')
-    : envelopesCollection.orderBy('sentAtMs', 'asc');
+  let envelopesQuery: FirebaseFirestore.Query = envelopesCollection;
+
+  if (options.trashSegmentId) {
+    if (!trashSegment) {
+      return [];
+    }
+
+    if (trashSegment.startAtMs) {
+      envelopesQuery = envelopesQuery.where('sentAtMs', '>', trashSegment.startAtMs);
+    }
+
+    if (trashSegment.endAtMs) {
+      envelopesQuery = envelopesQuery.where('sentAtMs', '<=', trashSegment.endAtMs);
+    }
+  } else if (preference.clearedAtMs) {
+    envelopesQuery = envelopesQuery.where('sentAtMs', '>', preference.clearedAtMs);
+  }
+
+  envelopesQuery = envelopesQuery.orderBy('sentAtMs', 'asc');
   const envelopesSnapshot = await envelopesQuery
     .limit(options.limit || 100)
     .get();
@@ -219,7 +237,11 @@ export async function listEncryptedDirectEnvelopesForDevice(
         Object.values(encryptedKeysForCurrentUser)[0] ||
         '';
 
-      if (preference.clearedAtMs && record.sentAtMs && record.sentAtMs <= preference.clearedAtMs) {
+      if (!options.trashSegmentId && preference.clearedAtMs && record.sentAtMs && record.sentAtMs <= preference.clearedAtMs) {
+        return null;
+      }
+
+      if (trashSegment?.endAtMs && record.sentAtMs && record.sentAtMs > trashSegment.endAtMs) {
         return null;
       }
 

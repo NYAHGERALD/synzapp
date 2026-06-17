@@ -38,7 +38,18 @@ export interface ChatContact {
   roleName: string;
   spammedAt?: string | null;
   status: string;
+  trashSegments?: ChatTrashSegment[];
   unreadCount: number;
+}
+
+export interface ChatTrashSegment {
+  deletedAt: string;
+  deletedAtMs: number;
+  endAtMs: number | null;
+  expiresAt: string;
+  expiresAtMs: number;
+  segmentId: string;
+  startAtMs: number | null;
 }
 
 export interface DirectChatContactDetails {
@@ -679,13 +690,17 @@ export async function getChatMessages(input: {
   contactId: string;
   currentUid: string;
   idToken: string;
+  trashSegmentId?: string | null;
 }): Promise<ChatThreadResponse> {
   const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
   const path = input.chatType === 'GROUP'
     ? `/api/profile/chat/groups/${encodeURIComponent(input.contactId)}/encrypted-messages`
     : `/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/encrypted-messages`;
+  const query = input.trashSegmentId
+    ? `?trashSegmentId=${encodeURIComponent(input.trashSegmentId)}`
+    : '';
   const response = await fetch(
-    `${getSynzappApiBaseUrl()}${path}`,
+    `${getSynzappApiBaseUrl()}${path}${query}`,
     {
       headers: {
         Accept: 'application/json',
@@ -1120,8 +1135,49 @@ function normalizeChatContact(contact: ChatContact): ChatContact {
     messagePermissionMode: contact.messagePermissionMode === 'ADMINS' ? 'ADMINS' : contact.messagePermissionMode === 'ALL_MEMBERS' ? 'ALL_MEMBERS' : undefined,
     phoneMasked: typeof contact.phoneMasked === 'string' && contact.phoneMasked.trim() ? contact.phoneMasked.trim() : null,
     profilePhotoUrl: normalizeSynzappApiUrl(contact.profilePhotoUrl),
-    spammedAt: typeof contact.spammedAt === 'string' ? contact.spammedAt : null
+    spammedAt: typeof contact.spammedAt === 'string' ? contact.spammedAt : null,
+    trashSegments: normalizeChatTrashSegments(contact.trashSegments)
   };
+}
+
+function normalizeChatTrashSegments(value: unknown): ChatTrashSegment[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((segment): ChatTrashSegment | null => {
+      if (!segment || typeof segment !== 'object') {
+        return null;
+      }
+
+      const record = segment as Partial<ChatTrashSegment>;
+      const segmentId = typeof record.segmentId === 'string' && record.segmentId.trim()
+        ? record.segmentId.trim()
+        : '';
+      const deletedAtMs = Number.isFinite(record.deletedAtMs)
+        ? Math.max(Math.round(record.deletedAtMs || 0), 0)
+        : 0;
+      const expiresAtMs = Number.isFinite(record.expiresAtMs)
+        ? Math.max(Math.round(record.expiresAtMs || 0), 0)
+        : 0;
+
+      if (!segmentId || !deletedAtMs || !expiresAtMs) {
+        return null;
+      }
+
+      return {
+        deletedAt: typeof record.deletedAt === 'string' ? record.deletedAt : new Date(deletedAtMs).toISOString(),
+        deletedAtMs,
+        endAtMs: Number.isFinite(record.endAtMs) ? Math.max(Math.round(record.endAtMs || 0), 0) : null,
+        expiresAt: typeof record.expiresAt === 'string' ? record.expiresAt : new Date(expiresAtMs).toISOString(),
+        expiresAtMs,
+        segmentId,
+        startAtMs: Number.isFinite(record.startAtMs) ? Math.max(Math.round(record.startAtMs || 0), 0) : null
+      };
+    })
+    .filter((segment): segment is ChatTrashSegment => Boolean(segment))
+    .sort((first, second) => second.deletedAtMs - first.deletedAtMs);
 }
 
 function normalizeDirectChatContactDetails(

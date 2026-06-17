@@ -727,10 +727,12 @@ profileRouter.get('/chat/groups/:groupId/encrypted-messages', verifyAppCheck, as
     const groupId = Array.isArray(req.params.groupId)
       ? req.params.groupId[0] || ''
       : req.params.groupId || '';
+    const trashSegmentId = getOptionalQueryString(req.query.trashSegmentId);
     const envelopes = await listEncryptedGroupEnvelopesForDevice(
       decodedToken,
       groupId,
-      activeDevice.deviceId
+      activeDevice.deviceId,
+      { trashSegmentId }
     );
     const [contact, messageReactions] = await Promise.all([
       getGroupChatContact(decodedToken, groupId),
@@ -1240,10 +1242,12 @@ profileRouter.get('/chat/conversations/:contactId/encrypted-messages', verifyApp
     const contactId = Array.isArray(req.params.contactId)
       ? req.params.contactId[0] || ''
       : req.params.contactId || '';
+    const trashSegmentId = getOptionalQueryString(req.query.trashSegmentId);
     const envelopes = await listEncryptedDirectEnvelopesForDevice(
       decodedToken,
       contactId,
-      activeDevice.deviceId
+      activeDevice.deviceId,
+      { trashSegmentId }
     );
     const [contact, messageReactions] = await Promise.all([
       getDirectChatContact(decodedToken, contactId),
@@ -1684,6 +1688,14 @@ function getDeviceIdFromHeader(req: Request): string {
   }
 
   return parsedDeviceId.data;
+}
+
+function getOptionalQueryString(value: unknown): string | null {
+  const rawValue = Array.isArray(value) ? value[0] : value;
+
+  return typeof rawValue === 'string' && rawValue.trim()
+    ? rawValue.trim().slice(0, 160)
+    : null;
 }
 
 function authorizationError(message: string): Error {

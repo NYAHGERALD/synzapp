@@ -102,6 +102,7 @@ import {
   ChatReplyReference,
   ChatTranscriptLanguageCode,
   ChatTranscriptLanguageSetting,
+  ChatTrashSegment,
   createGroupChat,
   decryptRealtimeEncryptedEnvelopes,
   deleteChatMessageForMe,
@@ -219,6 +220,7 @@ interface ChatItem {
   spammedAt?: string | null;
   status?: string;
   title: string;
+  trashSegments?: ChatTrashSegment[];
   unreadCount: number;
 }
 
@@ -662,6 +664,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const [addToGroupTargetsByContactId, setAddToGroupTargetsByContactId] = useState<Record<string, AddableChatGroup[]>>({});
   const [starredMessageIds, setStarredMessageIds] = useState<Record<string, boolean>>({});
   const [selectedChat, setSelectedChat] = useState<ChatItem | null>(null);
+  const [activeTrashSegmentId, setActiveTrashSegmentId] = useState<string | null>(null);
   const [isLoadingChats, setIsLoadingChats] = useState(true);
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
   const [isLoadingChatNotificationSettings, setIsLoadingChatNotificationSettings] = useState(false);
@@ -727,6 +730,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const realtimeReadyRef = useRef(false);
   const realtimeSocketRef = useRef<WebSocket | null>(null);
   const selectedChatRef = useRef<ChatItem | null>(null);
+  const activeTrashSegmentIdRef = useRef<string | null>(null);
   const messagesRef = useRef<ChatMessage[]>([]);
   const permissions = userProfile?.permissions ?? verifiedAdmin.session.user.permissions ?? [];
   const currentUid = verifiedAdmin.session.user.uid;
@@ -743,10 +747,10 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   const chatItems = chatContacts.map(mapChatContactToChatItem);
   const directChatContacts = chatContacts.filter((contact) => (contact.chatType || 'DIRECT') !== 'GROUP');
   const groupChatContacts = chatContacts.filter((contact) => contact.chatType === 'GROUP');
-  const visibleConversationChatItems = chatItems.filter(shouldShowChatInList);
-  const spamConversationChatItems = visibleConversationChatItems.filter((chat) => chat.isSpam === true);
-  const activeConversationChatItems = visibleConversationChatItems.filter((chat) => !chat.isArchived && chat.isSpam !== true);
-  const archivedConversationChatItems = visibleConversationChatItems.filter((chat) => chat.isArchived && chat.isSpam !== true);
+  const activeVisibleConversationChatItems = chatItems.filter(shouldShowActiveChatInList);
+  const spamConversationChatItems = chatItems.filter(shouldShowTrashChatInList);
+  const activeConversationChatItems = activeVisibleConversationChatItems.filter((chat) => !chat.isArchived);
+  const archivedConversationChatItems = activeVisibleConversationChatItems.filter((chat) => chat.isArchived);
   const unreadChatFilterCount = activeConversationChatItems.reduce((total, chat) => total + Math.max(chat.unreadCount || 0, 0), 0);
   const groupChatFilterCount = activeConversationChatItems.filter((chat) => chat.chatType === 'GROUP').length;
   const archivedChatFilterCount = archivedConversationChatItems.length;
@@ -947,8 +951,9 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   }, [selectedChat]);
 
   useEffect(() => {
+    activeTrashSegmentIdRef.current = activeTrashSegmentId;
     sendActiveRealtimeConversationSubscription();
-  }, [selectedChat?.contactId]);
+  }, [activeTrashSegmentId, selectedChat?.contactId]);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -1867,7 +1872,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         : upsertChatContact(currentContacts, cachedContact)
       );
 
-      if (input.clear || input.permanentDelete) {
+      if (input.clear || input.permanentDelete || input.isSpam === true) {
         const cachedConversation = await loadCachedChatConversation({
           contactId: chat.contactId,
           ownerUid: currentUid
@@ -2133,7 +2138,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
     Alert.alert(
       'Delete selected chats?',
-      'Selected chats will move to Spam, where you can permanently delete them for your account.',
+      'Selected chats will move to Trash as read-only history and permanently delete after 30 days.',
       [
         { style: 'cancel', text: 'Cancel' },
         {
@@ -2141,7 +2146,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
             const spammedAt = new Date().toISOString();
 
             await Promise.all(selectedChats.map((chat) => updateChatPreferenceAndApply(chat, {
-              failureMessage: 'Unable to move selected chats to Spam.',
+              failureMessage: 'Unable to move selected chats to Trash.',
               isSpam: true,
               optimisticContact: {
                 isArchived: false,
@@ -2166,7 +2171,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
     Alert.alert(
       'Delete chat?',
-      `${chat.title} will move to Spam, where you can permanently delete it for your account.`,
+      `${chat.title} will move to Trash as read-only history. A future message will start a fresh chat.`,
       [
         { style: 'cancel', text: 'Cancel' },
         {
@@ -2174,7 +2179,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
             const spammedAt = new Date().toISOString();
 
             void updateChatPreferenceAndApply(chat, {
-              failureMessage: 'Unable to move this chat to Spam.',
+              failureMessage: 'Unable to move this chat to Trash.',
               isSpam: true,
               optimisticContact: {
                 isArchived: false,
@@ -2192,33 +2197,23 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     );
   }
 
-  function handlePutBackSpamChat(chat: ChatItem) {
-    if (!canUseChatListActions(chat) || isDeletingSpamChats) {
+  function handleOpenTrashChat(chat: ChatItem) {
+    const trashSegments = getActiveTrashSegments(chat);
+
+    if (trashSegments.length > 1) {
+      setSpamActionTarget(chat);
       return;
     }
 
-    Alert.alert(
-      'Put back chat?',
-      `${chat.title} will move back to your chat list.`,
-      [
-        { style: 'cancel', text: 'Cancel' },
-        {
-          onPress: () => {
-            void updateChatPreferenceAndApply(chat, {
-              failureMessage: 'Unable to put this chat back.',
-              isSpam: false,
-              optimisticContact: {
-                isArchived: false,
-                isSpam: false,
-                spammedAt: null
-              }
-            });
-            setSpamActionTarget(null);
-          },
-          text: 'Put back'
-        }
-      ]
-    );
+    handleOpenTrashSegment(chat, trashSegments[0] || null);
+  }
+
+  function handleOpenTrashSegment(chat: ChatItem, trashSegment: ChatTrashSegment | null) {
+    setSpamActionTarget(null);
+    void handleOpenChat(chat, {
+      isTrashReadOnly: true,
+      trashSegmentId: trashSegment?.segmentId || null
+    });
   }
 
   function handlePermanentDeleteSpamChat(chat: ChatItem) {
@@ -2228,7 +2223,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
     Alert.alert(
       'Permanently delete?',
-      `${chat.title} will be deleted for your account and removed from Spam.`,
+      `${chat.title} will be deleted for your account and removed from Trash.`,
       [
         { style: 'cancel', text: 'Cancel' },
         {
@@ -2244,6 +2239,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
                 lastMessageAt: null,
                 preview: '',
                 spammedAt: null,
+                trashSegments: [],
                 unreadCount: 0
               },
               permanentDelete: true,
@@ -2268,8 +2264,8 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     }
 
     Alert.alert(
-      'Delete all Spam chats?',
-      'All chats in Spam will be permanently deleted for your account.',
+      'Delete all Trash chats?',
+      'All chats in Trash will be permanently deleted for your account.',
       [
         { style: 'cancel', text: 'Cancel' },
         {
@@ -2279,7 +2275,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
             try {
               await Promise.all(deletableSpamChats.map((chat) =>
                 updateChatPreferenceAndApply(chat, {
-                  failureMessage: 'Unable to permanently delete all Spam chats.',
+                  failureMessage: 'Unable to permanently delete all Trash chats.',
                   optimisticContact: {
                     clearedAt: new Date().toISOString(),
                     isArchived: false,
@@ -2288,6 +2284,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
                     lastMessageAt: null,
                     preview: '',
                     spammedAt: null,
+                    trashSegments: [],
                     unreadCount: 0
                   },
                   permanentDelete: true,
@@ -2348,7 +2345,8 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     }
 
     if (event.type === 'chatContactUpdated') {
-      const shouldMarkRead = selectedChatRef.current?.contactId === event.contact.contactId;
+      const shouldMarkRead = selectedChatRef.current?.contactId === event.contact.contactId &&
+        !activeTrashSegmentIdRef.current;
       const baseContact = shouldMarkRead
         ? { ...event.contact, unreadCount: 0 }
         : event.contact;
@@ -2435,7 +2433,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     }
 
     if (event.type === 'conversationMessages' || event.type === 'conversationEncryptedEnvelopes') {
-      if (selectedChatRef.current?.contactId !== event.contactId) {
+      if (selectedChatRef.current?.contactId !== event.contactId || activeTrashSegmentIdRef.current) {
         return;
       }
 
@@ -2521,7 +2519,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       return;
     }
 
-    if (selectedChatRef.current) {
+    if (selectedChatRef.current && !activeTrashSegmentIdRef.current) {
       subscribeRealtimeConversation(socket, selectedChatRef.current.contactId);
       return;
     }
@@ -2535,7 +2533,9 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
 
     if (selectedChatRef.current?.contactId === chat.contactId) {
       selectedChatRef.current = null;
+      activeTrashSegmentIdRef.current = null;
       setSelectedChat(null);
+      setActiveTrashSegmentId(null);
       setMessages([]);
       setMessageReactions({});
       setReplyTarget(null);
@@ -2543,12 +2543,22 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     }
   }
 
-  async function handleOpenChat(chat: ChatItem) {
+  async function handleOpenChat(
+    chat: ChatItem,
+    options: {
+      isTrashReadOnly?: boolean;
+      trashSegmentId?: string | null;
+    } = {}
+  ) {
     const openRequestId = chatOpenRequestIdRef.current + 1;
+    const trashSegmentId = options.trashSegmentId || null;
+    const isTrashReadOnly = options.isTrashReadOnly === true;
 
     chatOpenRequestIdRef.current = openRequestId;
     selectedChatRef.current = chat;
+    activeTrashSegmentIdRef.current = isTrashReadOnly ? trashSegmentId || '__legacy_trash__' : null;
     setSelectedChat(chat);
+    setActiveTrashSegmentId(activeTrashSegmentIdRef.current);
     setIsChatNotificationSettingsOpen(false);
     setIsChatTranscriptLanguageOpen(false);
     setIsDirectContactDetailsOpen(false);
@@ -2565,13 +2575,15 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     setMessages([]);
     setMessageReactions({});
     setError(null);
-    await loadCachedMessagesForChat(chat, openRequestId);
+    if (!isTrashReadOnly) {
+      await loadCachedMessagesForChat(chat, openRequestId);
+    }
 
     if (!isActiveChatOpenRequest(openRequestId, chat.contactId)) {
       return;
     }
 
-    await loadMessagesForChat(chat, true, openRequestId);
+    await loadMessagesForChat(chat, true, openRequestId, trashSegmentId, isTrashReadOnly);
   }
 
   async function handleOpenGroupFromGroupsTab(group: TenantGroup) {
@@ -3819,7 +3831,15 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     }
   }
 
-  async function loadMessagesForChat(chat: ChatItem, showError = true, openRequestId?: number) {
+  async function loadMessagesForChat(
+    chat: ChatItem,
+    showError = true,
+    openRequestId?: number,
+    trashSegmentId?: string | null,
+    isTrashReadOnly = false
+  ) {
+    const isTrashRead = isTrashReadOnly || Boolean(trashSegmentId);
+
     setIsLoadingMessages(true);
 
     try {
@@ -3828,25 +3848,32 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         chatType: chat.chatType,
         contactId: chat.contactId,
         currentUid,
-        idToken
+        idToken,
+        trashSegmentId: trashSegmentId || null
       });
       const cachedContact = await cacheChatContactPhoto(result.contact, idToken);
-      const [cachedConversation, pendingMessages] = await Promise.all([
-        loadCachedChatConversation({
-          contactId: chat.contactId,
-          ownerUid: currentUid
-        }).catch(() => null),
-        listPendingChatMessages({
-          contactId: chat.contactId,
-          ownerUid: currentUid
-        })
-      ]);
+      const [cachedConversation, pendingMessages] = isTrashRead
+        ? [null, [] as Awaited<ReturnType<typeof listPendingChatMessages>>]
+        : await Promise.all([
+            loadCachedChatConversation({
+              contactId: chat.contactId,
+              ownerUid: currentUid
+            }).catch(() => null),
+            listPendingChatMessages({
+              contactId: chat.contactId,
+              ownerUid: currentUid
+            })
+          ]);
       const serverMessages = applyReactionMapToMessages(uniqueChatMessages(result.messages), result.messageReactions);
-      const persistedMessages = applyReactionMapToMessages(uniqueChatMessages([
-        ...(cachedConversation?.messages || []),
-        ...serverMessages
-      ]), result.messageReactions);
-      const visiblePersistedMessages = await filterHiddenMessagesForChat(chat.contactId, persistedMessages);
+      const persistedMessages = isTrashRead
+        ? serverMessages
+        : applyReactionMapToMessages(uniqueChatMessages([
+            ...(cachedConversation?.messages || []),
+            ...serverMessages
+          ]), result.messageReactions);
+      const visiblePersistedMessages = isTrashRead
+        ? persistedMessages
+        : await filterHiddenMessagesForChat(chat.contactId, persistedMessages);
       const nextMessages = uniqueChatMessages([
         ...visiblePersistedMessages,
         ...pendingMessages.map((pendingMessage) => pendingMessage.message)
@@ -3861,18 +3888,20 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       setMessageReactions(result.messageReactions);
       setSelectedChat(mapChatContactToChatItem(contactWithLocalPreview));
       setMessages(nextMessages);
-      setChatContacts((currentContacts) => upsertChatContact(currentContacts, {
-        ...contactWithLocalPreview,
-        unreadCount: 0
-      }));
-      await saveCachedChatConversation({
-        contact: contactWithLocalPreview,
-        contactId: chat.contactId,
-        messages: visiblePersistedMessages,
-        ownerUid: currentUid
-      });
-      queueEncryptedChatBackup();
-      void syncPendingMessagesForChat(chat.contactId);
+      if (!isTrashRead) {
+        setChatContacts((currentContacts) => upsertChatContact(currentContacts, {
+          ...contactWithLocalPreview,
+          unreadCount: 0
+        }));
+        await saveCachedChatConversation({
+          contact: contactWithLocalPreview,
+          contactId: chat.contactId,
+          messages: visiblePersistedMessages,
+          ownerUid: currentUid
+        });
+        queueEncryptedChatBackup();
+        void syncPendingMessagesForChat(chat.contactId);
+      }
     } catch (nextError) {
       const isActiveRequest = isActiveChatOpenRequest(openRequestId, chat.contactId);
 
@@ -4292,7 +4321,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   }
 
   async function handleSendMessage() {
-    if (!selectedChat) {
+    if (!selectedChat || activeTrashSegmentIdRef.current) {
       return;
     }
 
@@ -4321,7 +4350,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   }
 
   async function handlePickChatMedia() {
-    if (!selectedChat) {
+    if (!selectedChat || activeTrashSegmentIdRef.current) {
       return;
     }
 
@@ -4384,7 +4413,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   }
 
   function handleSendMediaReview() {
-    if (!selectedChat || !mediaReviewItems.length || isSendingMediaReview) {
+    if (!selectedChat || !mediaReviewItems.length || isSendingMediaReview || activeTrashSegmentIdRef.current) {
       return;
     }
 
@@ -4433,7 +4462,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   }
 
   async function handlePickChatFile() {
-    if (!selectedChat) {
+    if (!selectedChat || activeTrashSegmentIdRef.current) {
       return;
     }
 
@@ -4467,7 +4496,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   }
 
   async function handleSendVoiceNote(localMedia: LocalChatMediaInput) {
-    if (!selectedChat) {
+    if (!selectedChat || activeTrashSegmentIdRef.current) {
       return;
     }
 
@@ -4502,6 +4531,10 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
     replyReference: ChatReplyReference | null;
     text: string;
   }) {
+    if (activeTrashSegmentIdRef.current) {
+      return;
+    }
+
     const { activeChat, clearDraft, media, replyReference, text } = input;
     const mediaItems = input.mediaItems || [];
     const primaryMedia = media || mediaItems[0] || null;
@@ -5200,9 +5233,11 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   function handleSelectFooterTab(tab: FooterTab) {
     chatOpenRequestIdRef.current += 1;
     selectedChatRef.current = null;
+    activeTrashSegmentIdRef.current = null;
     setActiveTab(tab);
     setError(null);
     setSelectedChat(null);
+    setActiveTrashSegmentId(null);
     setIsAiAssistantOpen(false);
     setIsSpamScreenOpen(false);
     setIsArchiveScreenOpen(false);
@@ -5250,7 +5285,9 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
   function handleCloseChat() {
     chatOpenRequestIdRef.current += 1;
     selectedChatRef.current = null;
+    activeTrashSegmentIdRef.current = null;
     setSelectedChat(null);
+    setActiveTrashSegmentId(null);
     setIsLoadingMessages(false);
     setIsContactInfoModalOpen(false);
     setIsChatNotificationSettingsOpen(false);
@@ -6610,7 +6647,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
       {selectedChat ? (
         <MessageThread
           bottomInset={insets.bottom}
-          canChat={selectedChat.hasActiveDevice}
+          canChat={selectedChat.hasActiveDevice && !activeTrashSegmentId}
           contactName={selectedChat.title}
           contactProfilePhotoUrl={selectedChat.profilePhotoUrl || null}
           currentUid={currentUid}
@@ -6625,9 +6662,10 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
           messageReactions={messageReactions}
           messages={messages}
           profilePhotoHeaders={profilePhotoHeaders}
+          readOnlyReason={activeTrashSegmentId ? 'This chat is in Trash' : undefined}
           onCancelReply={() => setReplyTarget(null)}
           onDraftChange={setMessageDraft}
-          onMessageLongPress={handleOpenMessageActions}
+          onMessageLongPress={activeTrashSegmentId ? () => undefined : handleOpenMessageActions}
           onCloseSearch={handleCloseConversationSearch}
           onOpenMedia={handleOpenMessageAttachment}
           onPrepareAttachment={handlePrepareAttachment}
@@ -6700,8 +6738,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
                 isDeleting={isDeletingSpamChats}
                 isLoading={isLoadingChats}
                 onDelete={handlePermanentDeleteSpamChat}
-                onOpenChat={setSpamActionTarget}
-                onPutBack={handlePutBackSpamChat}
+                onOpenChat={handleOpenTrashChat}
                 onSearchChange={setChatSearch}
                 profilePhotoHeaders={profilePhotoHeaders}
                 search={chatSearch}
@@ -7332,6 +7369,7 @@ export function AdminChatScreen({ onSessionInvalid, verifiedAdmin }: AdminChatSc
         isDeleting={isDeletingSpamChats}
         onClose={() => setSpamActionTarget(null)}
         onDelete={handlePermanentDeleteSpamChat}
+        onOpenSegment={handleOpenTrashSegment}
         profilePhotoHeaders={profilePhotoHeaders}
       />
 
@@ -8537,6 +8575,7 @@ function MessageThread({
   onSend,
   onSendVoiceNote,
   profilePhotoHeaders,
+  readOnlyReason,
   replyTarget,
   selectedForwardMessageIds,
   starredMessageIds
@@ -8569,6 +8608,7 @@ function MessageThread({
   onSend: () => void;
   onSendVoiceNote: (media: LocalChatMediaInput) => void;
   profilePhotoHeaders?: Record<string, string>;
+  readOnlyReason?: string;
   replyTarget: ChatMessage | null;
   selectedForwardMessageIds: Record<string, boolean>;
   starredMessageIds: Record<string, boolean>;
@@ -9296,7 +9336,7 @@ function MessageThread({
                     updateMessageInputHeight(estimateMessageInputHeight(draft, nextWidth));
                   }
                 }}
-                placeholder={canChat ? 'Type a message' : 'Waiting for secure device'}
+                placeholder={canChat ? 'Type a message' : readOnlyReason || 'Waiting for secure device'}
                 placeholderTextColor="#8B95A5"
                 ref={inputRef}
                 scrollEnabled={messageInputHeight >= MESSAGE_INPUT_MAX_HEIGHT}
@@ -11206,10 +11246,10 @@ function SpamHeader({
         <Text style={styles.backButtonText}>‹</Text>
       </Pressable>
 
-      <Text numberOfLines={1} style={styles.spamHeaderTitle}>Spam</Text>
+      <Text numberOfLines={1} style={styles.spamHeaderTitle}>Trash</Text>
 
       <Pressable
-        accessibilityLabel="Delete Spam chats"
+        accessibilityLabel="Delete Trash chats"
         accessibilityRole="button"
         disabled={isDeleting || spamCount === 0}
         onPress={onDelete}
@@ -11453,7 +11493,7 @@ function ChatsTab({
         {spamCount > 0 ? (
           <ChatsUtilityRow
             icon="message-circle"
-            label="Spam"
+            label="Trash"
             onPress={onOpenSpam}
           />
         ) : null}
@@ -11958,7 +11998,6 @@ function SpamChatsScreen({
   isLoading,
   onDelete,
   onOpenChat,
-  onPutBack,
   onSearchChange,
   profilePhotoHeaders,
   search
@@ -11968,7 +12007,6 @@ function SpamChatsScreen({
   isLoading: boolean;
   onDelete: (chat: ChatItem) => void;
   onOpenChat: (chat: ChatItem) => void;
-  onPutBack: (chat: ChatItem) => void;
   onSearchChange: (value: string) => void;
   profilePhotoHeaders?: Record<string, string>;
   search: string;
@@ -11977,12 +12015,12 @@ function SpamChatsScreen({
     <View style={styles.spamScreen}>
       <ChatSearchBar
         onChangeText={onSearchChange}
-        placeholder="Search Spam"
+        placeholder="Search Trash"
         value={search}
       />
 
       <Text style={styles.spamDescription}>
-        Deleted chats and normal groups are kept here until you permanently delete them for your account.
+        Deleted chats and normal groups are kept here as read-only history for 30 days.
       </Text>
 
       {isLoading && !chats.length ? (
@@ -11993,7 +12031,7 @@ function SpamChatsScreen({
 
       {!isLoading && !chats.length ? (
         <View style={styles.emptyState}>
-          <Text style={styles.emptyTitle}>{search.trim() ? 'No Spam chats found' : 'No Spam chats'}</Text>
+          <Text style={styles.emptyTitle}>{search.trim() ? 'No Trash chats found' : 'No Trash chats'}</Text>
         </View>
       ) : null}
 
@@ -12004,7 +12042,6 @@ function SpamChatsScreen({
           key={chat.id}
           onDelete={() => onDelete(chat)}
           onOpen={() => onOpenChat(chat)}
-          onPutBack={() => onPutBack(chat)}
           profilePhotoHeaders={profilePhotoHeaders}
         />
       ))}
@@ -12017,17 +12054,16 @@ function SpamChatRow({
   isDeleting,
   onDelete,
   onOpen,
-  onPutBack,
   profilePhotoHeaders
 }: {
   chat: ChatItem;
   isDeleting: boolean;
   onDelete: () => void;
   onOpen: () => void;
-  onPutBack: () => void;
   profilePhotoHeaders?: Record<string, string>;
 }) {
-  const spamTime = chat.spammedAt || chat.lastMessageAt;
+  const latestTrashSegment = getActiveTrashSegments(chat)[0] || null;
+  const spamTime = latestTrashSegment?.deletedAt || chat.spammedAt || chat.lastMessageAt;
   const translateX = useRef(new Animated.Value(0)).current;
   const offsetRef = useRef(0);
 
@@ -12059,30 +12095,23 @@ function SpamChatRow({
     onPanResponderMove: (_event, gestureState) => {
       const nextValue = Math.max(
         -SPAM_ROW_ACTION_WIDTH,
-        Math.min(SPAM_ROW_ACTION_WIDTH, offsetRef.current + gestureState.dx)
+        Math.min(0, offsetRef.current + gestureState.dx)
       );
 
       translateX.setValue(nextValue);
     },
     onPanResponderRelease: (_event, gestureState) => {
       const intendedDelete = gestureState.dx <= -CHAT_ROW_SWIPE_TRIGGER || gestureState.vx <= -0.18;
-      const intendedPutBack = gestureState.dx >= CHAT_ROW_SWIPE_TRIGGER || gestureState.vx >= 0.18;
-
       closeSwipe();
 
       if (intendedDelete) {
         onDelete();
-        return;
-      }
-
-      if (intendedPutBack) {
-        onPutBack();
       }
     },
     onPanResponderTerminate: closeSwipe,
     onPanResponderTerminationRequest: () => false,
     onStartShouldSetPanResponder: () => false
-  }), [isDeleting, onDelete, onPutBack, translateX]);
+  }), [isDeleting, onDelete, translateX]);
 
   useEffect(() => {
     closeSwipe();
@@ -12090,13 +12119,6 @@ function SpamChatRow({
 
   return (
     <View style={styles.spamSwipeShell}>
-      <View style={styles.spamSwipeLeftActions}>
-        <View style={[styles.spamSwipeAction, styles.spamSwipePutBackAction]}>
-          <Feather color="#FFFFFF" name="rotate-ccw" size={20} />
-          <Text style={styles.chatSwipeActionText}>Put back</Text>
-        </View>
-      </View>
-
       <View style={styles.spamSwipeRightActions}>
         <View style={[styles.spamSwipeAction, styles.spamSwipeDeleteAction]}>
           <Feather color="#FFFFFF" name="trash-2" size={20} />
@@ -12112,7 +12134,7 @@ function SpamChatRow({
         {...panResponder.panHandlers}
       >
         <Pressable
-          accessibilityLabel={`Open Spam details for ${chat.title}`}
+          accessibilityLabel={`Open Trash history for ${chat.title}`}
           accessibilityRole="button"
           onPress={onOpen}
           style={({ pressed }) => [styles.spamChatRow, pressed && styles.pressed]}
@@ -12132,7 +12154,7 @@ function SpamChatRow({
             <View style={styles.spamChatSubtitleRow}>
               <Feather color="#8B95A5" name="slash" size={13} />
               <Text numberOfLines={1} style={styles.spamChatSubtitle}>
-                {chat.chatType === 'GROUP' ? 'Group moved to Spam' : 'Chat moved to Spam'}
+                {getTrashRowSubtitle(chat)}
               </Text>
             </View>
             {getChatListPreviewText(chat) ? (
@@ -16180,17 +16202,33 @@ function SpamChatStatusModal({
   isDeleting,
   onClose,
   onDelete,
+  onOpenSegment,
   profilePhotoHeaders
 }: {
   chat: ChatItem | null;
   isDeleting: boolean;
   onClose: () => void;
   onDelete: (chat: ChatItem) => void;
+  onOpenSegment: (chat: ChatItem, trashSegment: ChatTrashSegment | null) => void;
   profilePhotoHeaders?: Record<string, string>;
 }) {
   if (!chat) {
     return null;
   }
+
+  const trashSegments = getActiveTrashSegments(chat);
+  const legacyTrashSegment = trashSegments.length
+    ? null
+    : {
+        deletedAt: chat.spammedAt || chat.lastMessageAt || new Date().toISOString(),
+        deletedAtMs: Date.parse(chat.spammedAt || chat.lastMessageAt || new Date().toISOString()) || Date.now(),
+        endAtMs: null,
+        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+        expiresAtMs: Date.now() + 30 * 24 * 60 * 60 * 1000,
+        segmentId: '',
+        startAtMs: null
+      } satisfies ChatTrashSegment;
+  const visibleSegments = trashSegments.length ? trashSegments : legacyTrashSegment ? [legacyTrashSegment] : [];
 
   return (
     <Modal
@@ -16201,14 +16239,14 @@ function SpamChatStatusModal({
     >
       <View style={styles.chatMoreRoot}>
         <Pressable
-          accessibilityLabel="Close Spam details"
+          accessibilityLabel="Close Trash details"
           accessibilityRole="button"
           onPress={onClose}
           style={styles.chatMoreBackdrop}
         />
         <View style={styles.spamStatusSheet}>
           <Pressable
-            accessibilityLabel="Close Spam details"
+            accessibilityLabel="Close Trash details"
             accessibilityRole="button"
             onPress={onClose}
             style={({ pressed }) => [styles.spamStatusCloseButton, pressed && styles.pressed]}
@@ -16229,31 +16267,38 @@ function SpamChatStatusModal({
           </View>
 
           <Text numberOfLines={2} style={styles.spamStatusTitle}>
-            {chat.chatType === 'GROUP' ? 'This group is in Spam' : 'This chat is in Spam'}
+            {chat.title}
           </Text>
 
           <View style={styles.spamStatusInfoList}>
-            <View style={styles.spamStatusInfoRow}>
-              <Feather color="#64748B" name="eye-off" size={18} />
-              <Text style={styles.spamStatusInfoText}>
-                It is hidden from your active chat list and unread badge.
-              </Text>
-            </View>
-            <View style={styles.spamStatusInfoRow}>
-              <Feather color="#64748B" name="lock" size={18} />
-              <Text style={styles.spamStatusInfoText}>
-                Permanent delete only removes it for your account.
-              </Text>
-            </View>
+            {visibleSegments.map((segment, index) => (
+              <Pressable
+                accessibilityLabel={`Open deleted history ${index + 1}`}
+                accessibilityRole="button"
+                key={segment.segmentId || `legacy_${index}`}
+                onPress={() => onOpenSegment(chat, segment.segmentId ? segment : null)}
+                style={({ pressed }) => [styles.spamStatusInfoRow, pressed && styles.pressed]}
+              >
+                <Feather color="#64748B" name="clock" size={18} />
+                <View style={styles.chatText}>
+                  <Text style={styles.spamStatusInfoText}>
+                    {formatTrashSegmentTitle(segment, index)}
+                  </Text>
+                  <Text style={styles.spamChatSubtitle}>
+                    {getTrashExpiryLabel(segment.expiresAtMs)}
+                  </Text>
+                </View>
+              </Pressable>
+            ))}
           </View>
 
           <Pressable
-            accessibilityLabel="Close Spam details"
+            accessibilityLabel={`Open latest Trash history for ${chat.title}`}
             accessibilityRole="button"
-            onPress={onClose}
+            onPress={() => onOpenSegment(chat, visibleSegments[0]?.segmentId ? visibleSegments[0] : null)}
             style={({ pressed }) => [styles.spamStatusOkButton, pressed && styles.pressed]}
           >
-            <Text style={styles.spamStatusOkText}>OK</Text>
+            <Text style={styles.spamStatusOkText}>View history</Text>
           </Pressable>
 
           <Pressable
@@ -17704,6 +17749,7 @@ function mapChatContactToChatItem(contact: ChatContact): ChatItem {
     spammedAt: contact.spammedAt || null,
     status: contact.status,
     title: contact.displayName,
+    trashSegments: contact.trashSegments || [],
     unreadCount: contact.unreadCount || 0
   };
 }
@@ -17735,6 +17781,7 @@ function mapChatItemToChatContact(chat: ChatItem): ChatContact {
     roleName: chat.roleName || '',
     spammedAt: chat.spammedAt || null,
     status: chat.status || 'ACTIVE',
+    trashSegments: chat.trashSegments || [],
     unreadCount: chat.unreadCount || 0
   };
 }
@@ -18055,13 +18102,53 @@ function applyChatListFilter(chats: ChatItem[], filter: ChatListFilter): ChatIte
   return chats;
 }
 
-function shouldShowChatInList(chat: ChatItem): boolean {
+function shouldShowActiveChatInList(chat: ChatItem): boolean {
   return Boolean(
-    chat.isSpam === true ||
-    chat.lastMessageAt ||
-    chat.preview.trim() ||
-    chat.unreadCount > 0
+    chat.isSpam !== true && (
+      chat.lastMessageAt ||
+      chat.preview.trim() ||
+      chat.unreadCount > 0
+    )
   );
+}
+
+function shouldShowTrashChatInList(chat: ChatItem): boolean {
+  return chat.isSpam === true || getActiveTrashSegments(chat).length > 0;
+}
+
+function getActiveTrashSegments(chat: Pick<ChatItem, 'spammedAt' | 'trashSegments'>): ChatTrashSegment[] {
+  const nowMs = Date.now();
+  const activeSegments = (chat.trashSegments || []).filter((segment) => segment.expiresAtMs > nowMs);
+
+  if (activeSegments.length) {
+    return activeSegments.sort((first, second) => second.deletedAtMs - first.deletedAtMs);
+  }
+
+  if (!chat.spammedAt) {
+    return [];
+  }
+
+  const deletedAtMs = Date.parse(chat.spammedAt);
+
+  if (!Number.isFinite(deletedAtMs)) {
+    return [];
+  }
+
+  const expiresAtMs = deletedAtMs + 30 * 24 * 60 * 60 * 1000;
+
+  if (expiresAtMs <= nowMs) {
+    return [];
+  }
+
+  return [{
+    deletedAt: new Date(deletedAtMs).toISOString(),
+    deletedAtMs,
+    endAtMs: null,
+    expiresAt: new Date(expiresAtMs).toISOString(),
+    expiresAtMs,
+    segmentId: '',
+    startAtMs: null
+  }];
 }
 
 function getChatListPreviewText(chat: ChatItem): string {
@@ -18072,6 +18159,37 @@ function getChatListPreviewText(chat: ChatItem): string {
   }
 
   return chat.lastMessageAt ? 'Message' : '';
+}
+
+function getTrashRowSubtitle(chat: ChatItem): string {
+  const segments = getActiveTrashSegments(chat);
+  const segmentCount = Math.max(segments.length, chat.isSpam ? 1 : 0);
+  const latestSegment = segments[0] || null;
+  const countLabel = segmentCount === 1 ? '1 deleted chat' : `${segmentCount} deleted chats`;
+  const expiryLabel = latestSegment ? getTrashExpiryLabel(latestSegment.expiresAtMs) : 'Deletes after 30 days';
+
+  return `${countLabel} · ${expiryLabel}`;
+}
+
+function getTrashExpiryLabel(expiresAtMs: number): string {
+  const remainingMs = expiresAtMs - Date.now();
+
+  if (remainingMs <= 0) {
+    return 'Deletes soon';
+  }
+
+  const remainingDays = Math.max(1, Math.ceil(remainingMs / (24 * 60 * 60 * 1000)));
+
+  return remainingDays === 1 ? 'Deletes in 1 day' : `Deletes in ${remainingDays} days`;
+}
+
+function formatTrashSegmentTitle(segment: ChatTrashSegment, index: number): string {
+  const deletedDate = new Date(segment.deletedAtMs);
+  const dateLabel = Number.isFinite(deletedDate.getTime())
+    ? formatChatListTime(deletedDate.toISOString())
+    : `Deleted history ${index + 1}`;
+
+  return `Deleted ${dateLabel}`;
 }
 
 function isFavoriteChat(chat: ChatItem): boolean {
@@ -18611,6 +18729,13 @@ function getChatContactListFingerprint(contact: ChatContact): string {
     roleName: contact.roleName,
     spammedAt: contact.spammedAt || null,
     status: contact.status,
+    trashSegments: (contact.trashSegments || []).map((segment) => ({
+      deletedAtMs: segment.deletedAtMs,
+      endAtMs: segment.endAtMs,
+      expiresAtMs: segment.expiresAtMs,
+      segmentId: segment.segmentId,
+      startAtMs: segment.startAtMs
+    })),
     unreadCount: contact.unreadCount || 0
   });
 }

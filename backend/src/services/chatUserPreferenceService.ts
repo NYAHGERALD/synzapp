@@ -3,6 +3,16 @@ import { fieldValue, firestore } from '../config/firebaseAdmin.js';
 
 export type ChatPreferenceChatType = 'DIRECT' | 'GROUP';
 
+const TRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+export interface ChatTrashSegment {
+  deletedAtMs: number;
+  endAtMs: number | null;
+  expiresAtMs: number;
+  segmentId: string;
+  startAtMs: number | null;
+}
+
 export interface ChatUserPreference {
   archivedAtMs: number | null;
   chatType: ChatPreferenceChatType;
@@ -13,6 +23,7 @@ export interface ChatUserPreference {
   isSpam: boolean;
   spammedAtMs: number | null;
   tenantId: string;
+  trashSegments: ChatTrashSegment[];
   uid: string;
 }
 
@@ -22,6 +33,7 @@ export interface UpdateChatUserPreferenceInput {
   isFavorite?: boolean;
   isSpam?: boolean;
   permanentDelete?: boolean;
+  trashSegmentEndAtMs?: number | null;
 }
 
 interface ChatUserPreferenceRecord {
@@ -34,6 +46,7 @@ interface ChatUserPreferenceRecord {
   isSpam?: boolean;
   spammedAtMs?: number | null;
   tenantId?: string;
+  trashSegments?: unknown;
   uid?: string;
 }
 
@@ -60,6 +73,7 @@ export function getDefaultChatUserPreference(
     isSpam: false,
     spammedAtMs: null,
     tenantId,
+    trashSegments: [],
     uid
   };
 }
@@ -122,6 +136,12 @@ export async function updateChatUserPreference(
   input: UpdateChatUserPreferenceInput
 ): Promise<ChatUserPreference> {
   const ref = getChatUserPreferenceRef(tenantId, uid, chatType, contactId);
+  const existingRecord = input.isSpam === true
+    ? (await ref.get()).data() as ChatUserPreferenceRecord | undefined
+    : undefined;
+  const existingPreference = existingRecord
+    ? normalizeChatUserPreference(tenantId, uid, chatType, contactId, existingRecord)
+    : null;
   const update: Record<string, unknown> = {
     chatType,
     contactId,
@@ -143,14 +163,29 @@ export async function updateChatUserPreference(
   }
 
   if (typeof input.isSpam === 'boolean') {
+    const trashedAtMs = Date.now();
+
     update.isSpam = input.isSpam;
     update.spammedAt = input.isSpam ? fieldValue.serverTimestamp() : null;
-    update.spammedAtMs = input.isSpam ? Date.now() : null;
+    update.spammedAtMs = input.isSpam ? trashedAtMs : null;
 
     if (input.isSpam) {
+      const segmentEndAtMs = normalizeOptionalTimestamp(input.trashSegmentEndAtMs) || trashedAtMs;
+
       update.archivedAt = null;
       update.archivedAtMs = null;
+      update.clearedAt = fieldValue.serverTimestamp();
+      update.clearedAtMs = trashedAtMs;
       update.isArchived = false;
+      update.permanentlyDeletedAt = null;
+      update.permanentlyDeletedAtMs = null;
+      update.trashSegments = fieldValue.arrayUnion({
+        deletedAtMs: trashedAtMs,
+        endAtMs: segmentEndAtMs,
+        expiresAtMs: trashedAtMs + TRASH_RETENTION_MS,
+        segmentId: buildTrashSegmentId(trashedAtMs),
+        startAtMs: existingPreference?.clearedAtMs || null
+      });
     } else {
       update.permanentlyDeletedAt = null;
       update.permanentlyDeletedAtMs = null;
@@ -179,6 +214,7 @@ export async function updateChatUserPreference(
     update.permanentlyDeletedAtMs = deletedAtMs;
     update.spammedAt = null;
     update.spammedAtMs = null;
+    update.trashSegments = [];
   }
 
   await ref.set(update, { merge: true });
@@ -246,6 +282,9 @@ function normalizeChatUserPreference(
   const spammedAtMs = Number.isFinite(record?.spammedAtMs)
     ? Math.max(Math.round(record?.spammedAtMs || 0), 0)
     : null;
+  const trashSegments = normalizeTrashSegments(record?.trashSegments);
+  const isLegacyTrashActive = record?.isSpam === true &&
+    (!spammedAtMs || spammedAtMs + TRASH_RETENTION_MS > Date.now());
 
   return {
     archivedAtMs,
@@ -254,11 +293,58 @@ function normalizeChatUserPreference(
     contactId,
     isArchived: record?.isArchived === true,
     isFavorite: record?.isFavorite === true,
-    isSpam: record?.isSpam === true,
+    isSpam: isLegacyTrashActive,
     spammedAtMs,
     tenantId,
+    trashSegments,
     uid
   };
+}
+
+function normalizeOptionalTimestamp(value: unknown): number | null {
+  return Number.isFinite(value)
+    ? Math.max(Math.round(Number(value)), 0)
+    : null;
+}
+
+function normalizeTrashSegments(value: unknown): ChatTrashSegment[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const nowMs = Date.now();
+
+  return value
+    .map((segment): ChatTrashSegment | null => {
+      if (!segment || typeof segment !== 'object') {
+        return null;
+      }
+
+      const record = segment as Record<string, unknown>;
+      const deletedAtMs = normalizeOptionalTimestamp(record.deletedAtMs);
+      const expiresAtMs = normalizeOptionalTimestamp(record.expiresAtMs);
+      const segmentId = typeof record.segmentId === 'string' && record.segmentId.trim()
+        ? record.segmentId.trim()
+        : '';
+
+      if (!deletedAtMs || !expiresAtMs || expiresAtMs <= nowMs || !segmentId) {
+        return null;
+      }
+
+      return {
+        deletedAtMs,
+        endAtMs: normalizeOptionalTimestamp(record.endAtMs),
+        expiresAtMs,
+        segmentId,
+        startAtMs: normalizeOptionalTimestamp(record.startAtMs)
+      };
+    })
+    .filter((segment): segment is ChatTrashSegment => Boolean(segment))
+    .sort((first, second) => second.deletedAtMs - first.deletedAtMs);
+}
+
+function buildTrashSegmentId(deletedAtMs: number): string {
+  return `trash_${deletedAtMs}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function getChatUserPreferenceRef(

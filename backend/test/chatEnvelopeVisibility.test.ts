@@ -23,17 +23,19 @@ describe('encrypted chat visibility after user clear/delete actions', () => {
   it('queries direct envelopes after the user clear timestamp before applying the read limit', () => {
     assert.match(
       directEnvelopeService,
-      /where\('sentAtMs', '>', preference\.clearedAtMs\)\s*\.orderBy\('sentAtMs', 'asc'\)/,
+      /envelopesQuery = envelopesQuery\.where\('sentAtMs', '>', preference\.clearedAtMs\)/,
       'Direct chat reads must not load the oldest deleted envelopes before filtering cleared history.'
     );
+    assert.match(directEnvelopeService, /envelopesQuery = envelopesQuery\.orderBy\('sentAtMs', 'asc'\)/);
   });
 
   it('queries group envelopes after the user clear timestamp before applying the read limit', () => {
     assert.match(
       groupChatService,
-      /where\('sentAtMs', '>', preference\.clearedAtMs\)\s*\.orderBy\('sentAtMs', 'asc'\)/,
+      /envelopesQuery = envelopesQuery\.where\('sentAtMs', '>', preference\.clearedAtMs\)/,
       'Group chat reads must not load the oldest deleted envelopes before filtering cleared history.'
     );
+    assert.match(groupChatService, /envelopesQuery = envelopesQuery\.orderBy\('sentAtMs', 'asc'\)/);
   });
 
   it('revives stale spam and permanent-delete markers without forcing archive policy', () => {
@@ -41,5 +43,16 @@ describe('encrypted chat visibility after user clear/delete actions', () => {
     assert.match(preferenceService, /permanentlyDeletedAt: null/);
     assert.match(preferenceService, /permanentlyDeletedAtMs: null/);
     assert.match(preferenceService, /if \(options\.unarchive\) \{/);
+  });
+
+  it('keeps read-only Trash history in explicit 30-day segments', () => {
+    assert.match(preferenceService, /TRASH_RETENTION_MS = 30 \* 24 \* 60 \* 60 \* 1000/);
+    assert.match(preferenceService, /update\.trashSegments = fieldValue\.arrayUnion/);
+    assert.match(directEnvelopeService, /trashSegmentId\?: string \| null/);
+    assert.match(directEnvelopeService, /trashSegment\.startAtMs/);
+    assert.match(directEnvelopeService, /trashSegment\.endAtMs/);
+    assert.match(groupChatService, /trashSegmentId\?: string \| null/);
+    assert.match(groupChatService, /trashSegment\.startAtMs/);
+    assert.match(groupChatService, /trashSegment\.endAtMs/);
   });
 });

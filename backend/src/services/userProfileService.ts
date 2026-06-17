@@ -8,6 +8,7 @@ import { buildAuthSession } from './authSessionService.js';
 import {
   buildChatPreferenceKey,
   ChatUserPreference,
+  type ChatTrashSegment,
   getChatUserPreference,
   getDefaultChatUserPreference,
   listChatUserPreferences,
@@ -84,6 +85,10 @@ export interface ChatContact {
   roleName: string;
   spammedAt: string | null;
   status: string;
+  trashSegments: Array<ChatTrashSegment & {
+    deletedAt: string;
+    expiresAt: string;
+  }>;
   unreadCount: number;
 }
 
@@ -287,7 +292,12 @@ export async function updateDirectChatPreferenceForCurrentUser(
     decodedToken.uid,
     'DIRECT',
     chatContext.contactId,
-    input
+    {
+      ...input,
+      trashSegmentEndAtMs: input.isSpam === true
+        ? chatContext.directChat?.lastMessageSentAtMs || Date.now()
+        : input.trashSegmentEndAtMs
+    }
   );
   const [hasActiveDevice, archiveSettings] = await Promise.all([
     hasActiveDeviceForUser(chatContext.tenantId, chatContext.contactId),
@@ -985,8 +995,20 @@ function buildChatContact(
     roleName,
     spammedAt: effectivePreference.spammedAtMs ? new Date(effectivePreference.spammedAtMs).toISOString() : null,
     status: user.status || 'ACTIVE',
+    trashSegments: mapTrashSegments(effectivePreference.trashSegments),
     unreadCount
   };
+}
+
+function mapTrashSegments(trashSegments: ChatTrashSegment[]): Array<ChatTrashSegment & {
+  deletedAt: string;
+  expiresAt: string;
+}> {
+  return trashSegments.map((segment) => ({
+    ...segment,
+    deletedAt: new Date(segment.deletedAtMs).toISOString(),
+    expiresAt: new Date(segment.expiresAtMs).toISOString()
+  }));
 }
 
 async function getActiveDeviceUserIds(tenantId: string): Promise<Set<string>> {

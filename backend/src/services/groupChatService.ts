@@ -17,6 +17,7 @@ import { pickNotificationPreviewsForRecipientDevices } from './encryptedNotifica
 import {
   buildChatPreferenceKey,
   ChatUserPreference,
+  type ChatTrashSegment,
   getChatUserPreference,
   getDefaultChatUserPreference,
   listChatUserPreferences,
@@ -70,6 +71,10 @@ export interface GroupChatContact {
   spammedAt: string | null;
   status: string;
   tenantId: string;
+  trashSegments: Array<ChatTrashSegment & {
+    deletedAt: string;
+    expiresAt: string;
+  }>;
   unreadCount: number;
 }
 
@@ -293,6 +298,7 @@ interface ListEncryptedGroupEnvelopeOptions {
   limit?: number;
   markAsDelivered?: boolean;
   markAsRead?: boolean;
+  trashSegmentId?: string | null;
 }
 
 export async function createGroupChat(
@@ -711,13 +717,30 @@ export async function listEncryptedGroupEnvelopesForDevice(
   const shouldMarkDelivered = options.markAsDelivered !== false;
   const shouldMarkRead = options.markAsRead !== false;
   const preference = await getChatUserPreference(context.tenantId, decodedToken.uid, 'GROUP', context.groupId);
+  const trashSegment = options.trashSegmentId
+    ? preference.trashSegments.find((segment) => segment.segmentId === options.trashSegmentId)
+    : null;
 
   const envelopesCollection = context.groupRef.collection('encryptedEnvelopes');
-  const envelopesQuery = preference.clearedAtMs
-    ? envelopesCollection
-        .where('sentAtMs', '>', preference.clearedAtMs)
-        .orderBy('sentAtMs', 'asc')
-    : envelopesCollection.orderBy('sentAtMs', 'asc');
+  let envelopesQuery: FirebaseFirestore.Query = envelopesCollection;
+
+  if (options.trashSegmentId) {
+    if (!trashSegment) {
+      return [];
+    }
+
+    if (trashSegment.startAtMs) {
+      envelopesQuery = envelopesQuery.where('sentAtMs', '>', trashSegment.startAtMs);
+    }
+
+    if (trashSegment.endAtMs) {
+      envelopesQuery = envelopesQuery.where('sentAtMs', '<=', trashSegment.endAtMs);
+    }
+  } else if (preference.clearedAtMs) {
+    envelopesQuery = envelopesQuery.where('sentAtMs', '>', preference.clearedAtMs);
+  }
+
+  envelopesQuery = envelopesQuery.orderBy('sentAtMs', 'asc');
 
   const [envelopesSnapshot, hiddenMessageIds, activeGroupDevices] = await Promise.all([
     envelopesQuery
@@ -737,7 +760,11 @@ export async function listEncryptedGroupEnvelopesForDevice(
       const record = doc.data() as EncryptedGroupEnvelopeRecord;
       const encryptedKeyForDevice = record.encryptedKeysByDevice?.[deviceId];
 
-      if (preference.clearedAtMs && record.sentAtMs && record.sentAtMs <= preference.clearedAtMs) {
+      if (!options.trashSegmentId && preference.clearedAtMs && record.sentAtMs && record.sentAtMs <= preference.clearedAtMs) {
+        return null;
+      }
+
+      if (trashSegment?.endAtMs && record.sentAtMs && record.sentAtMs > trashSegment.endAtMs) {
         return null;
       }
 
@@ -1090,7 +1117,12 @@ export async function updateGroupChatPreferenceForCurrentUser(
     decodedToken.uid,
     'GROUP',
     context.groupId,
-    input
+    {
+      ...input,
+      trashSegmentEndAtMs: input.isSpam === true
+        ? context.group.lastMessageSentAtMs || Date.now()
+        : input.trashSegmentEndAtMs
+    }
   );
   const [activeRecipientDeviceCount, archiveSettings] = await Promise.all([
     countActiveRecipientDevices(
@@ -1897,8 +1929,20 @@ function buildGroupChatContact(
     spammedAt: effectivePreference.spammedAtMs ? new Date(effectivePreference.spammedAtMs).toISOString() : null,
     status: group.status || 'ACTIVE',
     tenantId: group.tenantId || '',
+    trashSegments: mapTrashSegments(effectivePreference.trashSegments),
     unreadCount: isCleared ? 0 : group.unreadCounts?.[currentUid] || 0
   };
+}
+
+function mapTrashSegments(trashSegments: ChatTrashSegment[]): Array<ChatTrashSegment & {
+  deletedAt: string;
+  expiresAt: string;
+}> {
+  return trashSegments.map((segment) => ({
+    ...segment,
+    deletedAt: new Date(segment.deletedAtMs).toISOString(),
+    expiresAt: new Date(segment.expiresAtMs).toISOString()
+  }));
 }
 
 function cloneGroupChatMessageReactionRecord(
