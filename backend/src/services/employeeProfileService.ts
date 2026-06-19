@@ -105,10 +105,23 @@ export async function createEmployeeProfile(
       .doc(context.tenantId)
       .collection('users')
       .doc(uid);
-    const identitySnapshot = await transaction.get(identityRef);
+    const existingPhoneUserQuery = firestore
+      .collection('organizations')
+      .doc(context.tenantId)
+      .collection('users')
+      .where('phoneHash', '==', phoneHash)
+      .limit(1);
+    const [identitySnapshot, existingPhoneUserSnapshot] = await Promise.all([
+      transaction.get(identityRef),
+      transaction.get(existingPhoneUserQuery)
+    ]);
 
     if (identitySnapshot.exists && identitySnapshot.data()?.tenantId) {
       throw conflictError('This phone number is already linked to an organization.');
+    }
+
+    if (!existingPhoneUserSnapshot.empty && existingPhoneUserSnapshot.docs[0]?.id !== uid) {
+      throw conflictError('This phone number is already linked to this organization.');
     }
 
     transaction.set(userRef, {

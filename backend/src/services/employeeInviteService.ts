@@ -1,9 +1,9 @@
-import { createCipheriv, createHash, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { DecodedIdToken } from 'firebase-admin/auth';
 import { env } from '../config/env.js';
 import { fieldValue, firestore, storageBucket } from '../config/firebaseAdmin.js';
 import { SynzappRole } from '../types/auth.js';
-import { getPhoneLast4, maskPhoneNumber, normalizeE164Phone } from '../utils/phone.js';
+import { formatPhoneNumber, getPhoneLast4, maskPhoneNumber, normalizeE164Phone } from '../utils/phone.js';
 import { hashPhoneNumber } from '../utils/phoneHash.js';
 import {
   canDepartmentAdminUseScopedPermission,
@@ -56,6 +56,7 @@ interface ApprovedEmployeeRecord {
   departmentName?: string;
   displayName?: string | null;
   employeeUid?: string;
+  encryptedPhone?: EncryptedPhoneNumber | null;
   phoneHash?: string;
   phoneLast4?: string;
   phoneMasked?: string;
@@ -91,6 +92,7 @@ export interface ApprovedEmployeeResponse {
   departmentId: string;
   departmentName: string;
   displayName: string | null;
+  phoneFormatted?: string;
   phoneLast4: string;
   phoneMasked: string;
   profilePhotoCacheKey: string | null;
@@ -204,9 +206,16 @@ export async function inviteEmployeeContacts(
 ): Promise<ApprovedEmployeeResponse[]> {
   const context = await requireOrgAdmin(decodedToken, 'users.invite');
   const contacts = normalizeInviteContacts(input.contacts);
+  const currentPhoneHash = decodedToken.phone_number
+    ? hashPhoneNumber(normalizeE164Phone(decodedToken.phone_number))
+    : '';
 
   if (!contacts.length) {
     throw validationError('Select at least one contact to invite.');
+  }
+
+  if (currentPhoneHash && contacts.some((contact) => contact.phoneHash === currentPhoneHash)) {
+    throw conflictError('You cannot invite your own admin phone number as an employee.');
   }
 
   if (context.scopeDepartmentId && input.departmentId !== context.scopeDepartmentId) {
@@ -258,9 +267,48 @@ export async function inviteEmployeeContacts(
     const globalDirectoryRefs = contacts.map((contact) =>
       firestore.collection('approvedPhoneDirectory').doc(contact.phoneHash)
     );
-    const globalDirectorySnapshots = await Promise.all(
-      globalDirectoryRefs.map((ref) => transaction.get(ref))
+    const approvedPhoneRefs = contacts.map((contact) =>
+      organizationRef.collection('approvedPhones').doc(contact.phoneHash)
     );
+    const tenantUserPhoneQueries = contacts.map((contact) =>
+      organizationRef
+        .collection('users')
+        .where('phoneHash', '==', contact.phoneHash)
+        .limit(1)
+    );
+    const [globalDirectorySnapshots, approvedPhoneSnapshots, tenantUserPhoneSnapshots] = await Promise.all([
+      Promise.all(globalDirectoryRefs.map((ref) => transaction.get(ref))),
+      Promise.all(approvedPhoneRefs.map((ref) => transaction.get(ref))),
+      Promise.all(tenantUserPhoneQueries.map((query) => transaction.get(query)))
+    ]);
+
+    tenantUserPhoneSnapshots.forEach((snapshot) => {
+      if (snapshot.empty) {
+        return;
+      }
+
+      const existingUser = snapshot.docs[0]?.data() as TenantUserRecord | undefined;
+
+      if (!existingUser || existingUser.tenantId !== context.tenantId) {
+        return;
+      }
+
+      throw conflictError('One selected phone number already belongs to a user in this organization.');
+    });
+
+    approvedPhoneSnapshots.forEach((snapshot) => {
+      if (!snapshot.exists) {
+        return;
+      }
+
+      const existingRecord = snapshot.data() as ApprovedEmployeeRecord;
+
+      if (existingRecord.tenantId && existingRecord.tenantId !== context.tenantId) {
+        throw conflictError('One selected phone number belongs to another organization record.');
+      }
+
+      throw conflictError(getDuplicateInviteMessage(existingRecord.status));
+    });
 
     globalDirectorySnapshots.forEach((snapshot) => {
       if (!snapshot.exists) {
@@ -273,17 +321,13 @@ export async function inviteEmployeeContacts(
         throw conflictError('One selected phone number is already approved for another organization.');
       }
 
-      if (existingRecord.status === 'ACTIVE') {
-        throw conflictError('One selected employee is already active in this organization.');
-      }
-
-      if (existingRecord.status === 'DISABLED') {
-        throw conflictError('One selected employee is disabled and must be reactivated first.');
+      if (existingRecord.tenantId === context.tenantId) {
+        throw conflictError(getDuplicateInviteMessage(existingRecord.status));
       }
     });
 
     contacts.forEach((contact, index) => {
-      const approvedPhoneRef = organizationRef.collection('approvedPhones').doc(contact.phoneHash);
+      const approvedPhoneRef = approvedPhoneRefs[index];
       const globalDirectoryRef = globalDirectoryRefs[index];
       const displayName = contact.displayName || contact.phoneMasked;
       const approvedEmployee = {
@@ -342,6 +386,7 @@ export async function inviteEmployeeContacts(
     departmentId: input.departmentId,
     departmentName,
     displayName: contact.displayName || contact.phoneMasked,
+    phoneFormatted: formatPhoneNumber(contact.phoneNumber),
     phoneLast4: contact.phoneLast4,
     phoneMasked: contact.phoneMasked,
     profilePhotoCacheKey: null,
@@ -469,6 +514,30 @@ function normalizeInviteContacts(contacts: InviteEmployeeContactInput[]): Normal
   return [...normalizedContactsByHash.values()];
 }
 
+function getDuplicateInviteMessage(status?: string): string {
+  if (status === 'INVITED') {
+    return 'One selected employee has already been invited to this organization.';
+  }
+
+  if (status === 'ACTIVE') {
+    return 'One selected employee is already active in this organization.';
+  }
+
+  if (status === 'DEACTIVATED' || status === 'DISABLED') {
+    return 'One selected employee is disabled and must be reactivated first.';
+  }
+
+  if (status === 'ARCHIVED') {
+    return 'One selected employee is archived and must be reactivated first.';
+  }
+
+  if (status === 'DELETED') {
+    return 'One selected employee was deleted. Reactivate or permanently remove them before inviting this phone number again.';
+  }
+
+  return 'One selected phone number is already approved for this organization.';
+}
+
 function mapApprovedEmployee(record: ApprovedEmployeeRecord, fallbackId: string): ApprovedEmployeeResponse {
   return {
     approvedPhoneId: record.approvedPhoneId || fallbackId,
@@ -476,6 +545,7 @@ function mapApprovedEmployee(record: ApprovedEmployeeRecord, fallbackId: string)
     departmentId: record.departmentId || '',
     departmentName: record.departmentName || 'Department',
     displayName: record.displayName || null,
+    phoneFormatted: getApprovedEmployeePhoneFormatted(record),
     phoneLast4: record.phoneLast4 || '',
     phoneMasked: record.phoneMasked || '*****',
     profilePhotoCacheKey: record.profilePhotoStoragePath
@@ -493,6 +563,20 @@ function mapApprovedEmployee(record: ApprovedEmployeeRecord, fallbackId: string)
     status: record.status || 'INVITED',
     tenantId: record.tenantId || ''
   };
+}
+
+function getApprovedEmployeePhoneFormatted(record: ApprovedEmployeeRecord): string {
+  const phoneNumber = decryptPhoneNumber(record.encryptedPhone);
+
+  if (phoneNumber) {
+    try {
+      return formatPhoneNumber(phoneNumber);
+    } catch {
+      return record.phoneMasked || '*****';
+    }
+  }
+
+  return record.phoneMasked || '*****';
 }
 
 function isApprovedEmployeeVisibleToRequester(
@@ -581,6 +665,30 @@ function encryptPhoneNumber(phoneNumber: string): EncryptedPhoneNumber {
     keyVersion: 'v1',
     tag: tag.toString('base64')
   };
+}
+
+function decryptPhoneNumber(encryptedPhone?: EncryptedPhoneNumber | null): string | null {
+  if (!encryptedPhone || encryptedPhone.algorithm !== 'aes-256-gcm') {
+    return null;
+  }
+
+  try {
+    const key = createHash('sha256').update(env.phoneEncryptionSecret).digest();
+    const decipher = createDecipheriv(
+      'aes-256-gcm',
+      key,
+      Buffer.from(encryptedPhone.iv, 'base64')
+    );
+    decipher.setAuthTag(Buffer.from(encryptedPhone.tag, 'base64'));
+    const plaintext = Buffer.concat([
+      decipher.update(Buffer.from(encryptedPhone.ciphertext, 'base64')),
+      decipher.final()
+    ]).toString('utf8');
+
+    return normalizeE164Phone(plaintext);
+  } catch {
+    return null;
+  }
 }
 
 function authorizationError(message: string): Error {

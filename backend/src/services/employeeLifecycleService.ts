@@ -8,7 +8,14 @@ import { SynzappRole, SynzappUserStatus } from '../types/auth.js';
 import { buildAuthSession } from './authSessionService.js';
 import type { ApprovedEmployeeResponse } from './employeeInviteService.js';
 
-export type EmployeeLifecycleAction = 'DEACTIVATE' | 'ARCHIVE' | 'ANONYMIZE' | 'REACTIVATE';
+export type EmployeeLifecycleAction =
+  | 'DEACTIVATE'
+  | 'ARCHIVE'
+  | 'DELETE'
+  | 'ANONYMIZE'
+  | 'PERMANENT_DELETE'
+  | 'REMOVE_INVITE'
+  | 'REACTIVATE';
 
 interface TenantAdminContext {
   permissions: string[];
@@ -56,7 +63,10 @@ interface LifecycleResult {
 const ACTIVE_BLOCKING_STATUS_BY_ACTION: Record<EmployeeLifecycleAction, SynzappUserStatus> = {
   ANONYMIZE: 'DELETED',
   ARCHIVE: 'ARCHIVED',
+  DELETE: 'DELETED',
   DEACTIVATE: 'DEACTIVATED',
+  PERMANENT_DELETE: 'DELETED',
+  REMOVE_INVITE: 'DELETED',
   REACTIVATE: 'ACTIVE'
 };
 
@@ -80,6 +90,7 @@ export async function updateEmployeeLifecycle(
   let employeeUid: string | null = null;
   let employeeRole: SynzappRole = 'EMPLOYEE';
   let reactivatedPermissions: string[] = [];
+  let removedEmployee: ApprovedEmployeeResponse | null = null;
 
   await firestore.runTransaction(async (transaction) => {
     const approvedPhoneSnapshot = await transaction.get(approvedPhoneRef);
@@ -97,24 +108,55 @@ export async function updateEmployeeLifecycle(
       throw notFoundError('Employee was not found.');
     }
 
-    if (approvedPhone.status === 'DELETED') {
-      throw validationError('This employee has already been anonymized.');
+    if (approvedPhone.status === 'DELETED' && action !== 'REACTIVATE' && action !== 'PERMANENT_DELETE') {
+      throw validationError('This employee has already been deleted.');
+    }
+
+    if (
+      action === 'PERMANENT_DELETE' &&
+      approvedPhone.status !== 'DELETED' &&
+      approvedPhone.status !== 'INVITED'
+    ) {
+      throw validationError('Only deleted employees or pending invites can be permanently removed.');
     }
 
     employeeUid = approvedPhone.employeeUid || approvedPhone.claimedByUid || null;
+
+    if (action === 'REMOVE_INVITE') {
+      if (approvedPhone.status !== 'INVITED' || employeeUid) {
+        throw validationError('Only pending invites can be removed.');
+      }
+
+      removedEmployee = mapLifecycleEmployee(
+        {
+          ...approvedPhone,
+          status: 'INVITED'
+        },
+        approvedPhoneSnapshot.id
+      );
+      const phoneHash = approvedPhone.phoneHash || safeApprovedPhoneId;
+      const globalApprovedPhoneRef = firestore.collection('approvedPhoneDirectory').doc(phoneHash);
+      transaction.delete(approvedPhoneRef);
+      transaction.delete(globalApprovedPhoneRef);
+      return;
+    }
+
     employeeRole = getManagedEmployeeRole(approvedPhone.role);
     const reactivatedStatus = employeeUid ? 'ACTIVE' : 'INVITED';
     const nextApprovedPhoneStatus = action === 'REACTIVATE' ? reactivatedStatus : nextStatus;
     reactivatedPermissions = approvedPhone.permissions || [];
+    const phoneHash = approvedPhone.phoneHash || safeApprovedPhoneId;
+    const globalApprovedPhoneRef = firestore.collection('approvedPhoneDirectory').doc(phoneHash);
+    const userRef = employeeUid
+      ? organizationRef.collection('users').doc(employeeUid)
+      : null;
+    const identityRef = employeeUid
+      ? firestore.collection('identityDirectory').doc(employeeUid)
+      : null;
+    const userSnapshot = userRef ? await transaction.get(userRef) : null;
 
-    if (employeeUid) {
-      const userRef = organizationRef.collection('users').doc(employeeUid);
-      const identityRef = firestore.collection('identityDirectory').doc(employeeUid);
-      const [userSnapshot] = await Promise.all([
-        transaction.get(userRef)
-      ]);
-
-      if (userSnapshot.exists) {
+    if (userRef && identityRef) {
+      if (userSnapshot?.exists) {
         const user = userSnapshot.data() as TenantUserRecord;
 
         if (
@@ -125,20 +167,35 @@ export async function updateEmployeeLifecycle(
         }
       }
 
-      transaction.set(
-        userRef,
-        buildTenantUserLifecycleFields(action, context.uid, nextStatus, approvedPhone, reason),
-        { merge: true }
-      );
-      transaction.set(
-        identityRef,
-        buildIdentityLifecycleFields(action, context.uid, nextStatus, claimsVersion, approvedPhone),
-        { merge: true }
-      );
+      if (action === 'PERMANENT_DELETE') {
+        transaction.delete(userRef);
+        transaction.delete(identityRef);
+      } else {
+        transaction.set(
+          userRef,
+          buildTenantUserLifecycleFields(action, context.uid, nextStatus, approvedPhone, reason),
+          { merge: true }
+        );
+        transaction.set(
+          identityRef,
+          buildIdentityLifecycleFields(action, context.uid, nextStatus, claimsVersion, approvedPhone),
+          { merge: true }
+        );
+      }
     }
 
-    const phoneHash = approvedPhone.phoneHash || safeApprovedPhoneId;
-    const globalApprovedPhoneRef = firestore.collection('approvedPhoneDirectory').doc(phoneHash);
+    if (action === 'PERMANENT_DELETE') {
+      removedEmployee = mapLifecycleEmployee(
+        {
+          ...approvedPhone,
+          status: 'DELETED'
+        },
+        approvedPhoneSnapshot.id
+      );
+      transaction.delete(approvedPhoneRef);
+      transaction.delete(globalApprovedPhoneRef);
+      return;
+    }
 
     transaction.set(
       approvedPhoneRef,
@@ -183,6 +240,14 @@ export async function updateEmployeeLifecycle(
   const refreshedSnapshot = await approvedPhoneRef.get();
 
   if (!refreshedSnapshot.exists) {
+    if (removedEmployee) {
+      return {
+        employee: removedEmployee,
+        employeeUid,
+        tenantId: context.tenantId
+      };
+    }
+
     throw notFoundError('Employee was not found.');
   }
 
@@ -248,7 +313,12 @@ function buildTenantUserLifecycleFields(
     fields.archivedBy = adminUid;
   }
 
-  if (action === 'ANONYMIZE') {
+  if (action === 'DELETE') {
+    fields.deletedAt = fieldValue.serverTimestamp();
+    fields.deletedBy = adminUid;
+  }
+
+  if (isAnonymizingLifecycleAction(action)) {
     fields.anonymizedAt = fieldValue.serverTimestamp();
     fields.anonymizedBy = adminUid;
     fields.deletedAt = fieldValue.serverTimestamp();
@@ -294,7 +364,12 @@ function buildIdentityLifecycleFields(
   fields.permissions = [];
   fields.profileComplete = false;
 
-  if (action === 'ANONYMIZE') {
+  if (action === 'DELETE') {
+    fields.deletedAt = fieldValue.serverTimestamp();
+    fields.deletedBy = adminUid;
+  }
+
+  if (isAnonymizingLifecycleAction(action)) {
     fields.displayName = 'Deleted user';
     fields.phoneLast4 = null;
     fields.profilePhotoVersion = Date.now();
@@ -333,7 +408,12 @@ function buildApprovedPhoneLifecycleFields(
     fields.archivedBy = adminUid;
   }
 
-  if (action === 'ANONYMIZE') {
+  if (action === 'DELETE') {
+    fields.deletedAt = fieldValue.serverTimestamp();
+    fields.deletedBy = adminUid;
+  }
+
+  if (isAnonymizingLifecycleAction(action)) {
     fields.anonymizedAt = fieldValue.serverTimestamp();
     fields.anonymizedBy = adminUid;
     fields.deletedAt = fieldValue.serverTimestamp();
@@ -481,7 +561,23 @@ function getDefaultLifecycleReason(action: EmployeeLifecycleAction): string {
     return 'Archived by organization admin';
   }
 
+  if (action === 'DELETE') {
+    return 'Deleted by organization admin';
+  }
+
+  if (action === 'PERMANENT_DELETE') {
+    return 'Permanently removed by organization admin';
+  }
+
+  if (action === 'REMOVE_INVITE') {
+    return 'Invite removed by organization admin';
+  }
+
   return 'Anonymized by organization admin';
+}
+
+function isAnonymizingLifecycleAction(action: EmployeeLifecycleAction): boolean {
+  return action === 'ANONYMIZE' || action === 'PERMANENT_DELETE';
 }
 
 function isEmployeeManagedRole(role?: SynzappRole): boolean {
@@ -503,6 +599,18 @@ function getDeviceRevocationReason(action: EmployeeLifecycleAction): string {
 
   if (action === 'ARCHIVE') {
     return 'Employee archived by organization admin';
+  }
+
+  if (action === 'DELETE') {
+    return 'Employee deleted by organization admin';
+  }
+
+  if (action === 'PERMANENT_DELETE') {
+    return 'Employee permanently removed by organization admin';
+  }
+
+  if (action === 'REMOVE_INVITE') {
+    return 'Employee invite removed by organization admin';
   }
 
   return 'Employee anonymized by organization admin';

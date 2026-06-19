@@ -84,7 +84,15 @@ const revokeDeviceBodySchema = z.object({
 });
 
 const employeeLifecycleBodySchema = z.object({
-  action: z.enum(['DEACTIVATE', 'ARCHIVE', 'ANONYMIZE', 'REACTIVATE']),
+  action: z.enum([
+    'DEACTIVATE',
+    'ARCHIVE',
+    'DELETE',
+    'ANONYMIZE',
+    'PERMANENT_DELETE',
+    'REMOVE_INVITE',
+    'REACTIVATE'
+  ]),
   reason: z.string().trim().max(160).optional()
 });
 
@@ -898,6 +906,18 @@ function getEmployeeLifecycleAuditAction(action: EmployeeLifecycleAction): strin
 
   if (action === 'ARCHIVE') {
     return 'EMPLOYEE_ARCHIVED';
+  }
+
+  if (action === 'DELETE') {
+    return 'EMPLOYEE_DELETED';
+  }
+
+  if (action === 'PERMANENT_DELETE') {
+    return 'EMPLOYEE_PERMANENTLY_REMOVED';
+  }
+
+  if (action === 'REMOVE_INVITE') {
+    return 'EMPLOYEE_INVITE_REMOVED';
   }
 
   return 'EMPLOYEE_ANONYMIZED';
