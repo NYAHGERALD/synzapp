@@ -355,10 +355,16 @@ function isOptionalPhotoStorageError(error: unknown): boolean {
     : undefined;
   const message = getErrorMessage(error);
 
+  if (error instanceof Error && error.name === 'ValidationError') {
+    return false;
+  }
+
   return (
     code === 404 &&
     /bucket|storage|not found|does not exist/i.test(message)
-  ) || /specified bucket does not exist/i.test(message);
+  ) ||
+    /specified bucket does not exist/i.test(message) ||
+    /oauth|token|premature close|fetch failed|socket hang up|econnreset|etimedout|timeout|temporarily unavailable/i.test(message);
 }
 
 function getErrorMessage(error: unknown): string {
