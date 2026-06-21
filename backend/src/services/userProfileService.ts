@@ -138,6 +138,8 @@ interface CurrentUserProfilePhoto {
   file: ReturnType<typeof storageBucket.file>;
 }
 
+type StorageSaveOptions = NonNullable<Parameters<ReturnType<typeof storageBucket.file>['save']>[1]>;
+
 export interface DirectChatRecord {
   lastMessageId?: string | null;
   lastMessageSenderUid?: string | null;
@@ -173,6 +175,9 @@ export interface ChatMessageReaction {
 }
 
 export type ChatMessageReactionMap = Record<string, ChatMessageReaction[]>;
+
+const PROFILE_PHOTO_STORAGE_SAVE_MAX_ATTEMPTS = 3;
+const PROFILE_PHOTO_STORAGE_SAVE_RETRY_BASE_MS = 350;
 
 export async function getCurrentUserProfile(decodedToken: DecodedIdToken): Promise<CurrentUserProfile> {
   const context = await getCurrentUserContext(decodedToken);
@@ -1220,19 +1225,20 @@ async function uploadProfilePhoto(
       ? 'webp'
       : 'jpg';
   const storagePath = `organizations/${tenantId}/users/${uid}/profile/profile-photo.${extension}`;
+  const saveOptions: StorageSaveOptions = {
+    contentType,
+    metadata: {
+      cacheControl: 'private, max-age=3600',
+      metadata: {
+        tenantId,
+        uid
+      }
+    },
+    resumable: false
+  };
 
   try {
-    await storageBucket.file(storagePath).save(bytes, {
-      contentType,
-      metadata: {
-        cacheControl: 'private, max-age=3600',
-        metadata: {
-          tenantId,
-          uid
-        }
-      },
-      resumable: false
-    });
+    await saveProfilePhotoWithRetry(storagePath, bytes, saveOptions);
   } catch (error) {
     logProfilePhotoStorageFailure(error);
 
@@ -1251,6 +1257,33 @@ async function uploadProfilePhoto(
     contentType,
     storagePath
   };
+}
+
+async function saveProfilePhotoWithRetry(
+  storagePath: string,
+  bytes: Buffer,
+  options: StorageSaveOptions
+): Promise<void> {
+  for (let attempt = 1; attempt <= PROFILE_PHOTO_STORAGE_SAVE_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      await storageBucket.file(storagePath).save(bytes, options);
+      return;
+    } catch (error) {
+      if (attempt >= PROFILE_PHOTO_STORAGE_SAVE_MAX_ATTEMPTS || !isRetryableProfilePhotoStorageError(error)) {
+        throw error;
+      }
+
+      const delayMs = PROFILE_PHOTO_STORAGE_SAVE_RETRY_BASE_MS * attempt * attempt;
+      console.warn('Profile photo storage save retrying', {
+        bucket: storageBucket.name,
+        attempt,
+        maxAttempts: PROFILE_PHOTO_STORAGE_SAVE_MAX_ATTEMPTS,
+        code: getStorageErrorCode(error) ?? null,
+        message: sanitizeStorageErrorMessage(getErrorMessage(error))
+      });
+      await delay(delayMs);
+    }
+  }
 }
 
 function getDisplayName(user: TenantUserRecord): string {
@@ -1321,6 +1354,21 @@ function isProfilePhotoStorageUnavailableError(error: unknown): boolean {
     /access denied|forbidden|permission|credential|oauth|token|fetch failed|socket hang up|econnreset|etimedout|timeout|temporarily unavailable/i.test(message);
 }
 
+function isRetryableProfilePhotoStorageError(error: unknown): boolean {
+  const code = getStorageErrorCode(error);
+  const message = getErrorMessage(error);
+
+  return code === 429 ||
+    code === 500 ||
+    code === 502 ||
+    code === 503 ||
+    code === 504 ||
+    code === 'ERR_STREAM_PREMATURE_CLOSE' ||
+    code === 'ECONNRESET' ||
+    code === 'ETIMEDOUT' ||
+    /premature close|invalid response body while trying to fetch|fetch failed|socket hang up|econnreset|etimedout|timeout|temporarily unavailable/i.test(message);
+}
+
 function logProfilePhotoStorageFailure(error: unknown): void {
   console.warn('Profile photo storage save failed', {
     bucket: storageBucket.name,
@@ -1339,6 +1387,12 @@ function getStorageErrorCode(error: unknown): number | string | undefined {
 
 function sanitizeStorageErrorMessage(message: string): string {
   return message.replace(/\s+/g, ' ').slice(0, 400);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function getErrorMessage(error: unknown): string {
