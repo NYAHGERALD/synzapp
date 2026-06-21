@@ -66,12 +66,18 @@ export function attachChatRealtimeServer(server: Server): void {
   const realtimeServer = new WebSocketServer({ noServer: true });
 
   server.on('upgrade', (request, socket, head) => {
+    if ((request as { __synzappRealtimeHandled?: boolean }).__synzappRealtimeHandled) {
+      return;
+    }
+
     const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
 
     if (url.pathname !== '/realtime/chat') {
       socket.destroy();
       return;
     }
+
+    (request as { __synzappRealtimeHandled?: boolean }).__synzappRealtimeHandled = true;
 
     realtimeServer.handleUpgrade(request, socket, head, (webSocket) => {
       realtimeServer.emit('connection', webSocket);
