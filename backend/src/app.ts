@@ -39,7 +39,12 @@ export function createSynzappApp() {
 
 export const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
   if (error?.name === 'ZodError') {
-    res.status(400).json({ error: 'Invalid request.' });
+    res.status(400).json({ error: getZodErrorMessage(error) });
+    return;
+  }
+
+  if (error?.type === 'entity.too.large') {
+    res.status(413).json({ error: 'This upload is too large. Please choose a smaller photo and try again.' });
     return;
   }
 
@@ -91,3 +96,22 @@ export const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
   console.error('Unhandled backend error:', error);
   res.status(500).json({ error: 'Something went wrong. Please try again.' });
 };
+
+function getZodErrorMessage(error: unknown): string {
+  const issues = typeof error === 'object' && error !== null && 'issues' in error
+    ? (error as { issues?: Array<{ code?: string; maximum?: number; path?: Array<string | number> }> }).issues
+    : undefined;
+  const profilePhotoIssue = issues?.find((issue) =>
+    issue.path?.some((pathSegment) => pathSegment === 'profilePhotoDataUrl')
+  );
+
+  if (profilePhotoIssue?.code === 'too_big') {
+    return 'Profile photo is too large. Please choose a smaller photo and try again.';
+  }
+
+  if (profilePhotoIssue) {
+    return 'Profile photo could not be processed. Please choose another photo.';
+  }
+
+  return 'Invalid request.';
+}

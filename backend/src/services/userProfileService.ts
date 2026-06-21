@@ -1238,6 +1238,10 @@ async function uploadProfilePhoto(
       throw validationError('Profile photo storage is not ready yet. Please try again later.');
     }
 
+    if (isProfilePhotoStorageUnavailableError(error)) {
+      throw validationError('Profile photo could not be saved right now. Please try again later.');
+    }
+
     throw error;
   }
 
@@ -1302,7 +1306,21 @@ function isMissingStorageBucketError(error: unknown): boolean {
   return (
     code === 404 &&
     /bucket|storage|not found|does not exist/i.test(message)
-  ) || /specified bucket does not exist/i.test(message);
+  ) || /specified bucket does not exist|bucket name|storage bucket|bucket is needed|invalid bucket/i.test(message);
+}
+
+function isProfilePhotoStorageUnavailableError(error: unknown): boolean {
+  const code = typeof error === 'object' && error !== null && 'code' in error
+    ? (error as { code?: number | string }).code
+    : undefined;
+  const message = getErrorMessage(error);
+
+  return code === 403 ||
+    code === 429 ||
+    code === 500 ||
+    code === 502 ||
+    code === 503 ||
+    /access denied|forbidden|permission|credential|oauth|token|fetch failed|socket hang up|econnreset|etimedout|timeout|temporarily unavailable/i.test(message);
 }
 
 function getErrorMessage(error: unknown): string {

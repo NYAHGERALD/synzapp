@@ -6,6 +6,13 @@ type ProfilePhotoSource = 'camera' | 'library';
 
 const PROFILE_PHOTO_SIZE = 512;
 const PROFILE_PHOTO_QUALITY = 0.72;
+const PROFILE_PHOTO_MAX_DATA_URL_LENGTH = 1_200_000;
+const PROFILE_PHOTO_OPTIMIZATION_STEPS = [
+  { quality: PROFILE_PHOTO_QUALITY, size: PROFILE_PHOTO_SIZE },
+  { quality: 0.62, size: 448 },
+  { quality: 0.54, size: 384 },
+  { quality: 0.46, size: 320 }
+] as const;
 
 export interface PickedProfilePhoto {
   dataUrl?: string;
@@ -42,20 +49,42 @@ export async function pickNativeProfilePhoto(
     return null;
   }
 
-  const optimizedPhoto = await ImageManipulator.manipulateAsync(
-    result.assets[0].uri,
-    [{ resize: { height: PROFILE_PHOTO_SIZE, width: PROFILE_PHOTO_SIZE } }],
-    {
-      base64: true,
-      compress: PROFILE_PHOTO_QUALITY,
-      format: ImageManipulator.SaveFormat.JPEG
-    }
-  );
+  const optimizedPhoto = await optimizeProfilePhoto(result.assets[0].uri);
 
   return {
     dataUrl: optimizedPhoto.base64 ? `data:image/jpeg;base64,${optimizedPhoto.base64}` : undefined,
     uri: optimizedPhoto.uri
   };
+}
+
+async function optimizeProfilePhoto(uri: string): Promise<ImageManipulator.ImageResult> {
+  let latestPhoto: ImageManipulator.ImageResult | null = null;
+
+  for (const step of PROFILE_PHOTO_OPTIMIZATION_STEPS) {
+    latestPhoto = await ImageManipulator.manipulateAsync(
+      uri,
+      [{ resize: { height: step.size, width: step.size } }],
+      {
+        base64: true,
+        compress: step.quality,
+        format: ImageManipulator.SaveFormat.JPEG
+      }
+    );
+
+    const dataUrlLength = latestPhoto.base64
+      ? `data:image/jpeg;base64,${latestPhoto.base64}`.length
+      : 0;
+
+    if (dataUrlLength > 0 && dataUrlLength <= PROFILE_PHOTO_MAX_DATA_URL_LENGTH) {
+      return latestPhoto;
+    }
+  }
+
+  if (latestPhoto?.base64) {
+    throw new Error('This photo is too large to upload. Please take another photo with less detail or choose a smaller image.');
+  }
+
+  throw new Error('Unable to prepare this profile photo. Please choose another image.');
 }
 
 async function launchCamera() {
