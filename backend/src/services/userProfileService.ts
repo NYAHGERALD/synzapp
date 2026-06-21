@@ -1234,6 +1234,8 @@ async function uploadProfilePhoto(
       resumable: false
     });
   } catch (error) {
+    logProfilePhotoStorageFailure(error);
+
     if (isMissingStorageBucketError(error)) {
       throw validationError('Profile photo storage is not ready yet. Please try again later.');
     }
@@ -1298,9 +1300,7 @@ function formatProfileRoleName(roleName: string | undefined, role: SynzappRole):
 }
 
 function isMissingStorageBucketError(error: unknown): boolean {
-  const code = typeof error === 'object' && error !== null && 'code' in error
-    ? (error as { code?: number | string }).code
-    : undefined;
+  const code = getStorageErrorCode(error);
   const message = getErrorMessage(error);
 
   return (
@@ -1310,9 +1310,7 @@ function isMissingStorageBucketError(error: unknown): boolean {
 }
 
 function isProfilePhotoStorageUnavailableError(error: unknown): boolean {
-  const code = typeof error === 'object' && error !== null && 'code' in error
-    ? (error as { code?: number | string }).code
-    : undefined;
+  const code = getStorageErrorCode(error);
   const message = getErrorMessage(error);
 
   return code === 403 ||
@@ -1321,6 +1319,26 @@ function isProfilePhotoStorageUnavailableError(error: unknown): boolean {
     code === 502 ||
     code === 503 ||
     /access denied|forbidden|permission|credential|oauth|token|fetch failed|socket hang up|econnreset|etimedout|timeout|temporarily unavailable/i.test(message);
+}
+
+function logProfilePhotoStorageFailure(error: unknown): void {
+  console.warn('Profile photo storage save failed', {
+    bucket: storageBucket.name,
+    code: getStorageErrorCode(error) ?? null,
+    message: sanitizeStorageErrorMessage(getErrorMessage(error))
+  });
+}
+
+function getStorageErrorCode(error: unknown): number | string | undefined {
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    return (error as { code?: number | string }).code;
+  }
+
+  return undefined;
+}
+
+function sanitizeStorageErrorMessage(message: string): string {
+  return message.replace(/\s+/g, ' ').slice(0, 400);
 }
 
 function getErrorMessage(error: unknown): string {
