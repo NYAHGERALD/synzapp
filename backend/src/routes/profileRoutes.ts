@@ -21,12 +21,17 @@ import {
 } from '../services/userProfileService.js';
 import { verifyFirebaseSession } from '../services/authSessionService.js';
 import {
+  getCurrentDeviceSynzappAiStatus,
   listCurrentUserDevices,
   registerDeviceIdentity,
   revokeCurrentUserDevice,
+  updateCurrentDeviceSynzappAiStatus,
   verifyActiveRegisteredDevice
 } from '../services/deviceIdentityService.js';
-import type { DevicePlatform } from '../services/deviceIdentityService.js';
+import type {
+  DevicePlatform,
+  SynzappAiDeviceInstallStatus
+} from '../services/deviceIdentityService.js';
 import {
   getDirectEncryptionContext,
   listEncryptedDirectEnvelopesForDevice,
@@ -117,6 +122,11 @@ const deviceIdentityBodySchema = z.object({
 
 const revokeOwnDeviceBodySchema = z.object({
   reason: z.string().trim().max(160).optional()
+});
+
+const synzappAiDeviceStatusBodySchema = z.object({
+  modelId: z.string().trim().min(2).max(160).optional().nullable(),
+  status: z.enum(['available', 'downloading', 'failed', 'installed'])
 });
 
 const pushTokenBodySchema = z.object({
@@ -305,6 +315,55 @@ profileRouter.get('/me/devices', verifyAppCheck, async (req, res, next) => {
 
     res.json({ devices });
   } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.get('/me/synzapp-ai/device-status', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    const synzappAi = await getCurrentDeviceSynzappAiStatus(activeDevice);
+
+    res.json({ synzappAi });
+  } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.put('/me/synzapp-ai/device-status', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    const body = synzappAiDeviceStatusBodySchema.parse(req.body);
+    const synzappAi = await updateCurrentDeviceSynzappAiStatus(decodedToken, activeDevice, {
+      modelId: body.modelId || null,
+      status: body.status as SynzappAiDeviceInstallStatus
+    });
+
+    await writeAuditEvent({
+      action: 'SYNZAPP_AI_DEVICE_STATUS_UPDATED',
+      metadata: {
+        askButtonVisible: synzappAi.askButtonVisible,
+        deviceId: activeDevice.deviceId,
+        modelId: synzappAi.modelId,
+        status: synzappAi.status
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: activeDevice.tenantId,
+      uid: decodedToken.uid
+    });
+
+    res.json({ synzappAi });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'SYNZAPP_AI_DEVICE_STATUS_UPDATED',
+      reason: error instanceof Error ? error.message : 'Synzapp AI device status update failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
     next(error);
   }
 });

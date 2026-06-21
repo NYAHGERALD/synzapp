@@ -24,8 +24,22 @@ export interface RegisteredDeviceIdentity {
   platform: DevicePlatform;
   protocolVersion: string;
   status: 'ACTIVE';
+  synzappAiModelId: string | null;
+  synzappAiReadyAt: string | null;
+  synzappAiStatus: SynzappAiDeviceInstallStatus;
+  synzappAiUpdatedAt: string | null;
   tenantId: string;
   uid: string;
+}
+
+export type SynzappAiDeviceInstallStatus = 'available' | 'downloading' | 'failed' | 'installed';
+
+export interface SynzappAiDeviceStatusResponse {
+  askButtonVisible: boolean;
+  modelId: string | null;
+  readyAt: string | null;
+  status: SynzappAiDeviceInstallStatus;
+  updatedAt: string | null;
 }
 
 interface OrganizationRecord {
@@ -48,6 +62,10 @@ interface DeviceRecord {
   revokedAt?: FirebaseDateLike;
   revokedByUid?: string;
   revocationReason?: string | null;
+  synzappAiModelId?: string | null;
+  synzappAiReadyAt?: FirebaseDateLike | null;
+  synzappAiStatus?: string;
+  synzappAiUpdatedAt?: FirebaseDateLike | null;
   tenantId?: string;
   status?: string;
   uid?: string;
@@ -179,6 +197,10 @@ export async function registerDeviceIdentity(
     platform: input.platform,
     protocolVersion: input.protocolVersion,
     status: 'ACTIVE',
+    synzappAiModelId: null,
+    synzappAiReadyAt: null,
+    synzappAiStatus: 'available',
+    synzappAiUpdatedAt: null,
     tenantId,
     uid: decodedToken.uid
   };
@@ -240,9 +262,73 @@ export async function verifyActiveRegisteredDevice(
     platform: tenantDevice.platform || 'unknown',
     protocolVersion: tenantDevice.protocolVersion || 'unknown',
     status: 'ACTIVE',
+    synzappAiModelId: tenantDevice.synzappAiModelId || null,
+    synzappAiReadyAt: dateLikeToIso(tenantDevice.synzappAiReadyAt || undefined),
+    synzappAiStatus: normalizeSynzappAiDeviceStatus(tenantDevice.synzappAiStatus),
+    synzappAiUpdatedAt: dateLikeToIso(tenantDevice.synzappAiUpdatedAt || undefined),
     tenantId,
     uid: decodedToken.uid
   };
+}
+
+export async function getCurrentDeviceSynzappAiStatus(
+  activeDevice: RegisteredDeviceIdentity
+): Promise<SynzappAiDeviceStatusResponse> {
+  return mapSynzappAiDeviceStatus({
+    synzappAiModelId: activeDevice.synzappAiModelId,
+    synzappAiReadyAt: isoToDateLike(activeDevice.synzappAiReadyAt),
+    synzappAiStatus: activeDevice.synzappAiStatus,
+    synzappAiUpdatedAt: isoToDateLike(activeDevice.synzappAiUpdatedAt)
+  });
+}
+
+export async function updateCurrentDeviceSynzappAiStatus(
+  decodedToken: DecodedIdToken,
+  activeDevice: RegisteredDeviceIdentity,
+  input: {
+    modelId?: string | null;
+    status: SynzappAiDeviceInstallStatus;
+  }
+): Promise<SynzappAiDeviceStatusResponse> {
+  if (activeDevice.uid !== decodedToken.uid) {
+    throw authorizationError('This device is not authorized.');
+  }
+
+  const organizationRef = firestore.collection('organizations').doc(activeDevice.tenantId);
+  const userDeviceRef = organizationRef
+    .collection('users')
+    .doc(decodedToken.uid)
+    .collection('devices')
+    .doc(activeDevice.deviceId);
+  const tenantDeviceKeyRef = organizationRef.collection('deviceKeys').doc(activeDevice.deviceId);
+  const isInstalled = input.status === 'installed';
+  const safeModelId = isInstalled && input.modelId?.trim()
+    ? input.modelId.trim().slice(0, 160)
+    : null;
+  const nextFields = {
+    synzappAiModelId: safeModelId,
+    synzappAiReadyAt: isInstalled ? fieldValue.serverTimestamp() : null,
+    synzappAiStatus: input.status,
+    synzappAiUpdatedAt: fieldValue.serverTimestamp(),
+    updatedAt: fieldValue.serverTimestamp()
+  };
+
+  await Promise.all([
+    userDeviceRef.set(nextFields, { merge: true }),
+    tenantDeviceKeyRef.set(nextFields, { merge: true })
+  ]);
+
+  const refreshedDeviceSnapshot = await tenantDeviceKeyRef.get();
+  const record = refreshedDeviceSnapshot.exists
+    ? (refreshedDeviceSnapshot.data() as DeviceRecord)
+    : {
+        synzappAiModelId: safeModelId,
+        synzappAiReadyAt: null,
+        synzappAiStatus: input.status,
+        synzappAiUpdatedAt: null
+      };
+
+  return mapSynzappAiDeviceStatus(record);
 }
 
 export async function listCurrentUserDevices(
@@ -459,6 +545,43 @@ function dateLikeToIso(dateLike?: FirebaseDateLike): string | null {
   }
 
   return new Date(milliseconds).toISOString();
+}
+
+function isoToDateLike(value?: string | null): FirebaseDateLike | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const milliseconds = Date.parse(value);
+
+  if (!Number.isFinite(milliseconds)) {
+    return undefined;
+  }
+
+  return {
+    toMillis: () => milliseconds
+  };
+}
+
+function normalizeSynzappAiDeviceStatus(value?: string | null): SynzappAiDeviceInstallStatus {
+  return value === 'installed' ||
+    value === 'downloading' ||
+    value === 'failed' ||
+    value === 'available'
+    ? value
+    : 'available';
+}
+
+function mapSynzappAiDeviceStatus(record: Pick<DeviceRecord, 'synzappAiModelId' | 'synzappAiReadyAt' | 'synzappAiStatus' | 'synzappAiUpdatedAt'>): SynzappAiDeviceStatusResponse {
+  const status = normalizeSynzappAiDeviceStatus(record.synzappAiStatus);
+
+  return {
+    askButtonVisible: status === 'installed',
+    modelId: record.synzappAiModelId || null,
+    readyAt: dateLikeToIso(record.synzappAiReadyAt || undefined),
+    status,
+    updatedAt: dateLikeToIso(record.synzappAiUpdatedAt || undefined)
+  };
 }
 
 function authorizationError(message: string): Error {
