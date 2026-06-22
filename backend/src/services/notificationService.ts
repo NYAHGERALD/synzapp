@@ -717,6 +717,7 @@ async function sendCallInvitePushNotificationToRecipient(
     const tickets = await sendApnsVoipPushBatch(targetBatch.map((target) => target.message));
     const annotatedTickets = annotatePushTickets(tickets, targetBatch.map((target) => target.record));
 
+    logApnsVoipPushTickets('call.incoming', input.tenantId, recipientUid, annotatedTickets);
     ticketResults.push(...annotatedTickets);
     await deactivateInvalidPushTokens(input.tenantId, recipientUid, annotatedTickets);
   }
@@ -861,6 +862,7 @@ async function sendCallEndedPushNotificationToRecipient(
     const tickets = await sendApnsVoipPushBatch(targetBatch.map((target) => target.message));
     const annotatedTickets = annotatePushTickets(tickets, targetBatch.map((target) => target.record));
 
+    logApnsVoipPushTickets('call.ended', input.tenantId, recipientUid, annotatedTickets);
     ticketResults.push(...annotatedTickets);
     await deactivateInvalidPushTokens(input.tenantId, recipientUid, annotatedTickets);
   }
@@ -1090,6 +1092,12 @@ async function sendApnsVoipPushBatch(messages: ApnsVoipPushMessage[]): Promise<E
   const config = getApnsVoipConfig();
 
   if (!config) {
+    if (messages.length) {
+      console.warn('APNs VoIP push skipped because credentials are not configured.', {
+        count: messages.length
+      });
+    }
+
     return messages.map(() => ({
       details: {
         error: 'MissingApnsVoipCredentials'
@@ -1185,6 +1193,44 @@ function annotatePushTickets(
       platform: record?.platform,
       provider: record?.provider
     };
+  });
+}
+
+function logApnsVoipPushTickets(
+  type: 'call.ended' | 'call.incoming',
+  tenantId: string,
+  uid: string,
+  tickets: PushDeliveryTicket[]
+): void {
+  const apnsTickets = tickets.filter((ticket) => ticket.provider === 'apnsVoip');
+
+  if (!apnsTickets.length) {
+    return;
+  }
+
+  const failedTickets = apnsTickets.filter((ticket) => ticket.status === 'error');
+
+  if (!failedTickets.length) {
+    console.info('APNs VoIP push accepted.', {
+      count: apnsTickets.length,
+      tenantId,
+      type,
+      uid
+    });
+    return;
+  }
+
+  console.warn('APNs VoIP push failed.', {
+    errors: failedTickets.map((ticket) => ({
+      deviceId: ticket.deviceId,
+      error: ticket.details?.error,
+      message: ticket.message
+    })),
+    failedCount: failedTickets.length,
+    sentCount: apnsTickets.length - failedTickets.length,
+    tenantId,
+    type,
+    uid
   });
 }
 

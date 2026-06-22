@@ -34,6 +34,11 @@ const CALLS_CHANNEL_ID = 'synzapp-calls';
 const MAX_APP_BADGE_COUNT = 9999;
 let notificationHandlerConfigured = false;
 let notificationsModulePromise: Promise<ExpoNotificationsModule> | null = null;
+let activeVoipIdToken: string | null = null;
+let lastRegisteredVoipTokenKey: string | null = null;
+let pendingVoipToken: string | null = null;
+let voipRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let voipTokenSubscription: NotificationSubscription | null = null;
 
 export interface ChatPushNotificationData {
   chatType?: 'DIRECT' | 'GROUP';
@@ -122,33 +127,84 @@ async function registerDeviceVoipPushNotifications(idToken: string): Promise<boo
     return false;
   }
 
-  let didRegister = false;
-  const registerToken = async (token: string): Promise<void> => {
-    await registerPushTokenWithBackend(idToken, {
-      platform: 'ios',
-      provider: 'apnsVoip',
-      token
-    });
-    didRegister = true;
-  };
+  activeVoipIdToken = idToken;
+  ensureVoipTokenListener();
 
-  const tokenSubscription = addSynzappVoipTokenListener((token) => {
-    void registerToken(token).catch(() => undefined);
-  });
+  if (pendingVoipToken) {
+    return registerCurrentVoipToken(pendingVoipToken);
+  }
 
   try {
     const voipToken = await getSynzappVoipToken();
 
     if (voipToken) {
-      await registerToken(voipToken);
+      pendingVoipToken = voipToken;
+
+      return registerCurrentVoipToken(voipToken);
     }
   } catch {
-    didRegister = false;
-  } finally {
-    tokenSubscription.remove();
+    return false;
   }
 
-  return didRegister;
+  return false;
+}
+
+function ensureVoipTokenListener(): void {
+  if (voipTokenSubscription) {
+    return;
+  }
+
+  voipTokenSubscription = addSynzappVoipTokenListener((token) => {
+    pendingVoipToken = token;
+    void registerCurrentVoipToken(token);
+  });
+}
+
+async function registerCurrentVoipToken(token: string): Promise<boolean> {
+  const idToken = activeVoipIdToken;
+
+  if (!idToken || !token) {
+    return false;
+  }
+
+  const registrationKey = `${idToken}:${token}`;
+
+  if (registrationKey === lastRegisteredVoipTokenKey) {
+    return true;
+  }
+
+  try {
+    await registerPushTokenWithBackend(idToken, {
+      platform: 'ios',
+      provider: 'apnsVoip',
+      token
+    });
+    lastRegisteredVoipTokenKey = registrationKey;
+    clearVoipRegistrationRetry();
+
+    return true;
+  } catch {
+    scheduleVoipRegistrationRetry(token);
+
+    return false;
+  }
+}
+
+function scheduleVoipRegistrationRetry(token: string): void {
+  clearVoipRegistrationRetry();
+  voipRetryTimer = setTimeout(() => {
+    voipRetryTimer = null;
+    void registerCurrentVoipToken(token);
+  }, 3000);
+}
+
+function clearVoipRegistrationRetry(): void {
+  if (!voipRetryTimer) {
+    return;
+  }
+
+  clearTimeout(voipRetryTimer);
+  voipRetryTimer = null;
 }
 
 async function registerPushTokenWithBackend(
