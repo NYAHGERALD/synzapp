@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -14,7 +14,8 @@ import { getUserAuthMessage } from '../services/authErrors';
 import { ACCESS_DENIED_MESSAGE, isAccessDeniedError } from '../services/backendAuth';
 import { signOutOrgAdmin, verifyOrgAdminPhoneCode } from '../services/phoneAuth';
 import { FirebasePhoneSession, VerifiedOrgAdmin } from '../types/auth';
-import { colors } from '../theme/colors';
+import { useAppTheme } from '../theme/AppThemeProvider';
+import type { AppColors } from '../theme/colors';
 
 interface OrgAdminCodeScreenProps {
   phoneSession: FirebasePhoneSession;
@@ -23,6 +24,8 @@ interface OrgAdminCodeScreenProps {
 }
 
 export function OrgAdminCodeScreen({ phoneSession, onBack, onVerified }: OrgAdminCodeScreenProps) {
+  const appTheme = useAppTheme();
+  const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
   const [code, setCode] = useState('');
   const [isVerifying, setIsVerifying] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -84,7 +87,7 @@ export function OrgAdminCodeScreen({ phoneSession, onBack, onVerified }: OrgAdmi
               keyboardType="number-pad"
               maxLength={8}
               placeholder="123456"
-              placeholderTextColor="#64748B"
+              placeholderTextColor={appTheme.colors.muted}
               style={styles.codeInput}
               textContentType="oneTimeCode"
             />
@@ -114,7 +117,7 @@ export function OrgAdminCodeScreen({ phoneSession, onBack, onVerified }: OrgAdmi
 
         {isVerifying ? (
           <View style={styles.loading}>
-            <ActivityIndicator color={colors.primary} />
+            <ActivityIndicator color={appTheme.colors.primary} />
           </View>
         ) : null}
       </View>
@@ -129,7 +132,8 @@ function maskPhoneNumber(phoneNumber: string): string {
   return lastFourDigits ? `*****${lastFourDigits}` : '*****';
 }
 
-const styles = StyleSheet.create({
+function createStyles(colors: AppColors) {
+  return StyleSheet.create({
   screen: {
     backgroundColor: colors.background,
     flex: 1,
@@ -164,7 +168,7 @@ const styles = StyleSheet.create({
     lineHeight: 29
   },
   subtitle: {
-    color: '#475569',
+    color: colors.muted,
     fontSize: 14,
     fontWeight: '400',
     lineHeight: 19
@@ -175,7 +179,7 @@ const styles = StyleSheet.create({
   },
   codeBox: {
     alignItems: 'center',
-    borderBottomColor: 'rgba(15, 118, 110, 0.35)',
+    borderBottomColor: colors.border,
     borderBottomWidth: 1,
     flexDirection: 'row',
     minHeight: 54,
@@ -191,20 +195,20 @@ const styles = StyleSheet.create({
   sendButton: {
     alignItems: 'center',
     alignSelf: 'center',
-    backgroundColor: '#4F6FEA',
+    backgroundColor: colors.blue,
     borderRadius: 8,
     elevation: 8,
     justifyContent: 'center',
     minHeight: 54,
     minWidth: 180,
     paddingHorizontal: 26,
-    shadowColor: '#304ECF',
+    shadowColor: colors.blue,
     shadowOffset: { height: 10, width: 0 },
     shadowOpacity: 0.22,
     shadowRadius: 18
   },
   sendButtonText: {
-    color: colors.card,
+    color: '#FFFFFF',
     fontSize: 17,
     fontWeight: '400'
   },
@@ -216,7 +220,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18
   },
   backButtonText: {
-    color: '#253244',
+    color: colors.mutedStrong,
     fontSize: 16,
     fontWeight: '400'
   },
@@ -232,3 +236,4 @@ const styles = StyleSheet.create({
     minHeight: 26
   }
 });
+}

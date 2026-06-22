@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import {
   Image,
   Pressable,
@@ -8,7 +8,8 @@ import {
 } from 'react-native';
 import { signOutOrgAdmin } from '../services/phoneAuth';
 import { ProfileRoleSelection, VerifiedOrgAdmin } from '../types/auth';
-import { colors } from '../theme/colors';
+import { useAppTheme } from '../theme/AppThemeProvider';
+import type { AppColors } from '../theme/colors';
 
 interface ProfileRoleSelectionScreenProps {
   verifiedAdmin: VerifiedOrgAdmin;
@@ -21,6 +22,9 @@ export function ProfileRoleSelectionScreen({
   onSelectRole,
   onSignOut
 }: ProfileRoleSelectionScreenProps) {
+  const appTheme = useAppTheme();
+  const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
+
   async function handleSignOut() {
     await signOutOrgAdmin();
     onSignOut();
@@ -70,6 +74,9 @@ interface RoleOptionProps {
 }
 
 function RoleOption({ title, description, onPress }: RoleOptionProps) {
+  const appTheme = useAppTheme();
+  const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
+
   return (
     <Pressable
       accessibilityRole="button"
@@ -88,7 +95,8 @@ function RoleOption({ title, description, onPress }: RoleOptionProps) {
   );
 }
 
-const styles = StyleSheet.create({
+function createStyles(colors: AppColors) {
+  return StyleSheet.create({
   screen: {
     backgroundColor: colors.background,
     flex: 1,
@@ -134,7 +142,7 @@ const styles = StyleSheet.create({
   },
   roleOption: {
     alignItems: 'center',
-    borderBottomColor: 'rgba(15, 118, 110, 0.35)',
+    borderBottomColor: colors.border,
     borderBottomWidth: 1,
     flexDirection: 'row',
     gap: 18,
@@ -154,13 +162,13 @@ const styles = StyleSheet.create({
     lineHeight: 23
   },
   optionDescription: {
-    color: '#475569',
+    color: colors.muted,
     fontSize: 14,
     fontWeight: '400',
     lineHeight: 19
   },
   optionAction: {
-    color: '#4F6FEA',
+    color: colors.blue,
     fontSize: 16,
     fontWeight: '400'
   },
@@ -172,7 +180,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18
   },
   secondaryButtonText: {
-    color: '#253244',
+    color: colors.mutedStrong,
     fontSize: 16,
     fontWeight: '400'
   },
@@ -180,3 +188,4 @@ const styles = StyleSheet.create({
     opacity: 0.78
   }
 });
+}

@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { Pressable, StyleSheet, Text, ViewStyle } from 'react-native';
-import { colors } from '../theme/colors';
+import { useAppTheme } from '../theme/AppThemeProvider';
+import type { AppColors } from '../theme/colors';
 
 interface ButtonProps {
   label: string;
@@ -11,6 +12,9 @@ interface ButtonProps {
 }
 
 export function Button({ label, onPress, disabled, variant = 'primary', style }: ButtonProps) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme.colors), [theme.colors]);
+
   return (
     <Pressable
       accessibilityRole="button"
@@ -29,7 +33,8 @@ export function Button({ label, onPress, disabled, variant = 'primary', style }:
   );
 }
 
-const styles = StyleSheet.create({
+function createStyles(colors: AppColors) {
+  return StyleSheet.create({
   base: {
     alignItems: 'center',
     borderRadius: 8,
@@ -59,4 +64,5 @@ const styles = StyleSheet.create({
   disabled: {
     opacity: 0.5
   }
-});
+  });
+}

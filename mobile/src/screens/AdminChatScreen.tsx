@@ -26,6 +26,7 @@ import {
   Image,
   Keyboard,
   KeyboardAvoidingView,
+  Linking,
   Modal,
   PanResponder,
   Platform,
@@ -83,6 +84,19 @@ import {
   TenantGroup,
   TenantRole
 } from '../services/adminApi';
+import {
+  openCallRealtimeSocket,
+  parseCallRealtimeEvent,
+  sendAnswerCall,
+  sendCallSignal,
+  sendEndCall,
+  sendStartCall,
+  type SynzappCallEndReason,
+  type SynzappCallMode,
+  type SynzappCallRecord,
+  type SynzappCallRealtimeEvent,
+  type SynzappCallSignalKind
+} from '../services/callApi';
 import {
   AddableChatGroup,
   addContactToGroupChat,
@@ -149,9 +163,12 @@ import {
 import {
   CurrentUserDevice,
   CurrentUserProfile,
+  CurrentDeviceSynzappAiStatus,
+  getCurrentDeviceSynzappAiStatus,
   getCurrentUserProfile,
   listCurrentUserDevices,
   revokeCurrentUserDevice,
+  updateCurrentDeviceSynzappAiStatus,
   updateCurrentUserProfilePhoto
 } from '../services/profileApi';
 import {
@@ -172,6 +189,16 @@ import type {
   LocalConversationRecord,
   PendingChatMessage
 } from '../services/localChatStore';
+import {
+  loadSynzappCallStore,
+  markSynzappCallsSeen,
+  saveSynzappCallStore,
+  upsertSynzappCallHistoryEntry,
+  type SynzappCallHistoryEntry,
+  type SynzappCallHistoryStatus,
+  type SynzappCallStoreData,
+  type SynzappScheduledCall
+} from '../services/localCallStore';
 import { getCachedProfilePhotoUri } from '../services/profilePhotoCache';
 import { openChatAttachmentFile } from '../services/chatAttachmentOpener';
 import {
@@ -179,24 +206,58 @@ import {
   pickNativeChatFile
 } from '../services/chatAttachmentPicker';
 import {
+  cacheLocalChatMedia,
+  CHAT_MEDIA_LIMITS,
   downloadAndDecryptChatMedia,
   LocalChatMediaInput,
   uploadEncryptedChatMedia
 } from '../services/chatMediaApi';
+import {
+  createOfflineAiAttachment,
+  createOfflineAiConversation,
+  createOfflineAiMessage,
+  deleteOfflineAiModel,
+  formatOfflineAiBytes,
+  generateOfflineAiResponse,
+  getOfflineAiConversationTitle,
+  installOfflineAiModel,
+  loadOfflineAiConversations,
+  loadOfflineAiState,
+  saveOfflineAiConversations,
+  synzappOfflineAiModel,
+  type OfflineAiAttachment,
+  type OfflineAiChatMessage,
+  type OfflineAiConversation,
+  type OfflineAiProfileContext,
+  type OfflineAiInstallProgress,
+  type OfflineAiModelState
+} from '../services/offlineAi';
 import { pickNativeProfilePhoto } from '../services/profilePhotoPicker';
 import {
   addChatPushNotificationListeners,
+  CallPushNotificationData,
   ChatPushNotificationData,
   configureSynzappNotificationHandling,
   registerDevicePushNotifications,
   syncSynzappUnreadBadgeCount
 } from '../services/pushNotifications';
 import {
+  addSynzappVoipCallEventListener,
+  endSynzappNativeVoipCall,
+  getPendingSynzappVoipCallEvents,
+  type SynzappVoipCallEvent
+} from '../services/voipCalls';
+import {
   sendReauthenticationPhoneCode,
   signOutOrgAdmin
 } from '../services/phoneAuth';
 import { VerifiedOrgAdmin } from '../types/auth';
 import { colors } from '../theme/colors';
+import {
+  AppThemePreference,
+  getThemePreferenceLabel,
+  useAppTheme
+} from '../theme/AppThemeProvider';
 
 interface AdminChatScreenProps {
   onOrganizationDeleted: () => void;
@@ -244,7 +305,9 @@ interface EmployeeListItem {
   department: string;
   id: string;
   initials: string;
+  isPhoneOnly: boolean;
   name: string;
+  phoneFormatted: string;
   profilePhotoUrl: string | null;
   role: string;
   roleId: string;
@@ -271,10 +334,17 @@ interface AudioAttachmentPreviewState {
 }
 
 type DirectoryFilter = 'Departments' | 'Roles';
-type FooterTab = 'Chats' | 'Groups' | 'Employees' | 'Settings' | 'You';
+type FooterTab = 'Chats' | 'Calls' | 'Groups' | 'Employees' | 'Settings' | 'You';
 type ChatListFilter = 'all' | 'archived' | 'favorites' | 'groups' | 'unread';
 type ChatMoreActionTarget = ChatItem | null;
 type ArchiveSelectionMap = Record<string, boolean>;
+interface ClearChatSummary {
+  mediaFileCount: number;
+  mediaSizeBytes: number;
+  messageCount: number;
+  textSizeBytes: number;
+  totalSizeBytes: number;
+}
 type ArchiveSettingsOption<T extends string> = {
   description?: string;
   label: string;
@@ -282,6 +352,8 @@ type ArchiveSettingsOption<T extends string> = {
 };
 type GroupCallMode = 'select' | 'voice' | 'video';
 type GroupCallOption = 'schedule' | 'selectPeople' | 'sendLink' | 'video' | 'voice';
+type SynzappCallDirection = 'incoming' | 'outgoing';
+type SynzappCallStatus = 'calling' | 'connecting' | 'connected' | 'ended' | 'ringing';
 type InviteMode = 'single' | 'batch' | 'manual';
 type SettingsScreen = 'list' | 'directory' | 'security' | 'chat-backup' | 'my-devices' | 'company-profile' | 'dept-admin-permissions' | 'groups' | 'role-permissions';
 type UserPermission =
@@ -304,6 +376,8 @@ const CHAT_ROW_LEFT_ACTION_WIDTH = 112;
 const CHAT_ROW_RIGHT_ACTION_WIDTH = 216;
 const CHAT_ROW_SWIPE_TRIGGER = 28;
 const SPAM_ROW_ACTION_WIDTH = 118;
+const AI_HISTORY_ROW_ACTION_WIDTH = 118;
+const CHAT_SMALL_FILE_AUTO_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024;
 const VOICE_NOTE_MIN_DURATION_MS = 700;
 const VOICE_NOTE_RECORDING_OPTIONS = RecordingPresets.LOW_QUALITY;
 const CHAT_AUDIO_PLAYBACK_MODE: AudioMode = {
@@ -326,6 +400,13 @@ const DEFAULT_CHAT_BACKUP_POLICY: ChatBackupPolicy = {
   selfRestoreEnabled: false,
   updatedAt: null,
   updatedByUid: null
+};
+const emptyClearChatSummary: ClearChatSummary = {
+  mediaFileCount: 0,
+  mediaSizeBytes: 0,
+  messageCount: 0,
+  textSizeBytes: 0,
+  totalSizeBytes: 0
 };
 
 interface ChatBackupPolicyConfirmation {
@@ -408,6 +489,7 @@ type DeviceListItem = TenantDevice | CurrentUserDevice;
 type FeatherIconName = React.ComponentProps<typeof Feather>['name'];
 
 type NewGroupFlowOrigin = 'contactInfo' | 'groupSwitcher' | 'newChat';
+type CallQuickAction = 'call' | 'favorites' | 'keypad' | 'schedule';
 
 interface InviteContactDraft {
   displayName?: string;
@@ -473,13 +555,45 @@ interface NativeOptionPickerState {
   title: string;
 }
 
+interface ScheduleCallDraft {
+  callType: SynzappCallMode;
+  description: string;
+  endsAt: Date;
+  includeEndTime: boolean;
+  reminderMinutes: number;
+  requireApproval: boolean;
+  startsAt: Date;
+  title: string;
+}
+
 interface TranscriptLanguageOption {
   code: ChatTranscriptLanguageCode;
   label: string;
   status: 'available' | 'onDevice';
 }
 
-const footerTabs: FooterTab[] = ['Chats', 'Groups', 'Employees', 'Settings', 'You'];
+interface ActiveSynzappCall {
+  call: SynzappCallRecord;
+  direction: SynzappCallDirection;
+  isMuted: boolean;
+  isSpeakerOn: boolean;
+  isVideoEnabled: boolean;
+  localStreamUrl: string | null;
+  remoteStreamUrlsByUid: Record<string, string>;
+  status: SynzappCallStatus;
+}
+
+type WebRtcRuntime = {
+  mediaDevices?: {
+    getUserMedia?: (constraints: Record<string, unknown>) => Promise<any>;
+  };
+  RTCIceCandidate?: new (candidate: unknown) => any;
+  RTCPeerConnection?: new (configuration: Record<string, unknown>) => any;
+  RTCSessionDescription?: new (description: unknown) => any;
+  RTCView?: React.ComponentType<any>;
+};
+
+const footerTabs: FooterTab[] = ['Chats', 'Calls', 'Groups', 'Employees', 'Settings', 'You'];
 const synzappAiSuggestions = [
   'Draft a professional message',
   'Summarize what I should do next',
@@ -586,12 +700,14 @@ const androidButtonRipple = { borderless: false, color: 'rgba(15, 118, 110, 0.14
 const androidIconRipple = { borderless: true, color: 'rgba(15, 118, 110, 0.14)' } as const;
 
 export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verifiedAdmin }: AdminChatScreenProps) {
+  const appTheme = useAppTheme();
   const insets = useSafeAreaInsets();
   const { height } = useWindowDimensions();
   const [activeTab, setActiveTab] = useState<FooterTab>('Chats');
   const [settingsScreen, setSettingsScreen] = useState<SettingsScreen>('list');
   const [directoryFilter, setDirectoryFilter] = useState<DirectoryFilter>('Departments');
   const [approvedEmployees, setApprovedEmployees] = useState<ApprovedEmployee[]>([]);
+  const [employeePhoneDisplayById, setEmployeePhoneDisplayById] = useState<Record<string, string>>({});
   const [departments, setDepartments] = useState<TenantDepartment[]>([]);
   const [departmentAdminPermissionCatalog, setDepartmentAdminPermissionCatalog] = useState<DepartmentAdminPermission[]>([]);
   const [groups, setGroups] = useState<TenantGroup[]>([]);
@@ -614,6 +730,21 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const [chatContacts, setChatContacts] = useState<ChatContact[]>([]);
   const [chatListFilter, setChatListFilter] = useState<ChatListFilter>('all');
   const [chatSearch, setChatSearch] = useState('');
+  const [callSearch, setCallSearch] = useState('');
+  const [callHistory, setCallHistory] = useState<SynzappCallHistoryEntry[]>([]);
+  const [callFavoriteContactIds, setCallFavoriteContactIds] = useState<string[]>([]);
+  const [scheduledCalls, setScheduledCalls] = useState<SynzappScheduledCall[]>([]);
+  const [isCallOptionsOpen, setIsCallOptionsOpen] = useState(false);
+  const [isNewCallModalOpen, setIsNewCallModalOpen] = useState(false);
+  const [isCallKeypadOpen, setIsCallKeypadOpen] = useState(false);
+  const [isCallFavoritesModalOpen, setIsCallFavoritesModalOpen] = useState(false);
+  const [isScheduleCallModalOpen, setIsScheduleCallModalOpen] = useState(false);
+  const [isScheduledCallsModalOpen, setIsScheduledCallsModalOpen] = useState(false);
+  const [isCallEditMode, setIsCallEditMode] = useState(false);
+  const [callKeypadDigits, setCallKeypadDigits] = useState('');
+  const [newCallSearch, setNewCallSearch] = useState('');
+  const [callFavoritesSearch, setCallFavoritesSearch] = useState('');
+  const [scheduleCallDraft, setScheduleCallDraft] = useState<ScheduleCallDraft>(() => createScheduleCallDraft(null));
   const [isSpamScreenOpen, setIsSpamScreenOpen] = useState(false);
   const [spamActionTarget, setSpamActionTarget] = useState<ChatItem | null>(null);
   const [isDeletingSpamChats, setIsDeletingSpamChats] = useState(false);
@@ -626,9 +757,24 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const [isLoadingArchiveSettings, setIsLoadingArchiveSettings] = useState(false);
   const [isSavingArchiveSettings, setIsSavingArchiveSettings] = useState(false);
   const [isAiAssistantOpen, setIsAiAssistantOpen] = useState(false);
+  const [aiAssistantView, setAiAssistantView] = useState<'list' | 'thread'>('list');
   const [aiAssistantDraft, setAiAssistantDraft] = useState('');
+  const [aiAssistantAttachments, setAiAssistantAttachments] = useState<OfflineAiAttachment[]>([]);
+  const [isPreparingAiAttachment, setIsPreparingAiAttachment] = useState(false);
+  const [offlineAiConversations, setOfflineAiConversations] = useState<OfflineAiConversation[]>([]);
+  const [activeOfflineAiConversationId, setActiveOfflineAiConversationId] = useState<string | null>(null);
+  const [offlineAiState, setOfflineAiState] = useState<OfflineAiModelState | null>(null);
+  const [offlineAiInstallProgress, setOfflineAiInstallProgress] = useState<OfflineAiInstallProgress | null>(null);
+  const [synzappAiDeviceStatus, setSynzappAiDeviceStatus] = useState<CurrentDeviceSynzappAiStatus | null>(null);
+  const [isOfflineAiModalOpen, setIsOfflineAiModalOpen] = useState(false);
+  const [isInstallingOfflineAi, setIsInstallingOfflineAi] = useState(false);
+  const [isOfflineAiResponding, setIsOfflineAiResponding] = useState(false);
   const [isScreenKeyboardVisible, setIsScreenKeyboardVisible] = useState(false);
   const [chatMoreActionTarget, setChatMoreActionTarget] = useState<ChatMoreActionTarget>(null);
+  const [clearChatTarget, setClearChatTarget] = useState<ChatItem | null>(null);
+  const [clearChatSummary, setClearChatSummary] = useState<ClearChatSummary>(emptyClearChatSummary);
+  const [isClearingChat, setIsClearingChat] = useState(false);
+  const [isThemePreferenceModalOpen, setIsThemePreferenceModalOpen] = useState(false);
   const [newChatSearch, setNewChatSearch] = useState('');
   const [addMembersSearch, setAddMembersSearch] = useState('');
   const [isNewChatModalOpen, setIsNewChatModalOpen] = useState(false);
@@ -686,6 +832,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const [addToGroupTargetsByContactId, setAddToGroupTargetsByContactId] = useState<Record<string, AddableChatGroup[]>>({});
   const [starredMessageIds, setStarredMessageIds] = useState<Record<string, boolean>>({});
   const [selectedChat, setSelectedChat] = useState<ChatItem | null>(null);
+  const [activeSynzappCall, setActiveSynzappCall] = useState<ActiveSynzappCall | null>(null);
   const [activeTrashSegmentId, setActiveTrashSegmentId] = useState<string | null>(null);
   const [isLoadingChats, setIsLoadingChats] = useState(true);
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
@@ -752,11 +899,27 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const pendingSyncContactIdsRef = useRef<Set<string>>(new Set());
   const activeMediaDownloadPromisesRef = useRef<Map<string, Promise<string | null>>>(new Map());
   const organizationDeletionProgressAnim = useRef(new Animated.Value(0)).current;
+  const hasPromptedOfflineAiInstallRef = useRef(false);
   const chatContactsRef = useRef<ChatContact[]>([]);
   const chatOpenRequestIdRef = useRef(0);
+  const clearChatRequestIdRef = useRef(0);
   const hasResolvedChatContactsRef = useRef(false);
   const realtimeReadyRef = useRef(false);
   const realtimeSocketRef = useRef<WebSocket | null>(null);
+  const callKeepSetupRef = useRef(false);
+  const callRealtimeReadyRef = useRef(false);
+  const callRealtimeReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const callRealtimeSocketRef = useRef<WebSocket | null>(null);
+  const activeSynzappCallRef = useRef<ActiveSynzappCall | null>(null);
+  const callLocalStreamRef = useRef<any>(null);
+  const callPeerConnectionsRef = useRef<Record<string, any>>({});
+  const callOfferStartedIdsRef = useRef<Set<string>>(new Set());
+  const callKeepEventSubscriptionsRef = useRef<Array<{ remove?: () => void }>>([]);
+  const callRingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingCallSignalsRef = useRef<Array<Extract<SynzappCallRealtimeEvent, { type: 'callSignal' }>>>([]);
+  const callHistoryRef = useRef<SynzappCallHistoryEntry[]>([]);
+  const callFavoriteContactIdsRef = useRef<string[]>([]);
+  const scheduledCallsRef = useRef<SynzappScheduledCall[]>([]);
   const selectedChatRef = useRef<ChatItem | null>(null);
   const activeTrashSegmentIdRef = useRef<string | null>(null);
   const messagesRef = useRef<ChatMessage[]>([]);
@@ -771,23 +934,28 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const canViewEmployees = canInviteEmployees || canManageUsers;
   const canDeleteOrganization = userProfile?.isTenantOwner === true;
   const visibleFooterTabs: FooterTab[] = canViewEmployees
-    ? ['Chats', 'Groups', 'Employees', 'Settings', 'You']
-    : ['Chats', 'Groups', 'Settings', 'You'];
+    ? ['Chats', 'Calls', 'Groups', 'Employees', 'Settings', 'You']
+    : ['Chats', 'Calls', 'Groups', 'Settings', 'You'];
   const chatItems = chatContacts.map(mapChatContactToChatItem);
   const directChatContacts = chatContacts.filter((contact) => (contact.chatType || 'DIRECT') !== 'GROUP');
   const groupChatContacts = chatContacts.filter((contact) => contact.chatType === 'GROUP');
+  const registeredCallContacts = directChatContacts.filter((contact) => contact.status !== 'INVITED' && contact.status !== 'DELETED');
   const activeVisibleConversationChatItems = chatItems.filter(shouldShowActiveChatInList);
   const spamConversationChatItems = chatItems.filter(shouldShowTrashChatInList);
   const activeConversationChatItems = activeVisibleConversationChatItems.filter((chat) => !chat.isArchived);
   const archivedConversationChatItems = activeVisibleConversationChatItems.filter((chat) => chat.isArchived);
   const unreadChatFilterCount = activeConversationChatItems.reduce((total, chat) => total + Math.max(chat.unreadCount || 0, 0), 0);
+  const unreadChatBadgeCount = activeConversationChatItems.filter((chat) => Math.max(chat.unreadCount || 0, 0) > 0).length;
+  const unseenCallCount = callHistory.filter((entry) => entry.unseen).length;
   const groupChatFilterCount = activeConversationChatItems.filter((chat) => chat.chatType === 'GROUP').length;
   const archivedChatFilterCount = archivedConversationChatItems.length;
   const archivedUnreadTotal = archivedConversationChatItems.reduce((total, chat) => total + Math.max(chat.unreadCount || 0, 0), 0);
   const archivedBadgeCount = chatArchiveSettings.archiveBadgeMode === 'UNREAD_COUNT' ? archivedUnreadTotal : 0;
   const selectedForwardMessageCount = Object.values(forwardSelectedMessageIds).filter(Boolean).length;
   const selectedForwardRecipientCount = Object.values(forwardRecipientIds).filter(Boolean).length;
-  const employeeItems = approvedEmployees.map(mapApprovedEmployeeToListItem);
+  const employeeItems = approvedEmployees.map((employee) =>
+    mapApprovedEmployeeToListItem(employee, employeePhoneDisplayById[employee.approvedPhoneId])
+  );
   const isConversationSurfaceOpen = Boolean(selectedChat || isAiAssistantOpen);
   const isCompactAndroid = Platform.OS === 'android' && height < 720;
   const footerHeight = isCompactAndroid ? 64 : 68;
@@ -799,6 +967,9 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const androidBottomInset = Platform.OS === 'android'
     ? Math.max(insets.bottom, androidEstimatedNavigationInset)
     : 0;
+  const conversationBottomInset = Platform.OS === 'android'
+    ? androidBottomInset
+    : insets.bottom;
   const footerBottom = Platform.OS === 'android'
     ? androidBottomInset > 0
       ? androidBottomInset + 6
@@ -859,12 +1030,97 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const selectedGroupCallMemberCount = Object.values(selectedGroupCallMemberIds).filter(Boolean).length;
   const selectedGroupAddMemberCount = Object.values(selectedGroupAddMemberIds).filter(Boolean).length;
   const companyDisplayName = userProfile?.companyName || companyProfile?.companyName || 'Synzapp';
+  const activeOfflineAiConversation = offlineAiConversations.find((conversation) =>
+    conversation.id === activeOfflineAiConversationId
+  ) || null;
+  const isSynzappAiReadyForAskButton =
+    offlineAiState?.status === 'installed' &&
+    synzappAiDeviceStatus?.askButtonVisible === true;
 
   useEffect(() => {
     void configureSynzappNotificationHandling();
     void loadUserProfile(false);
     void loadArchiveSettings(false);
+    void refreshSynzappAiDeviceStatus(false);
   }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    loadOfflineAiState()
+      .then((state) => {
+        if (isMounted) {
+          setOfflineAiState(state);
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const localStatus = offlineAiState?.status;
+
+    if (!localStatus || isInstallingOfflineAi) {
+      return;
+    }
+
+    if (localStatus === 'installed' && synzappAiDeviceStatus?.status !== 'installed') {
+      void syncSynzappAiDeviceStatus('installed');
+      return;
+    }
+
+    if (localStatus !== 'installed' && synzappAiDeviceStatus?.status === 'installed') {
+      void syncSynzappAiDeviceStatus(localStatus);
+    }
+  }, [isInstallingOfflineAi, offlineAiState?.status, synzappAiDeviceStatus?.status]);
+
+  useEffect(() => {
+    let isMounted = true;
+    const tenantId = userProfile?.tenantId || verifiedAdmin.session.user.tenantId || '';
+
+    if (!tenantId) {
+      setOfflineAiConversations([]);
+      return () => {
+        isMounted = false;
+      };
+    }
+
+    loadOfflineAiConversations({
+      ownerUid: currentUid,
+      tenantId
+    })
+      .then((conversations) => {
+        if (isMounted) {
+          setOfflineAiConversations(conversations);
+        }
+      })
+      .catch((nextError) => {
+        console.warn('Synzapp AI history could not be loaded:', getErrorMessage(nextError, 'Unable to load Synzapp AI history.'));
+        if (isMounted) {
+          setOfflineAiConversations([]);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [currentUid, userProfile?.tenantId, verifiedAdmin.session.user.tenantId]);
+
+  useEffect(() => {
+    if (!isAiAssistantOpen || hasPromptedOfflineAiInstallRef.current) {
+      return;
+    }
+
+    if (offlineAiState?.status === 'installed') {
+      return;
+    }
+
+    hasPromptedOfflineAiInstallRef.current = true;
+    setIsOfflineAiModalOpen(true);
+  }, [isAiAssistantOpen, offlineAiState?.status]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextState) => {
@@ -980,6 +1236,58 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   }, [selectedChat]);
 
   useEffect(() => {
+    callHistoryRef.current = callHistory;
+  }, [callHistory]);
+
+  useEffect(() => {
+    callFavoriteContactIdsRef.current = callFavoriteContactIds;
+  }, [callFavoriteContactIds]);
+
+  useEffect(() => {
+    scheduledCallsRef.current = scheduledCalls;
+  }, [scheduledCalls]);
+
+  useEffect(() => {
+    let isMounted = true;
+    const scope = getLocalCallScope();
+
+    if (!scope) {
+      updateLocalCallStoreState({
+        favoriteContactIds: [],
+        history: [],
+        scheduledCalls: []
+      });
+      return () => {
+        isMounted = false;
+      };
+    }
+
+    loadSynzappCallStore(scope)
+      .then((storeData) => {
+        if (isMounted) {
+          updateLocalCallStoreState(storeData);
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      isMounted = false;
+    };
+  }, [currentUid, userProfile?.tenantId, verifiedAdmin.session.user.tenantId]);
+
+  useEffect(() => {
+    if (activeTab !== 'Calls' || unseenCallCount <= 0) {
+      return;
+    }
+
+    void persistCallStoreData({
+      favoriteContactIds: callFavoriteContactIdsRef.current,
+      history: markSynzappCallsSeen(callHistoryRef.current),
+      scheduledCalls: scheduledCallsRef.current
+    });
+  }, [activeTab, unseenCallCount]);
+
+  useEffect(() => {
     if (organizationDeletionModal?.step !== 'deleting') {
       organizationDeletionProgressAnim.stopAnimation();
       organizationDeletionProgressAnim.setValue(0);
@@ -1012,6 +1320,10 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  useEffect(() => {
+    activeSynzappCallRef.current = activeSynzappCall;
+  }, [activeSynzappCall]);
 
   useEffect(() => {
     chatContactsRef.current = chatContacts;
@@ -1058,10 +1370,36 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       clearTimeout(chatContactCacheTimerRef.current);
       chatContactCacheTimerRef.current = null;
     }
+    if (callRealtimeReconnectTimerRef.current) {
+      clearTimeout(callRealtimeReconnectTimerRef.current);
+      callRealtimeReconnectTimerRef.current = null;
+    }
+    if (callRingTimeoutRef.current) {
+      clearTimeout(callRingTimeoutRef.current);
+      callRingTimeoutRef.current = null;
+    }
+    const callSocket = callRealtimeSocketRef.current;
+    callRealtimeSocketRef.current = null;
+    callSocket?.close();
+    callKeepEventSubscriptionsRef.current.forEach((subscription) => {
+      try {
+        subscription.remove?.();
+      } catch {
+        // Ignore native listener cleanup errors during screen teardown.
+      }
+    });
+    callKeepEventSubscriptionsRef.current = [];
+    void cleanupSynzappCallMedia();
   }, []);
 
   useEffect(() => {
     return addChatPushNotificationListeners({
+      onCallReceived: (data) => {
+        void handleIncomingCallPushNotification(data);
+      },
+      onCallResponse: (data) => {
+        void handleIncomingCallPushNotification(data);
+      },
       onReceived: () => {
         void loadChatContacts(false);
       },
@@ -1070,6 +1408,76 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       }
     });
   }, []);
+
+  useEffect(() => {
+    let isActive = true;
+    const handleIncomingCallUrl = (url: string | null) => {
+      const data = parseIncomingCallDeepLink(url);
+
+      if (data) {
+        void handleIncomingCallPushNotification(data);
+      }
+    };
+    const subscription = Linking.addEventListener('url', (event) => {
+      handleIncomingCallUrl(event.url);
+    });
+
+    void Linking.getInitialURL()
+      .then((url) => {
+        if (isActive) {
+          handleIncomingCallUrl(url);
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      isActive = false;
+      subscription.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    let isActive = true;
+    const subscription = addSynzappVoipCallEventListener((event) => {
+      void handleSynzappVoipCallEvent(event);
+    });
+
+    void getPendingSynzappVoipCallEvents()
+      .then((events) => {
+        if (!isActive) {
+          return;
+        }
+
+        events.forEach((event) => {
+          void handleSynzappVoipCallEvent(event);
+        });
+      })
+      .catch(() => undefined);
+
+    return () => {
+      isActive = false;
+      subscription.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!registeredDeviceId) {
+      return;
+    }
+
+    void connectCallRealtimeSocket();
+
+    return () => {
+      callRealtimeReadyRef.current = false;
+      if (callRealtimeReconnectTimerRef.current) {
+        clearTimeout(callRealtimeReconnectTimerRef.current);
+        callRealtimeReconnectTimerRef.current = null;
+      }
+      const callSocket = callRealtimeSocketRef.current;
+      callRealtimeSocketRef.current = null;
+      callSocket?.close();
+    };
+  }, [registeredDeviceId]);
 
   useEffect(() => {
     if (activeTab !== 'Settings' || settingsScreen !== 'directory' || !canManageDirectory) {
@@ -1222,6 +1630,103 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       ownerUid: currentUid,
       tenantId: getActiveTenantId()
     };
+  }
+
+  function getLocalCallScope(): { ownerUid: string; tenantId: string } | null {
+    const tenantId = getActiveTenantId();
+
+    if (!tenantId) {
+      return null;
+    }
+
+    return {
+      ownerUid: currentUid,
+      tenantId
+    };
+  }
+
+  function updateLocalCallStoreState(storeData: SynzappCallStoreData) {
+    callHistoryRef.current = storeData.history;
+    callFavoriteContactIdsRef.current = storeData.favoriteContactIds;
+    scheduledCallsRef.current = storeData.scheduledCalls;
+    setCallHistory(storeData.history);
+    setCallFavoriteContactIds(storeData.favoriteContactIds);
+    setScheduledCalls(storeData.scheduledCalls);
+  }
+
+  async function persistCallStoreData(storeData: SynzappCallStoreData) {
+    updateLocalCallStoreState(storeData);
+
+    const scope = getLocalCallScope();
+
+    if (!scope) {
+      return;
+    }
+
+    await saveSynzappCallStore(scope, storeData).catch(() => undefined);
+  }
+
+  async function persistCallHistory(nextHistory: SynzappCallHistoryEntry[]) {
+    await persistCallStoreData({
+      favoriteContactIds: callFavoriteContactIdsRef.current,
+      history: nextHistory,
+      scheduledCalls: scheduledCallsRef.current
+    });
+  }
+
+  async function persistCallFavorites(nextFavoriteContactIds: string[]) {
+    await persistCallStoreData({
+      favoriteContactIds: Array.from(new Set(nextFavoriteContactIds)),
+      history: callHistoryRef.current,
+      scheduledCalls: scheduledCallsRef.current
+    });
+  }
+
+  async function persistScheduledCalls(nextScheduledCalls: SynzappScheduledCall[]) {
+    await persistCallStoreData({
+      favoriteContactIds: callFavoriteContactIdsRef.current,
+      history: callHistoryRef.current,
+      scheduledCalls: nextScheduledCalls
+    });
+  }
+
+  function getOfflineAiScope(): { ownerUid: string; tenantId: string } | null {
+    const tenantId = getActiveTenantId();
+
+    if (!tenantId) {
+      return null;
+    }
+
+    return {
+      ownerUid: currentUid,
+      tenantId
+    };
+  }
+
+  function getOfflineAiProfileContext(): OfflineAiProfileContext {
+    return {
+      companyName: userProfile?.companyName || companyProfile?.companyName || null,
+      departmentName: userProfile?.departmentName || null,
+      displayName: userProfile?.displayName || null,
+      phoneFormatted: userProfile?.phoneFormatted || null,
+      roleName: userProfile?.roleName || null
+    };
+  }
+
+  async function persistOfflineAiConversations(nextConversations: OfflineAiConversation[]) {
+    const scope = getOfflineAiScope();
+
+    setOfflineAiConversations(nextConversations);
+
+    if (!scope) {
+      return;
+    }
+
+    await saveOfflineAiConversations({
+      conversations: nextConversations,
+      ownerUid: scope.ownerUid,
+      tenantId: scope.tenantId
+    });
   }
 
   function queueEncryptedChatBackup() {
@@ -2010,31 +2515,112 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       return;
     }
 
-    Alert.alert(
-      'Clear chat?',
-      `Messages in ${chat.title} will be cleared for you on this device and any future device.`,
-      [
-        { style: 'cancel', text: 'Cancel' },
-        {
-          onPress: () => {
-            void updateChatPreferenceAndApply(chat, {
-              clear: true,
-              failureMessage: 'Unable to clear this chat for you.',
-              optimisticContact: {
-                clearedAt: new Date().toISOString(),
-                isArchived: false,
-                lastMessageAt: null,
-                preview: '',
-                unreadCount: 0
-              }
-            });
-            setChatMoreActionTarget(null);
-          },
-          style: 'destructive',
-          text: 'Clear'
+    setChatMoreActionTarget(null);
+    const requestId = clearChatRequestIdRef.current + 1;
+    clearChatRequestIdRef.current = requestId;
+    setClearChatTarget(chat);
+    setClearChatSummary(buildClearChatSummary(getVisibleMessagesForChat(chat)));
+
+    void loadMessagesForClearChatSummary(chat)
+      .then((summary) => {
+        if (clearChatRequestIdRef.current === requestId) {
+          setClearChatSummary(summary);
         }
-      ]
-    );
+      })
+      .catch(() => undefined);
+  }
+
+  function closeClearChatModal() {
+    if (isClearingChat) {
+      return;
+    }
+
+    setClearChatTarget(null);
+    setClearChatSummary(emptyClearChatSummary);
+    clearChatRequestIdRef.current += 1;
+  }
+
+  async function loadMessagesForClearChatSummary(chat: ChatItem): Promise<ClearChatSummary> {
+    const clearMessages = await loadMessagesForClearChat(chat);
+
+    return buildClearChatSummary(clearMessages);
+  }
+
+  async function loadMessagesForClearChat(chat: ChatItem): Promise<ChatMessage[]> {
+    const cachedConversation = await loadCachedChatConversation({
+      contactId: chat.contactId,
+      ...getLocalChatScope()
+    }).catch(() => null);
+
+    return uniqueChatMessages([
+      ...(cachedConversation?.messages || []),
+      ...getVisibleMessagesForChat(chat)
+    ]);
+  }
+
+  function getVisibleMessagesForChat(chat: ChatItem): ChatMessage[] {
+    return selectedChatRef.current?.contactId === chat.contactId
+      ? messagesRef.current
+      : [];
+  }
+
+  async function handleClearChatMediaFiles(chat: ChatItem) {
+    if (!canUseChatListActions(chat) || isClearingChat) {
+      return;
+    }
+
+    setIsClearingChat(true);
+
+    try {
+      const clearMessages = await loadMessagesForClearChat(chat);
+      const cleanedMessages = await clearDownloadedMediaFilesFromMessages(clearMessages);
+      const existingContact = chatContactsRef.current.find((contact) => contact.contactId === chat.contactId);
+
+      await saveCachedChatConversation({
+        contact: existingContact || mapChatItemToChatContact(chat),
+        contactId: chat.contactId,
+        messages: cleanedMessages,
+        ...getLocalChatScope()
+      });
+
+      if (selectedChatRef.current?.contactId === chat.contactId) {
+        setMessages(cleanedMessages);
+      }
+
+      setClearChatSummary(buildClearChatSummary(cleanedMessages));
+      setClearChatTarget(null);
+    } catch (nextError) {
+      setError(getErrorMessage(nextError, 'Unable to clear media files for this chat.'));
+    } finally {
+      setIsClearingChat(false);
+    }
+  }
+
+  async function handleClearChatMessages(chat: ChatItem) {
+    if (!canUseChatListActions(chat) || isClearingChat) {
+      return;
+    }
+
+    setIsClearingChat(true);
+    const clearedAt = new Date().toISOString();
+
+    try {
+      await updateChatPreferenceAndApply(chat, {
+        clear: true,
+        failureMessage: 'Unable to clear this chat for you.',
+        optimisticContact: {
+          clearedAt,
+          isArchived: false,
+          lastMessageAt: null,
+          preview: '',
+          unreadCount: 0
+        }
+      });
+      setClearChatTarget(null);
+      setClearChatSummary(emptyClearChatSummary);
+    } finally {
+      setIsClearingChat(false);
+    }
   }
 
   function handleOpenSpamScreen() {
@@ -2588,6 +3174,1005 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     unsubscribeRealtimeConversation(socket);
   }
 
+  function updateActiveSynzappCall(
+    updater: (currentCall: ActiveSynzappCall | null) => ActiveSynzappCall | null
+  ) {
+    setActiveSynzappCall((currentCall) => {
+      const nextCall = updater(currentCall);
+      activeSynzappCallRef.current = nextCall;
+
+      return nextCall;
+    });
+  }
+
+  async function connectCallRealtimeSocket() {
+    if (!registeredDeviceId) {
+      return;
+    }
+
+    const existingSocket = callRealtimeSocketRef.current;
+    callRealtimeSocketRef.current = null;
+    existingSocket?.close();
+    callRealtimeReadyRef.current = false;
+
+    try {
+      const idToken = await getIdToken();
+      const socket = openCallRealtimeSocket(idToken, registeredDeviceId);
+
+      callRealtimeSocketRef.current = socket;
+      socket.onmessage = (event) => {
+        const payload = typeof event.data === 'string' ? event.data : '';
+        void handleCallRealtimePayload(payload);
+      };
+      socket.onerror = () => {
+        console.warn('Synzapp call socket error.');
+      };
+      socket.onclose = () => {
+        callRealtimeReadyRef.current = false;
+
+        if (callRealtimeSocketRef.current !== socket) {
+          return;
+        }
+
+        callRealtimeSocketRef.current = null;
+
+        if (callRealtimeReconnectTimerRef.current) {
+          clearTimeout(callRealtimeReconnectTimerRef.current);
+        }
+
+        callRealtimeReconnectTimerRef.current = setTimeout(() => {
+          callRealtimeReconnectTimerRef.current = null;
+          void connectCallRealtimeSocket();
+        }, 2200);
+      };
+    } catch (nextError) {
+      console.warn('Synzapp call socket could not connect:', getErrorMessage(nextError, 'Calling is unavailable.'));
+    }
+  }
+
+  async function ensureCallRealtimeReadyForAction(timeoutMs = 4000): Promise<WebSocket | null> {
+    const currentSocket = callRealtimeSocketRef.current;
+
+    if (currentSocket?.readyState === WebSocket.OPEN && callRealtimeReadyRef.current) {
+      return currentSocket;
+    }
+
+    if (
+      !currentSocket ||
+      currentSocket.readyState === WebSocket.CLOSED ||
+      currentSocket.readyState === WebSocket.CLOSING
+    ) {
+      void connectCallRealtimeSocket();
+    }
+
+    const startedAt = Date.now();
+
+    return new Promise((resolve) => {
+      const pollSocket = () => {
+        const socket = callRealtimeSocketRef.current;
+
+        if (socket?.readyState === WebSocket.OPEN && callRealtimeReadyRef.current) {
+          resolve(socket);
+          return;
+        }
+
+        if (Date.now() - startedAt >= timeoutMs) {
+          resolve(socket?.readyState === WebSocket.OPEN ? socket : null);
+          return;
+        }
+
+        setTimeout(pollSocket, 100);
+      };
+
+      pollSocket();
+    });
+  }
+
+  async function handleCallRealtimePayload(payload: string) {
+    const event = parseCallRealtimeEvent(payload);
+
+    if (!event) {
+      return;
+    }
+
+    if (event.type === 'ready') {
+      callRealtimeReadyRef.current = true;
+      return;
+    }
+
+    if (event.type === 'error') {
+      console.warn('Synzapp call event ignored:', event.message);
+      if (activeSynzappCallRef.current) {
+        Alert.alert('Synzapp call', event.message);
+      }
+      return;
+    }
+
+    if (event.type === 'incomingCall') {
+      await handleIncomingSynzappCall(event.call);
+      return;
+    }
+
+    if (event.type === 'callStarted') {
+      await handleSynzappCallStarted(event.call);
+      return;
+    }
+
+    if (event.type === 'callSignal') {
+      await handleSynzappCallSignal(event);
+      return;
+    }
+
+    if (event.type === 'callAnswered') {
+      updateActiveSynzappCall((currentCall) => currentCall?.call.callId === event.callId
+        ? { ...currentCall, status: currentCall.status === 'calling' ? 'connecting' : currentCall.status }
+        : currentCall
+      );
+      const activeCall = activeSynzappCallRef.current;
+
+      if (activeCall?.call.callId === event.callId) {
+        await updateSynzappCallHistoryStatus(activeCall.call, 'answered');
+      }
+      return;
+    }
+
+    if (event.type === 'callEnded') {
+      await handleRemoteSynzappCallEnded(event.callId, event.reason);
+    }
+  }
+
+  async function handleIncomingCallPushNotification(data: CallPushNotificationData) {
+    if (!data.callId || data.callerUid === currentUid) {
+      return;
+    }
+
+    void connectCallRealtimeSocket();
+    await handleIncomingSynzappCall({
+      callId: data.callId,
+      callerName: data.callerName || data.title || 'Synzapp user',
+      callerUid: data.callerUid,
+      chatType: data.chatType,
+      contactId: data.contactId,
+      createdAt: data.createdAt || new Date().toISOString(),
+      mode: data.mode,
+      participantUids: data.participantUids.length
+        ? data.participantUids
+        : [data.callerUid, currentUid],
+      tenantId: data.tenantId || getActiveTenantId(),
+      title: data.title || data.callerName || 'Synzapp call'
+    });
+  }
+
+  async function handleSynzappVoipCallEvent(event: SynzappVoipCallEvent) {
+    if (event.type === 'incoming' && event.call) {
+      if (event.call.callerUid === currentUid) {
+        return;
+      }
+
+      void connectCallRealtimeSocket();
+      await handleIncomingSynzappCall(event.call, {
+        skipNativeIncomingDisplay: event.nativeDisplayed === true
+      });
+      return;
+    }
+
+    const callId = event.callId || event.call?.callId || '';
+    const activeCall = activeSynzappCallRef.current;
+
+    if (!callId || !activeCall || activeCall.call.callId !== callId) {
+      return;
+    }
+
+    if (event.type === 'answer') {
+      await handleAnswerIncomingSynzappCall();
+      return;
+    }
+
+    if (event.type === 'end') {
+      await handleEndSynzappCall(activeCall.status === 'ringing' ? 'declined' : 'ended');
+    }
+  }
+
+  function parseIncomingCallDeepLink(url: string | null): CallPushNotificationData | null {
+    if (!url) {
+      return null;
+    }
+
+    try {
+      const parsedUrl = new URL(url);
+
+      if (parsedUrl.protocol !== 'synzapp:' || parsedUrl.hostname !== 'call' || parsedUrl.pathname !== '/incoming') {
+        return null;
+      }
+
+      const callId = parsedUrl.searchParams.get('callId') || '';
+      const callerUid = parsedUrl.searchParams.get('callerUid') || '';
+      const contactId = parsedUrl.searchParams.get('contactId') || '';
+      const createdAt = parsedUrl.searchParams.get('createdAt') || '';
+
+      if (!callId || !callerUid || !contactId || !createdAt) {
+        return null;
+      }
+
+      const mode = parsedUrl.searchParams.get('mode') === 'video' ? 'video' : 'voice';
+      const chatType = parsedUrl.searchParams.get('chatType') === 'GROUP' ? 'GROUP' : 'DIRECT';
+      const callerName = parsedUrl.searchParams.get('callerName') || 'Synzapp user';
+      const title = parsedUrl.searchParams.get('title') || callerName || 'Synzapp call';
+
+      return {
+        callId,
+        callerName,
+        callerUid,
+        chatType,
+        contactId,
+        createdAt,
+        mode,
+        participantUids: parseIncomingCallDeepLinkParticipantUids(parsedUrl.searchParams.get('participantUids')),
+        tenantId: parsedUrl.searchParams.get('tenantId') || '',
+        title,
+        type: 'call.incoming'
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function parseIncomingCallDeepLinkParticipantUids(value: string | null): string[] {
+    if (!value) {
+      return [];
+    }
+
+    try {
+      const parsed = JSON.parse(value);
+
+      if (Array.isArray(parsed)) {
+        return parsed.filter((uid): uid is string => typeof uid === 'string' && Boolean(uid.trim()));
+      }
+    } catch {
+      return value
+        .split(',')
+        .map((uid) => uid.trim())
+        .filter(Boolean);
+    }
+
+    return [];
+  }
+
+  async function recordSynzappCallHistory(
+    call: SynzappCallRecord,
+    status: SynzappCallHistoryStatus,
+    direction: SynzappCallDirection,
+    options: { unseen?: boolean } = {}
+  ) {
+    if (!call.callId || !call.contactId) {
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const contact = chatContactsRef.current.find((currentContact) =>
+      currentContact.contactId === call.contactId ||
+      (call.chatType === 'DIRECT' && currentContact.contactId === call.callerUid)
+    );
+    const entry: SynzappCallHistoryEntry = {
+      callId: call.callId,
+      callerName: call.callerName || contact?.displayName || call.title || 'Synzapp user',
+      chatType: call.chatType,
+      contactId: call.contactId,
+      createdAt: call.createdAt || now,
+      direction,
+      endedAt: isFinalSynzappCallHistoryStatus(status) ? now : null,
+      id: `call-${call.callId}`,
+      mode: call.mode,
+      participantUids: call.participantUids,
+      profilePhotoUrl: contact?.profilePhotoUrl || null,
+      status,
+      title: contact?.displayName || call.title || call.callerName || 'Synzapp call',
+      unseen: options.unseen === true && activeTab !== 'Calls',
+      updatedAt: now
+    };
+
+    await persistCallHistory(upsertSynzappCallHistoryEntry(callHistoryRef.current, entry));
+  }
+
+  async function updateSynzappCallHistoryStatus(
+    call: SynzappCallRecord,
+    status: SynzappCallHistoryStatus,
+    options: { unseen?: boolean } = {}
+  ) {
+    const existingEntry = callHistoryRef.current.find((entry) => entry.callId === call.callId);
+    await recordSynzappCallHistory(
+      call,
+      status,
+      existingEntry?.direction || (call.callerUid === currentUid ? 'outgoing' : 'incoming'),
+      options
+    );
+  }
+
+  async function ensureSynzappCallKeepReady() {
+    if (callKeepSetupRef.current) {
+      return;
+    }
+
+    const RNCallKeep = getOptionalCallKeepRuntime();
+
+    if (!RNCallKeep?.setup) {
+      return;
+    }
+
+    await RNCallKeep.setup({
+      android: {
+        alertDescription: 'Allow Synzapp to place and receive secure workplace calls.',
+        alertTitle: 'Enable Synzapp calls',
+        cancelButton: 'Not now',
+        foregroundService: {
+          channelId: 'synzapp-calls',
+          channelName: 'Synzapp calls',
+          notificationIcon: 'notification_icon',
+          notificationTitle: 'Synzapp call in progress'
+        },
+        okButton: 'Enable',
+        selfManaged: false
+      },
+      ios: {
+        appName: 'Synzapp',
+        handleType: 'generic',
+        includesCallsInRecents: true,
+        maximumCallGroups: '1',
+        maximumCallsPerCallGroup: '8',
+        supportsVideo: true
+      }
+    });
+
+    RNCallKeep.setAvailable?.(true);
+    RNCallKeep.canMakeMultipleCalls?.(false);
+    callKeepSetupRef.current = true;
+
+    const answerSubscription = RNCallKeep.addEventListener?.('answerCall', ({ callUUID }: { callUUID?: string }) => {
+      const activeCall = activeSynzappCallRef.current;
+
+      if (activeCall?.call.callId === callUUID) {
+        void handleAnswerIncomingSynzappCall();
+      }
+    });
+    const endSubscription = RNCallKeep.addEventListener?.('endCall', ({ callUUID }: { callUUID?: string }) => {
+      const activeCall = activeSynzappCallRef.current;
+
+      if (activeCall && activeCall.call.callId === callUUID) {
+        const reason: SynzappCallEndReason = activeCall.status === 'ringing' ? 'declined' : 'ended';
+        void handleEndSynzappCall(reason);
+      }
+    });
+
+    [answerSubscription, endSubscription].forEach((subscription) => {
+      if (subscription && typeof subscription === 'object' && 'remove' in subscription) {
+        callKeepEventSubscriptionsRef.current.push(subscription as { remove?: () => void });
+      }
+    });
+  }
+
+  async function handleIncomingSynzappCall(
+    call: SynzappCallRecord,
+    options: { skipNativeIncomingDisplay?: boolean } = {}
+  ) {
+    const existingCall = activeSynzappCallRef.current;
+
+    if (existingCall?.call.callId === call.callId) {
+      return;
+    }
+
+    if (existingCall && existingCall.call.callId !== call.callId) {
+      const socket = callRealtimeSocketRef.current;
+
+      if (socket) {
+        sendEndCall(socket, call.callId, 'busy');
+      }
+      await recordSynzappCallHistory(call, 'busy', 'incoming', { unseen: true });
+      return;
+    }
+
+    const incomingCall: ActiveSynzappCall = {
+      call,
+      direction: 'incoming',
+      isMuted: false,
+      isSpeakerOn: call.mode === 'video',
+      isVideoEnabled: call.mode === 'video',
+      localStreamUrl: null,
+      remoteStreamUrlsByUid: {},
+      status: 'ringing'
+    };
+
+    updateActiveSynzappCall(() => incomingCall);
+    await recordSynzappCallHistory(call, 'ringing', 'incoming', { unseen: true });
+    await ensureSynzappCallKeepReady().catch(() => undefined);
+    startIncomingCallAudio(call.mode);
+    startSynzappIncomingRingTimeout(call.callId);
+    if (!options.skipNativeIncomingDisplay) {
+      showNativeIncomingSynzappCall(call);
+    }
+  }
+
+  async function handleSynzappCallStarted(call: SynzappCallRecord) {
+    updateActiveSynzappCall((currentCall) => {
+      const nextCall: ActiveSynzappCall = currentCall?.call.callId === call.callId
+        ? {
+            ...currentCall,
+            call,
+            status: currentCall.status === 'ringing' ? 'ringing' : 'calling'
+          }
+        : {
+            call,
+            direction: call.callerUid === currentUid ? 'outgoing' : 'incoming',
+            isMuted: false,
+            isSpeakerOn: call.mode === 'video',
+            isVideoEnabled: call.mode === 'video',
+            localStreamUrl: null,
+            remoteStreamUrlsByUid: {},
+            status: call.callerUid === currentUid ? 'calling' : 'ringing'
+          };
+
+      return nextCall;
+    });
+
+    await recordSynzappCallHistory(
+      call,
+      'ringing',
+      call.callerUid === currentUid ? 'outgoing' : 'incoming',
+      { unseen: call.callerUid !== currentUid }
+    );
+
+    if (call.callerUid !== currentUid || callOfferStartedIdsRef.current.has(call.callId)) {
+      return;
+    }
+
+    callOfferStartedIdsRef.current.add(call.callId);
+
+    try {
+      await ensureSynzappCallKeepReady().catch(() => undefined);
+      showNativeOutgoingSynzappCall(call);
+      await startOutgoingSynzappCallOffers(call);
+    } catch (nextError) {
+      await handleEndSynzappCall('failed');
+      Alert.alert('Synzapp call', getErrorMessage(nextError, 'This build needs the latest Synzapp calling update before calls can start.'));
+    }
+  }
+
+  async function handleSynzappCallSignal(event: Extract<SynzappCallRealtimeEvent, { type: 'callSignal' }>) {
+    const activeCall = activeSynzappCallRef.current;
+
+    if (!activeCall || activeCall.call.callId !== event.callId || activeCall.status === 'ringing') {
+      pendingCallSignalsRef.current.push(event);
+      return;
+    }
+
+    await processSynzappCallSignal(event);
+  }
+
+  async function processPendingSynzappCallSignals(callId: string) {
+    const [matchingSignals, remainingSignals] = partitionCallSignals(
+      pendingCallSignalsRef.current,
+      (signal) => signal.callId === callId
+    );
+
+    pendingCallSignalsRef.current = remainingSignals;
+
+    for (const signal of matchingSignals) {
+      await processSynzappCallSignal(signal);
+    }
+  }
+
+  async function processSynzappCallSignal(event: Extract<SynzappCallRealtimeEvent, { type: 'callSignal' }>) {
+    const activeCall = activeSynzappCallRef.current;
+
+    if (!activeCall || activeCall.call.callId !== event.callId) {
+      return;
+    }
+
+    const runtime = getSynzappWebRtcRuntime();
+    const localStream = await ensureSynzappCallLocalStream(activeCall.call.mode);
+    const peerConnection = ensureSynzappPeerConnection(event.fromUid, activeCall.call, localStream, runtime);
+
+    if (event.kind === 'offer') {
+      await peerConnection.setRemoteDescription(createRtcSessionDescription(runtime, event.payload));
+      const answer = await peerConnection.createAnswer();
+      await peerConnection.setLocalDescription(answer);
+      sendSynzappCallSignal(activeCall.call.callId, event.fromUid, 'answer', peerConnection.localDescription || answer);
+      setSynzappCallConnecting();
+      return;
+    }
+
+    if (event.kind === 'answer') {
+      await peerConnection.setRemoteDescription(createRtcSessionDescription(runtime, event.payload));
+      setSynzappCallConnecting();
+      return;
+    }
+
+    if (event.kind === 'iceCandidate' && event.payload) {
+      await peerConnection.addIceCandidate(createRtcIceCandidate(runtime, event.payload));
+    }
+  }
+
+  async function startOutgoingSynzappCallOffers(call: SynzappCallRecord) {
+    const runtime = getSynzappWebRtcRuntime();
+    const localStream = await ensureSynzappCallLocalStream(call.mode);
+    const targetUids = call.participantUids.filter((uid) => uid && uid !== currentUid);
+
+    startOutgoingCallAudio(call.mode);
+
+    for (const targetUid of targetUids) {
+      const peerConnection = ensureSynzappPeerConnection(targetUid, call, localStream, runtime);
+      const offer = await peerConnection.createOffer();
+
+      await peerConnection.setLocalDescription(offer);
+      sendSynzappCallSignal(call.callId, targetUid, 'offer', peerConnection.localDescription || offer);
+    }
+  }
+
+  async function ensureSynzappCallLocalStream(mode: SynzappCallMode) {
+    if (callLocalStreamRef.current) {
+      return callLocalStreamRef.current;
+    }
+
+    const runtime = getSynzappWebRtcRuntime();
+    const mediaStream = await runtime.mediaDevices?.getUserMedia?.({
+      audio: true,
+      video: mode === 'video'
+        ? {
+            facingMode: 'user',
+            frameRate: 24,
+            height: 720,
+            width: 1280
+          }
+        : false
+    });
+
+    if (!mediaStream) {
+      throw new Error('Camera or microphone could not be started.');
+    }
+
+    callLocalStreamRef.current = mediaStream;
+
+    const localStreamUrl = typeof mediaStream.toURL === 'function' ? mediaStream.toURL() : null;
+    updateActiveSynzappCall((currentCall) => currentCall
+      ? {
+          ...currentCall,
+          localStreamUrl
+        }
+      : currentCall
+    );
+
+    return mediaStream;
+  }
+
+  function ensureSynzappPeerConnection(
+    remoteUid: string,
+    call: SynzappCallRecord,
+    localStream: any,
+    runtime: WebRtcRuntime
+  ) {
+    if (callPeerConnectionsRef.current[remoteUid]) {
+      return callPeerConnectionsRef.current[remoteUid];
+    }
+
+    if (!runtime.RTCPeerConnection) {
+      throw new Error('Calling is not available in this installed build.');
+    }
+
+    const peerConnection = new runtime.RTCPeerConnection({
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' }
+      ]
+    });
+
+    if (typeof localStream.getTracks === 'function') {
+      localStream.getTracks().forEach((track: unknown) => {
+        peerConnection.addTrack?.(track, localStream);
+      });
+    }
+
+    peerConnection.onicecandidate = (event: { candidate?: unknown }) => {
+      if (event.candidate) {
+        sendSynzappCallSignal(call.callId, remoteUid, 'iceCandidate', event.candidate);
+      }
+    };
+    peerConnection.ontrack = (event: { streams?: any[] }) => {
+      const remoteStream = event.streams?.[0];
+      const remoteStreamUrl = remoteStream && typeof remoteStream.toURL === 'function'
+        ? remoteStream.toURL()
+        : null;
+
+      if (!remoteStreamUrl) {
+        return;
+      }
+
+      updateActiveSynzappCall((currentCall) => currentCall?.call.callId === call.callId
+        ? {
+            ...currentCall,
+            remoteStreamUrlsByUid: {
+              ...currentCall.remoteStreamUrlsByUid,
+              [remoteUid]: remoteStreamUrl
+            },
+            status: 'connected'
+          }
+        : currentCall
+      );
+    };
+    peerConnection.onconnectionstatechange = () => {
+      if (peerConnection.connectionState === 'connected') {
+        updateActiveSynzappCall((currentCall) => currentCall?.call.callId === call.callId
+          ? { ...currentCall, status: 'connected' }
+          : currentCall
+        );
+      }
+    };
+
+    callPeerConnectionsRef.current[remoteUid] = peerConnection;
+
+    return peerConnection;
+  }
+
+  function sendSynzappCallSignal(
+    callId: string,
+    targetUid: string,
+    kind: SynzappCallSignalKind,
+    payload: unknown
+  ) {
+    const socket = callRealtimeSocketRef.current;
+
+    if (!socket || socket.readyState !== WebSocket.OPEN || !callRealtimeReadyRef.current) {
+      return;
+    }
+
+    sendCallSignal(socket, {
+      callId,
+      kind,
+      payload: serializeSynzappCallSignalPayload(payload),
+      targetUid
+    });
+  }
+
+  async function handleStartDirectCall(mode: SynzappCallMode) {
+    const chat = selectedChatRef.current;
+
+    if (!chat || chat.chatType === 'GROUP') {
+      return;
+    }
+
+    await startSynzappCall({
+      chat,
+      mode,
+      targetUids: []
+    });
+  }
+
+  async function handleStartGroupCall(mode: SynzappCallMode, targetUids: string[]) {
+    const chat = selectedChatRef.current;
+
+    if (!chat || chat.chatType !== 'GROUP') {
+      return;
+    }
+
+    await startSynzappCall({
+      chat,
+      mode,
+      targetUids
+    });
+  }
+
+  async function startSynzappCall({
+    chat,
+    mode,
+    targetUids
+  }: {
+    chat: ChatItem;
+    mode: SynzappCallMode;
+    targetUids: string[];
+  }) {
+    if (activeSynzappCallRef.current) {
+      Alert.alert('Synzapp call', 'You already have a call in progress.');
+      return;
+    }
+
+    if (!chat.hasActiveDevice && chat.chatType !== 'GROUP') {
+      Alert.alert('Secure device needed', getRecipientDeviceNotReadyMessage(chat.title));
+      return;
+    }
+
+    const socket = callRealtimeSocketRef.current;
+
+    if (!socket || socket.readyState !== WebSocket.OPEN || !callRealtimeReadyRef.current) {
+      Alert.alert('Synzapp call', 'Calling is still connecting. Please try again in a moment.');
+      void connectCallRealtimeSocket();
+      return;
+    }
+
+    const callId = createSynzappCallId();
+    const optimisticCall: SynzappCallRecord = {
+      callId,
+      callerName: userProfile?.displayName || 'You',
+      callerUid: currentUid,
+      chatType: chat.chatType,
+      contactId: chat.contactId,
+      createdAt: new Date().toISOString(),
+      mode,
+      participantUids: [currentUid, ...targetUids],
+      tenantId: getActiveTenantId(),
+      title: chat.title
+    };
+
+    updateActiveSynzappCall(() => ({
+      call: optimisticCall,
+      direction: 'outgoing',
+      isMuted: false,
+      isSpeakerOn: mode === 'video',
+      isVideoEnabled: mode === 'video',
+      localStreamUrl: null,
+      remoteStreamUrlsByUid: {},
+      status: 'calling'
+    }));
+    await recordSynzappCallHistory(optimisticCall, 'ringing', 'outgoing');
+
+    try {
+      await ensureSynzappCallKeepReady().catch(() => undefined);
+      showNativeOutgoingSynzappCall(optimisticCall);
+      sendStartCall(socket, {
+        callId,
+        chatType: chat.chatType,
+        contactId: chat.contactId,
+        mode,
+        targetUids,
+        title: chat.title
+      });
+    } catch (nextError) {
+      await handleEndSynzappCall('failed');
+      Alert.alert('Synzapp call', getErrorMessage(nextError, 'Unable to start this call.'));
+    }
+  }
+
+  async function handleAnswerIncomingSynzappCall() {
+    const activeCall = activeSynzappCallRef.current;
+
+    if (!activeCall || activeCall.direction !== 'incoming') {
+      return;
+    }
+
+    try {
+      clearSynzappIncomingRingTimeout();
+      stopIncomingCallAudio();
+      startOutgoingCallAudio(activeCall.call.mode);
+      updateActiveSynzappCall((currentCall) => currentCall?.call.callId === activeCall.call.callId
+        ? { ...currentCall, status: 'connecting' }
+        : currentCall
+      );
+      await updateSynzappCallHistoryStatus(activeCall.call, 'answered');
+      await ensureSynzappCallLocalStream(activeCall.call.mode);
+      const socket = await ensureCallRealtimeReadyForAction();
+
+      if (socket) {
+        sendAnswerCall(socket, activeCall.call.callId);
+      }
+
+      await processPendingSynzappCallSignals(activeCall.call.callId);
+    } catch (nextError) {
+      await handleEndSynzappCall('failed');
+      Alert.alert('Synzapp call', getErrorMessage(nextError, 'Unable to answer this call.'));
+    }
+  }
+
+  async function handleEndSynzappCall(reason: SynzappCallEndReason = 'ended') {
+    const activeCall = activeSynzappCallRef.current;
+
+    if (!activeCall) {
+      return;
+    }
+
+    const socket = await ensureCallRealtimeReadyForAction(1800);
+
+    if (socket?.readyState === WebSocket.OPEN) {
+      sendEndCall(socket, activeCall.call.callId, reason);
+    }
+
+    await updateSynzappCallHistoryStatus(
+      activeCall.call,
+      getSynzappCallHistoryStatusFromEndReason(reason, activeCall.direction, activeCall.status)
+    );
+
+    finishNativeSynzappCall(activeCall.call.callId, reason);
+    clearSynzappIncomingRingTimeout();
+    await cleanupSynzappCallMedia();
+    pendingCallSignalsRef.current = pendingCallSignalsRef.current.filter((signal) => signal.callId !== activeCall.call.callId);
+    callOfferStartedIdsRef.current.delete(activeCall.call.callId);
+    updateActiveSynzappCall((currentCall) => currentCall?.call.callId === activeCall.call.callId
+      ? { ...currentCall, status: 'ended' }
+      : currentCall
+    );
+    setTimeout(() => {
+      updateActiveSynzappCall((currentCall) => currentCall?.call.callId === activeCall.call.callId ? null : currentCall);
+    }, 260);
+  }
+
+  async function handleRemoteSynzappCallEnded(callId: string, reason: SynzappCallEndReason) {
+    const activeCall = activeSynzappCallRef.current;
+
+    if (!activeCall || activeCall.call.callId !== callId) {
+      return;
+    }
+
+    await updateSynzappCallHistoryStatus(
+      activeCall.call,
+      getSynzappCallHistoryStatusFromEndReason(reason, activeCall.direction, activeCall.status),
+      { unseen: activeCall.direction === 'incoming' && activeCall.status === 'ringing' }
+    );
+    finishNativeSynzappCall(callId, reason);
+    clearSynzappIncomingRingTimeout();
+    await cleanupSynzappCallMedia();
+    pendingCallSignalsRef.current = pendingCallSignalsRef.current.filter((signal) => signal.callId !== callId);
+    callOfferStartedIdsRef.current.delete(callId);
+    updateActiveSynzappCall(() => null);
+  }
+
+  async function cleanupSynzappCallMedia() {
+    clearSynzappIncomingRingTimeout();
+    stopIncomingCallAudio();
+    stopOutgoingCallAudio();
+
+    Object.values(callPeerConnectionsRef.current).forEach((peerConnection) => {
+      try {
+        peerConnection.close?.();
+      } catch {
+        // Media cleanup should never block leaving the call screen.
+      }
+    });
+    callPeerConnectionsRef.current = {};
+
+    const localStream = callLocalStreamRef.current;
+    callLocalStreamRef.current = null;
+
+    if (localStream && typeof localStream.getTracks === 'function') {
+      localStream.getTracks().forEach((track: { stop?: () => void }) => {
+        try {
+          track.stop?.();
+        } catch {
+          // Ignore native media teardown failures.
+        }
+      });
+    }
+  }
+
+  function setSynzappCallConnecting() {
+    updateActiveSynzappCall((currentCall) => currentCall && currentCall.status !== 'connected'
+      ? { ...currentCall, status: 'connecting' }
+      : currentCall
+    );
+  }
+
+  function toggleSynzappCallMute() {
+    const nextMuted = !activeSynzappCallRef.current?.isMuted;
+    const localStream = callLocalStreamRef.current;
+
+    if (localStream && typeof localStream.getAudioTracks === 'function') {
+      localStream.getAudioTracks().forEach((track: { enabled?: boolean }) => {
+        track.enabled = !nextMuted;
+      });
+    }
+
+    getOptionalInCallManagerRuntime()?.setMicrophoneMute?.(nextMuted);
+    updateActiveSynzappCall((currentCall) => currentCall
+      ? { ...currentCall, isMuted: nextMuted }
+      : currentCall
+    );
+  }
+
+  function toggleSynzappCallSpeaker() {
+    const nextSpeakerState = !activeSynzappCallRef.current?.isSpeakerOn;
+
+    getOptionalInCallManagerRuntime()?.setSpeakerphoneOn?.(nextSpeakerState);
+    updateActiveSynzappCall((currentCall) => currentCall
+      ? { ...currentCall, isSpeakerOn: nextSpeakerState }
+      : currentCall
+    );
+  }
+
+  function toggleSynzappCallVideo() {
+    const nextVideoState = !activeSynzappCallRef.current?.isVideoEnabled;
+    const localStream = callLocalStreamRef.current;
+
+    if (localStream && typeof localStream.getVideoTracks === 'function') {
+      localStream.getVideoTracks().forEach((track: { enabled?: boolean }) => {
+        track.enabled = nextVideoState;
+      });
+    }
+
+    updateActiveSynzappCall((currentCall) => currentCall
+      ? { ...currentCall, isVideoEnabled: nextVideoState }
+      : currentCall
+    );
+  }
+
+  function showNativeIncomingSynzappCall(call: SynzappCallRecord) {
+    const RNCallKeep = getOptionalCallKeepRuntime();
+
+    RNCallKeep?.displayIncomingCall?.(
+      call.callId,
+      call.title,
+      call.callerName || call.title,
+      'generic',
+      call.mode === 'video'
+    );
+  }
+
+  function showNativeOutgoingSynzappCall(call: SynzappCallRecord) {
+    const RNCallKeep = getOptionalCallKeepRuntime();
+
+    RNCallKeep?.startCall?.(
+      call.callId,
+      call.title,
+      call.title,
+      'generic',
+      call.mode === 'video'
+    );
+  }
+
+  function finishNativeSynzappCall(callId: string, reason: SynzappCallEndReason) {
+    const RNCallKeep = getOptionalCallKeepRuntime();
+
+    void endSynzappNativeVoipCall(callId, reason).catch(() => undefined);
+
+    if (!RNCallKeep) {
+      return;
+    }
+
+    const endReason = getNativeCallKeepEndReason(RNCallKeep, reason);
+
+    RNCallKeep.reportEndCallWithUUID?.(callId, endReason);
+    RNCallKeep.endCall?.(callId);
+  }
+
+  function startIncomingCallAudio(mode: SynzappCallMode) {
+    const inCallManager = getOptionalInCallManagerRuntime();
+
+    inCallManager?.startRingtone?.('_BUNDLE_');
+  }
+
+  function stopIncomingCallAudio() {
+    const inCallManager = getOptionalInCallManagerRuntime();
+
+    inCallManager?.stopRingtone?.();
+    inCallManager?.stop?.({ busytone: '' });
+  }
+
+  function startOutgoingCallAudio(mode: SynzappCallMode) {
+    const inCallManager = getOptionalInCallManagerRuntime();
+
+    inCallManager?.start?.({ media: mode === 'video' ? 'video' : 'audio' });
+    inCallManager?.setSpeakerphoneOn?.(mode === 'video');
+  }
+
+  function stopOutgoingCallAudio() {
+    getOptionalInCallManagerRuntime()?.stop?.();
+  }
+
+  function startSynzappIncomingRingTimeout(callId: string) {
+    clearSynzappIncomingRingTimeout();
+    callRingTimeoutRef.current = setTimeout(() => {
+      const activeCall = activeSynzappCallRef.current;
+
+      if (!activeCall || activeCall.call.callId !== callId || activeCall.status !== 'ringing') {
+        return;
+      }
+
+      void handleEndSynzappCall('missed');
+    }, 60_000);
+  }
+
+  function clearSynzappIncomingRingTimeout() {
+    if (!callRingTimeoutRef.current) {
+      return;
+    }
+
+    clearTimeout(callRingTimeoutRef.current);
+    callRingTimeoutRef.current = null;
+  }
+
   function removeUnavailableChatFromList(chat: ChatItem) {
     hasResolvedChatContactsRef.current = true;
     setChatContacts((currentContacts) => currentContacts.filter((contact) => contact.contactId !== chat.contactId));
@@ -2633,6 +4218,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     setMessageDraft('');
     setReplyTarget(null);
     resetForwardMode();
+    setIsLoadingMessages(true);
     setMessages([]);
     setMessageReactions({});
     setError(null);
@@ -2684,6 +4270,149 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   function handleOpenNewChatModal() {
     setNewChatSearch('');
     setIsNewChatModalOpen(true);
+  }
+
+  function handleOpenNewCallModal() {
+    setNewCallSearch('');
+    setIsNewCallModalOpen(true);
+  }
+
+  function handleCloseNewCallModal() {
+    setIsNewCallModalOpen(false);
+    setNewCallSearch('');
+  }
+
+  function handleToggleCallOptions() {
+    setIsCallOptionsOpen((isOpen) => !isOpen);
+  }
+
+  function handleToggleCallEditMode() {
+    setIsCallOptionsOpen(false);
+    setIsCallEditMode((isEditing) => !isEditing);
+  }
+
+  function handleOpenScheduledCalls() {
+    setIsCallOptionsOpen(false);
+    setIsScheduledCallsModalOpen(true);
+  }
+
+  function handleOpenCallFavoritesModal() {
+    setCallFavoritesSearch('');
+    setIsCallFavoritesModalOpen(true);
+  }
+
+  function handleOpenCallKeypad() {
+    setCallKeypadDigits('');
+    setIsCallKeypadOpen(true);
+  }
+
+  function handleOpenScheduleCallModal() {
+    setScheduleCallDraft(createScheduleCallDraft(userProfile?.displayName || null));
+    setIsScheduleCallModalOpen(true);
+  }
+
+  async function handleStartCallFromContact(contact: ChatContact, mode: SynzappCallMode = 'voice') {
+    if (!contact.hasActiveDevice) {
+      Alert.alert('Secure device needed', getRecipientDeviceNotReadyMessage(contact.displayName));
+      return;
+    }
+
+    setIsNewCallModalOpen(false);
+    setIsCallFavoritesModalOpen(false);
+    await startSynzappCall({
+      chat: mapChatContactToChatItem(contact),
+      mode,
+      targetUids: []
+    });
+  }
+
+  function handleAppendCallKeypadDigit(digit: string) {
+    setCallKeypadDigits((currentDigits) => {
+      if (currentDigits.replace(/\D/g, '').length >= 15) {
+        return currentDigits;
+      }
+
+      return `${currentDigits}${digit}`;
+    });
+  }
+
+  function handleBackspaceCallKeypadDigit() {
+    setCallKeypadDigits((currentDigits) => currentDigits.slice(0, -1));
+  }
+
+  async function handleStartKeypadCall() {
+    const contact = findRegisteredCallContactForDialInput(registeredCallContacts, callKeypadDigits);
+
+    if (!contact) {
+      Alert.alert(
+        'Registered contact required',
+        'Synzapp calls are limited to registered people in this company. Select a company contact or enter a matching company phone number.'
+      );
+      return;
+    }
+
+    setIsCallKeypadOpen(false);
+    await handleStartCallFromContact(contact, 'voice');
+  }
+
+  function handleToggleCallFavorite(contactId: string) {
+    const nextFavoriteContactIds = callFavoriteContactIdsRef.current.includes(contactId)
+      ? callFavoriteContactIdsRef.current.filter((favoriteContactId) => favoriteContactId !== contactId)
+      : [...callFavoriteContactIdsRef.current, contactId];
+
+    void persistCallFavorites(nextFavoriteContactIds);
+  }
+
+  function handleDeleteCallHistoryEntry(entry: SynzappCallHistoryEntry) {
+    Alert.alert(
+      'Remove call?',
+      `${entry.title} will be removed from your call history on this device.`,
+      [
+        { style: 'cancel', text: 'Cancel' },
+        {
+          onPress: () => {
+            void persistCallHistory(callHistoryRef.current.filter((currentEntry) => currentEntry.id !== entry.id));
+          },
+          style: 'destructive',
+          text: 'Remove'
+        }
+      ]
+    );
+  }
+
+  function handleUpdateScheduleCallDraft(patch: Partial<ScheduleCallDraft>) {
+    setScheduleCallDraft((currentDraft) => normalizeScheduleCallDraft({
+      ...currentDraft,
+      ...patch
+    }));
+  }
+
+  function handleSaveScheduledCall() {
+    const title = scheduleCallDraft.title.trim();
+
+    if (!title) {
+      Alert.alert('Call title needed', 'Add a short title before saving this scheduled call.');
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const scheduledCall: SynzappScheduledCall = {
+      callType: scheduleCallDraft.callType,
+      contactIds: [],
+      createdAt: now,
+      description: scheduleCallDraft.description.trim(),
+      endsAt: scheduleCallDraft.includeEndTime ? scheduleCallDraft.endsAt.toISOString() : null,
+      id: `scheduled-call-${Date.now()}`,
+      includeEndTime: scheduleCallDraft.includeEndTime,
+      reminderMinutes: scheduleCallDraft.reminderMinutes,
+      requireApproval: scheduleCallDraft.requireApproval,
+      startsAt: scheduleCallDraft.startsAt.toISOString(),
+      title
+    };
+
+    void persistScheduledCalls([scheduledCall, ...scheduledCallsRef.current]);
+    setIsScheduleCallModalOpen(false);
+    Alert.alert('Scheduled call saved', 'You can find it under Scheduled calls.');
   }
 
   function handleCloseNewChatModal() {
@@ -3598,23 +5327,364 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     Alert.alert(title, 'This chats section is ready in the Chats tab and will connect to the chat management service when that service is enabled.');
   }
 
+  async function refreshOfflineAiState() {
+    const nextState = await loadOfflineAiState();
+    setOfflineAiState(nextState);
+
+    return nextState;
+  }
+
+  async function refreshSynzappAiDeviceStatus(showError = false) {
+    try {
+      const idToken = await getIdToken();
+      const nextStatus = await getCurrentDeviceSynzappAiStatus(idToken);
+
+      setSynzappAiDeviceStatus(nextStatus);
+
+      return nextStatus;
+    } catch (nextError) {
+      if (showError) {
+        setError(getErrorMessage(nextError, 'Unable to load Synzapp AI device status.'));
+      }
+
+      return null;
+    }
+  }
+
+  async function syncSynzappAiDeviceStatus(status: 'available' | 'downloading' | 'failed' | 'installed') {
+    try {
+      const idToken = await getIdToken();
+      const nextStatus = await updateCurrentDeviceSynzappAiStatus({
+        idToken,
+        modelId: status === 'installed' ? synzappOfflineAiModel.id : null,
+        status
+      });
+
+      setSynzappAiDeviceStatus(nextStatus);
+
+      return nextStatus;
+    } catch (nextError) {
+      console.warn('Synzapp AI device status sync failed:', getErrorMessage(nextError, 'Unable to sync Synzapp AI device status.'));
+      return null;
+    }
+  }
+
+  async function handleInstallOfflineAiModel() {
+    if (isInstallingOfflineAi) {
+      return;
+    }
+
+    setIsInstallingOfflineAi(true);
+    setOfflineAiInstallProgress(null);
+    setOfflineAiState((currentState) => ({
+      ...(currentState || {}),
+      downloadedBytes: 0,
+      errorMessage: undefined,
+      modelId: synzappOfflineAiModel.id,
+      progress: 0,
+      status: 'downloading',
+      totalBytes: synzappOfflineAiModel.sizeBytes,
+      updatedAt: new Date().toISOString()
+    }));
+    void syncSynzappAiDeviceStatus('downloading');
+
+    try {
+      const installedState = await installOfflineAiModel((progress) => {
+        setOfflineAiInstallProgress(progress);
+        setOfflineAiState((currentState) => ({
+          ...(currentState || {}),
+          downloadedBytes: progress.downloadedBytes,
+          errorMessage: undefined,
+          modelId: synzappOfflineAiModel.id,
+          progress: progress.progress,
+          status: 'downloading',
+          totalBytes: progress.totalBytes,
+          updatedAt: new Date().toISOString()
+        }));
+      });
+
+      setOfflineAiState(installedState);
+      setOfflineAiInstallProgress(null);
+      await syncSynzappAiDeviceStatus('installed');
+      setIsOfflineAiModalOpen(false);
+      Alert.alert(
+        'Synzapp AI is ready',
+        'Synzapp AI can now help on this device, even when internet is unavailable.'
+      );
+    } catch (nextError) {
+      setOfflineAiInstallProgress(null);
+      void syncSynzappAiDeviceStatus('failed');
+      setError(getErrorMessage(nextError, 'Unable to install Synzapp Offline AI.'));
+      void refreshOfflineAiState();
+    } finally {
+      setIsInstallingOfflineAi(false);
+    }
+  }
+
+  function handleRemoveOfflineAiModel() {
+    Alert.alert(
+      'Remove Synzapp AI?',
+      'This removes Synzapp AI offline support from this phone. You can install it again later.',
+      [
+        { style: 'cancel', text: 'Cancel' },
+        {
+          style: 'destructive',
+          text: 'Remove',
+          onPress: () => {
+            void deleteOfflineAiModel()
+              .then((nextState) => {
+                setOfflineAiState(nextState);
+                setOfflineAiInstallProgress(null);
+                void syncSynzappAiDeviceStatus('available');
+              })
+              .catch((nextError) => {
+                setError(getErrorMessage(nextError, 'Unable to remove Synzapp Offline AI.'));
+              });
+          }
+        }
+      ]
+    );
+  }
+
   function handleOpenAskSynzappAi() {
     Keyboard.dismiss();
     setIsAiAssistantOpen(true);
+    setAiAssistantView('list');
+    void refreshOfflineAiState().then((state) => {
+      if (state.status !== 'installed') {
+        setIsOfflineAiModalOpen(true);
+      }
+    });
   }
 
   function handleCloseAskSynzappAi() {
     Keyboard.dismiss();
     setIsAiAssistantOpen(false);
+    setAiAssistantView('list');
+    setActiveOfflineAiConversationId(null);
     setAiAssistantDraft('');
+    setAiAssistantAttachments([]);
   }
 
-  function handleSendAskSynzappAiPrompt() {
-    if (!aiAssistantDraft.trim()) {
+  function handleOpenOfflineAiConversation(conversation: OfflineAiConversation) {
+    Keyboard.dismiss();
+    setActiveOfflineAiConversationId(conversation.id);
+    setAiAssistantView('thread');
+    setAiAssistantDraft('');
+    setAiAssistantAttachments([]);
+  }
+
+  function handleDeleteOfflineAiConversation(conversation: OfflineAiConversation) {
+    Alert.alert(
+      'Delete AI conversation?',
+      `${conversation.title || 'This Synzapp AI conversation'} will be removed from your AI history on this device.`,
+      [
+        { style: 'cancel', text: 'Cancel' },
+        {
+          style: 'destructive',
+          text: 'Delete',
+          onPress: () => {
+            const nextConversations = offlineAiConversations.filter((currentConversation) =>
+              currentConversation.id !== conversation.id
+            );
+
+            if (activeOfflineAiConversationId === conversation.id) {
+              setActiveOfflineAiConversationId(null);
+              setAiAssistantView('list');
+            }
+
+            void persistOfflineAiConversations(nextConversations).catch((nextError) => {
+              Alert.alert('Synzapp AI', getErrorMessage(nextError, 'Unable to delete this Synzapp AI conversation.'));
+            });
+          }
+        }
+      ]
+    );
+  }
+
+  function handleStartNewOfflineAiConversation() {
+    const scope = getOfflineAiScope();
+
+    if (!scope) {
+      Alert.alert('Synzapp AI', 'Your company profile is still loading. Please try again in a moment.');
       return;
     }
 
-    Alert.alert('Synzapp AI', 'AI responses will appear in this chat when the assistant service is enabled.');
+    const conversation = createOfflineAiConversation(scope);
+    const nextConversations = [conversation, ...offlineAiConversations];
+
+    setActiveOfflineAiConversationId(conversation.id);
+    setAiAssistantView('thread');
+    setAiAssistantDraft('');
+    setAiAssistantAttachments([]);
+    void persistOfflineAiConversations(nextConversations).catch((nextError) => {
+      Alert.alert('Synzapp AI', getErrorMessage(nextError, 'Unable to start a Synzapp AI chat.'));
+    });
+  }
+
+  function handleBackToOfflineAiList() {
+    Keyboard.dismiss();
+    setAiAssistantView('list');
+    setActiveOfflineAiConversationId(null);
+    setAiAssistantDraft('');
+    setAiAssistantAttachments([]);
+  }
+
+  async function handleAttachSynzappAiMedia() {
+    if (isPreparingAiAttachment || isOfflineAiResponding) {
+      return;
+    }
+
+    try {
+      setIsPreparingAiAttachment(true);
+      const localMediaItems = await pickNativeChatCameraMedia();
+
+      if (!localMediaItems?.length) {
+        return;
+      }
+
+      const nextAttachments = await Promise.all(
+        localMediaItems.map((localMedia) => createOfflineAiAttachment(localMedia))
+      );
+
+      setAiAssistantAttachments((currentAttachments) => [
+        ...currentAttachments,
+        ...nextAttachments
+      ].slice(0, 8));
+    } catch (nextError) {
+      Alert.alert('Synzapp AI', getErrorMessage(nextError, 'Unable to prepare this media for Synzapp AI.'));
+    } finally {
+      setIsPreparingAiAttachment(false);
+    }
+  }
+
+  async function handleAttachSynzappAiFile() {
+    if (isPreparingAiAttachment || isOfflineAiResponding) {
+      return;
+    }
+
+    try {
+      setIsPreparingAiAttachment(true);
+      const localMedia = await pickNativeChatFile();
+
+      if (!localMedia) {
+        return;
+      }
+
+      const nextAttachment = await createOfflineAiAttachment(localMedia);
+
+      setAiAssistantAttachments((currentAttachments) => [
+        ...currentAttachments,
+        nextAttachment
+      ].slice(0, 8));
+    } catch (nextError) {
+      Alert.alert('Synzapp AI', getErrorMessage(nextError, 'Unable to prepare this file for Synzapp AI.'));
+    } finally {
+      setIsPreparingAiAttachment(false);
+    }
+  }
+
+  function handleRemoveSynzappAiAttachment(attachmentId: string) {
+    setAiAssistantAttachments((currentAttachments) =>
+      currentAttachments.filter((attachment) => attachment.id !== attachmentId)
+    );
+  }
+
+  async function handleSendSynzappAiVoiceNote(localMedia: LocalChatMediaInput) {
+    try {
+      const attachment = await createOfflineAiAttachment(localMedia);
+
+      await handleSendAskSynzappAiPrompt({
+        extraAttachments: [attachment]
+      });
+    } catch (nextError) {
+      Alert.alert('Synzapp AI', getErrorMessage(nextError, 'Unable to prepare this voice note for Synzapp AI.'));
+    }
+  }
+
+  async function handleSendAskSynzappAiPrompt(input?: {
+    extraAttachments?: OfflineAiAttachment[];
+    promptOverride?: string;
+  }) {
+    const prompt = (input?.promptOverride ?? aiAssistantDraft).trim();
+    const attachments = [
+      ...aiAssistantAttachments,
+      ...(input?.extraAttachments || [])
+    ].slice(0, 8);
+
+    if ((!prompt && !attachments.length) || isOfflineAiResponding) {
+      return;
+    }
+
+    Keyboard.dismiss();
+
+    const currentOfflineAiState = await refreshOfflineAiState().catch(() => offlineAiState);
+
+    if (currentOfflineAiState?.status !== 'installed' || !currentOfflineAiState.localUri) {
+      setIsOfflineAiModalOpen(true);
+      return;
+    }
+
+    const scope = getOfflineAiScope();
+
+    if (!scope) {
+      Alert.alert('Synzapp AI', 'Your company profile is still loading. Please try again in a moment.');
+      return;
+    }
+
+    const existingConversation = activeOfflineAiConversation || createOfflineAiConversation(scope);
+    const userMessageText = prompt || getSynzappAiAttachmentMessageText(attachments);
+    const userMessage = createOfflineAiMessage({
+      attachments,
+      role: 'user',
+      status: 'seen',
+      text: userMessageText
+    });
+    const conversationWithUserMessage: OfflineAiConversation = {
+      ...existingConversation,
+      messages: [...existingConversation.messages, userMessage],
+      title: existingConversation.messages.length
+        ? existingConversation.title
+        : getOfflineAiConversationTitle(prompt || userMessageText),
+      updatedAt: userMessage.createdAt
+    };
+    const nextConversations = [
+      conversationWithUserMessage,
+      ...offlineAiConversations.filter((conversation) => conversation.id !== conversationWithUserMessage.id)
+    ];
+
+    setActiveOfflineAiConversationId(conversationWithUserMessage.id);
+    setAiAssistantView('thread');
+    setAiAssistantDraft('');
+    setAiAssistantAttachments([]);
+    setIsOfflineAiResponding(true);
+
+    try {
+      await persistOfflineAiConversations(nextConversations);
+
+      const response = await generateOfflineAiResponse(prompt || userMessageText, currentOfflineAiState.localUri, {
+        profile: getOfflineAiProfileContext(),
+        recentMessages: conversationWithUserMessage.messages
+      });
+      const assistantMessage = createOfflineAiMessage({
+        role: 'assistant',
+        text: response || 'I am here, but I could not complete that response. Please try again.'
+      });
+      const completedConversation: OfflineAiConversation = {
+        ...conversationWithUserMessage,
+        messages: [...conversationWithUserMessage.messages, assistantMessage],
+        updatedAt: assistantMessage.createdAt
+      };
+
+      await persistOfflineAiConversations([
+        completedConversation,
+        ...nextConversations.filter((conversation) => conversation.id !== completedConversation.id)
+      ]);
+    } catch (nextError) {
+      Alert.alert('Synzapp AI', getErrorMessage(nextError, 'Synzapp AI is not ready on this build yet.'));
+    } finally {
+      setIsOfflineAiResponding(false);
+    }
   }
 
   function handleOpenCommonGroupFromContactInfo(groupContact: ChatContact) {
@@ -3659,16 +5729,23 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       return;
     }
 
-    const modeLabel = groupCallMode === 'voice'
-      ? 'Voice call'
-      : groupCallMode === 'video'
-        ? 'Video call'
-        : 'Selected people';
+    const selectedMemberUids = activeGroupMemberContacts
+      .filter((contact) => selectedGroupCallMemberIds[contact.contactId])
+      .map((contact) => contact.contactId);
 
     setIsGroupCallPeopleModalOpen(false);
-    Alert.alert(modeLabel, `${selectedGroupCallMemberCount} ${selectedGroupCallMemberCount === 1 ? 'person' : 'people'} selected.`);
     setGroupCallPeopleSearch('');
     setSelectedGroupCallMemberIds({});
+
+    if (groupCallMode === 'voice' || groupCallMode === 'video') {
+      void handleStartGroupCall(groupCallMode, selectedMemberUids);
+      return;
+    }
+
+    Alert.alert(
+      'People selected',
+      `${selectedMemberUids.length} ${selectedMemberUids.length === 1 ? 'person' : 'people'} selected for this group call.`
+    );
   }
 
   function handleReturnToNewChatModal() {
@@ -3886,6 +5963,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       if (nextMessages.length) {
         setMessageReactions(extractReactionMapFromMessages(nextMessages));
         setMessages(nextMessages);
+        queueMediaDownloadsForMessages(chat.contactId, nextMessages, chat.chatType);
       }
     } catch {
       // Local cache should never block opening a live chat.
@@ -3961,6 +6039,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           ...getLocalChatScope()
         });
         queueEncryptedChatBackup();
+        queueMediaDownloadsForMessages(chat.contactId, nextMessages, chat.chatType);
         void syncPendingMessagesForChat(chat.contactId);
       }
     } catch (nextError) {
@@ -4341,7 +6420,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           !media.mediaId ||
           !media.key ||
           !media.nonce ||
-          media.kind === 'file' ||
+          shouldSkipAutomaticMediaDownload(media) ||
           media.localUri ||
           media.transferStatus === 'downloading' ||
           media.transferStatus === 'failed'
@@ -4429,8 +6508,10 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         return;
       }
 
+      const cachedMediaItems = await Promise.all(localMediaItems.map(cacheLocalChatMedia));
+
       setError(null);
-      setMediaReviewItems(localMediaItems.map((localMedia, index) => ({
+      setMediaReviewItems(cachedMediaItems.map((localMedia, index) => ({
         id: `media_review_${Date.now()}_${index}_${localMedia.fileName}`,
         media: localMedia
       })));
@@ -4541,13 +6622,14 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         return;
       }
 
+      const cachedMedia = await cacheLocalChatMedia(localMedia);
       const replyReference = replyTarget ? buildReplyReference(replyTarget) : null;
 
       setError(null);
       await queueAndSendChatPayload({
         activeChat,
         clearDraft: false,
-        media: buildLocalChatMediaAttachment(localMedia),
+        media: buildLocalChatMediaAttachment(cachedMedia),
         replyReference,
         text: ''
       });
@@ -4569,13 +6651,14 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     }
 
     try {
+      const cachedMedia = await cacheLocalChatMedia(localMedia);
       const replyReference = replyTarget ? buildReplyReference(replyTarget) : null;
 
       setError(null);
       await queueAndSendChatPayload({
         activeChat,
         clearDraft: false,
-        media: buildLocalChatMediaAttachment(localMedia),
+        media: buildLocalChatMediaAttachment(cachedMedia),
         replyReference,
         text: ''
       });
@@ -5307,6 +7390,17 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     setSelectedArchivedChatIds({});
     setSpamActionTarget(null);
     setChatMoreActionTarget(null);
+    setIsCallOptionsOpen(false);
+    setIsNewCallModalOpen(false);
+    setIsCallKeypadOpen(false);
+    setIsCallFavoritesModalOpen(false);
+    setIsScheduleCallModalOpen(false);
+    setIsScheduledCallsModalOpen(false);
+    setIsCallEditMode(false);
+    setCallSearch('');
+    setNewCallSearch('');
+    setCallFavoritesSearch('');
+    setCallKeypadDigits('');
     setIsLoadingMessages(false);
     setIsContactInfoModalOpen(false);
     setIsChatNotificationSettingsOpen(false);
@@ -5336,6 +7430,14 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
 
     if (tab === 'Settings') {
       setSettingsScreen('list');
+    }
+
+    if (tab === 'Calls' && unseenCallCount > 0) {
+      void persistCallStoreData({
+        favoriteContactIds: callFavoriteContactIdsRef.current,
+        history: markSynzappCallsSeen(callHistoryRef.current),
+        scheduledCalls: scheduledCallsRef.current
+      });
     }
 
     if (tab === 'You') {
@@ -5510,6 +7612,46 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
 
     if (selectedOption?.id === 'delete-organization') {
       handleOpenDeleteOrganization();
+    }
+  }
+
+  async function handleOpenEmployeeOptions() {
+    if (!canInviteEmployees) {
+      Alert.alert('Employee options', 'No employee import actions are available for this account.');
+      return;
+    }
+
+    if (isInvitingEmployees || isPickingInviteContact) {
+      return;
+    }
+
+    if (inviteDraft) {
+      Alert.alert('Employee invite', 'Finish or cancel the current invite before starting another one.');
+      return;
+    }
+
+    const selectedOption = await selectScreenOption(
+      'Employee options',
+      [
+        { id: 'manual', label: 'Add by phone number' },
+        { id: 'contact', label: 'Add from contacts' },
+        { id: 'batch', label: 'Batch import contacts' }
+      ],
+      (option) => option.label
+    );
+
+    if (selectedOption?.id === 'manual') {
+      void handleInviteEmployee('manual');
+      return;
+    }
+
+    if (selectedOption?.id === 'contact') {
+      void handleInviteEmployee('single');
+      return;
+    }
+
+    if (selectedOption?.id === 'batch') {
+      void handleInviteEmployee('batch');
     }
   }
 
@@ -5806,7 +7948,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     }
 
     if (Platform.OS === 'ios') {
-      const destructiveButtonIndex = options.findIndex((option) => option.action === 'ANONYMIZE');
+      const destructiveButtonIndex = options.findIndex((option) => isDestructiveEmployeeAction(option.action));
 
       ActionSheetIOS.showActionSheetWithOptions(
         {
@@ -5832,7 +7974,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       [
         ...options.map((option) => ({
           onPress: () => confirmEmployeeLifecycleAction(employee, option),
-          style: option.action === 'ANONYMIZE' ? 'destructive' as const : 'default' as const,
+          style: isDestructiveEmployeeAction(option.action) ? 'destructive' as const : 'default' as const,
           text: option.label
         })),
         {
@@ -5841,6 +7983,29 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         }
       ]
     );
+  }
+
+  function handleReactivateDeletedEmployee(employee: EmployeeListItem) {
+    const option = getEmployeeActionOptions(employee).find((employeeOption) =>
+      employeeOption.action === 'REACTIVATE'
+    );
+
+    if (option) {
+      confirmEmployeeLifecycleAction(employee, option);
+    }
+  }
+
+  function handlePermanentlyRemoveDeletedEmployee(employee: EmployeeListItem) {
+    const targetAction: EmployeeAction = employee.statusValue.toUpperCase() === 'INVITED'
+      ? 'REMOVE_INVITE'
+      : 'PERMANENT_DELETE';
+    const option = getEmployeeActionOptions(employee).find((employeeOption) =>
+      employeeOption.action === targetAction
+    );
+
+    if (option) {
+      confirmEmployeeLifecycleAction(employee, option);
+    }
   }
 
   function confirmEmployeeLifecycleAction(
@@ -5864,7 +8029,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           onPress: () => {
             void handleUpdateEmployeeAction(employee, option);
           },
-          style: option.action === 'ANONYMIZE' ? 'destructive' : 'default',
+          style: isDestructiveEmployeeAction(option.action) ? 'destructive' : 'default',
           text: option.confirmButton
         }
       ]
@@ -5894,7 +8059,9 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           });
 
       setApprovedEmployees((currentEmployees) =>
-        sortApprovedEmployees(upsertApprovedEmployees(currentEmployees, [updatedEmployee]))
+        option.action === 'PERMANENT_DELETE' || option.action === 'REMOVE_INVITE'
+          ? currentEmployees.filter((currentEmployee) => currentEmployee.approvedPhoneId !== employee.id)
+          : sortApprovedEmployees(upsertApprovedEmployees(currentEmployees, [updatedEmployee]))
       );
       void loadChatContacts(false);
       Alert.alert(option.successTitle, option.successMessage(employee.name));
@@ -6501,32 +8668,13 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   }
 
   function openManualInvitePrompt(draft: InviteDraft) {
-    if (Platform.OS === 'ios') {
-      Alert.prompt(
-        'Add employee',
-        'Enter the phone number with country code, for example +14695554444.',
-        [
-          {
-            style: 'cancel',
-            text: 'Cancel'
-          },
-          {
-            onPress: (value?: string) => {
-              addManualPhoneToInviteDraft(value || '', draft);
-            },
-            text: 'Add'
-          }
-        ],
-        'plain-text',
-        '',
-        'phone-pad'
-      );
-      return;
-    }
-
     setManualInviteDraftTarget(draft);
     setManualPhoneDraft('');
     setIsManualInviteModalOpen(true);
+  }
+
+  function handleChangeManualPhoneDraft(value: string) {
+    setManualPhoneDraft(formatManualInvitePhoneNumberInput(value));
   }
 
   function closeManualInviteModal() {
@@ -6550,7 +8698,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     if (!phoneNumber) {
       Alert.alert(
         'Phone number needed',
-        'Enter a full phone number with country code, for example +14695554444.'
+        'Enter a full phone number with country code, for example +1 (469) 555 4444.'
       );
       return;
     }
@@ -6687,16 +8835,29 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         idToken,
         roleId: inviteDraft.role.roleId
       });
+      const invitedPhoneDisplayByEmployeeId = buildInvitedEmployeePhoneDisplayMap(
+        invitedEmployees,
+        inviteDraft.contacts
+      );
 
       setApprovedEmployees((currentEmployees) =>
         sortApprovedEmployees(upsertApprovedEmployees(currentEmployees, invitedEmployees))
       );
+      if (Object.keys(invitedPhoneDisplayByEmployeeId).length) {
+        setEmployeePhoneDisplayById((currentPhoneDisplayById) => ({
+          ...currentPhoneDisplayById,
+          ...invitedPhoneDisplayByEmployeeId
+        }));
+      }
       setInviteDraft(null);
 
       Alert.alert(
         invitedEmployees.length === 1 ? 'Employee invited' : 'Employees invited',
         invitedEmployees.length === 1
-          ? `${invitedEmployees[0].displayName || invitedEmployees[0].phoneMasked} is approved for ${inviteDraft.department.name}.`
+          ? `${getApprovedEmployeeDisplayLabel(
+              invitedEmployees[0],
+              invitedPhoneDisplayByEmployeeId[invitedEmployees[0].approvedPhoneId]
+            )} is approved for ${inviteDraft.department.name}.`
           : `${invitedEmployees.length} employees are approved for ${inviteDraft.department.name}.`
       );
     } catch (nextError) {
@@ -6760,6 +8921,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     <View style={[
       styles.screen,
       {
+        backgroundColor: appTheme.colors.screen,
         paddingBottom: isConversationSurfaceOpen ? 0 : 98,
         paddingTop: isConversationSurfaceOpen ? messageTopPadding : headerTopPadding
       }
@@ -6781,6 +8943,12 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           onOpenGroupCallOptions={handleOpenGroupCallOptions}
           onOpenGroupInfo={handleOpenGroupInfo}
           onOpenGroupPeoplePicker={() => handleOpenGroupCallPeopleModal('select')}
+          onStartVideoCall={() => {
+            void handleStartDirectCall('video');
+          }}
+          onStartVoiceCall={() => {
+            void handleStartDirectCall('voice');
+          }}
           profilePhotoHeaders={profilePhotoHeaders}
         />
       ) : isAiAssistantOpen ? null : activeTab === 'Settings' && settingsScreen === 'directory' ? (
@@ -6825,30 +8993,25 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           spamCount={spamConversationChatItems.length}
         />
       ) : (
-        <HeaderActions
-          activeTab={activeTab}
-          canInviteEmployees={canInviteEmployees}
-          hasInviteDraft={Boolean(inviteDraft)}
-          isInvitingEmployees={isInvitingEmployees || isPickingInviteContact}
-          onOpenOptions={activeTab === 'Settings' ? handleOpenSettingsOptions : undefined}
-          onOpenNewChat={handleOpenNewChatModal}
-          onBatchImportEmployees={() => {
-            void handleInviteEmployee('batch');
-          }}
-          onInviteEmployee={() => {
-            void handleInviteEmployee('single');
-          }}
-          onManualAddEmployee={() => {
-            void handleInviteEmployee('manual');
-          }}
-        />
+	        <HeaderActions
+	          activeTab={activeTab}
+	          onOpenOptions={activeTab === 'Settings'
+	            ? handleOpenSettingsOptions
+	            : activeTab === 'Employees'
+	              ? handleOpenEmployeeOptions
+	              : activeTab === 'Calls'
+	                ? handleToggleCallOptions
+	                : undefined}
+	          onOpenNewCall={handleOpenNewCallModal}
+	          onOpenNewChat={handleOpenNewChatModal}
+	        />
       )}
 
       {!selectedChat &&
       !isAiAssistantOpen &&
       activeTab !== 'You' &&
       !(activeTab === 'Chats' && (isSpamScreenOpen || isArchiveScreenOpen)) ? (
-        <Text style={styles.title}>
+        <Text style={[styles.title, { color: appTheme.colors.ink }]}>
           {activeTab === 'Settings' && settingsScreen === 'directory'
             ? 'Departments and roles'
             : activeTab === 'Settings' && settingsScreen === 'role-permissions'
@@ -6881,13 +9044,14 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
 
       {selectedChat ? (
         <MessageThread
-          bottomInset={insets.bottom}
+          bottomInset={conversationBottomInset}
           canChat={selectedChat.hasActiveDevice && !activeTrashSegmentId}
           contactName={selectedChat.title}
           contactProfilePhotoUrl={selectedChat.profilePhotoUrl || null}
           currentUid={currentUid}
           draft={messageDraft}
           groupMembers={selectedChat.members || []}
+          hasKnownMessages={hasChatKnownMessages(selectedChat)}
           isGroupChat={selectedChat.chatType === 'GROUP'}
           isCompactAndroid={isCompactAndroid}
           isForwardMode={isForwardMode}
@@ -6923,15 +9087,37 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           starredMessageIds={starredMessageIds}
         />
       ) : isAiAssistantOpen ? (
-        <SynzappAiAssistantScreen
-          bottomInset={insets.bottom}
-          draft={aiAssistantDraft}
-          isCompactAndroid={isCompactAndroid}
-          onBack={handleCloseAskSynzappAi}
-          onDraftChange={setAiAssistantDraft}
-          onSend={handleSendAskSynzappAiPrompt}
-          profileName={userProfile?.displayName || ''}
-        />
+        aiAssistantView === 'thread' ? (
+          <SynzappAiChatThreadScreen
+            attachments={aiAssistantAttachments}
+            bottomInset={conversationBottomInset}
+            conversation={activeOfflineAiConversation}
+            draft={aiAssistantDraft}
+            isCompactAndroid={isCompactAndroid}
+            isGenerating={isOfflineAiResponding}
+            isPreparingAttachment={isPreparingAiAttachment}
+            onBack={handleBackToOfflineAiList}
+            onDraftChange={setAiAssistantDraft}
+            onPickFile={handleAttachSynzappAiFile}
+            onPickMedia={handleAttachSynzappAiMedia}
+            onRemoveAttachment={handleRemoveSynzappAiAttachment}
+            onSend={handleSendAskSynzappAiPrompt}
+            onSendVoiceNote={handleSendSynzappAiVoiceNote}
+            onUseSuggestion={setAiAssistantDraft}
+            profileName={userProfile?.displayName || ''}
+          />
+        ) : (
+          <SynzappAiChatListScreen
+            bottomInset={conversationBottomInset}
+            conversations={offlineAiConversations}
+            isCompactAndroid={isCompactAndroid}
+            onBack={handleCloseAskSynzappAi}
+            onDeleteConversation={handleDeleteOfflineAiConversation}
+            onNewChat={handleStartNewOfflineAiConversation}
+            onOpenConversation={handleOpenOfflineAiConversation}
+            profileName={userProfile?.displayName || ''}
+          />
+        )
       ) : (
         <ScrollView
           contentContainerStyle={[styles.tabContent, { paddingBottom: tabContentBottomPadding }]}
@@ -7005,9 +9191,28 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
             )
           ) : null}
 
+          {activeTab === 'Calls' ? (
+            <CallsTab
+              contacts={registeredCallContacts}
+              favorites={callFavoriteContactIds}
+              history={callHistory}
+              isEditMode={isCallEditMode}
+              onDeleteCall={handleDeleteCallHistoryEntry}
+              onOpenFavorites={handleOpenCallFavoritesModal}
+              onOpenKeypad={handleOpenCallKeypad}
+              onOpenNewCall={handleOpenNewCallModal}
+              onOpenSchedule={handleOpenScheduleCallModal}
+              onSearchChange={setCallSearch}
+              onStartCall={handleStartCallFromContact}
+              profilePhotoHeaders={profilePhotoHeaders}
+              search={callSearch}
+              scheduledCount={scheduledCalls.length}
+            />
+          ) : null}
+
           {activeTab === 'Groups' ? (
-            <GroupsTab
-              groups={groups}
+	            <GroupsTab
+	              groups={groups}
               isLoading={isLoadingGroups}
               onOpenGroup={(group) => {
                 void handleOpenGroupFromGroupsTab(group);
@@ -7028,6 +9233,8 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
                 void handleAddContactToDraft();
               }}
               onCancelDraft={() => setInviteDraft(null)}
+              onPermanentlyRemoveDeletedEmployee={handlePermanentlyRemoveDeletedEmployee}
+              onReactivateDeletedEmployee={handleReactivateDeletedEmployee}
               onSendDraft={() => {
                 void handleSendInviteDraft();
               }}
@@ -7043,14 +9250,18 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
               canManageGroups={canManageGroups}
               canManageSecurity={canManageSecurity}
               canManageUsers={canManageUsers}
+              onOpenAppearance={() => setIsThemePreferenceModalOpen(true)}
               onOpenChatBackup={handleOpenChatBackupSettings}
               onOpenCompanyProfile={handleOpenCompanyProfileSettings}
               onOpenDepartmentAdminPermissions={handleOpenDepartmentAdminPermissions}
               onOpenDepartmentsAndRoles={handleOpenDirectorySettings}
               onOpenGroups={handleOpenGroupsSettings}
               onOpenMyDevices={handleOpenMyDevicesSettings}
+              onOpenOfflineAi={() => setIsOfflineAiModalOpen(true)}
               onOpenRolePermissions={handleOpenRolePermissions}
               onOpenSecurity={handleOpenSecuritySettings}
+              offlineAiState={offlineAiState}
+              themePreference={appTheme.preference}
             />
           ) : null}
 
@@ -7187,6 +9398,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       {!selectedChat &&
       !isAiAssistantOpen &&
       activeTab === 'Chats' &&
+      isSynzappAiReadyForAskButton &&
       !isSpamScreenOpen &&
       !isArchiveScreenOpen &&
       !isScreenKeyboardVisible ? (
@@ -7208,16 +9420,19 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         <View style={[
         styles.footer,
         {
+          backgroundColor: appTheme.colors.footer,
+          borderColor: appTheme.colors.border,
           borderRadius: isCompactAndroid ? 32 : 34,
           bottom: footerBottom,
           minHeight: footerHeight
         }
       ]}>
-        {visibleFooterTabs.map((tab) => (
-          <FooterTabButton
-            active={activeTab === tab}
-            key={tab}
-            minHeight={footerTabHeight}
+	        {visibleFooterTabs.map((tab) => (
+	          <FooterTabButton
+	            active={activeTab === tab}
+	            badgeCount={tab === 'Chats' ? unreadChatBadgeCount : tab === 'Calls' ? unseenCallCount : 0}
+	            key={tab}
+	            minHeight={footerTabHeight}
             onPress={() => handleSelectFooterTab(tab)}
             profile={userProfile}
             profilePhotoHeaders={profilePhotoHeaders}
@@ -7226,6 +9441,23 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         ))}
         </View>
       ) : null}
+
+      <SynzappCallOverlay
+        callState={activeSynzappCall}
+        onAnswer={() => {
+          void handleAnswerIncomingSynzappCall();
+        }}
+        onDecline={() => {
+          void handleEndSynzappCall('declined');
+        }}
+        onEnd={() => {
+          void handleEndSynzappCall('ended');
+        }}
+        onToggleMute={toggleSynzappCallMute}
+        onToggleSpeaker={toggleSynzappCallSpeaker}
+        onToggleVideo={toggleSynzappCallVideo}
+        profilePhotoHeaders={profilePhotoHeaders}
+      />
 
       <MessageActionOverlay
         contactName={selectedChat?.title || ''}
@@ -7403,8 +9635,12 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         onOpenNotifications={handleOpenChatNotificationSettings}
         onOpenSearch={handleOpenConversationSearch}
         onOpenTranscriptLanguage={handleOpenChatTranscriptLanguage}
-        onStartVideoCall={() => handleContactInfoUnavailableAction('Video call')}
-        onStartVoiceCall={() => handleContactInfoUnavailableAction('Audio call')}
+        onStartVideoCall={() => {
+          void handleStartDirectCall('video');
+        }}
+        onStartVoiceCall={() => {
+          void handleStartDirectCall('voice');
+        }}
         profilePhotoHeaders={profilePhotoHeaders}
       />
 
@@ -7444,8 +9680,12 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         isOpen={isDirectContactDetailsOpen}
         onAddToGroup={handleOpenAddToGroupModal}
         onClose={handleCloseDirectContactDetails}
-        onStartVideoCall={() => handleContactInfoUnavailableAction('Video call')}
-        onStartVoiceCall={() => handleContactInfoUnavailableAction('Audio call')}
+        onStartVideoCall={() => {
+          void handleStartDirectCall('video');
+        }}
+        onStartVoiceCall={() => {
+          void handleStartDirectCall('voice');
+        }}
         profilePhotoHeaders={profilePhotoHeaders}
       />
 
@@ -7535,6 +9775,62 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         settings={chatArchiveSettings}
       />
 
+      <CallOptionsMenu
+        isOpen={isCallOptionsOpen}
+        onClose={() => setIsCallOptionsOpen(false)}
+        onEdit={handleToggleCallEditMode}
+        onOpenScheduled={handleOpenScheduledCalls}
+      />
+
+      <NewCallModal
+        contacts={registeredCallContacts}
+        isOpen={isNewCallModalOpen}
+        onChangeSearch={setNewCallSearch}
+        onClose={handleCloseNewCallModal}
+        onStartCall={handleStartCallFromContact}
+        profilePhotoHeaders={profilePhotoHeaders}
+        search={newCallSearch}
+      />
+
+      <CallKeypadModal
+        digits={callKeypadDigits}
+        isOpen={isCallKeypadOpen}
+        onAppendDigit={handleAppendCallKeypadDigit}
+        onBackspace={handleBackspaceCallKeypadDigit}
+        onClose={() => setIsCallKeypadOpen(false)}
+        onStartCall={() => {
+          void handleStartKeypadCall();
+        }}
+      />
+
+      <CallFavoritesModal
+        contacts={registeredCallContacts}
+        favoriteContactIds={callFavoriteContactIds}
+        isOpen={isCallFavoritesModalOpen}
+        onChangeSearch={setCallFavoritesSearch}
+        onClose={() => setIsCallFavoritesModalOpen(false)}
+        onToggleFavorite={handleToggleCallFavorite}
+        profilePhotoHeaders={profilePhotoHeaders}
+        search={callFavoritesSearch}
+      />
+
+      <ScheduleCallModal
+        draft={scheduleCallDraft}
+        isOpen={isScheduleCallModalOpen}
+        onClose={() => setIsScheduleCallModalOpen(false)}
+        onSave={handleSaveScheduledCall}
+        onUpdateDraft={handleUpdateScheduleCallDraft}
+      />
+
+      <ScheduledCallsModal
+        calls={scheduledCalls}
+        isOpen={isScheduledCallsModalOpen}
+        onClose={() => setIsScheduledCallsModalOpen(false)}
+        onDelete={(callId) => {
+          void persistScheduledCalls(scheduledCallsRef.current.filter((call) => call.id !== callId));
+        }}
+      />
+
       <NativeOptionPickerModal picker={nativeOptionPicker} />
 
       <AddRecordModal
@@ -7582,7 +9878,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
 
       <ManualInviteModal
         onCancel={closeManualInviteModal}
-        onChangePhone={setManualPhoneDraft}
+        onChangePhone={handleChangeManualPhoneDraft}
         onConfirm={handleConfirmManualInvite}
         phone={manualPhoneDraft}
         visible={isManualInviteModalOpen}
@@ -7641,6 +9937,40 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         profilePhotoHeaders={profilePhotoHeaders}
       />
 
+      <ClearChatModal
+        chat={clearChatTarget}
+        isClearing={isClearingChat}
+        onClearMediaFiles={handleClearChatMediaFiles}
+        onClearMessages={handleClearChatMessages}
+        onClose={closeClearChatModal}
+        summary={clearChatSummary}
+      />
+
+      <ThemePreferenceModal
+        currentPreference={appTheme.preference}
+        onClose={() => setIsThemePreferenceModalOpen(false)}
+        onSelect={(preference) => {
+          void appTheme.setPreference(preference);
+          setIsThemePreferenceModalOpen(false);
+        }}
+        visible={isThemePreferenceModalOpen}
+      />
+
+      <OfflineAiInstallModal
+        isInstalling={isInstallingOfflineAi}
+        isOpen={isOfflineAiModalOpen}
+        onClose={() => {
+          if (!isInstallingOfflineAi) {
+            setIsOfflineAiModalOpen(false);
+          }
+        }}
+        onInstall={handleInstallOfflineAiModel}
+        onRemove={handleRemoveOfflineAiModel}
+        onRunInBackground={() => setIsOfflineAiModalOpen(false)}
+        progress={offlineAiInstallProgress}
+        state={offlineAiState}
+      />
+
       <ChatMoreActionsModal
         chat={chatMoreActionTarget}
         onArchive={handleArchiveChat}
@@ -7679,6 +10009,8 @@ function OrganizationDeletionModal({
   progressAnim: Animated.Value;
   state: OrganizationDeletionModalState | null;
 }) {
+  const appTheme = useAppTheme();
+
   if (!state) {
     return null;
   }
@@ -7703,8 +10035,18 @@ function OrganizationDeletionModal({
       transparent
       visible
     >
-      <View style={styles.organizationDeletionOverlay}>
-        <View style={styles.organizationDeletionCard}>
+      <View style={[
+        styles.organizationDeletionOverlay,
+        { backgroundColor: appTheme.colors.overlay }
+      ]}>
+        <View style={[
+          styles.organizationDeletionCard,
+          {
+            backgroundColor: appTheme.colors.surfaceElevated,
+            borderColor: appTheme.colors.border,
+            borderWidth: StyleSheet.hairlineWidth
+          }
+        ]}>
           {state.step !== 'deleting' ? (
             <Pressable
               accessibilityLabel="Close delete organization"
@@ -7713,11 +10055,12 @@ function OrganizationDeletionModal({
               onPress={onCancel}
               style={({ pressed }) => [
                 styles.organizationDeletionClose,
+                { backgroundColor: appTheme.colors.surface },
                 pressed && !(isRequesting || isVerifying) && styles.pressed,
                 (isRequesting || isVerifying) && styles.disabled
               ]}
             >
-              <Feather color="#334155" name="x" size={20} />
+              <Feather color={appTheme.colors.mutedStrong} name="x" size={20} />
             </Pressable>
           ) : null}
 
@@ -7726,15 +10069,21 @@ function OrganizationDeletionModal({
               <View style={styles.organizationDeletionIcon}>
                 <Feather color="#FFFFFF" name="alert-triangle" size={25} />
               </View>
-              <Text style={styles.organizationDeletionTitle}>Delete organization?</Text>
-              <Text style={styles.organizationDeletionBody}>
+              <Text style={[styles.organizationDeletionTitle, { color: appTheme.colors.ink }]}>Delete organization?</Text>
+              <Text style={[styles.organizationDeletionBody, { color: appTheme.colors.mutedStrong }]}>
                 This permanently deletes organization chats, employees, encrypted files, devices, groups, departments, and tenant settings. This action cannot be reversed.
               </Text>
-              <Text style={styles.organizationDeletionBody}>
+              <Text style={[styles.organizationDeletionBody, { color: appTheme.colors.mutedStrong }]}>
                 We will send a verification code to the organization owner phone number before allowing deletion.
               </Text>
               {state.error ? (
-                <Text style={styles.organizationDeletionError}>{state.error}</Text>
+                <Text style={[
+                  styles.organizationDeletionError,
+                  {
+                    backgroundColor: appTheme.colors.amberSoft,
+                    color: appTheme.colors.amber
+                  }
+                ]}>{state.error}</Text>
               ) : null}
               <View style={styles.organizationDeletionActions}>
                 <Pressable
@@ -7743,11 +10092,12 @@ function OrganizationDeletionModal({
                   onPress={onCancel}
                   style={({ pressed }) => [
                     styles.organizationDeletionSecondaryButton,
+                    { backgroundColor: appTheme.colors.surface },
                     pressed && !isRequesting && styles.pressed,
                     isRequesting && styles.disabled
                   ]}
                 >
-                  <Text style={styles.organizationDeletionSecondaryText}>Cancel</Text>
+                  <Text style={[styles.organizationDeletionSecondaryText, { color: appTheme.colors.ink }]}>Cancel</Text>
                 </Pressable>
                 <Pressable
                   accessibilityRole="button"
@@ -7769,8 +10119,8 @@ function OrganizationDeletionModal({
 
           {state.step === 'otp' && challenge ? (
             <>
-              <Text style={styles.organizationDeletionTitle}>Verify deletion</Text>
-              <Text style={styles.organizationDeletionBody}>
+              <Text style={[styles.organizationDeletionTitle, { color: appTheme.colors.ink }]}>Verify deletion</Text>
+              <Text style={[styles.organizationDeletionBody, { color: appTheme.colors.mutedStrong }]}>
                 Enter the verification code sent to your phone, then type the confirmation phrase below.
               </Text>
               <SettingsInput
@@ -7779,7 +10129,7 @@ function OrganizationDeletionModal({
                 placeholder="Verification code"
                 value={state.otpCode}
               />
-              <Text style={styles.organizationDeletionHint}>
+              <Text style={[styles.organizationDeletionHint, { color: appTheme.colors.muted }]}>
                 Type {challenge.requiredConfirmation}
               </Text>
               <SettingsInput
@@ -7789,7 +10139,13 @@ function OrganizationDeletionModal({
                 value={state.confirmationText}
               />
               {state.error ? (
-                <Text style={styles.organizationDeletionError}>{state.error}</Text>
+                <Text style={[
+                  styles.organizationDeletionError,
+                  {
+                    backgroundColor: appTheme.colors.amberSoft,
+                    color: appTheme.colors.amber
+                  }
+                ]}>{state.error}</Text>
               ) : null}
               <Pressable
                 accessibilityRole="button"
@@ -7810,15 +10166,21 @@ function OrganizationDeletionModal({
 
           {state.step === 'verified' && challenge ? (
             <>
-              <View style={styles.organizationDeletionVerifiedIcon}>
+              <View style={[styles.organizationDeletionVerifiedIcon, { backgroundColor: appTheme.colors.primary }]}>
                 <Feather color="#FFFFFF" name="check" size={25} />
               </View>
-              <Text style={styles.organizationDeletionTitle}>Account verified</Text>
-              <Text style={styles.organizationDeletionBody}>
+              <Text style={[styles.organizationDeletionTitle, { color: appTheme.colors.ink }]}>Account verified</Text>
+              <Text style={[styles.organizationDeletionBody, { color: appTheme.colors.mutedStrong }]}>
                 Your account was verified. Proceeding will permanently delete {challenge.companyName} and sign out every user in this organization.
               </Text>
               {state.error ? (
-                <Text style={styles.organizationDeletionError}>{state.error}</Text>
+                <Text style={[
+                  styles.organizationDeletionError,
+                  {
+                    backgroundColor: appTheme.colors.amberSoft,
+                    color: appTheme.colors.amber
+                  }
+                ]}>{state.error}</Text>
               ) : null}
               <Pressable
                 accessibilityRole="button"
@@ -7837,19 +10199,23 @@ function OrganizationDeletionModal({
 
           {state.step === 'deleting' ? (
             <>
-              <Text style={styles.organizationDeletionTitle}>Deleting organization</Text>
-              <Text style={styles.organizationDeletionBody}>
+              <Text style={[styles.organizationDeletionTitle, { color: appTheme.colors.ink }]}>Deleting organization</Text>
+              <Text style={[styles.organizationDeletionBody, { color: appTheme.colors.mutedStrong }]}>
                 Hang tight while we delete this tenant and its data. Keep the app open until this finishes.
               </Text>
-              <View style={styles.organizationDeletionProgressTrack}>
+              <View style={[
+                styles.organizationDeletionProgressTrack,
+                { backgroundColor: appTheme.colors.surface }
+              ]}>
                 <Animated.View
                   style={[
                     styles.organizationDeletionProgressFill,
+                    { backgroundColor: appTheme.colors.primary },
                     { width: progressWidth }
                   ]}
                 />
               </View>
-              <Text style={styles.organizationDeletionHint}>Securely signing users out and purging tenant data...</Text>
+              <Text style={[styles.organizationDeletionHint, { color: appTheme.colors.muted }]}>Securely signing users out and purging tenant data...</Text>
             </>
           ) : null}
         </View>
@@ -7860,135 +10226,755 @@ function OrganizationDeletionModal({
 
 function HeaderActions({
   activeTab,
-  canInviteEmployees,
-  hasInviteDraft,
-  isInvitingEmployees,
-  onBatchImportEmployees,
-  onInviteEmployee,
-  onManualAddEmployee,
   onOpenOptions,
+  onOpenNewCall,
   onOpenNewChat
 }: {
   activeTab: FooterTab;
-  canInviteEmployees: boolean;
-  hasInviteDraft: boolean;
-  isInvitingEmployees: boolean;
-  onBatchImportEmployees: () => void;
-  onInviteEmployee: () => void;
-  onManualAddEmployee: () => void;
   onOpenOptions?: () => void;
+  onOpenNewCall?: () => void;
   onOpenNewChat: () => void;
 }) {
-  const employeeActionDisabled = isInvitingEmployees || hasInviteDraft;
+  const appTheme = useAppTheme();
+  const showOptionsButton = Boolean(onOpenOptions);
 
   return (
     <View style={styles.topActions}>
-      <Pressable
-        android_ripple={androidIconRipple}
-        accessibilityLabel="Open options"
-        accessibilityRole="button"
-        onPress={onOpenOptions}
-        style={({ pressed }) => [styles.roundIconButton, pressed && styles.pressed]}
-      >
-        <Ionicons color={colors.primary} name="ellipsis-horizontal-circle-outline" size={23} />
-      </Pressable>
+      <View style={styles.topActionsLeftSpacer} />
 
-      {activeTab === 'Employees' && canInviteEmployees ? (
-        <View style={styles.employeeTopActions}>
-          <Pressable
-            android_ripple={androidButtonRipple}
-            accessibilityRole="button"
-            disabled={employeeActionDisabled}
-            onPress={onManualAddEmployee}
-            style={({ pressed }) => [
-              styles.inviteButtonSecondary,
-              pressed && !employeeActionDisabled && styles.pressed,
-              employeeActionDisabled && styles.disabled
-            ]}
-          >
-            <Text style={styles.inviteButtonSecondaryText}>Phone</Text>
-          </Pressable>
+      {activeTab === 'Chats' || activeTab === 'Calls' || showOptionsButton ? (
+        <View style={[
+          styles.rightActions,
+          activeTab !== 'Chats' && activeTab !== 'Calls' && styles.rightActionsCompact
+        ]}>
+          {activeTab === 'Chats' ? (
+            <>
+              <Pressable
+                android_ripple={androidIconRipple}
+                accessibilityLabel="Open camera"
+                accessibilityRole="button"
+                style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}
+              >
+                <Ionicons color={appTheme.colors.primary} name="camera-outline" size={23} />
+              </Pressable>
+              <Pressable
+                android_ripple={androidButtonRipple}
+                accessibilityLabel="Start new chat"
+                accessibilityRole="button"
+                onPress={onOpenNewChat}
+                style={({ pressed }) => [
+                  styles.addButton,
+                  { backgroundColor: appTheme.colors.primary },
+                  pressed && styles.pressed
+                ]}
+              >
+                <Ionicons color="#FFFFFF" name="add" size={22} />
+              </Pressable>
+            </>
+          ) : null}
 
-          <Pressable
-            android_ripple={androidButtonRipple}
-            accessibilityRole="button"
-            disabled={employeeActionDisabled}
-            onPress={onInviteEmployee}
-            style={({ pressed }) => [
-              styles.inviteButtonSecondary,
-              pressed && !employeeActionDisabled && styles.pressed,
-              employeeActionDisabled && styles.disabled
-            ]}
-          >
-            <Text style={styles.inviteButtonSecondaryText}>Contact</Text>
-          </Pressable>
+          {activeTab === 'Calls' ? (
+            <>
+              <Pressable
+                android_ripple={androidIconRipple}
+                accessibilityLabel="Open call options"
+                accessibilityRole="button"
+                onPress={onOpenOptions}
+                style={({ pressed }) => [styles.topMenuButton, pressed && styles.pressed]}
+              >
+                <Ionicons color={appTheme.colors.primary} name="ellipsis-horizontal-circle-outline" size={32} />
+              </Pressable>
+              <Pressable
+                android_ripple={androidButtonRipple}
+                accessibilityLabel="Start new call"
+                accessibilityRole="button"
+                onPress={onOpenNewCall}
+                style={({ pressed }) => [
+                  styles.addButton,
+                  { backgroundColor: appTheme.colors.primary },
+                  pressed && styles.pressed
+                ]}
+              >
+                <Ionicons color="#FFFFFF" name="add" size={22} />
+              </Pressable>
+            </>
+          ) : null}
 
-          <Pressable
-            android_ripple={androidButtonRipple}
-            accessibilityRole="button"
-            disabled={employeeActionDisabled}
-            onPress={onBatchImportEmployees}
-            style={({ pressed }) => [
-              styles.inviteButton,
-              pressed && !employeeActionDisabled && styles.pressed,
-              employeeActionDisabled && styles.disabled
-            ]}
-          >
-            <Text style={styles.inviteButtonText}>
-              {isInvitingEmployees ? 'Importing' : 'Batch'}
-            </Text>
-          </Pressable>
-        </View>
-      ) : null}
-
-      {activeTab === 'Chats' ? (
-        <View style={styles.rightActions}>
-          <Pressable
-            android_ripple={androidIconRipple}
-            accessibilityLabel="Open camera"
-            accessibilityRole="button"
-            style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}
-          >
-            <Ionicons color={colors.primary} name="camera-outline" size={23} />
-          </Pressable>
-          <Pressable
-            android_ripple={androidButtonRipple}
-            accessibilityLabel="Start new chat"
-            accessibilityRole="button"
-            onPress={onOpenNewChat}
-            style={({ pressed }) => [styles.addButton, pressed && styles.pressed]}
-          >
-            <Ionicons color="#FFFFFF" name="add" size={22} />
-          </Pressable>
+          {showOptionsButton && activeTab !== 'Calls' ? (
+            <Pressable
+              android_ripple={androidIconRipple}
+              accessibilityLabel="Open options"
+              accessibilityRole="button"
+              onPress={onOpenOptions}
+              style={({ pressed }) => [styles.topMenuButton, pressed && styles.pressed]}
+            >
+              <Ionicons color={appTheme.colors.primary} name="menu-outline" size={32} />
+            </Pressable>
+          ) : null}
         </View>
       ) : null}
     </View>
   );
 }
 
-function SynzappAiAssistantScreen({
+function OfflineAiInstallModal({
+  isInstalling,
+  isOpen,
+  onClose,
+  onInstall,
+  onRemove,
+  onRunInBackground,
+  progress,
+  state
+}: {
+  isInstalling: boolean;
+  isOpen: boolean;
+  onClose: () => void;
+  onInstall: () => void;
+  onRemove: () => void;
+  onRunInBackground: () => void;
+  progress: OfflineAiInstallProgress | null;
+  state: OfflineAiModelState | null;
+}) {
+  const appTheme = useAppTheme();
+  const spinValue = useRef(new Animated.Value(0)).current;
+  const effectiveProgress = progress || (state?.status === 'downloading'
+    ? {
+        downloadedBytes: state.downloadedBytes,
+        progress: state.progress,
+        totalBytes: state.totalBytes
+      }
+    : null);
+  const progressFraction = effectiveProgress
+    ? Math.max(0, Math.min(effectiveProgress.progress, 1))
+    : 0;
+  const progressPercent = Math.round(progressFraction * 100);
+  const isInstalled = state?.status === 'installed';
+  const isFailed = state?.status === 'failed';
+  const downloadedLabel = effectiveProgress
+    ? `${formatOfflineAiBytes(effectiveProgress.downloadedBytes)} of ${formatOfflineAiBytes(effectiveProgress.totalBytes)}`
+    : formatOfflineAiBytes(synzappOfflineAiModel.sizeBytes);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return undefined;
+    }
+
+    spinValue.setValue(0);
+    const spinAnimation = Animated.loop(
+      Animated.timing(spinValue, {
+        duration: 2600,
+        easing: Easing.linear,
+        toValue: 1,
+        useNativeDriver: true
+      })
+    );
+
+    spinAnimation.start();
+
+    return () => {
+      spinAnimation.stop();
+    };
+  }, [isOpen, spinValue]);
+
+  const rotation = spinValue.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '360deg']
+  });
+
+  return (
+    <Modal
+      animationType="fade"
+      onRequestClose={isInstalling ? onRunInBackground : onClose}
+      transparent
+      visible={isOpen}
+    >
+      <View style={[styles.offlineAiOverlay, { backgroundColor: appTheme.colors.overlay }]}>
+        <View style={[
+          styles.offlineAiCard,
+          {
+            backgroundColor: appTheme.colors.surfaceElevated,
+            borderColor: appTheme.colors.border
+          }
+        ]}>
+          {!isInstalling ? (
+            <Pressable
+              accessibilityLabel="Close offline AI setup"
+              accessibilityRole="button"
+              onPress={onClose}
+              style={({ pressed }) => [
+                styles.offlineAiClose,
+                { backgroundColor: appTheme.colors.surface },
+                pressed && styles.pressed
+              ]}
+            >
+              <Feather color={appTheme.colors.mutedStrong} name="x" size={22} />
+            </Pressable>
+          ) : null}
+
+          <View style={styles.offlineAiHeader}>
+            <View style={[styles.offlineAiMarkShell, { backgroundColor: appTheme.colors.primarySoft }]}>
+              <SynzappAiMark size={64} spin={rotation} />
+            </View>
+            <Text style={[styles.offlineAiTitle, { color: appTheme.colors.ink }]}>
+              {isInstalled ? 'Synzapp AI is ready' : 'Install Synzapp AI'}
+            </Text>
+            <Text style={[styles.offlineAiBody, { color: appTheme.colors.mutedStrong }]}>
+              Set up a secure offline assistant on this device so Synzapp AI can help with writing, planning, and summaries even when internet is unavailable.
+            </Text>
+          </View>
+
+          <View style={[styles.offlineAiInfoPanel, { backgroundColor: appTheme.colors.surface }]}>
+            <OfflineAiInfoRow
+              label="Storage"
+              value={`${formatOfflineAiBytes(synzappOfflineAiModel.sizeBytes)} on this device`}
+            />
+            <OfflineAiInfoRow
+              label="Availability"
+              value="Works offline after installation"
+            />
+            <OfflineAiInfoRow
+              label="Privacy"
+              value="Prompts and responses remain on this device."
+            />
+            <OfflineAiInfoRow
+              label="Network"
+              value="Use Wi-Fi for the first download."
+            />
+          </View>
+
+          {effectiveProgress ? (
+            <View style={styles.offlineAiProgressBlock}>
+              <View style={styles.offlineAiProgressHeader}>
+                <Text style={[styles.offlineAiProgressText, { color: appTheme.colors.ink }]}>Downloading Synzapp AI</Text>
+                <Text style={[styles.offlineAiProgressText, { color: appTheme.colors.muted }]}>{progressPercent}%</Text>
+              </View>
+              <View style={[styles.offlineAiProgressTrack, { backgroundColor: appTheme.colors.divider }]}>
+                <View
+                  style={[
+                    styles.offlineAiProgressFill,
+                    {
+                      backgroundColor: appTheme.colors.primary,
+                      width: `${progressPercent}%`
+                    }
+                  ]}
+                />
+              </View>
+              <Text style={[styles.offlineAiDownloadedText, { color: appTheme.colors.muted }]}>{downloadedLabel}</Text>
+            </View>
+          ) : null}
+
+          {isFailed && state?.errorMessage ? (
+            <Text style={[
+              styles.offlineAiFailureText,
+              {
+                backgroundColor: appTheme.colors.amberSoft,
+                color: appTheme.colors.amber
+              }
+            ]}>
+              {state.errorMessage}
+            </Text>
+          ) : null}
+
+          <View style={styles.offlineAiActions}>
+            {isInstalled ? (
+              <>
+                <Pressable
+                  accessibilityLabel="Remove Synzapp AI offline support"
+                  accessibilityRole="button"
+                  disabled={isInstalling}
+                  onPress={onRemove}
+                  style={({ pressed }) => [
+                    styles.offlineAiSecondaryButton,
+                    { backgroundColor: appTheme.colors.surface },
+                    pressed && styles.pressed,
+                    isInstalling && styles.disabled
+                  ]}
+                >
+                  <Text style={[styles.offlineAiSecondaryText, { color: appTheme.colors.destructive }]}>Remove</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityLabel="Done"
+                  accessibilityRole="button"
+                  onPress={onClose}
+                  style={({ pressed }) => [
+                    styles.offlineAiPrimaryButton,
+                    { backgroundColor: appTheme.colors.primary },
+                    pressed && styles.pressed
+                  ]}
+                >
+                  <Text style={styles.offlineAiPrimaryText}>Done</Text>
+                </Pressable>
+              </>
+            ) : (
+              <>
+                <Pressable
+                  accessibilityLabel={isInstalling ? 'Run Synzapp AI installation in background' : 'Not now'}
+                  accessibilityRole="button"
+                  onPress={isInstalling ? onRunInBackground : onClose}
+                  style={({ pressed }) => [
+                    styles.offlineAiSecondaryButton,
+                    { backgroundColor: appTheme.colors.surface },
+                    pressed && styles.pressed
+                  ]}
+                >
+                  <Text style={[styles.offlineAiSecondaryText, { color: isInstalling ? appTheme.colors.primary : appTheme.colors.ink }]}>
+                    {isInstalling ? 'Run in background' : 'Not now'}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  accessibilityLabel={isInstalling ? 'Installing Synzapp AI' : 'Install offline AI'}
+                  accessibilityRole="button"
+                  disabled={isInstalling}
+                  onPress={onInstall}
+                  style={({ pressed }) => [
+                    styles.offlineAiPrimaryButton,
+                    { backgroundColor: appTheme.colors.primary },
+                    pressed && !isInstalling && styles.pressed,
+                    isInstalling && styles.disabled
+                  ]}
+                >
+                  {isInstalling ? (
+                    <ActivityIndicator color="#FFFFFF" size="small" />
+                  ) : (
+                    <Text style={styles.offlineAiPrimaryText}>Install</Text>
+                  )}
+                </Pressable>
+              </>
+            )}
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function OfflineAiInfoRow({
+  label,
+  value
+}: {
+  label: string;
+  value: string;
+}) {
+  const appTheme = useAppTheme();
+
+  return (
+    <View style={[styles.offlineAiInfoRow, { borderBottomColor: appTheme.colors.divider }]}>
+      <Text style={[styles.offlineAiInfoLabel, { color: appTheme.colors.muted }]}>{label}</Text>
+      <Text style={[styles.offlineAiInfoValue, { color: appTheme.colors.ink }]}>{value}</Text>
+    </View>
+  );
+}
+
+function getOfflineAiStatusCopy(state: OfflineAiModelState | null): { body: string; title: string } {
+  if (state?.status === 'installed') {
+    return {
+      body: `${formatOfflineAiBytes(state.downloadedBytes)} installed on this device.`,
+      title: 'Offline AI ready'
+    };
+  }
+
+  if (state?.status === 'downloading') {
+    return {
+      body: 'Synzapp AI is downloading to this device.',
+      title: 'Downloading Synzapp AI'
+    };
+  }
+
+  if (state?.status === 'failed') {
+    return {
+      body: state.errorMessage || 'Synzapp AI needs to be installed again.',
+      title: 'Offline AI needs attention'
+    };
+  }
+
+  return {
+    body: `Download ${formatOfflineAiBytes(synzappOfflineAiModel.sizeBytes)} once for private on-device AI.`,
+    title: 'Install offline AI'
+  };
+}
+
+function SynzappAiChatListScreen({
   bottomInset,
-  draft,
+  conversations,
   isCompactAndroid,
   onBack,
-  onDraftChange,
-  onSend,
+  onDeleteConversation,
+  onNewChat,
+  onOpenConversation,
   profileName
 }: {
   bottomInset: number;
-  draft: string;
+  conversations: OfflineAiConversation[];
   isCompactAndroid: boolean;
   onBack: () => void;
-  onDraftChange: (value: string) => void;
-  onSend: () => void;
+  onDeleteConversation: (conversation: OfflineAiConversation) => void;
+  onNewChat: () => void;
+  onOpenConversation: (conversation: OfflineAiConversation) => void;
   profileName: string;
 }) {
   const spinValue = useRef(new Animated.Value(0)).current;
   const pulseValue = useRef(new Animated.Value(0)).current;
+  const appTheme = useAppTheme();
   const safeFirstName = profileName.trim().split(/\s+/)[0] || '';
   const greeting = safeFirstName ? `Hello, ${safeFirstName}` : 'Hello';
-  const canSend = draft.trim().length > 0;
+
+  useEffect(() => {
+    spinValue.setValue(0);
+    pulseValue.setValue(0);
+
+    const spinAnimation = Animated.loop(
+      Animated.timing(spinValue, {
+        duration: 3200,
+        easing: Easing.linear,
+        toValue: 1,
+        useNativeDriver: true
+      })
+    );
+    const pulseAnimation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseValue, {
+          duration: 1200,
+          easing: Easing.inOut(Easing.ease),
+          toValue: 1,
+          useNativeDriver: true
+        }),
+        Animated.timing(pulseValue, {
+          duration: 1200,
+          easing: Easing.inOut(Easing.ease),
+          toValue: 0,
+          useNativeDriver: true
+        })
+      ])
+    );
+
+    spinAnimation.start();
+    pulseAnimation.start();
+
+    return () => {
+      spinAnimation.stop();
+      pulseAnimation.stop();
+    };
+  }, [pulseValue, spinValue]);
+
+  const rotation = spinValue.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '360deg']
+  });
+  const haloScale = pulseValue.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.94, 1.08]
+  });
+  const haloOpacity = pulseValue.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.28, 0.48]
+  });
+  const listBottomPadding = Math.max(bottomInset + (isCompactAndroid ? 18 : 24), 28);
+
+  return (
+    <View style={[styles.aiScreen, { backgroundColor: appTheme.colors.screen }]}>
+      <View style={[
+        styles.aiHeader,
+        {
+          backgroundColor: appTheme.colors.surfaceElevated,
+          borderBottomColor: appTheme.colors.divider
+        }
+      ]}>
+        <Pressable
+          accessibilityLabel="Back to chats"
+          accessibilityRole="button"
+          onPress={onBack}
+          style={({ pressed }) => [
+            styles.aiHeaderButton,
+            { backgroundColor: appTheme.colors.surfaceElevated },
+            pressed && styles.pressed
+          ]}
+        >
+          <Text style={[styles.backButtonText, { color: appTheme.colors.primary }]}>‹</Text>
+        </Pressable>
+        <View style={styles.aiHeaderTitleRow}>
+          <SynzappAiMark size={30} spin={rotation} />
+          <View style={styles.aiHeaderTitleText}>
+            <Text numberOfLines={1} style={[styles.aiHeaderTitle, { color: appTheme.colors.ink }]}>Synzapp AI</Text>
+            <Text numberOfLines={1} style={[styles.aiHeaderSubtitle, { color: appTheme.colors.muted }]}>Private assistant preview</Text>
+          </View>
+        </View>
+        <Pressable
+          accessibilityLabel="Start new Synzapp AI chat"
+          accessibilityRole="button"
+          onPress={onNewChat}
+          style={({ pressed }) => [
+            styles.aiHeaderButton,
+            { backgroundColor: appTheme.colors.surfaceElevated },
+            pressed && styles.pressed
+          ]}
+        >
+          <Feather color={appTheme.colors.primary} name="plus" size={23} />
+        </Pressable>
+      </View>
+
+      <ScrollView
+        contentContainerStyle={[
+          styles.aiScrollContent,
+          { paddingBottom: listBottomPadding }
+        ]}
+        showsVerticalScrollIndicator={false}
+        style={styles.aiScroll}
+      >
+        {conversations.length ? (
+          <View style={styles.aiHistoryList}>
+            {conversations.map((conversation) => (
+              <SynzappAiHistoryRow
+                conversation={conversation}
+                key={conversation.id}
+                onDelete={() => onDeleteConversation(conversation)}
+                onOpen={() => onOpenConversation(conversation)}
+                spin={rotation}
+              />
+            ))}
+          </View>
+        ) : (
+          <View style={styles.aiEmptyHistory}>
+            <View style={styles.aiHeroMarkWrap}>
+              <Animated.View
+                pointerEvents="none"
+                style={[
+                  styles.aiHeroHalo,
+                  {
+                    opacity: haloOpacity,
+                    transform: [{ scale: haloScale }]
+                  }
+                ]}
+              />
+              <SynzappAiMark size={92} spin={rotation} />
+            </View>
+            <Text style={[styles.aiGreeting, { color: appTheme.colors.ink }]}>{greeting}</Text>
+            <Text style={[styles.aiPrompt, { color: appTheme.colors.mutedStrong }]}>
+              Start a private Synzapp AI chat for writing, planning, summaries, and workplace ideas.
+            </Text>
+            <Pressable
+              accessibilityLabel="Start a new Synzapp AI chat"
+              accessibilityRole="button"
+              onPress={onNewChat}
+              style={({ pressed }) => [
+                styles.aiStartChatButton,
+                { backgroundColor: appTheme.colors.primary },
+                pressed && styles.pressed
+              ]}
+            >
+              <Feather color="#FFFFFF" name="plus" size={18} />
+              <Text style={styles.aiStartChatText}>New AI chat</Text>
+            </Pressable>
+          </View>
+        )}
+      </ScrollView>
+    </View>
+  );
+}
+
+function SynzappAiHistoryRow({
+  conversation,
+  onDelete,
+  onOpen,
+  spin
+}: {
+  conversation: OfflineAiConversation;
+  onDelete: () => void;
+  onOpen: () => void;
+  spin: Animated.AnimatedInterpolation<string>;
+}) {
+  const appTheme = useAppTheme();
+  const translateX = useRef(new Animated.Value(0)).current;
+  const offsetRef = useRef(0);
+
+  const closeSwipe = () => {
+    offsetRef.current = 0;
+    Animated.spring(translateX, {
+      damping: 20,
+      mass: 0.75,
+      stiffness: 170,
+      toValue: 0,
+      useNativeDriver: true
+    }).start();
+  };
+
+  const snapSwipe = (toValue: number) => {
+    offsetRef.current = toValue;
+    Animated.spring(translateX, {
+      damping: 20,
+      mass: 0.75,
+      stiffness: 170,
+      toValue,
+      useNativeDriver: true
+    }).start();
+  };
+
+  const panResponder = useMemo(() => PanResponder.create({
+    onMoveShouldSetPanResponder: (_event, gestureState) =>
+      Math.abs(gestureState.dx) > 4 &&
+      Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.08,
+    onMoveShouldSetPanResponderCapture: (_event, gestureState) =>
+      Math.abs(gestureState.dx) > 6 &&
+      Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.08,
+    onPanResponderGrant: () => {
+      translateX.stopAnimation((value) => {
+        offsetRef.current = value;
+      });
+    },
+    onPanResponderMove: (_event, gestureState) => {
+      const nextValue = Math.max(
+        -AI_HISTORY_ROW_ACTION_WIDTH,
+        Math.min(0, offsetRef.current + gestureState.dx)
+      );
+
+      translateX.setValue(nextValue);
+    },
+    onPanResponderRelease: (_event, gestureState) => {
+      const intendedDelete = gestureState.dx <= -CHAT_ROW_SWIPE_TRIGGER || gestureState.vx <= -0.18;
+
+      if (intendedDelete) {
+        snapSwipe(-AI_HISTORY_ROW_ACTION_WIDTH);
+        return;
+      }
+
+      closeSwipe();
+    },
+    onPanResponderTerminate: closeSwipe,
+    onPanResponderTerminationRequest: () => false,
+    onStartShouldSetPanResponder: () => false
+  }), [translateX]);
+
+  useEffect(() => {
+    closeSwipe();
+  }, [conversation.id]);
+
+  const runDelete = () => {
+    closeSwipe();
+    onDelete();
+  };
+
+  return (
+    <View style={[styles.aiHistorySwipeShell, { backgroundColor: appTheme.colors.screen }]}>
+      <View style={styles.aiHistorySwipeRightActions}>
+        <Pressable
+          accessibilityLabel={`Delete ${conversation.title}`}
+          accessibilityRole="button"
+          onPress={runDelete}
+          style={({ pressed }) => [
+            styles.aiHistorySwipeAction,
+            pressed && styles.pressed
+          ]}
+        >
+          <Feather color="#FFFFFF" name="trash-2" size={20} />
+          <Text style={styles.chatSwipeActionText}>Delete</Text>
+        </Pressable>
+      </View>
+
+      <Animated.View
+        style={[
+          styles.chatSwipeContent,
+          { backgroundColor: appTheme.colors.screen },
+          { transform: [{ translateX }] }
+        ]}
+        {...panResponder.panHandlers}
+      >
+        <Pressable
+          accessibilityLabel={`Open ${conversation.title}`}
+          accessibilityRole="button"
+          onPress={() => {
+            if (offsetRef.current !== 0) {
+              closeSwipe();
+              return;
+            }
+
+            onOpen();
+          }}
+          style={({ pressed }) => [
+            styles.aiHistoryRow,
+            {
+              backgroundColor: appTheme.colors.screen,
+              borderBottomColor: appTheme.colors.divider
+            },
+            pressed && styles.pressed
+          ]}
+        >
+          <View style={[styles.aiHistoryIcon, { backgroundColor: appTheme.colors.primarySoft }]}>
+            <SynzappAiMark size={30} spin={spin} />
+          </View>
+          <View style={styles.aiHistoryText}>
+            <View style={styles.aiHistoryTitleRow}>
+              <Text numberOfLines={1} style={[styles.aiHistoryTitle, { color: appTheme.colors.ink }]}>
+                {conversation.title}
+              </Text>
+              <Text style={[styles.aiHistoryTime, { color: appTheme.colors.muted }]}>
+                {formatChatListTime(conversation.updatedAt)}
+              </Text>
+            </View>
+            <Text numberOfLines={2} style={[styles.aiHistoryPreview, { color: appTheme.colors.muted }]}>
+              {getOfflineAiConversationPreview(conversation)}
+            </Text>
+          </View>
+        </Pressable>
+      </Animated.View>
+    </View>
+  );
+}
+
+function SynzappAiChatThreadScreen({
+  attachments,
+  bottomInset,
+  conversation,
+  draft,
+  isCompactAndroid,
+  isGenerating,
+  isPreparingAttachment,
+  onBack,
+  onDraftChange,
+  onPickFile,
+  onPickMedia,
+  onRemoveAttachment,
+  onSend,
+  onSendVoiceNote,
+  onUseSuggestion,
+  profileName
+}: {
+  attachments: OfflineAiAttachment[];
+  bottomInset: number;
+  conversation: OfflineAiConversation | null;
+  draft: string;
+  isCompactAndroid: boolean;
+  isGenerating: boolean;
+  isPreparingAttachment: boolean;
+  onBack: () => void;
+  onDraftChange: (value: string) => void;
+  onPickFile: () => void | Promise<void>;
+  onPickMedia: () => void | Promise<void>;
+  onRemoveAttachment: (attachmentId: string) => void;
+  onSend: () => void | Promise<void>;
+  onSendVoiceNote: (media: LocalChatMediaInput) => void | Promise<void>;
+  onUseSuggestion: (value: string) => void;
+  profileName: string;
+}) {
+  const spinValue = useRef(new Animated.Value(0)).current;
+  const pulseValue = useRef(new Animated.Value(0)).current;
+  const appTheme = useAppTheme();
+  const recorder = useAudioRecorder(VOICE_NOTE_RECORDING_OPTIONS);
+  const recorderState = useAudioRecorderState(recorder, 250);
+  const safeFirstName = profileName.trim().split(/\s+/)[0] || '';
+  const greeting = safeFirstName ? `Hello, ${safeFirstName}` : 'Hello';
+  const [isVoiceRecording, setIsVoiceRecording] = useState(false);
+  const [isVoiceRecorderBusy, setIsVoiceRecorderBusy] = useState(false);
   const [isKeyboardVisible, setIsKeyboardVisible] = useState(false);
+  const [messageInputHeight, setMessageInputHeight] = useState(MESSAGE_INPUT_MIN_HEIGHT);
+  const [messageInputWidth, setMessageInputWidth] = useState(0);
+  const inputRef = useRef<TextInput | null>(null);
+  const scrollViewRef = useRef<ScrollView | null>(null);
+  const activeVoiceRecordingUriRef = useRef<string | null>(null);
+  const canSend = (draft.trim().length > 0 || attachments.length > 0) &&
+    !isGenerating &&
+    !isPreparingAttachment &&
+    !isVoiceRecording;
+  const isComposerBusy = isGenerating || isPreparingAttachment || isVoiceRecorderBusy;
 
   useEffect(() => {
     spinValue.setValue(0);
@@ -8040,6 +11026,26 @@ function SynzappAiAssistantScreen({
     };
   }, []);
 
+  useEffect(() => () => {
+    if (safeIsAudioRecorderRecording(recorder)) {
+      void safeStopAudioRecorder(recorder);
+    }
+
+    void setAudioModeAsync(CHAT_AUDIO_PLAYBACK_MODE).catch(() => undefined);
+  }, [recorder]);
+
+  useEffect(() => {
+    if (recorder.uri || recorderState.url) {
+      activeVoiceRecordingUriRef.current = recorder.uri || recorderState.url;
+    }
+  }, [recorder.uri, recorderState.url]);
+
+  useEffect(() => {
+    if (draft.length === 0) {
+      setMessageInputHeight(MESSAGE_INPUT_MIN_HEIGHT);
+    }
+  }, [draft.length]);
+
   const rotation = spinValue.interpolate({
     inputRange: [0, 1],
     outputRange: ['0deg', '360deg']
@@ -8052,28 +11058,178 @@ function SynzappAiAssistantScreen({
     inputRange: [0, 1],
     outputRange: [0.28, 0.48]
   });
-  const composerBottomPadding = Math.max(bottomInset + 6, isCompactAndroid ? 10 : 12);
+  const composerBottomPadding = isKeyboardVisible
+    ? 6
+    : Math.max(bottomInset + 6, isCompactAndroid ? 10 : 12);
+  const messages = conversation?.messages || [];
+  const title = conversation?.messages.length ? conversation.title : 'Synzapp AI';
+  const messageInputBoxHeight = Math.max(42, messageInputHeight + MESSAGE_INPUT_BOX_EXTRA_HEIGHT);
+
+  function updateMessageInputHeight(nextHeight: number) {
+    setMessageInputHeight((currentHeight) => (
+      Math.abs(currentHeight - nextHeight) > 1 ? nextHeight : currentHeight
+    ));
+  }
+
+  function scrollToLatest(animated = true) {
+    scrollViewRef.current?.scrollToEnd({ animated });
+  }
+
+  async function handleStartVoiceRecording() {
+    if (isComposerBusy) {
+      return;
+    }
+
+    try {
+      setIsVoiceRecorderBusy(true);
+      const permission = await requestRecordingPermissionsAsync();
+
+      if (!permission.granted) {
+        Alert.alert('Microphone access needed', 'Please allow microphone access to record a voice note.');
+        return;
+      }
+
+      await setAudioModeAsync(CHAT_AUDIO_RECORDING_MODE);
+      await recorder.prepareToRecordAsync(VOICE_NOTE_RECORDING_OPTIONS);
+      recorder.record();
+      activeVoiceRecordingUriRef.current = recorder.uri || recorderState.url || null;
+      setIsVoiceRecording(true);
+      Keyboard.dismiss();
+    } catch (error) {
+      await setAudioModeAsync(CHAT_AUDIO_PLAYBACK_MODE).catch(() => undefined);
+      Alert.alert('Voice note unavailable', getErrorMessage(error, 'Unable to start recording.'));
+    } finally {
+      setIsVoiceRecorderBusy(false);
+    }
+  }
+
+  async function handleCancelVoiceRecording() {
+    if (!isVoiceRecording || isVoiceRecorderBusy) {
+      return;
+    }
+
+    try {
+      setIsVoiceRecorderBusy(true);
+
+      if (safeIsAudioRecorderRecording(recorder)) {
+        await safeStopAudioRecorder(recorder);
+      }
+
+      const recordedUri = recorder.uri || recorderState.url || activeVoiceRecordingUriRef.current;
+
+      if (recordedUri) {
+        await FileSystem.deleteAsync(recordedUri, { idempotent: true }).catch(() => undefined);
+      }
+    } catch {
+      // Cancel should stay quiet; the user is leaving the recording flow.
+    } finally {
+      activeVoiceRecordingUriRef.current = null;
+      setIsVoiceRecording(false);
+      setIsVoiceRecorderBusy(false);
+      await setAudioModeAsync(CHAT_AUDIO_PLAYBACK_MODE).catch(() => undefined);
+    }
+  }
+
+  async function handleStopAndSendVoiceRecording() {
+    if (!isVoiceRecording || isVoiceRecorderBusy) {
+      return;
+    }
+
+    try {
+      setIsVoiceRecorderBusy(true);
+      const durationMs = Math.max(
+        recorderState.durationMillis || 0,
+        Math.round((recorder.currentTime || 0) * 1000)
+      );
+
+      if (safeIsAudioRecorderRecording(recorder)) {
+        await safeStopAudioRecorder(recorder);
+      }
+
+      await setAudioModeAsync(CHAT_AUDIO_PLAYBACK_MODE).catch(() => undefined);
+
+      const recordedUri = recorder.uri || recorderState.url || activeVoiceRecordingUriRef.current;
+      activeVoiceRecordingUriRef.current = null;
+      setIsVoiceRecording(false);
+
+      if (!recordedUri) {
+        throw new Error('Recording could not be saved.');
+      }
+
+      if (durationMs < VOICE_NOTE_MIN_DURATION_MS) {
+        await FileSystem.deleteAsync(recordedUri, { idempotent: true }).catch(() => undefined);
+        Alert.alert('Voice note too short', 'Please record a longer voice note.');
+        return;
+      }
+
+      await onSendVoiceNote({
+        contentType: getVoiceNoteContentType(recordedUri),
+        durationMs,
+        fileName: buildVoiceNoteFileName(recordedUri),
+        kind: 'audio',
+        sizeBytes: await getLocalFileSize(recordedUri),
+        uri: recordedUri
+      });
+    } catch (error) {
+      activeVoiceRecordingUriRef.current = null;
+      setIsVoiceRecording(false);
+      await setAudioModeAsync(CHAT_AUDIO_PLAYBACK_MODE).catch(() => undefined);
+      Alert.alert('Voice note not sent', getErrorMessage(error, 'Unable to prepare this voice note.'));
+    } finally {
+      setIsVoiceRecorderBusy(false);
+    }
+  }
+
+  function handleComposerActionPress() {
+    if (canSend) {
+      void onSend();
+      return;
+    }
+
+    if (isVoiceRecording) {
+      void handleStopAndSendVoiceRecording();
+      return;
+    }
+
+    void handleStartVoiceRecording();
+  }
+
+  useEffect(() => {
+    setTimeout(() => scrollToLatest(messages.length > 0), 60);
+  }, [attachments.length, isGenerating, messages.length]);
 
   return (
-    <View style={styles.aiScreen}>
-      <View style={styles.aiHeader}>
+    <View style={[styles.aiScreen, { backgroundColor: appTheme.colors.screen }]}>
+      <View style={[
+        styles.aiHeader,
+        {
+          backgroundColor: appTheme.colors.surfaceElevated,
+          borderBottomColor: appTheme.colors.divider
+        }
+      ]}>
         <Pressable
-          accessibilityLabel="Back to chats"
+          accessibilityLabel="Back to Synzapp AI chats"
           accessibilityRole="button"
           onPress={onBack}
-          style={({ pressed }) => [styles.aiHeaderButton, pressed && styles.pressed]}
+          style={({ pressed }) => [
+            styles.aiHeaderButton,
+            { backgroundColor: appTheme.colors.surfaceElevated },
+            pressed && styles.pressed
+          ]}
         >
-          <Text style={styles.backButtonText}>‹</Text>
+          <Text style={[styles.backButtonText, { color: appTheme.colors.primary }]}>‹</Text>
         </Pressable>
         <View style={styles.aiHeaderTitleRow}>
           <SynzappAiMark size={30} spin={rotation} />
           <View style={styles.aiHeaderTitleText}>
-            <Text numberOfLines={1} style={styles.aiHeaderTitle}>Synzapp AI</Text>
-            <Text numberOfLines={1} style={styles.aiHeaderSubtitle}>Private assistant preview</Text>
+            <Text numberOfLines={1} style={[styles.aiHeaderTitle, { color: appTheme.colors.ink }]}>{title}</Text>
+            <Text numberOfLines={1} style={[styles.aiHeaderSubtitle, { color: appTheme.colors.muted }]}>
+              {isGenerating ? 'Synzapp Typing......' : 'Private offline assistant'}
+            </Text>
           </View>
         </View>
-        <View style={styles.aiHeaderButton}>
-          <Feather color={colors.primary} name="clock" size={22} />
+        <View style={[styles.aiHeaderButton, { backgroundColor: appTheme.colors.surfaceElevated }]}>
+          <Feather color={appTheme.colors.primary} name="lock" size={20} />
         </View>
       </View>
 
@@ -8082,89 +11238,461 @@ function SynzappAiAssistantScreen({
         style={styles.aiKeyboardAvoidingView}
       >
         <ScrollView
-          contentContainerStyle={styles.aiScrollContent}
+          contentContainerStyle={[
+            styles.aiThreadContent,
+            messages.length === 0 && styles.aiThreadEmptyContent
+          ]}
           keyboardDismissMode={getKeyboardDismissMode()}
           keyboardShouldPersistTaps="handled"
+          onContentSizeChange={() => {
+            setTimeout(() => scrollToLatest(messages.length > 0), 20);
+          }}
           onScrollBeginDrag={() => Keyboard.dismiss()}
+          ref={scrollViewRef}
           showsVerticalScrollIndicator={false}
           style={styles.aiScroll}
         >
-          <View style={styles.aiHero}>
-            <View style={styles.aiHeroMarkWrap}>
-              <Animated.View
-                pointerEvents="none"
-                style={[
-                  styles.aiHeroHalo,
-                  {
-                    opacity: haloOpacity,
-                    transform: [{ scale: haloScale }]
-                  }
-                ]}
-              />
-              <SynzappAiMark size={92} spin={rotation} />
-            </View>
-            <Text style={styles.aiGreeting}>{greeting}</Text>
-            <Text style={styles.aiPrompt}>
-              I'm your Synzapp AI assistant, ready to help with messages, planning, ideas, and anything else on your mind.
-            </Text>
-          </View>
+          {messages.length ? (
+            <>
+              {messages.map((message) => (
+                <SynzappAiMessageBubble key={message.id} message={message} />
+              ))}
+              {isGenerating ? <SynzappAiTypingBubble /> : null}
+            </>
+          ) : (
+            <View style={styles.aiHero}>
+              <View style={styles.aiHeroMarkWrap}>
+                <Animated.View
+                  pointerEvents="none"
+                  style={[
+                    styles.aiHeroHalo,
+                    {
+                      opacity: haloOpacity,
+                      transform: [{ scale: haloScale }]
+                    }
+                  ]}
+                />
+                <SynzappAiMark size={92} spin={rotation} />
+              </View>
+              <Text style={[styles.aiGreeting, { color: appTheme.colors.ink }]}>{greeting}</Text>
+              <Text style={[styles.aiPrompt, { color: appTheme.colors.mutedStrong }]}>
+                I am your private Synzapp AI assistant. Ask me to help draft, plan, summarize, or think through work.
+              </Text>
 
-          <View style={styles.aiSuggestionList}>
-            {synzappAiSuggestions.map((suggestion) => (
-              <Pressable
-                accessibilityLabel={suggestion}
-                accessibilityRole="button"
-                key={suggestion}
-                onPress={() => onDraftChange(suggestion)}
-                style={({ pressed }) => [styles.aiSuggestionRow, pressed && styles.pressed]}
-              >
-                <Feather color="#64748B" name="file-text" size={17} />
-                <Text numberOfLines={1} style={styles.aiSuggestionText}>{suggestion}</Text>
-              </Pressable>
-            ))}
-          </View>
+              <View style={styles.aiSuggestionList}>
+                {synzappAiSuggestions.map((suggestion) => (
+                  <Pressable
+                    accessibilityLabel={suggestion}
+                    accessibilityRole="button"
+                    key={suggestion}
+                    onPress={() => onUseSuggestion(suggestion)}
+                    style={({ pressed }) => [
+                      styles.aiSuggestionRow,
+                      {
+                        backgroundColor: appTheme.colors.surfaceElevated,
+                        borderColor: appTheme.colors.divider
+                      },
+                      pressed && styles.pressed
+                    ]}
+                  >
+                    <Feather color={appTheme.colors.muted} name="file-text" size={17} />
+                    <Text numberOfLines={1} style={[styles.aiSuggestionText, { color: appTheme.colors.ink }]}>{suggestion}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+          )}
         </ScrollView>
 
-        <View style={[styles.aiComposer, { paddingBottom: composerBottomPadding }]}>
-          <View style={styles.aiInputBox}>
-            {isKeyboardVisible ? (
-              <Pressable
-                accessibilityLabel="Close keyboard"
-                accessibilityRole="button"
-                onPress={() => Keyboard.dismiss()}
-                style={({ pressed }) => [styles.aiComposerIconButton, pressed && styles.pressed]}
-              >
-                <Ionicons color="#64748B" name="chevron-down" size={22} />
-              </Pressable>
+        <View style={[
+          styles.aiComposer,
+          {
+            backgroundColor: appTheme.colors.screen,
+            borderTopColor: appTheme.colors.divider,
+            paddingBottom: composerBottomPadding
+          }
+        ]}>
+          <View style={styles.messageComposerMain}>
+            {attachments.length ? (
+              <SynzappAiAttachmentTray
+                attachments={attachments}
+                onRemoveAttachment={onRemoveAttachment}
+              />
             ) : null}
-            <TextInput
-              multiline
-              onChangeText={onDraftChange}
-              placeholder="Ask Synzapp AI"
-              placeholderTextColor="#8B95A5"
-              returnKeyType="default"
-              scrollEnabled
-              style={styles.aiInput}
-              value={draft}
-            />
-            <Pressable
-              accessibilityLabel="Send AI prompt"
-              accessibilityRole="button"
-              disabled={!canSend}
-              onPress={onSend}
-              style={({ pressed }) => [
-                styles.aiSendButton,
-                pressed && canSend && styles.pressed,
-                !canSend && styles.disabled
-              ]}
-            >
-              <Ionicons color="#FFFFFF" name="arrow-up" size={20} />
-            </Pressable>
+
+            {isVoiceRecording ? (
+              <View style={styles.voiceRecordingBox}>
+                <Pressable
+                  accessibilityLabel="Cancel voice note"
+                  accessibilityRole="button"
+                  disabled={isVoiceRecorderBusy}
+                  onPress={() => {
+                    void handleCancelVoiceRecording();
+                  }}
+                  style={({ pressed }) => [
+                    styles.voiceRecordingCancelButton,
+                    pressed && styles.pressed,
+                    isVoiceRecorderBusy && styles.disabled
+                  ]}
+                >
+                  <Feather color="#EF4444" name="trash-2" size={19} />
+                </Pressable>
+                <View style={styles.voiceRecordingDot} />
+                <Text numberOfLines={1} style={styles.voiceRecordingText}>
+                  {formatMediaDuration(recorderState.durationMillis)}
+                </Text>
+                <Text numberOfLines={1} style={styles.voiceRecordingHint}>
+                  Recording
+                </Text>
+              </View>
+            ) : (
+              <View style={[
+                styles.messageInputBox,
+                { backgroundColor: appTheme.colors.composer },
+                { height: messageInputBoxHeight }
+              ]}>
+                <Pressable
+                  accessibilityLabel={isKeyboardVisible ? 'Close keyboard' : 'Open emoji'}
+                  accessibilityRole="button"
+                  onPress={isKeyboardVisible ? () => Keyboard.dismiss() : undefined}
+                  style={({ pressed }) => [styles.messageComposerIconButton, pressed && styles.pressed]}
+                >
+                  <Ionicons
+                    color="#8B95A5"
+                    name={isKeyboardVisible ? 'chevron-down' : 'happy-outline'}
+                    size={isKeyboardVisible ? 22 : 23}
+                  />
+                </Pressable>
+                <TextInput
+                  multiline
+                  onChangeText={(value) => {
+                    onDraftChange(value);
+                    updateMessageInputHeight(estimateMessageInputHeight(value, messageInputWidth));
+                  }}
+                  onContentSizeChange={(event) => {
+                    const contentHeight = Math.ceil(event.nativeEvent.contentSize.height);
+                    const estimatedHeight = estimateMessageInputHeight(draft, messageInputWidth);
+                    const nextHeight = clampMessageInputHeight(
+                      Math.max(contentHeight, estimatedHeight)
+                    );
+
+                    updateMessageInputHeight(nextHeight);
+                  }}
+                  onLayout={(event) => {
+                    const nextWidth = Math.ceil(event.nativeEvent.layout.width);
+                    setMessageInputWidth((currentWidth) => (
+                      Math.abs(currentWidth - nextWidth) > 1 ? nextWidth : currentWidth
+                    ));
+                    if (draft.length > 0) {
+                      updateMessageInputHeight(estimateMessageInputHeight(draft, nextWidth));
+                    }
+                  }}
+                  placeholder="Ask Synzapp AI"
+                  placeholderTextColor={appTheme.colors.muted}
+                  ref={inputRef}
+                  returnKeyType="default"
+                  scrollEnabled={messageInputHeight >= MESSAGE_INPUT_MAX_HEIGHT}
+                  style={[
+                    styles.messageInput,
+                    {
+                      color: appTheme.colors.ink,
+                      height: messageInputHeight
+                    }
+                  ]}
+                  value={draft}
+                />
+                <Pressable
+                  accessibilityLabel="Attach file"
+                  accessibilityRole="button"
+                  disabled={isComposerBusy}
+                  onPress={() => {
+                    void onPickFile();
+                  }}
+                  style={({ pressed }) => [styles.messageComposerIconButton, pressed && styles.pressed]}
+                >
+                  <Feather color="#8B95A5" name="paperclip" size={19} />
+                </Pressable>
+                <Pressable
+                  accessibilityLabel="Open camera"
+                  accessibilityRole="button"
+                  disabled={isComposerBusy}
+                  onPress={() => {
+                    void onPickMedia();
+                  }}
+                  style={({ pressed }) => [styles.messageComposerIconButton, pressed && styles.pressed]}
+                >
+                  <Ionicons color="#8B95A5" name="camera" size={20} />
+                </Pressable>
+              </View>
+            )}
           </View>
+
+          <Pressable
+            accessibilityLabel={canSend ? 'Send AI prompt' : isVoiceRecording ? 'Send voice note' : 'Record voice message'}
+            accessibilityRole="button"
+            disabled={isGenerating || isVoiceRecorderBusy || isPreparingAttachment}
+            onPress={handleComposerActionPress}
+            style={({ pressed }) => [
+              styles.messageSendButton,
+              isVoiceRecording && styles.voiceRecordingSendButton,
+              pressed && styles.pressed,
+              (isComposerBusy && !isVoiceRecording) && styles.disabled
+            ]}
+          >
+            {isComposerBusy && !isVoiceRecording ? (
+              <ActivityIndicator color="#FFFFFF" size="small" />
+            ) : (
+              <Ionicons
+                color="#FFFFFF"
+                name={canSend || isVoiceRecording ? 'send' : 'mic'}
+                size={canSend || isVoiceRecording ? 20 : 22}
+              />
+            )}
+          </Pressable>
         </View>
       </KeyboardAvoidingView>
     </View>
   );
+}
+
+function SynzappAiMessageBubble({ message }: { message: OfflineAiChatMessage }) {
+  const appTheme = useAppTheme();
+  const isUser = message.role === 'user';
+  const bubbleBackground = isUser
+    ? appTheme.colors.primary
+    : appTheme.colors.surfaceElevated;
+  const bubbleTextColor = isUser
+    ? '#FFFFFF'
+    : appTheme.colors.ink;
+  const bubbleMetaColor = isUser
+    ? 'rgba(255, 255, 255, 0.72)'
+    : appTheme.colors.muted;
+
+  return (
+    <View style={[
+      styles.aiChatBubbleRow,
+      isUser ? styles.aiChatBubbleRowMine : styles.aiChatBubbleRowTheirs
+    ]}>
+      <View style={[
+        styles.aiChatBubble,
+        isUser ? styles.aiChatBubbleMine : styles.aiChatBubbleTheirs,
+        {
+          backgroundColor: bubbleBackground,
+          borderColor: isUser ? bubbleBackground : appTheme.colors.divider
+        }
+      ]}>
+        {message.attachments?.length ? (
+          <View style={styles.aiMessageAttachmentList}>
+            {message.attachments.map((attachment) => (
+              <SynzappAiAttachmentCard
+                attachment={attachment}
+                isUser={isUser}
+                key={attachment.id}
+              />
+            ))}
+          </View>
+        ) : null}
+        {message.text ? (
+          <Text style={[styles.aiChatBubbleText, { color: bubbleTextColor }]}>{message.text}</Text>
+        ) : null}
+        <View style={styles.aiChatBubbleMetaRow}>
+          <Text style={[styles.aiChatBubbleTime, { color: bubbleMetaColor }]}>
+            {formatMessageTime(message.createdAt)}
+          </Text>
+          {isUser ? (
+            <Text style={[styles.aiChatBubbleSeen, { color: '#7DD3FC' }]}>Seen</Text>
+          ) : null}
+        </View>
+      </View>
+    </View>
+  );
+}
+
+function SynzappAiAttachmentTray({
+  attachments,
+  onRemoveAttachment
+}: {
+  attachments: OfflineAiAttachment[];
+  onRemoveAttachment: (attachmentId: string) => void;
+}) {
+  const appTheme = useAppTheme();
+
+  return (
+    <ScrollView
+      contentContainerStyle={styles.aiAttachmentTrayContent}
+      horizontal
+      keyboardShouldPersistTaps="handled"
+      showsHorizontalScrollIndicator={false}
+      style={[
+        styles.aiAttachmentTray,
+        {
+          backgroundColor: appTheme.colors.composer,
+          borderColor: appTheme.colors.divider
+        }
+      ]}
+    >
+      {attachments.map((attachment) => (
+        <View
+          key={attachment.id}
+          style={[
+            styles.aiAttachmentChip,
+            {
+              backgroundColor: appTheme.colors.surface,
+              borderColor: appTheme.colors.divider
+            }
+          ]}
+        >
+          <Feather
+            color={appTheme.colors.primary}
+            name={getSynzappAiAttachmentIconName(attachment)}
+            size={16}
+          />
+          <View style={styles.aiAttachmentChipText}>
+            <Text numberOfLines={1} style={[styles.aiAttachmentChipName, { color: appTheme.colors.ink }]}>
+              {attachment.fileName}
+            </Text>
+            <Text numberOfLines={1} style={[styles.aiAttachmentChipMeta, { color: appTheme.colors.muted }]}>
+              {getSynzappAiAttachmentMeta(attachment)}
+            </Text>
+          </View>
+          <Pressable
+            accessibilityLabel={`Remove ${attachment.fileName}`}
+            accessibilityRole="button"
+            onPress={() => onRemoveAttachment(attachment.id)}
+            style={({ pressed }) => [styles.aiAttachmentChipRemove, pressed && styles.pressed]}
+          >
+            <Feather color={appTheme.colors.muted} name="x" size={15} />
+          </Pressable>
+        </View>
+      ))}
+    </ScrollView>
+  );
+}
+
+function SynzappAiAttachmentCard({
+  attachment,
+  isUser
+}: {
+  attachment: OfflineAiAttachment;
+  isUser: boolean;
+}) {
+  const appTheme = useAppTheme();
+  const iconColor = isUser ? '#FFFFFF' : appTheme.colors.primary;
+  const titleColor = isUser ? '#FFFFFF' : appTheme.colors.ink;
+  const metaColor = isUser ? 'rgba(255, 255, 255, 0.72)' : appTheme.colors.muted;
+  const backgroundColor = isUser ? 'rgba(255, 255, 255, 0.13)' : appTheme.colors.surface;
+  const borderColor = isUser ? 'rgba(255, 255, 255, 0.18)' : appTheme.colors.divider;
+
+  return (
+    <View style={[
+      styles.aiMessageAttachmentCard,
+      {
+        backgroundColor,
+        borderColor
+      }
+    ]}>
+      <Feather color={iconColor} name={getSynzappAiAttachmentIconName(attachment)} size={18} />
+      <View style={styles.aiMessageAttachmentText}>
+        <Text numberOfLines={1} style={[styles.aiMessageAttachmentName, { color: titleColor }]}>
+          {attachment.fileName}
+        </Text>
+        <Text numberOfLines={1} style={[styles.aiMessageAttachmentMeta, { color: metaColor }]}>
+          {getSynzappAiAttachmentMeta(attachment)}
+        </Text>
+      </View>
+    </View>
+  );
+}
+
+function SynzappAiTypingBubble() {
+  const appTheme = useAppTheme();
+
+  return (
+    <View style={[styles.aiChatBubbleRow, styles.aiChatBubbleRowTheirs]}>
+      <View style={[
+        styles.aiTypingBubble,
+        {
+          backgroundColor: appTheme.colors.surfaceElevated,
+          borderColor: appTheme.colors.divider
+        }
+      ]}>
+        <ActivityIndicator color={appTheme.colors.primary} size="small" />
+        <Text style={[styles.aiTypingText, { color: appTheme.colors.mutedStrong }]}>Synzapp Typing......</Text>
+      </View>
+    </View>
+  );
+}
+
+function getOfflineAiConversationPreview(conversation: OfflineAiConversation): string {
+  const lastMessage = conversation.messages[conversation.messages.length - 1];
+
+  if (!lastMessage) {
+    return 'No messages yet';
+  }
+
+  if (lastMessage.attachments?.length && !lastMessage.text) {
+    return getSynzappAiAttachmentMessageText(lastMessage.attachments);
+  }
+
+  return lastMessage.role === 'user'
+    ? lastMessage.text
+    : `Synzapp AI: ${lastMessage.text}`;
+}
+
+function getSynzappAiAttachmentMessageText(attachments: OfflineAiAttachment[]): string {
+  if (attachments.length > 1) {
+    return `${attachments.length} attachments`;
+  }
+
+  const attachment = attachments[0];
+
+  if (!attachment) {
+    return 'Attachment';
+  }
+
+  if (attachment.kind === 'image') {
+    return 'Photo';
+  }
+
+  if (attachment.kind === 'video') {
+    return 'Video';
+  }
+
+  if (attachment.kind === 'audio') {
+    return 'Voice note';
+  }
+
+  return attachment.fileName || 'File';
+}
+
+function getSynzappAiAttachmentIconName(attachment: OfflineAiAttachment): keyof typeof Feather.glyphMap {
+  if (attachment.kind === 'image') {
+    return 'image';
+  }
+
+  if (attachment.kind === 'video') {
+    return 'video';
+  }
+
+  if (attachment.kind === 'audio') {
+    return 'mic';
+  }
+
+  return 'file-text';
+}
+
+function getSynzappAiAttachmentMeta(attachment: OfflineAiAttachment): string {
+  const kindLabel = attachment.kind === 'image'
+    ? 'Photo'
+    : attachment.kind === 'video'
+      ? 'Video'
+      : attachment.kind === 'audio'
+        ? 'Voice note'
+        : getReadableFileExtension(attachment.fileName) || 'File';
+  const durationLabel = attachment.durationMs ? ` • ${formatMediaDuration(attachment.durationMs)}` : '';
+  const textLabel = attachment.textPreview ? ' • text ready' : '';
+
+  return `${kindLabel}${durationLabel} • ${formatByteCount(attachment.sizeBytes)}${textLabel}`;
 }
 
 function SynzappAiMark({
@@ -8226,6 +11754,242 @@ function SynzappAiMark({
   );
 }
 
+function SynzappCallOverlay({
+  callState,
+  onAnswer,
+  onDecline,
+  onEnd,
+  onToggleMute,
+  onToggleSpeaker,
+  onToggleVideo,
+  profilePhotoHeaders
+}: {
+  callState: ActiveSynzappCall | null;
+  onAnswer: () => void;
+  onDecline: () => void;
+  onEnd: () => void;
+  onToggleMute: () => void;
+  onToggleSpeaker: () => void;
+  onToggleVideo: () => void;
+  profilePhotoHeaders?: Record<string, string>;
+}) {
+  const insets = useSafeAreaInsets();
+
+  if (!callState) {
+    return null;
+  }
+
+  const remoteStreamUrls = Object.values(callState.remoteStreamUrlsByUid).filter(Boolean);
+  const primaryRemoteStreamUrl = remoteStreamUrls[0] || null;
+  const isVideoCall = callState.call.mode === 'video';
+  const isIncomingRinging = callState.direction === 'incoming' && callState.status === 'ringing';
+  const statusText = getSynzappCallStatusLabel(callState);
+  const displayName = callState.direction === 'incoming'
+    ? callState.call.callerName || callState.call.title
+    : callState.call.title;
+
+  return (
+    <Modal
+      animationType="fade"
+      onRequestClose={isIncomingRinging ? onDecline : onEnd}
+      presentationStyle="fullScreen"
+      transparent={false}
+      visible
+    >
+      <View style={[
+        styles.callOverlayRoot,
+        {
+          paddingBottom: Math.max(insets.bottom, 12) + 10,
+          paddingTop: Math.max(insets.top, 12) + 10
+        }
+      ]}>
+        {isVideoCall && primaryRemoteStreamUrl ? (
+          <SynzappCallVideoSurface
+            mirror={false}
+            streamUrl={primaryRemoteStreamUrl}
+            style={styles.callRemoteVideo}
+          />
+        ) : null}
+
+        <View style={styles.callOverlayPattern}>
+          {Array.from({ length: 28 }).map((_, index) => (
+            <View
+              key={index}
+              style={[
+                styles.callPatternDot,
+                {
+                  left: `${(index * 37) % 100}%`,
+                  opacity: 0.08 + ((index % 4) * 0.025),
+                  top: `${(index * 19) % 100}%`,
+                  transform: [{ rotate: `${index * 17}deg` }]
+                }
+              ]}
+            />
+          ))}
+        </View>
+
+        <View style={styles.callTopBar}>
+          <Pressable
+            accessibilityLabel="Minimize call"
+            accessibilityRole="button"
+            style={({ pressed }) => [styles.callRoundButton, pressed && styles.pressed]}
+          >
+            <Feather color="#E5E7EB" name="minimize-2" size={20} />
+          </Pressable>
+
+          <View style={styles.callSecureBadge}>
+            <Feather color="#5EEAD4" name="shield" size={14} />
+            <Text style={styles.callSecureBadgeText}>Synzapp secure call</Text>
+          </View>
+
+          <Pressable
+            accessibilityLabel="Message during call"
+            accessibilityRole="button"
+            style={({ pressed }) => [styles.callRoundButton, pressed && styles.pressed]}
+          >
+            <Feather color="#E5E7EB" name="message-circle" size={20} />
+          </Pressable>
+        </View>
+
+        <View style={styles.callIdentityArea}>
+          <Text numberOfLines={1} style={styles.callTitle}>{displayName}</Text>
+          <Text numberOfLines={1} style={styles.callStatus}>{statusText}</Text>
+        </View>
+
+        <View style={styles.callAvatarStage}>
+          {isVideoCall && primaryRemoteStreamUrl ? null : (
+            <View style={styles.callAvatarHalo}>
+              <View style={styles.callAvatarHaloInner}>
+                <ProfileAvatar
+                  headers={profilePhotoHeaders}
+                  name={displayName}
+                  size={156}
+                  uri={null}
+                />
+              </View>
+            </View>
+          )}
+
+          {isVideoCall && callState.localStreamUrl ? (
+            <View style={styles.callLocalVideoWrap}>
+              <SynzappCallVideoSurface
+                mirror
+                streamUrl={callState.localStreamUrl}
+                style={styles.callLocalVideo}
+              />
+              {!callState.isVideoEnabled ? (
+                <View style={styles.callLocalVideoOff}>
+                  <Feather color="#FFFFFF" name="video-off" size={18} />
+                </View>
+              ) : null}
+            </View>
+          ) : null}
+        </View>
+
+        <View style={styles.callControlsDock}>
+          {isIncomingRinging ? (
+            <>
+              <Pressable
+                accessibilityLabel="Decline Synzapp call"
+                accessibilityRole="button"
+                onPress={onDecline}
+                style={({ pressed }) => [
+                  styles.callControlButton,
+                  styles.callEndButton,
+                  pressed && styles.pressed
+                ]}
+              >
+                <Ionicons color="#FFFFFF" name="call" size={28} style={styles.callEndIconFlip} />
+              </Pressable>
+              <Pressable
+                accessibilityLabel="Answer Synzapp call"
+                accessibilityRole="button"
+                onPress={onAnswer}
+                style={({ pressed }) => [
+                  styles.callControlButton,
+                  styles.callAnswerButton,
+                  pressed && styles.pressed
+                ]}
+              >
+                <Ionicons color="#FFFFFF" name={isVideoCall ? 'videocam' : 'call'} size={28} />
+              </Pressable>
+            </>
+          ) : (
+            <>
+              <Pressable
+                accessibilityLabel={callState.isVideoEnabled ? 'Turn video off' : 'Turn video on'}
+                accessibilityRole="button"
+                disabled={!isVideoCall}
+                onPress={onToggleVideo}
+                style={({ pressed }) => [
+                  styles.callControlButton,
+                  !isVideoCall && styles.disabled,
+                  pressed && isVideoCall && styles.pressed
+                ]}
+              >
+                <Ionicons color="#FFFFFF" name={callState.isVideoEnabled ? 'videocam' : 'videocam-off'} size={24} />
+              </Pressable>
+              <Pressable
+                accessibilityLabel={callState.isSpeakerOn ? 'Turn speaker off' : 'Turn speaker on'}
+                accessibilityRole="button"
+                onPress={onToggleSpeaker}
+                style={({ pressed }) => [styles.callControlButton, pressed && styles.pressed]}
+              >
+                <Ionicons color="#FFFFFF" name={callState.isSpeakerOn ? 'volume-high' : 'volume-medium'} size={25} />
+              </Pressable>
+              <Pressable
+                accessibilityLabel={callState.isMuted ? 'Unmute microphone' : 'Mute microphone'}
+                accessibilityRole="button"
+                onPress={onToggleMute}
+                style={({ pressed }) => [styles.callControlButton, pressed && styles.pressed]}
+              >
+                <Ionicons color="#FFFFFF" name={callState.isMuted ? 'mic-off' : 'mic'} size={25} />
+              </Pressable>
+              <Pressable
+                accessibilityLabel="End Synzapp call"
+                accessibilityRole="button"
+                onPress={onEnd}
+                style={({ pressed }) => [
+                  styles.callControlButton,
+                  styles.callEndButton,
+                  pressed && styles.pressed
+                ]}
+              >
+                <Ionicons color="#FFFFFF" name="call" size={28} style={styles.callEndIconFlip} />
+              </Pressable>
+            </>
+          )}
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function SynzappCallVideoSurface({
+  mirror,
+  streamUrl,
+  style
+}: {
+  mirror: boolean;
+  streamUrl: string | null;
+  style: any;
+}) {
+  const RTCView = getOptionalRtcView();
+
+  if (!RTCView || !streamUrl) {
+    return null;
+  }
+
+  return (
+    <RTCView
+      mirror={mirror}
+      objectFit="cover"
+      streamURL={streamUrl}
+      style={style}
+    />
+  );
+}
+
 function MessageHeader({
   chat,
   onlineCount,
@@ -8234,6 +11998,8 @@ function MessageHeader({
   onOpenGroupCallOptions,
   onOpenGroupInfo,
   onOpenGroupPeoplePicker,
+  onStartVideoCall,
+  onStartVoiceCall,
   profilePhotoHeaders
 }: {
   chat: ChatItem;
@@ -8243,6 +12009,8 @@ function MessageHeader({
   onOpenGroupCallOptions: () => void;
   onOpenGroupInfo: () => void;
   onOpenGroupPeoplePicker: () => void;
+  onStartVideoCall: () => void;
+  onStartVoiceCall: () => void;
   profilePhotoHeaders?: Record<string, string>;
 }) {
   const isGroupChat = chat.chatType === 'GROUP';
@@ -8304,7 +12072,7 @@ function MessageHeader({
           android_ripple={androidIconRipple}
           accessibilityLabel={isGroupChat ? 'Open group call options' : 'Video call'}
           accessibilityRole="button"
-          onPress={isGroupChat ? onOpenGroupCallOptions : undefined}
+          onPress={isGroupChat ? onOpenGroupCallOptions : onStartVideoCall}
           style={({ pressed }) => [styles.messageHeaderIcon, pressed && styles.pressed]}
         >
           <View style={styles.messageHeaderVideoIcon}>
@@ -8317,6 +12085,7 @@ function MessageHeader({
             android_ripple={androidIconRipple}
             accessibilityLabel="Call"
             accessibilityRole="button"
+            onPress={onStartVoiceCall}
             style={({ pressed }) => [styles.messageHeaderIcon, pressed && styles.pressed]}
           >
             <Ionicons color="#FFFFFF" name="call" size={25} />
@@ -8416,6 +12185,7 @@ function MediaReviewModal({
   onSelectIndex: (index: number) => void;
   onSend: () => void;
 }) {
+  const appTheme = useAppTheme();
   const insets = useSafeAreaInsets();
   const { height, width } = useWindowDimensions();
   const activeItem = items[activeIndex] || null;
@@ -9029,6 +12799,7 @@ function MessageThread({
   currentUid,
   draft,
   groupMembers,
+  hasKnownMessages,
   isGroupChat,
   isCompactAndroid,
   isForwardMode,
@@ -9062,6 +12833,7 @@ function MessageThread({
   currentUid: string;
   draft: string;
   groupMembers: ChatGroupMember[];
+  hasKnownMessages: boolean;
   isGroupChat: boolean;
   isCompactAndroid: boolean;
   isForwardMode: boolean;
@@ -9088,6 +12860,7 @@ function MessageThread({
   selectedForwardMessageIds: Record<string, boolean>;
   starredMessageIds: Record<string, boolean>;
 }) {
+  const appTheme = useAppTheme();
   const recorder = useAudioRecorder(VOICE_NOTE_RECORDING_OPTIONS);
   const recorderState = useAudioRecorderState(recorder, 250);
   const [isVoiceRecording, setIsVoiceRecording] = useState(false);
@@ -9104,6 +12877,7 @@ function MessageThread({
   const [activeSearchMatchIndex, setActiveSearchMatchIndex] = useState(0);
   const [isSearchDateModalOpen, setIsSearchDateModalOpen] = useState(false);
   const [isSearchPersonModalOpen, setIsSearchPersonModalOpen] = useState(false);
+  const [isPrivacyInfoModalOpen, setIsPrivacyInfoModalOpen] = useState(false);
   const [activeAudioPlaybackId, setActiveAudioPlaybackId] = useState<string | null>(null);
   const canSend = canChat && draft.trim().length > 0 && !isSending && !isVoiceRecording;
   const threadItems = buildMessageThreadItems(uniqueChatMessages(messages));
@@ -9130,21 +12904,17 @@ function MessageThread({
   const lastReplyJumpRef = useRef<{ messageId: string; timestamp: number } | null>(null);
   const messageOffsetsRef = useRef<Record<string, number>>({});
   const previousMessageCountRef = useRef(0);
-  const androidClosedComposerBottomPadding = Math.max(
-    8,
-    Math.min(bottomInset + 4, isCompactAndroid ? 12 : 14)
-  );
-  const iosClosedComposerBottomPadding = Math.max(
-    8,
-    Math.min(bottomInset + 2, 14)
+  const closedComposerBottomPadding = Math.max(
+    isCompactAndroid ? 10 : 12,
+    bottomInset + (Platform.OS === 'android' ? 6 : 4)
   );
   const composerBottomPadding = Platform.OS === 'android'
     ? isKeyboardVisible
       ? 6
-      : androidClosedComposerBottomPadding
+      : closedComposerBottomPadding
     : isKeyboardVisible
       ? 6
-      : iosClosedComposerBottomPadding;
+      : closedComposerBottomPadding;
   const messageInputBoxHeight = Math.max(42, messageInputHeight + MESSAGE_INPUT_BOX_EXTRA_HEIGHT);
   const composerControlHeight = isVoiceRecording ? 42 : messageInputBoxHeight;
   const scrollToLatestButtonBottom = composerBottomPadding + composerControlHeight + (replyTarget ? 70 : 22);
@@ -9531,7 +13301,13 @@ function MessageThread({
   };
 
   return (
-    <View style={styles.messageScreen} accessibilityState={{ busy: isLoading }}>
+    <View
+      style={[
+        styles.messageScreen,
+        { backgroundColor: appTheme.colors.chatBackground }
+      ]}
+      accessibilityState={{ busy: isLoading }}
+    >
       {isSearchOpen ? (
         <ChatThreadSearchHeader
           inputRef={searchInputRef}
@@ -9574,6 +13350,13 @@ function MessageThread({
         showsVerticalScrollIndicator={false}
         style={styles.messageList}
       >
+        {!threadItems.length && !isSearchOpen && !hasKnownMessages ? (
+          <EmptyChatSecurityNotice
+            isGroupChat={isGroupChat}
+            onLearnMore={() => setIsPrivacyInfoModalOpen(true)}
+          />
+        ) : null}
+
         {threadItems.map((item) => (
           item.type === 'date' ? (
             <View key={item.id} style={styles.messageDateRow}>
@@ -9643,8 +13426,17 @@ function MessageThread({
           pointerEvents="box-none"
           style={styles.chatSearchFooterWrap}
         >
-          <View style={styles.chatSearchFooter}>
-            <View style={styles.chatSearchNavigationPill}>
+          <View style={[
+            styles.chatSearchFooter,
+            {
+              backgroundColor: appTheme.colors.surfaceElevated,
+              borderTopColor: appTheme.colors.divider
+            }
+          ]}>
+            <View style={[
+              styles.chatSearchNavigationPill,
+              { backgroundColor: appTheme.colors.surface }
+            ]}>
               <Pressable
                 accessibilityLabel="Previous search result"
                 accessibilityRole="button"
@@ -9656,9 +13448,9 @@ function MessageThread({
                   !searchMatches.length && styles.disabled
                 ]}
               >
-                <Feather color={colors.ink} name="chevron-up" size={22} />
+                <Feather color={appTheme.colors.ink} name="chevron-up" size={22} />
               </Pressable>
-              <View style={styles.chatSearchNavDivider} />
+              <View style={[styles.chatSearchNavDivider, { backgroundColor: appTheme.colors.divider }]} />
               <Pressable
                 accessibilityLabel="Next search result"
                 accessibilityRole="button"
@@ -9670,11 +13462,11 @@ function MessageThread({
                   !searchMatches.length && styles.disabled
                 ]}
               >
-                <Feather color={colors.ink} name="chevron-down" size={22} />
+                <Feather color={appTheme.colors.ink} name="chevron-down" size={22} />
               </Pressable>
             </View>
 
-            <Text numberOfLines={1} style={styles.chatSearchResultText}>
+            <Text numberOfLines={1} style={[styles.chatSearchResultText, { color: appTheme.colors.muted }]}>
               {getChatSearchResultLabel({
                 hasFilters: hasSearchFilters,
                 matchCount: searchMatches.length,
@@ -9689,15 +13481,18 @@ function MessageThread({
                 onPress={() => setIsSearchPersonModalOpen(true)}
                 style={({ pressed }) => [
                   styles.chatSearchFilterButton,
+                  { backgroundColor: appTheme.colors.surface },
                   searchSenderUid && styles.chatSearchFilterButtonActive,
+                  searchSenderUid && { backgroundColor: appTheme.colors.primary },
                   pressed && styles.pressed
                 ]}
               >
-                <Feather color={searchSenderUid ? '#FFFFFF' : colors.primary} name="user" size={18} />
+                <Feather color={searchSenderUid ? '#FFFFFF' : appTheme.colors.primary} name="user" size={18} />
                 <Text
                   numberOfLines={1}
                   style={[
                     styles.chatSearchFilterText,
+                    { color: appTheme.colors.primary },
                     searchSenderUid && styles.chatSearchFilterTextActive
                   ]}
                 >
@@ -9712,18 +13507,26 @@ function MessageThread({
               onPress={() => setIsSearchDateModalOpen(true)}
               style={({ pressed }) => [
                 styles.chatSearchDateButton,
+                { backgroundColor: appTheme.colors.surface },
                 searchDateKey && styles.chatSearchDateButtonActive,
+                searchDateKey && { backgroundColor: appTheme.colors.primary },
                 pressed && styles.pressed
               ]}
             >
-              <Feather color={searchDateKey ? '#FFFFFF' : colors.primary} name="calendar" size={20} />
+              <Feather color={searchDateKey ? '#FFFFFF' : appTheme.colors.primary} name="calendar" size={20} />
             </Pressable>
           </View>
         </KeyboardAvoidingView>
       ) : null}
 
       {!isForwardMode && !isSearchOpen ? (
-      <View style={[styles.messageComposer, { paddingBottom: composerBottomPadding }]}>
+      <View style={[
+        styles.messageComposer,
+        {
+          backgroundColor: appTheme.colors.chatBackground,
+          paddingBottom: composerBottomPadding
+        }
+      ]}>
         <View style={styles.messageComposerMain}>
           {replyTarget ? (
             <ComposerReplyPreview
@@ -9765,6 +13568,7 @@ function MessageThread({
           ) : (
             <View style={[
               styles.messageInputBox,
+              { backgroundColor: appTheme.colors.composer },
               { height: messageInputBoxHeight },
               replyTarget && styles.messageInputBoxWithReply
             ]}>
@@ -9806,10 +13610,16 @@ function MessageThread({
                   }
                 }}
                 placeholder={canChat ? 'Type a message' : readOnlyReason || 'Waiting for secure device'}
-                placeholderTextColor="#8B95A5"
+                placeholderTextColor={appTheme.colors.muted}
                 ref={inputRef}
                 scrollEnabled={messageInputHeight >= MESSAGE_INPUT_MAX_HEIGHT}
-                style={[styles.messageInput, { height: messageInputHeight }]}
+                style={[
+                  styles.messageInput,
+                  {
+                    color: appTheme.colors.ink,
+                    height: messageInputHeight
+                  }
+                ]}
                 value={draft}
               />
               <Pressable
@@ -9876,6 +13686,170 @@ function MessageThread({
         profilePhotoHeaders={profilePhotoHeaders}
         selectedSenderUid={searchSenderUid}
       />
+
+      <ChatPrivacyInfoModal
+        isGroupChat={isGroupChat}
+        onClose={() => setIsPrivacyInfoModalOpen(false)}
+        visible={isPrivacyInfoModalOpen}
+      />
+    </View>
+  );
+}
+
+function EmptyChatSecurityNotice({
+  isGroupChat,
+  onLearnMore
+}: {
+  isGroupChat: boolean;
+  onLearnMore: () => void;
+}) {
+  const appTheme = useAppTheme();
+  const securityCardBackground = appTheme.isDark ? '#171203' : '#FFF7D6';
+  const securityCardBorder = appTheme.isDark ? '#3B2F0A' : 'rgba(124, 90, 18, 0.14)';
+  const securityTextColor = appTheme.isDark ? '#E7D9A8' : '#3F3215';
+  const securityIconColor = appTheme.isDark ? '#EAB308' : '#7C5A12';
+
+  return (
+    <View style={styles.emptyChatSecurityWrap}>
+      <View style={[
+        styles.emptyChatSecurityCard,
+        {
+          backgroundColor: securityCardBackground,
+          borderColor: securityCardBorder
+        }
+      ]}>
+        <View style={styles.emptyChatSecurityIcon}>
+          <Feather color={securityIconColor} name="lock" size={12} />
+        </View>
+        <Text style={[styles.emptyChatSecurityText, { color: securityTextColor }]}>
+          {isGroupChat
+            ? 'This group is protected with Synzapp secure messaging. Only approved members on registered devices can open the conversation content. '
+            : 'This chat is protected with Synzapp secure messaging. Only you and this contact can open the conversation content on registered devices. '}
+          <Text
+            accessibilityRole="link"
+            onPress={onLearnMore}
+            style={[
+              styles.emptyChatSecurityLink,
+              { color: appTheme.isDark ? '#5EEAD4' : '#2563EB' }
+            ]}
+          >
+            Learn more
+          </Text>
+        </Text>
+      </View>
+    </View>
+  );
+}
+
+function ChatPrivacyInfoModal({
+  isGroupChat,
+  onClose,
+  visible
+}: {
+  isGroupChat: boolean;
+  onClose: () => void;
+  visible: boolean;
+}) {
+  const appTheme = useAppTheme();
+
+  return (
+    <Modal
+      animationType="slide"
+      onRequestClose={onClose}
+      transparent
+      visible={visible}
+    >
+      <View style={styles.chatMoreRoot}>
+        <Pressable
+          accessibilityLabel="Close privacy details"
+          accessibilityRole="button"
+          onPress={onClose}
+          style={[
+            styles.chatMoreBackdrop,
+            { backgroundColor: appTheme.colors.overlay }
+          ]}
+        />
+        <View style={[
+          styles.chatPrivacySheet,
+          {
+            backgroundColor: appTheme.colors.surfaceElevated,
+            borderColor: appTheme.colors.border
+          }
+        ]}>
+          <Pressable
+            accessibilityLabel="Close privacy details"
+            accessibilityRole="button"
+            onPress={onClose}
+            style={({ pressed }) => [
+              styles.chatPrivacyCloseButton,
+              { backgroundColor: appTheme.colors.surface },
+              pressed && styles.pressed
+            ]}
+          >
+            <Feather color={appTheme.colors.ink} name="x" size={24} />
+          </Pressable>
+
+          <View style={styles.chatPrivacyHero}>
+            <View style={[
+              styles.chatPrivacyDevice,
+              {
+                backgroundColor: appTheme.colors.primarySoft,
+                borderColor: appTheme.colors.border
+              }
+            ]}>
+              <Feather color={appTheme.colors.primary} name="shield" size={42} />
+            </View>
+            <View style={[
+              styles.chatPrivacyBadge,
+              {
+                backgroundColor: appTheme.colors.primary,
+                borderColor: appTheme.colors.surfaceElevated
+              }
+            ]}>
+              <Feather color="#FFFFFF" name="lock" size={18} />
+            </View>
+          </View>
+
+          <Text style={[styles.chatPrivacyTitle, { color: appTheme.colors.ink }]}>Synzapp keeps this conversation private</Text>
+          <Text style={[styles.chatPrivacyBody, { color: appTheme.colors.mutedStrong }]}>
+            Message text, voice notes, media, and files are encrypted before sync. Synzapp stores encrypted records for delivery and history, while readable content stays limited to approved devices in this {isGroupChat ? 'group' : 'chat'}.
+          </Text>
+
+          <View style={styles.chatPrivacyPointList}>
+            <ChatPrivacyPoint icon="message-square" label="Messages and replies" />
+            <ChatPrivacyPoint icon="mic" label="Voice notes and audio attachments" />
+            <ChatPrivacyPoint icon="image" label="Photos, videos, and documents" />
+            <ChatPrivacyPoint icon={isGroupChat ? 'users' : 'user-check'} label={isGroupChat ? 'Group membership controls' : 'Verified one-to-one access'} />
+            <ChatPrivacyPoint icon="database" label="Encrypted server sync and device cache" />
+          </View>
+
+          <Text style={[styles.chatPrivacyFooter, { color: appTheme.colors.muted }]}>
+            Delivery status, membership, and audit metadata help the workplace run safely, but message content is opened only inside Synzapp on trusted devices.
+          </Text>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function ChatPrivacyPoint({
+  icon,
+  label
+}: {
+  icon: keyof typeof Feather.glyphMap;
+  label: string;
+}) {
+  const appTheme = useAppTheme();
+
+  return (
+    <View style={styles.chatPrivacyPointRow}>
+      <View style={[
+        styles.chatPrivacyPointIcon,
+        { backgroundColor: appTheme.colors.primarySoft }
+      ]}>
+        <Feather color={appTheme.colors.primary} name={icon} size={17} />
+      </View>
+      <Text style={[styles.chatPrivacyPointText, { color: appTheme.colors.ink }]}>{label}</Text>
     </View>
   );
 }
@@ -9895,19 +13869,28 @@ function ChatThreadSearchHeader({
   onClose: () => void;
   query: string;
 }) {
+  const appTheme = useAppTheme();
+
   return (
     <View style={styles.chatSearchHeader}>
-      <View style={styles.threadSearchBox}>
-        <Feather color="#64748B" name="search" size={18} />
+      <View style={[
+        styles.threadSearchBox,
+        {
+          backgroundColor: appTheme.colors.input,
+          borderColor: appTheme.colors.border,
+          borderWidth: StyleSheet.hairlineWidth
+        }
+      ]}>
+        <Feather color={appTheme.colors.muted} name="search" size={18} />
         <TextInput
           autoCapitalize="none"
           autoCorrect={false}
           onChangeText={onChangeQuery}
           placeholder="Search"
-          placeholderTextColor="#8B95A5"
+          placeholderTextColor={appTheme.colors.muted}
           ref={inputRef}
           returnKeyType="search"
-          style={styles.threadSearchInput}
+          style={[styles.threadSearchInput, { color: appTheme.colors.ink }]}
           value={query}
         />
         {query.trim() ? (
@@ -9915,22 +13898,30 @@ function ChatThreadSearchHeader({
             accessibilityLabel="Clear search"
             accessibilityRole="button"
             onPress={onClearQuery}
-            style={({ pressed }) => [styles.chatSearchClearButton, pressed && styles.pressed]}
+            style={({ pressed }) => [
+              styles.chatSearchClearButton,
+              { backgroundColor: appTheme.colors.mutedStrong },
+              pressed && styles.pressed
+            ]}
           >
-            <Feather color="#FFFFFF" name="x" size={12} />
+            <Feather color={appTheme.colors.screen} name="x" size={12} />
           </Pressable>
         ) : null}
       </View>
       {query.trim() && matchCount > 0 ? (
-        <Text numberOfLines={1} style={styles.chatSearchHeaderCount}>{matchCount}</Text>
+        <Text numberOfLines={1} style={[styles.chatSearchHeaderCount, { color: appTheme.colors.muted }]}>{matchCount}</Text>
       ) : null}
       <Pressable
         accessibilityLabel="Close search"
         accessibilityRole="button"
         onPress={onClose}
-        style={({ pressed }) => [styles.chatSearchCloseButton, pressed && styles.pressed]}
+        style={({ pressed }) => [
+          styles.chatSearchCloseButton,
+          { backgroundColor: appTheme.colors.surface },
+          pressed && styles.pressed
+        ]}
       >
-        <Feather color={colors.ink} name="x" size={24} />
+        <Feather color={appTheme.colors.ink} name="x" size={24} />
       </Pressable>
     </View>
   );
@@ -9949,6 +13940,7 @@ function ChatSearchDateModal({
   onClose: () => void;
   onSelectDate: (dateKey: string | null, targetMessageId?: string, shouldClose?: boolean) => void;
 }) {
+  const appTheme = useAppTheme();
   const defaultDateKey = currentDateKey || getLatestMessageDateKey(messages) || getMessageDateKeyFromDate(new Date());
   const [selectedDate, setSelectedDate] = useState(() => getDateFromDateKey(defaultDateKey));
   const didOpenRef = useRef(false);
@@ -10022,24 +14014,34 @@ function ChatSearchDateModal({
       transparent
       visible
     >
-      <View style={styles.chatSearchModalRoot}>
+      <View style={[
+        styles.chatSearchModalRoot,
+        { backgroundColor: appTheme.colors.overlay }
+      ]}>
         <Pressable
           accessibilityLabel="Close date search"
           accessibilityRole="button"
           onPress={onClose}
           style={styles.chatSearchModalBackdrop}
         />
-        <View style={styles.chatSearchModalSheet}>
-          <View style={styles.chatSearchModalHandle} />
+        <View style={[
+          styles.chatSearchModalSheet,
+          { backgroundColor: appTheme.colors.surfaceElevated }
+        ]}>
+          <View style={[styles.chatSearchModalHandle, { backgroundColor: appTheme.colors.divider }]} />
           <View style={styles.chatSearchModalHeader}>
-            <Text style={styles.chatSearchModalTitle}>Search by date and time</Text>
+            <Text style={[styles.chatSearchModalTitle, { color: appTheme.colors.ink }]}>Search by date and time</Text>
             <Pressable
               accessibilityLabel="Close date search"
               accessibilityRole="button"
               onPress={onClose}
-              style={({ pressed }) => [styles.chatSearchModalCloseButton, pressed && styles.pressed]}
+              style={({ pressed }) => [
+                styles.chatSearchModalCloseButton,
+                { backgroundColor: appTheme.colors.surface },
+                pressed && styles.pressed
+              ]}
             >
-              <Feather color={colors.ink} name="x" size={22} />
+              <Feather color={appTheme.colors.ink} name="x" size={22} />
             </Pressable>
           </View>
 
@@ -10048,25 +14050,32 @@ function ChatSearchDateModal({
               accessibilityLabel="Choose date"
               accessibilityRole="button"
               onPress={() => openAndroidDatePicker()}
-              style={({ pressed }) => [styles.chatSearchAndroidDateButton, pressed && styles.pressed]}
+              style={({ pressed }) => [
+                styles.chatSearchAndroidDateButton,
+                { backgroundColor: appTheme.colors.surface },
+                pressed && styles.pressed
+              ]}
             >
-              <View style={styles.chatSearchAndroidDateButtonIcon}>
-                <Feather color={colors.primary} name="calendar" size={20} />
+              <View style={[styles.chatSearchAndroidDateButtonIcon, { backgroundColor: appTheme.colors.primarySoft }]}>
+                <Feather color={appTheme.colors.primary} name="calendar" size={20} />
               </View>
-              <Text numberOfLines={1} style={styles.chatSearchAndroidDateButtonText}>
+              <Text numberOfLines={1} style={[styles.chatSearchAndroidDateButtonText, { color: appTheme.colors.ink }]}>
                 {formatChatSearchPickerDate(selectedDate)}
               </Text>
-              <Feather color="#94A3B8" name="chevron-right" size={22} />
+              <Feather color={appTheme.colors.muted} name="chevron-right" size={22} />
             </Pressable>
           ) : (
-            <View style={styles.chatSearchNativeDatePickerWrap}>
+            <View style={[
+              styles.chatSearchNativeDatePickerWrap,
+              { backgroundColor: appTheme.colors.surfaceElevated }
+            ]}>
               <DateTimePicker
                 display="spinner"
                 mode="date"
                 onChange={handleNativeDateChange}
                 style={styles.chatSearchNativeDatePicker}
-                textColor={colors.ink}
-                themeVariant="light"
+                textColor={appTheme.colors.ink}
+                themeVariant={appTheme.isDark ? 'dark' : 'light'}
                 value={selectedDate}
               />
             </View>
@@ -10078,6 +14087,7 @@ function ChatSearchDateModal({
             onPress={jumpToSelectedDate}
             style={({ pressed }) => [
               styles.chatSearchJumpDateButton,
+              { backgroundColor: appTheme.colors.success },
               pressed && hasMessagesOnSelectedDate && styles.pressed,
               !hasMessagesOnSelectedDate && styles.disabled
             ]}
@@ -10107,6 +14117,8 @@ function ChatSearchPersonModal({
   profilePhotoHeaders?: Record<string, string>;
   selectedSenderUid: string | null;
 }) {
+  const appTheme = useAppTheme();
+
   if (!isOpen) {
     return null;
   }
@@ -10118,24 +14130,34 @@ function ChatSearchPersonModal({
       transparent
       visible
     >
-      <View style={styles.chatSearchModalRoot}>
+      <View style={[
+        styles.chatSearchModalRoot,
+        { backgroundColor: appTheme.colors.overlay }
+      ]}>
         <Pressable
           accessibilityLabel="Close person search"
           accessibilityRole="button"
           onPress={onClose}
           style={styles.chatSearchModalBackdrop}
         />
-        <View style={styles.chatSearchModalSheet}>
-          <View style={styles.chatSearchModalHandle} />
+        <View style={[
+          styles.chatSearchModalSheet,
+          { backgroundColor: appTheme.colors.surfaceElevated }
+        ]}>
+          <View style={[styles.chatSearchModalHandle, { backgroundColor: appTheme.colors.divider }]} />
           <View style={styles.chatSearchModalHeader}>
-            <Text style={styles.chatSearchModalTitle}>Search by person</Text>
+            <Text style={[styles.chatSearchModalTitle, { color: appTheme.colors.ink }]}>Search by person</Text>
             <Pressable
               accessibilityLabel="Close person search"
               accessibilityRole="button"
               onPress={onClose}
-              style={({ pressed }) => [styles.chatSearchModalCloseButton, pressed && styles.pressed]}
+              style={({ pressed }) => [
+                styles.chatSearchModalCloseButton,
+                { backgroundColor: appTheme.colors.surface },
+                pressed && styles.pressed
+              ]}
             >
-              <Feather color={colors.ink} name="x" size={22} />
+              <Feather color={appTheme.colors.ink} name="x" size={22} />
             </Pressable>
           </View>
 
@@ -10143,13 +14165,20 @@ function ChatSearchPersonModal({
             <Pressable
               accessibilityRole="button"
               onPress={() => onSelectPerson(null)}
-              style={({ pressed }) => [styles.chatSearchPersonRow, pressed && styles.pressed]}
+              style={({ pressed }) => [
+                styles.chatSearchPersonRow,
+                {
+                  backgroundColor: appTheme.colors.surfaceElevated,
+                  borderBottomColor: appTheme.colors.divider
+                },
+                pressed && styles.pressed
+              ]}
             >
-              <View style={styles.chatSearchPersonAvatar}>
-                <Feather color={colors.primary} name="users" size={18} />
+              <View style={[styles.chatSearchPersonAvatar, { backgroundColor: appTheme.colors.primarySoft }]}>
+                <Feather color={appTheme.colors.primary} name="users" size={18} />
               </View>
-              <Text style={styles.chatSearchPersonName}>All people</Text>
-              {!selectedSenderUid ? <Feather color={colors.primary} name="check" size={18} /> : null}
+              <Text style={[styles.chatSearchPersonName, { color: appTheme.colors.ink }]}>All people</Text>
+              {!selectedSenderUid ? <Feather color={appTheme.colors.primary} name="check" size={18} /> : null}
             </Pressable>
 
             {groupMembers.map((member) => (
@@ -10157,7 +14186,14 @@ function ChatSearchPersonModal({
                 accessibilityRole="button"
                 key={member.uid}
                 onPress={() => onSelectPerson(member.uid)}
-                style={({ pressed }) => [styles.chatSearchPersonRow, pressed && styles.pressed]}
+                style={({ pressed }) => [
+                  styles.chatSearchPersonRow,
+                  {
+                    backgroundColor: appTheme.colors.surfaceElevated,
+                    borderBottomColor: appTheme.colors.divider
+                  },
+                  pressed && styles.pressed
+                ]}
               >
                 <ProfileAvatar
                   headers={profilePhotoHeaders}
@@ -10166,12 +14202,12 @@ function ChatSearchPersonModal({
                   uri={member.profilePhotoUrl}
                 />
                 <View style={styles.chatText}>
-                  <Text numberOfLines={1} style={styles.chatSearchPersonName}>
+                  <Text numberOfLines={1} style={[styles.chatSearchPersonName, { color: appTheme.colors.ink }]}>
                     {member.uid === currentUid ? 'You' : member.displayName}
                   </Text>
-                  <Text numberOfLines={1} style={styles.chatSearchPersonRole}>{member.roleName}</Text>
+                  <Text numberOfLines={1} style={[styles.chatSearchPersonRole, { color: appTheme.colors.muted }]}>{member.roleName}</Text>
                 </View>
-                {selectedSenderUid === member.uid ? <Feather color={colors.primary} name="check" size={18} /> : null}
+                {selectedSenderUid === member.uid ? <Feather color={appTheme.colors.primary} name="check" size={18} /> : null}
               </Pressable>
             ))}
           </ScrollView>
@@ -10233,6 +14269,20 @@ function BubbleReplyPreview({
   onPress?: () => void;
   replyTo: ChatReplyReference;
 }) {
+  const appTheme = useAppTheme();
+  const isDark = appTheme.isDark;
+  const replyPreviewBackground = isMine
+    ? 'rgba(255, 255, 255, 0.15)'
+    : isDark
+      ? 'rgba(255, 255, 255, 0.08)'
+      : '#F1F5F9';
+  const replyTextColor = isMine || isDark
+    ? 'rgba(255, 255, 255, 0.82)'
+    : appTheme.colors.mutedStrong;
+  const replyAuthorColor = replyTo.senderUid === currentUid
+    ? isMine || isDark ? '#F0ABFC' : '#C026D3'
+    : isMine || isDark ? '#5EEAD4' : appTheme.colors.primary;
+
   return (
     <Pressable
       accessibilityLabel="Open original message"
@@ -10243,20 +14293,23 @@ function BubbleReplyPreview({
       pressRetentionOffset={8}
       style={[
       styles.bubbleReplyPreview,
-      isMine ? styles.bubbleReplyPreviewMine : styles.bubbleReplyPreviewTheirs
+      isMine ? styles.bubbleReplyPreviewMine : styles.bubbleReplyPreviewTheirs,
+      { backgroundColor: replyPreviewBackground }
     ]}>
       <View style={[
         styles.bubbleReplyAccent,
-        isMine ? styles.bubbleReplyAccentMine : styles.bubbleReplyAccentTheirs
+        isMine ? styles.bubbleReplyAccentMine : styles.bubbleReplyAccentTheirs,
+        { backgroundColor: isMine ? '#F472B6' : appTheme.colors.primary }
       ]} />
       <View style={styles.bubbleReplyTextWrap}>
         <Text numberOfLines={1} style={[
           styles.bubbleReplyAuthor,
-          replyTo.senderUid === currentUid ? styles.replyAuthorMine : styles.replyAuthorTheirs
+          replyTo.senderUid === currentUid ? styles.replyAuthorMine : styles.replyAuthorTheirs,
+          { color: replyAuthorColor }
         ]}>
           {getReplyAuthorLabel(replyTo.senderUid, currentUid, contactName)}
         </Text>
-        <Text numberOfLines={2} style={styles.bubbleReplyText}>
+        <Text numberOfLines={2} style={[styles.bubbleReplyText, { color: replyTextColor }]}>
           {formatReplyPreviewText(replyTo.text)}
         </Text>
       </View>
@@ -10289,6 +14342,8 @@ function AudioMessageAttachment({
   senderName: string;
   senderProfilePhotoUrl: string | null;
 }) {
+  const appTheme = useAppTheme();
+  const isDark = appTheme.isDark;
   const initialLocalUri = getMediaLocalUri(media);
   const [sourceUri, setSourceUri] = useState(initialLocalUri);
   const [isPreparingAudio, setIsPreparingAudio] = useState(false);
@@ -10311,6 +14366,20 @@ function AudioMessageAttachment({
   const positionLabel = status.currentTime > 0 ? formatAudioSeconds(status.currentTime) : '0:00';
   const waveformBars = useMemo(() => buildVoiceNoteWaveform(media), [media.fileName, media.mediaId, media.sizeBytes]);
   const activeWaveformBars = Math.round((isPreparing ? transferProgress : playbackProgress) * waveformBars.length);
+  const cardBackgroundColor = isMine
+    ? 'rgba(255, 255, 255, 0.15)'
+    : isDark
+      ? 'rgba(255, 255, 255, 0.08)'
+      : '#F1F5F9';
+  const iconBackgroundColor = isMine || isDark
+    ? 'rgba(255, 255, 255, 0.14)'
+    : '#FFFFFF';
+  const voiceMetaColor = isMine || isDark
+    ? 'rgba(255, 255, 255, 0.72)'
+    : appTheme.colors.muted;
+  const voiceInactiveWaveColor = isMine || isDark
+    ? 'rgba(255, 255, 255, 0.24)'
+    : 'rgba(100, 116, 139, 0.34)';
 
   useEffect(() => {
     const nextLocalUri = getMediaLocalUri(media);
@@ -10410,18 +14479,20 @@ function AudioMessageAttachment({
       style={({ pressed }) => [
         styles.messageVoiceNoteCard,
         isMine ? styles.messageAttachmentCardMine : styles.messageAttachmentCardTheirs,
+        { backgroundColor: cardBackgroundColor },
         pressed && styles.pressed
       ]}
     >
       <View style={[
         styles.messageVoiceNotePlayButton,
-        isMine ? styles.messageVoiceNotePlayButtonMine : styles.messageVoiceNotePlayButtonTheirs
+        isMine ? styles.messageVoiceNotePlayButtonMine : styles.messageVoiceNotePlayButtonTheirs,
+        { backgroundColor: iconBackgroundColor }
       ]}>
         {isPreparing ? (
-          <ActivityIndicator color={isMine ? colors.primary : '#64748B'} size="small" />
+          <ActivityIndicator color={isMine || isDark ? '#FFFFFF' : appTheme.colors.primary} size="small" />
         ) : (
           <Ionicons
-            color={isMine ? colors.primary : '#64748B'}
+            color={isMine || isDark ? '#FFFFFF' : appTheme.colors.primary}
             name={status.playing ? 'pause' : 'play'}
             size={22}
           />
@@ -10449,10 +14520,8 @@ function AudioMessageAttachment({
                 styles.messageVoiceWaveformBar,
                 {
                   backgroundColor: index < activeWaveformBars
-                    ? colors.primary
-                    : isMine
-                      ? 'rgba(22, 101, 52, 0.28)'
-                      : 'rgba(100, 116, 139, 0.34)',
+                    ? (isMine || isDark ? '#FFFFFF' : appTheme.colors.primary)
+                    : voiceInactiveWaveColor,
                   height: heightValue
                 }
               ]}
@@ -10460,11 +14529,11 @@ function AudioMessageAttachment({
           ))}
         </View>
         <View style={styles.messageVoiceNoteMetaRow}>
-          <Text numberOfLines={1} style={styles.messageAttachmentMeta}>
+          <Text numberOfLines={1} style={[styles.messageAttachmentMeta, { color: voiceMetaColor }]}>
             {transferLabel || (status.playing || status.currentTime > 0 ? positionLabel : durationLabel)}
           </Text>
           {media.transferStatus === 'uploading' || media.transferStatus === 'queued' ? (
-            <Text numberOfLines={1} style={styles.messageVoiceNoteMetaDot}>
+            <Text numberOfLines={1} style={[styles.messageVoiceNoteMetaDot, { color: voiceMetaColor }]}>
               {formatByteCount(media.sizeBytes)}
             </Text>
           ) : null}
@@ -10515,9 +14584,22 @@ function MessageMediaPreview({
   sourceUri: string;
   width: number;
 }) {
+  const appTheme = useAppTheme();
+  const isDark = appTheme.isDark;
   const transferLabel = getMediaTransferLabel(media);
   const isTransferActive = isMediaTransferActive(media);
   const transferProgress = Math.max(0, Math.min(media.transferProgress || 0, 1));
+  const cardBackgroundColor = isMine
+    ? 'rgba(255, 255, 255, 0.15)'
+    : isDark
+      ? 'rgba(255, 255, 255, 0.08)'
+      : '#F1F5F9';
+  const iconBackgroundColor = isMine || isDark
+    ? 'rgba(255, 255, 255, 0.14)'
+    : '#FFFFFF';
+  const attachmentTextColor = isMine || isDark ? '#FFFFFF' : appTheme.colors.ink;
+  const attachmentMetaColor = isMine || isDark ? 'rgba(255, 255, 255, 0.72)' : appTheme.colors.muted;
+  const attachmentIconColor = isMine || isDark ? '#FFFFFF' : appTheme.colors.primary;
 
   if (media.kind === 'image') {
     return (
@@ -10604,24 +14686,25 @@ function MessageMediaPreview({
       }}
       style={[
       styles.messageAttachmentCard,
-      isMine ? styles.messageAttachmentCardMine : styles.messageAttachmentCardTheirs
+      isMine ? styles.messageAttachmentCardMine : styles.messageAttachmentCardTheirs,
+      { backgroundColor: cardBackgroundColor }
     ]}>
-      <View style={styles.messageAttachmentIcon}>
+      <View style={[styles.messageAttachmentIcon, { backgroundColor: iconBackgroundColor }]}>
         {isTransferActive ? (
-          <ActivityIndicator color={colors.primary} size="small" />
+          <ActivityIndicator color={attachmentIconColor} size="small" />
         ) : (
           <Feather
-            color={colors.primary}
+            color={attachmentIconColor}
             name={media.kind === 'video' ? 'play-circle' : isAudioAttachment(media) ? 'music' : 'file-text'}
             size={22}
           />
         )}
       </View>
       <View style={styles.messageAttachmentText}>
-        <Text numberOfLines={1} style={styles.messageAttachmentName}>
+        <Text numberOfLines={1} style={[styles.messageAttachmentName, { color: attachmentTextColor }]}>
           {media.fileName || (media.kind === 'video' ? 'Video' : 'File')}
         </Text>
-        <Text numberOfLines={1} style={styles.messageAttachmentMeta}>
+        <Text numberOfLines={1} style={[styles.messageAttachmentMeta, { color: attachmentMetaColor }]}>
           {transferLabel || formatAttachmentMeta(media)}
         </Text>
       </View>
@@ -10826,6 +14909,7 @@ function MessageBubble({
   senderMember?: ChatGroupMember | null;
   starred?: boolean;
 }) {
+  const appTheme = useAppTheme();
   const deliveryStatusLabel = message.isMine
     ? formatMessageDeliveryStatus(message.deliveryStatus)
     : '';
@@ -10838,6 +14922,16 @@ function MessageBubble({
   const reactionBadgeOpacity = useRef(new Animated.Value(reactionBadgeLabel ? 1 : 0)).current;
   const reactionBadgeScale = useRef(new Animated.Value(reactionBadgeLabel ? 1 : 0.82)).current;
   const swipeTranslateX = useRef(new Animated.Value(0)).current;
+  const isDark = appTheme.isDark;
+  const sentBubbleColor = isDark ? '#005C4B' : '#0F766E';
+  const receivedBubbleColor = isDark ? '#1F1F1F' : appTheme.colors.surfaceElevated;
+  const bubbleColor = message.isMine ? sentBubbleColor : receivedBubbleColor;
+  const bubbleTextColor = message.isMine || isDark ? '#FFFFFF' : appTheme.colors.ink;
+  const bubbleMetaColor = message.isMine || isDark ? 'rgba(255, 255, 255, 0.68)' : appTheme.colors.muted;
+  const bubbleForwardedColor = message.isMine || isDark ? 'rgba(255, 255, 255, 0.72)' : appTheme.colors.muted;
+  const bubbleReadStatusColor = message.isMine || isDark ? '#7DD3FC' : '#2563EB';
+  const bubbleDeliveredStatusColor = message.isMine || isDark ? '#A7F3D0' : '#F97316';
+  const bubbleQueuedStatusColor = message.isMine || isDark ? '#FCA5A5' : '#DC2626';
   const panResponder = useMemo(() => PanResponder.create({
     onMoveShouldSetPanResponder: (_event, gestureState) =>
       !isSelectable &&
@@ -10990,6 +15084,7 @@ function MessageBubble({
             style={({ pressed }) => [
               styles.messageBubble,
               message.isMine ? styles.messageBubbleMine : styles.messageBubbleTheirs,
+              { backgroundColor: bubbleColor },
               hasMedia && styles.messageBubbleWithImage,
               highlighted && styles.messageBubbleHighlighted,
               pressed && (onLongPress || isSelectable || replyTargetMessageId) && styles.messageBubblePressed
@@ -10997,12 +15092,13 @@ function MessageBubble({
           >
             <View style={[
               styles.messageBubbleTail,
-              message.isMine ? styles.messageBubbleTailMine : styles.messageBubbleTailTheirs
+              message.isMine ? styles.messageBubbleTailMine : styles.messageBubbleTailTheirs,
+              { borderTopColor: bubbleColor }
             ]} />
             {message.forwarded ? (
               <View style={styles.forwardedMessageLabelRow}>
-                <Feather color="#64748B" name="corner-up-right" size={12} />
-                <Text style={styles.forwardedMessageLabel}>Forwarded</Text>
+                <Feather color={bubbleForwardedColor} name="corner-up-right" size={12} />
+                <Text style={[styles.forwardedMessageLabel, { color: bubbleForwardedColor }]}>Forwarded</Text>
               </View>
             ) : null}
             {message.replyTo ? (
@@ -11032,21 +15128,28 @@ function MessageBubble({
               />
             ) : null}
             {message.text.trim() ? (
-              <Text style={[styles.messageBubbleText, hasMedia && styles.messageBubbleCaptionText]}>
+              <Text style={[
+                styles.messageBubbleText,
+                { color: bubbleTextColor },
+                hasMedia && styles.messageBubbleCaptionText
+              ]}>
                 {renderHighlightedMessageText(message.text, searchQuery)}
               </Text>
             ) : null}
             <View style={styles.messageBubbleMetaRow}>
-              <Text style={styles.messageBubbleTime}>{formatMessageTime(message.sentAt)}</Text>
+              <Text style={[styles.messageBubbleTime, { color: bubbleMetaColor }]}>
+                {formatMessageTime(message.sentAt)}
+              </Text>
               {starred ? (
-                <Feather color="#B45309" name="star" size={11} />
+                <Feather color={message.isMine || isDark ? '#FBBF24' : '#B45309'} name="star" size={11} />
               ) : null}
               {deliveryStatusLabel ? (
                 <Text style={[
                   styles.messageBubbleStatus,
-                  message.deliveryStatus === 'queued' && styles.messageBubbleStatusQueued,
-                  message.deliveryStatus === 'delivered' && styles.messageBubbleStatusDelivered,
-                  message.deliveryStatus === 'read' && styles.messageBubbleStatusRead
+                  { color: bubbleMetaColor },
+                  message.deliveryStatus === 'queued' && { color: bubbleQueuedStatusColor },
+                  message.deliveryStatus === 'delivered' && { color: bubbleDeliveredStatusColor },
+                  message.deliveryStatus === 'read' && { color: bubbleReadStatusColor }
                 ]}>{deliveryStatusLabel}</Text>
               ) : null}
             </View>
@@ -11411,6 +15514,8 @@ function MessageActionRow({
   label: string;
   onPress: () => void;
 }) {
+  const appTheme = useAppTheme();
+
   return (
     <Pressable
       accessibilityRole="button"
@@ -11619,13 +15724,22 @@ function ForwardRecipientModal({
 }
 
 function YouHeaderActions() {
+  const appTheme = useAppTheme();
+
   return (
     <View style={styles.topActions}>
       <Pressable
         android_ripple={androidIconRipple}
         accessibilityLabel="Search profile"
         accessibilityRole="button"
-        style={({ pressed }) => [styles.youHeaderButton, pressed && styles.pressed]}
+        style={({ pressed }) => [
+          styles.youHeaderButton,
+          {
+            backgroundColor: appTheme.colors.surfaceElevated,
+            borderColor: appTheme.colors.border
+          },
+          pressed && styles.pressed
+        ]}
       >
         <SearchIcon />
       </Pressable>
@@ -11634,7 +15748,14 @@ function YouHeaderActions() {
         android_ripple={androidIconRipple}
         accessibilityLabel="Open profile code"
         accessibilityRole="button"
-        style={({ pressed }) => [styles.youHeaderButton, pressed && styles.pressed]}
+        style={({ pressed }) => [
+          styles.youHeaderButton,
+          {
+            backgroundColor: appTheme.colors.surfaceElevated,
+            borderColor: appTheme.colors.border
+          },
+          pressed && styles.pressed
+        ]}
       >
         <QrIcon />
       </Pressable>
@@ -11853,16 +15974,24 @@ function ChatSearchBar({
   placeholder: string;
   value: string;
 }) {
+  const appTheme = useAppTheme();
+
   return (
-    <View style={styles.chatSearchBox}>
-      <Feather color="#8B95A5" name="search" size={18} />
+    <View style={[
+      styles.chatSearchBox,
+      {
+        backgroundColor: appTheme.colors.input,
+        borderColor: appTheme.colors.border
+      }
+    ]}>
+      <Feather color={appTheme.colors.muted} name="search" size={18} />
       <TextInput
         autoCapitalize="none"
         autoCorrect={false}
         onChangeText={onChangeText}
         placeholder={placeholder}
-        placeholderTextColor="#8B95A5"
-        style={styles.chatSearchInput}
+        placeholderTextColor={appTheme.colors.muted}
+        style={[styles.chatSearchInput, { color: appTheme.colors.ink }]}
         value={value}
       />
     </View>
@@ -11910,9 +16039,14 @@ function ChatsTab({
   spamCount: number;
   unreadCount: number;
 }) {
+  const appTheme = useAppTheme();
+
   return (
     <View>
-      <View style={styles.chatsControls}>
+      <View style={[
+        styles.chatsControls,
+        { borderBottomColor: appTheme.colors.divider }
+      ]}>
         <ChatSearchBar
           onChangeText={onSearchChange}
           placeholder="Ask Synzapp AI or search"
@@ -11953,9 +16087,16 @@ function ChatsTab({
             accessibilityRole="button"
             android_ripple={androidIconRipple}
             onPress={onOpenNewChat}
-            style={({ pressed }) => [styles.chatFilterAddButton, pressed && styles.pressed]}
+            style={({ pressed }) => [
+              styles.chatFilterAddButton,
+              {
+                backgroundColor: appTheme.colors.surfaceElevated,
+                borderColor: appTheme.colors.border
+              },
+              pressed && styles.pressed
+            ]}
           >
-            <Feather color={colors.ink} name="plus" size={18} />
+            <Feather color={appTheme.colors.ink} name="plus" size={18} />
           </Pressable>
         </ScrollView>
 
@@ -11978,13 +16119,15 @@ function ChatsTab({
 
       {isLoading && !chats.length ? (
         <View style={styles.loadingRow}>
-          <ActivityIndicator color={colors.primary} />
+          <ActivityIndicator color={appTheme.colors.primary} />
         </View>
       ) : null}
 
       {!isLoading && !chats.length ? (
         <View style={styles.emptyState}>
-          <Text style={styles.emptyTitle}>{search.trim() ? 'No chats found' : 'No chats yet'}</Text>
+          <Text style={[styles.emptyTitle, { color: appTheme.colors.muted }]}>
+            {search.trim() ? 'No chats found' : 'No chats yet'}
+          </Text>
         </View>
       ) : null}
 
@@ -12000,6 +16143,973 @@ function ChatsTab({
         />
       ))}
     </View>
+  );
+}
+
+function CallsTab({
+  contacts,
+  favorites,
+  history,
+  isEditMode,
+  onDeleteCall,
+  onOpenFavorites,
+  onOpenKeypad,
+  onOpenNewCall,
+  onOpenSchedule,
+  onSearchChange,
+  onStartCall,
+  profilePhotoHeaders,
+  scheduledCount,
+  search
+}: {
+  contacts: ChatContact[];
+  favorites: string[];
+  history: SynzappCallHistoryEntry[];
+  isEditMode: boolean;
+  onDeleteCall: (entry: SynzappCallHistoryEntry) => void;
+  onOpenFavorites: () => void;
+  onOpenKeypad: () => void;
+  onOpenNewCall: () => void;
+  onOpenSchedule: () => void;
+  onSearchChange: (value: string) => void;
+  onStartCall: (contact: ChatContact, mode?: SynzappCallMode) => void;
+  profilePhotoHeaders?: Record<string, string>;
+  scheduledCount: number;
+  search: string;
+}) {
+  const appTheme = useAppTheme();
+  const visibleHistory = filterCallHistory(history, search);
+  const favoriteCount = favorites.length;
+  const contactById = useMemo(() => new Map(
+    contacts.map((contact) => [contact.contactId, contact])
+  ), [contacts]);
+
+  return (
+    <View style={styles.callsTab}>
+      <ChatSearchBar
+        onChangeText={onSearchChange}
+        placeholder="Search"
+        value={search}
+      />
+
+      <View style={styles.callQuickActions}>
+        <CallQuickActionButton icon="phone" label="Call" onPress={onOpenNewCall} />
+        <CallQuickActionButton badge={scheduledCount} icon="calendar" label="Schedule" onPress={onOpenSchedule} />
+        <CallQuickActionButton icon="grid" label="Keypad" onPress={onOpenKeypad} />
+        <CallQuickActionButton badge={favoriteCount} icon="heart" label="Favorites" onPress={onOpenFavorites} />
+      </View>
+
+      <Text style={[styles.callsSectionTitle, { color: appTheme.colors.ink }]}>Recent</Text>
+
+      {!visibleHistory.length ? (
+        <View style={styles.emptyState}>
+          <Text style={[styles.emptyTitle, { color: appTheme.colors.muted }]}>
+            {search.trim() ? 'No calls found' : 'No recent calls'}
+          </Text>
+        </View>
+      ) : null}
+
+      {visibleHistory.map((entry) => (
+        <CallHistoryRow
+          contact={contactById.get(entry.contactId)}
+          entry={entry}
+          isEditMode={isEditMode}
+          key={entry.id}
+          onDelete={() => onDeleteCall(entry)}
+          onStartCall={(contact) => onStartCall(contact, entry.mode)}
+          profilePhotoHeaders={profilePhotoHeaders}
+        />
+      ))}
+    </View>
+  );
+}
+
+function CallQuickActionButton({
+  badge = 0,
+  icon,
+  label,
+  onPress
+}: {
+  badge?: number;
+  icon: keyof typeof Feather.glyphMap;
+  label: string;
+  onPress: () => void;
+}) {
+  const appTheme = useAppTheme();
+
+  return (
+    <Pressable
+      accessibilityRole="button"
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.callQuickAction,
+        pressed && styles.pressed
+      ]}
+    >
+      <View style={[styles.callQuickActionIcon, { backgroundColor: appTheme.colors.surface }]}>
+        <Feather color={appTheme.colors.ink} name={icon} size={21} />
+        {badge > 0 ? (
+          <View style={styles.callQuickActionBadge}>
+            <Text style={styles.callQuickActionBadgeText}>{badge > 99 ? '99+' : badge}</Text>
+          </View>
+        ) : null}
+      </View>
+      <Text style={[styles.callQuickActionLabel, { color: appTheme.colors.muted }]}>{label}</Text>
+    </Pressable>
+  );
+}
+
+function CallHistoryRow({
+  contact,
+  entry,
+  isEditMode,
+  onDelete,
+  onStartCall,
+  profilePhotoHeaders
+}: {
+  contact?: ChatContact;
+  entry: SynzappCallHistoryEntry;
+  isEditMode: boolean;
+  onDelete: () => void;
+  onStartCall: (contact: ChatContact) => void;
+  profilePhotoHeaders?: Record<string, string>;
+}) {
+  const appTheme = useAppTheme();
+  const isMissed = entry.status === 'missed' || entry.status === 'declined' || entry.status === 'failed';
+  const statusIcon = entry.direction === 'outgoing' ? 'arrow-up-right' : entry.status === 'missed' ? 'phone-missed' : 'arrow-down-left';
+  const callColor = isMissed ? appTheme.colors.red : appTheme.colors.muted;
+
+  return (
+    <View style={[
+      styles.callHistoryRow,
+      { borderBottomColor: appTheme.colors.divider }
+    ]}>
+      {isEditMode ? (
+        <Pressable
+          accessibilityLabel={`Remove ${entry.title} call`}
+          accessibilityRole="button"
+          onPress={onDelete}
+          style={({ pressed }) => [styles.callHistoryDeleteButton, pressed && styles.pressed]}
+        >
+          <Feather color="#FFFFFF" name="minus" size={16} />
+        </Pressable>
+      ) : null}
+
+      <ProfileAvatar
+        headers={profilePhotoHeaders}
+        name={entry.title}
+        size={46}
+        uri={contact?.profilePhotoUrl || entry.profilePhotoUrl}
+      />
+
+      <View style={styles.chatText}>
+        <Text
+          numberOfLines={1}
+          style={[
+            styles.callHistoryTitle,
+            { color: isMissed ? appTheme.colors.red : appTheme.colors.ink }
+          ]}
+        >
+          {entry.title}
+        </Text>
+        <View style={styles.callHistorySubtitleRow}>
+          <Feather color={callColor} name={statusIcon} size={13} />
+          <Text numberOfLines={1} style={[styles.callHistorySubtitle, { color: callColor }]}>
+            {getCallHistoryStatusLabel(entry)}
+          </Text>
+        </View>
+      </View>
+
+      <View style={styles.callHistoryMeta}>
+        <Text numberOfLines={1} style={[styles.callHistoryTime, { color: appTheme.colors.muted }]}>
+          {formatCallHistoryTime(entry.updatedAt || entry.createdAt)}
+        </Text>
+        <View style={styles.callHistoryActions}>
+          <Pressable
+            accessibilityLabel={`Call ${entry.title}`}
+            accessibilityRole="button"
+            disabled={!contact}
+            onPress={contact ? () => onStartCall(contact) : undefined}
+            style={({ pressed }) => [
+              styles.callHistoryIconButton,
+              { backgroundColor: appTheme.colors.surface },
+              !contact && styles.disabled,
+              pressed && styles.pressed
+            ]}
+          >
+            <Ionicons color={appTheme.colors.primary} name={entry.mode === 'video' ? 'videocam' : 'call'} size={18} />
+          </Pressable>
+          <Pressable
+            accessibilityLabel={`Show ${entry.title} call details`}
+            accessibilityRole="button"
+            onPress={() => Alert.alert(entry.title, getCallHistoryDetailText(entry))}
+            style={({ pressed }) => [
+              styles.callHistoryInfoButton,
+              pressed && styles.pressed
+            ]}
+          >
+            <Feather color={appTheme.colors.mutedStrong} name="info" size={17} />
+          </Pressable>
+        </View>
+      </View>
+    </View>
+  );
+}
+
+function CallOptionsMenu({
+  isOpen,
+  onClose,
+  onEdit,
+  onOpenScheduled
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  onEdit: () => void;
+  onOpenScheduled: () => void;
+}) {
+  const appTheme = useAppTheme();
+
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <Modal animationType="fade" onRequestClose={onClose} transparent visible>
+      <View style={styles.callOptionsRoot}>
+        <Pressable accessibilityRole="button" onPress={onClose} style={styles.callOptionsBackdrop} />
+        <View style={[
+          styles.callOptionsPanel,
+          {
+            backgroundColor: appTheme.colors.surfaceElevated,
+            borderColor: appTheme.colors.border
+          }
+        ]}>
+          <CallOptionsRow icon="edit-2" label="Edit" onPress={onEdit} />
+          <CallOptionsRow icon="calendar" label="Scheduled calls" onPress={onOpenScheduled} />
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function CallOptionsRow({
+  icon,
+  label,
+  onPress
+}: {
+  icon: keyof typeof Feather.glyphMap;
+  label: string;
+  onPress: () => void;
+}) {
+  const appTheme = useAppTheme();
+
+  return (
+    <Pressable
+      accessibilityRole="button"
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.callOptionsRow,
+        { borderBottomColor: appTheme.colors.divider },
+        pressed && styles.pressed
+      ]}
+    >
+      <Feather color={appTheme.colors.ink} name={icon} size={17} />
+      <Text style={[styles.callOptionsRowText, { color: appTheme.colors.ink }]}>{label}</Text>
+    </Pressable>
+  );
+}
+
+function NewCallModal({
+  contacts,
+  isOpen,
+  onChangeSearch,
+  onClose,
+  onStartCall,
+  profilePhotoHeaders,
+  search
+}: {
+  contacts: ChatContact[];
+  isOpen: boolean;
+  onChangeSearch: (value: string) => void;
+  onClose: () => void;
+  onStartCall: (contact: ChatContact, mode?: SynzappCallMode) => void;
+  profilePhotoHeaders?: Record<string, string>;
+  search: string;
+}) {
+  const appTheme = useAppTheme();
+  const insets = useSafeAreaInsets();
+  const modalTopPadding = getFullScreenModalTopPadding(insets.top);
+  const visibleContacts = filterCallContacts(contacts, search);
+
+  return (
+    <Modal
+      allowSwipeDismissal={Platform.OS === 'ios'}
+      animationType="slide"
+      onRequestClose={onClose}
+      presentationStyle={getNativeFullHeightModalPresentationStyle()}
+      transparent={false}
+      visible={isOpen}
+    >
+      <View style={[
+        styles.callModalScreen,
+        {
+          backgroundColor: appTheme.colors.screen,
+          paddingTop: modalTopPadding
+        }
+      ]}>
+        <View style={styles.callModalHeader}>
+          <Pressable
+            accessibilityLabel="Close new call"
+            accessibilityRole="button"
+            onPress={onClose}
+            style={({ pressed }) => [styles.newChatHeaderIconButton, pressed && styles.pressed]}
+          >
+            <Feather color={appTheme.colors.ink} name="x" size={24} />
+          </Pressable>
+          <View style={styles.newChatCenteredTitleWrap}>
+            <Text numberOfLines={1} style={[styles.callModalHeaderTitle, { color: appTheme.colors.ink }]}>New call</Text>
+            <Text numberOfLines={1} style={[styles.callModalHeaderSubtitle, { color: appTheme.colors.muted }]}>{contacts.length} company contacts</Text>
+          </View>
+          <View style={styles.newChatHeaderSpacer} />
+        </View>
+
+        <ChatSearchBar
+          onChangeText={onChangeSearch}
+          placeholder="Search name or number"
+          value={search}
+        />
+
+        <ScrollView
+          keyboardDismissMode={getKeyboardDismissMode()}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+          style={styles.callModalList}
+        >
+          <Text style={[styles.callModalSectionLabel, { color: appTheme.colors.muted }]}>Frequently contacted</Text>
+          {visibleContacts.map((contact) => (
+            <CallContactRow
+              contact={contact}
+              key={contact.contactId}
+              onPress={() => onStartCall(contact, 'voice')}
+              profilePhotoHeaders={profilePhotoHeaders}
+              trailing="radio"
+            />
+          ))}
+
+          {!visibleContacts.length ? (
+            <Text style={[styles.batchEmpty, { color: appTheme.colors.muted }]}>
+              {search.trim() ? 'No company contacts found' : 'No registered company contacts yet'}
+            </Text>
+          ) : null}
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+}
+
+function CallContactRow({
+  contact,
+  isSelected = false,
+  onPress,
+  profilePhotoHeaders,
+  trailing = 'call'
+}: {
+  contact: ChatContact;
+  isSelected?: boolean;
+  onPress: () => void;
+  profilePhotoHeaders?: Record<string, string>;
+  trailing?: 'call' | 'radio';
+}) {
+  const appTheme = useAppTheme();
+
+  return (
+    <Pressable
+      accessibilityLabel={contact.displayName}
+      accessibilityRole="button"
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.callContactRow,
+        { borderBottomColor: appTheme.colors.divider },
+        pressed && styles.pressed
+      ]}
+    >
+      <ProfileAvatar
+        headers={profilePhotoHeaders}
+        name={contact.displayName}
+        size={44}
+        uri={contact.profilePhotoUrl}
+      />
+      <View style={styles.chatText}>
+        <Text numberOfLines={1} style={[styles.callContactTitle, { color: appTheme.colors.ink }]}>{contact.displayName}</Text>
+        <Text numberOfLines={1} style={[styles.callContactSubtitle, { color: appTheme.colors.muted }]}>
+          {contact.roleName || contact.role || contact.phoneMasked || 'Company contact'}
+        </Text>
+      </View>
+      {trailing === 'radio' ? (
+        <View style={[
+          styles.callContactRadio,
+          { borderColor: isSelected ? appTheme.colors.primary : appTheme.colors.border },
+          isSelected && { backgroundColor: appTheme.colors.primary }
+        ]}>
+          {isSelected ? <Feather color="#FFFFFF" name="check" size={13} /> : null}
+        </View>
+      ) : (
+        <View style={[styles.callContactCallIcon, { backgroundColor: appTheme.colors.surface }]}>
+          <Ionicons color={appTheme.colors.primary} name="call" size={18} />
+        </View>
+      )}
+    </Pressable>
+  );
+}
+
+function CallKeypadModal({
+  digits,
+  isOpen,
+  onAppendDigit,
+  onBackspace,
+  onClose,
+  onStartCall
+}: {
+  digits: string;
+  isOpen: boolean;
+  onAppendDigit: (digit: string) => void;
+  onBackspace: () => void;
+  onClose: () => void;
+  onStartCall: () => void;
+}) {
+  const appTheme = useAppTheme();
+  const insets = useSafeAreaInsets();
+  const modalTopPadding = getFullScreenModalTopPadding(insets.top);
+  const keypadRows = [
+    ['1', '2', '3'],
+    ['4', '5', '6'],
+    ['7', '8', '9'],
+    ['*', '0', '#']
+  ];
+
+  return (
+    <Modal
+      allowSwipeDismissal={Platform.OS === 'ios'}
+      animationType="slide"
+      onRequestClose={onClose}
+      presentationStyle={getNativeFullHeightModalPresentationStyle()}
+      transparent={false}
+      visible={isOpen}
+    >
+      <View style={[
+        styles.callKeypadScreen,
+        {
+          backgroundColor: appTheme.colors.screen,
+          paddingBottom: Math.max(insets.bottom + 18, 28),
+          paddingTop: modalTopPadding
+        }
+      ]}>
+        <View style={styles.callModalHeader}>
+          <Pressable
+            accessibilityLabel="Close keypad"
+            accessibilityRole="button"
+            onPress={onClose}
+            style={({ pressed }) => [styles.newChatHeaderIconButton, pressed && styles.pressed]}
+          >
+            <Feather color={appTheme.colors.ink} name="x" size={24} />
+          </Pressable>
+          <View style={styles.newChatHeaderSpacer} />
+          <Pressable
+            accessibilityLabel="Delete digit"
+            accessibilityRole="button"
+            disabled={!digits}
+            onPress={onBackspace}
+            style={({ pressed }) => [styles.newChatHeaderIconButton, !digits && styles.disabled, pressed && styles.pressed]}
+          >
+            <Feather color={appTheme.colors.ink} name="delete" size={22} />
+          </Pressable>
+        </View>
+
+        <View style={styles.callKeypadDisplay}>
+          <Text numberOfLines={1} adjustsFontSizeToFit style={[styles.callKeypadDigits, { color: appTheme.colors.ink }]}>
+            {digits ? formatCallKeypadDigits(digits) : ' '}
+          </Text>
+          <Text style={[styles.callKeypadHint, { color: appTheme.colors.muted }]}>Company contacts only</Text>
+        </View>
+
+        <View style={styles.callKeypadGrid}>
+          {keypadRows.flatMap((row) => row.map((digit) => (
+            <Pressable
+              accessibilityLabel={`Dial ${digit}`}
+              accessibilityRole="button"
+              key={digit}
+              onPress={() => onAppendDigit(digit)}
+              style={({ pressed }) => [
+                styles.callKeypadButton,
+                { backgroundColor: appTheme.colors.surface },
+                pressed && styles.pressed
+              ]}
+            >
+              <Text style={[styles.callKeypadButtonText, { color: appTheme.colors.ink }]}>{digit}</Text>
+              <Text style={[styles.callKeypadButtonLetters, { color: appTheme.colors.muted }]}>
+                {getKeypadLetters(digit)}
+              </Text>
+            </Pressable>
+          )))}
+        </View>
+
+        <Pressable
+          accessibilityLabel="Start call"
+          accessibilityRole="button"
+          onPress={onStartCall}
+          style={({ pressed }) => [
+            styles.callKeypadStartButton,
+            { backgroundColor: appTheme.colors.success },
+            pressed && styles.pressed
+          ]}
+        >
+          <Ionicons color="#FFFFFF" name="call" size={28} />
+        </Pressable>
+      </View>
+    </Modal>
+  );
+}
+
+function CallFavoritesModal({
+  contacts,
+  favoriteContactIds,
+  isOpen,
+  onChangeSearch,
+  onClose,
+  onToggleFavorite,
+  profilePhotoHeaders,
+  search
+}: {
+  contacts: ChatContact[];
+  favoriteContactIds: string[];
+  isOpen: boolean;
+  onChangeSearch: (value: string) => void;
+  onClose: () => void;
+  onToggleFavorite: (contactId: string) => void;
+  profilePhotoHeaders?: Record<string, string>;
+  search: string;
+}) {
+  const appTheme = useAppTheme();
+  const insets = useSafeAreaInsets();
+  const modalTopPadding = getFullScreenModalTopPadding(insets.top);
+  const visibleContacts = filterCallContacts(contacts, search);
+
+  return (
+    <Modal
+      allowSwipeDismissal={Platform.OS === 'ios'}
+      animationType="slide"
+      onRequestClose={onClose}
+      presentationStyle={getNativeFullHeightModalPresentationStyle()}
+      transparent={false}
+      visible={isOpen}
+    >
+      <View style={[
+        styles.callModalScreen,
+        {
+          backgroundColor: appTheme.colors.screen,
+          paddingTop: modalTopPadding
+        }
+      ]}>
+        <View style={styles.callModalHeader}>
+          <Pressable
+            accessibilityLabel="Close favorites"
+            accessibilityRole="button"
+            onPress={onClose}
+            style={({ pressed }) => [styles.newChatHeaderIconButton, pressed && styles.pressed]}
+          >
+            <Feather color={appTheme.colors.ink} name="x" size={24} />
+          </Pressable>
+          <View style={styles.newChatCenteredTitleWrap}>
+            <Text numberOfLines={1} style={[styles.callModalHeaderTitle, { color: appTheme.colors.ink }]}>Add favorites</Text>
+            <Text numberOfLines={1} style={[styles.callModalHeaderSubtitle, { color: appTheme.colors.muted }]}>{favoriteContactIds.length} selected</Text>
+          </View>
+          <Pressable
+            accessibilityLabel="Done"
+            accessibilityRole="button"
+            onPress={onClose}
+            style={({ pressed }) => [
+              styles.callModalDoneButton,
+              { backgroundColor: favoriteContactIds.length ? appTheme.colors.primary : appTheme.colors.surface },
+              pressed && styles.pressed
+            ]}
+          >
+            <Feather color={favoriteContactIds.length ? '#FFFFFF' : appTheme.colors.muted} name="check" size={20} />
+          </Pressable>
+        </View>
+
+        <ChatSearchBar
+          onChangeText={onChangeSearch}
+          placeholder="Search name or number"
+          value={search}
+        />
+
+        <Text style={[styles.callFavoritesHelper, { backgroundColor: appTheme.colors.surface, color: appTheme.colors.muted }]}>
+          Add as many people as you need. Favorites are private to your Synzapp account on this device.
+        </Text>
+
+        <ScrollView
+          keyboardDismissMode={getKeyboardDismissMode()}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+          style={styles.callModalList}
+        >
+          <Text style={[styles.callModalSectionLabel, { color: appTheme.colors.muted }]}>Frequently contacted</Text>
+          {visibleContacts.map((contact) => (
+            <CallContactRow
+              contact={contact}
+              isSelected={favoriteContactIds.includes(contact.contactId)}
+              key={contact.contactId}
+              onPress={() => onToggleFavorite(contact.contactId)}
+              profilePhotoHeaders={profilePhotoHeaders}
+              trailing="radio"
+            />
+          ))}
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+}
+
+function ScheduleCallModal({
+  draft,
+  isOpen,
+  onClose,
+  onSave,
+  onUpdateDraft
+}: {
+  draft: ScheduleCallDraft;
+  isOpen: boolean;
+  onClose: () => void;
+  onSave: () => void;
+  onUpdateDraft: (patch: Partial<ScheduleCallDraft>) => void;
+}) {
+  const appTheme = useAppTheme();
+  const insets = useSafeAreaInsets();
+  const modalTopPadding = getFullScreenModalTopPadding(insets.top);
+
+  return (
+    <Modal
+      allowSwipeDismissal={Platform.OS === 'ios'}
+      animationType="slide"
+      onRequestClose={onClose}
+      presentationStyle={getNativeFullHeightModalPresentationStyle()}
+      transparent={false}
+      visible={isOpen}
+    >
+      <ScrollView
+        contentContainerStyle={[
+          styles.scheduleCallContent,
+          {
+            backgroundColor: appTheme.colors.screen,
+            paddingBottom: Math.max(insets.bottom + 28, 42),
+            paddingTop: modalTopPadding
+          }
+        ]}
+        keyboardDismissMode={getKeyboardDismissMode()}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.callModalHeader}>
+          <Pressable
+            accessibilityLabel="Close schedule call"
+            accessibilityRole="button"
+            onPress={onClose}
+            style={({ pressed }) => [styles.newChatHeaderIconButton, pressed && styles.pressed]}
+          >
+            <Feather color={appTheme.colors.ink} name="x" size={24} />
+          </Pressable>
+          <Text numberOfLines={1} style={[styles.callModalHeaderTitle, { color: appTheme.colors.ink }]}>Schedule call</Text>
+          <Pressable
+            accessibilityLabel="Save scheduled call"
+            accessibilityRole="button"
+            onPress={onSave}
+            style={({ pressed }) => [
+              styles.callModalNextButton,
+              { backgroundColor: appTheme.colors.surfaceElevated },
+              pressed && styles.pressed
+            ]}
+          >
+            <Text style={[styles.callModalNextText, { color: appTheme.colors.ink }]}>Save</Text>
+          </Pressable>
+        </View>
+
+        <View style={[styles.scheduleCallCard, { backgroundColor: appTheme.colors.surfaceElevated }]}>
+          <TextInput
+            onChangeText={(title) => onUpdateDraft({ title })}
+            placeholder="Call title"
+            placeholderTextColor={appTheme.colors.muted}
+            style={[styles.scheduleCallTitleInput, { borderBottomColor: appTheme.colors.divider, color: appTheme.colors.ink }]}
+            value={draft.title}
+          />
+          <TextInput
+            multiline
+            onChangeText={(description) => onUpdateDraft({ description })}
+            placeholder="Add description (optional)"
+            placeholderTextColor={appTheme.colors.muted}
+            style={[styles.scheduleCallDescriptionInput, { color: appTheme.colors.ink }]}
+            value={draft.description}
+          />
+          <Text style={[styles.scheduleCallCounter, { color: appTheme.colors.muted }]}>{2048 - draft.description.length}</Text>
+        </View>
+
+        <View style={[styles.scheduleCallCard, { backgroundColor: appTheme.colors.surfaceElevated }]}>
+          <ScheduleDateTimeRow
+            date={draft.startsAt}
+            label="Starts"
+            onChange={(startsAt) => onUpdateDraft({ startsAt })}
+          />
+          {draft.includeEndTime ? (
+            <ScheduleDateTimeRow
+              date={draft.endsAt}
+              label="Ends"
+              onChange={(endsAt) => onUpdateDraft({ endsAt })}
+            />
+          ) : null}
+          <ScheduleSwitchRow
+            label="Include end time"
+            onValueChange={(includeEndTime) => onUpdateDraft({ includeEndTime })}
+            value={draft.includeEndTime}
+          />
+        </View>
+
+        <Text style={[styles.scheduleCallFootnote, { color: appTheme.colors.muted }]}>
+          Events with call links can be scheduled up to one year in advance.
+        </Text>
+
+        <View style={[styles.scheduleCallCard, { backgroundColor: appTheme.colors.surfaceElevated }]}>
+          <ScheduleOptionRow
+            label="Call type"
+            onPress={() => onUpdateDraft({ callType: draft.callType === 'video' ? 'voice' : 'video' })}
+            value={draft.callType === 'video' ? 'Video' : 'Voice'}
+          />
+          <ScheduleSwitchRow
+            label="Require approval to join"
+            onValueChange={(requireApproval) => onUpdateDraft({ requireApproval })}
+            value={draft.requireApproval}
+          />
+        </View>
+
+        <View style={[styles.scheduleCallCard, { backgroundColor: appTheme.colors.surfaceElevated }]}>
+          <ScheduleOptionRow
+            label="Reminder"
+            onPress={() => onUpdateDraft({ reminderMinutes: getNextReminderMinutes(draft.reminderMinutes) })}
+            value={formatReminderMinutes(draft.reminderMinutes)}
+          />
+        </View>
+      </ScrollView>
+    </Modal>
+  );
+}
+
+function ScheduleDateTimeRow({
+  date,
+  label,
+  onChange
+}: {
+  date: Date;
+  label: string;
+  onChange: (date: Date) => void;
+}) {
+  const appTheme = useAppTheme();
+
+  function openAndroidPicker(mode: 'date' | 'time') {
+    DateTimePickerAndroid.open({
+      display: mode === 'date' ? 'calendar' : 'clock',
+      mode,
+      onChange: (event, selectedDate) => {
+        if (event.type === 'set' && selectedDate) {
+          onChange(mergeDateTimeValue(date, selectedDate, mode));
+        }
+      },
+      value: date
+    });
+  }
+
+  return (
+    <View style={[styles.scheduleDateTimeRow, { borderBottomColor: appTheme.colors.divider }]}>
+      <Text style={[styles.scheduleRowLabel, { color: appTheme.colors.ink }]}>{label}</Text>
+      <View style={styles.scheduleDateControls}>
+        {Platform.OS === 'ios' ? (
+          <>
+            <DateTimePicker
+              display="compact"
+              mode="date"
+              onChange={(_, selectedDate) => selectedDate ? onChange(mergeDateTimeValue(date, selectedDate, 'date')) : undefined}
+              themeVariant={appTheme.isDark ? 'dark' : 'light'}
+              value={date}
+            />
+            <DateTimePicker
+              display="compact"
+              mode="time"
+              onChange={(_, selectedDate) => selectedDate ? onChange(mergeDateTimeValue(date, selectedDate, 'time')) : undefined}
+              themeVariant={appTheme.isDark ? 'dark' : 'light'}
+              value={date}
+            />
+          </>
+        ) : (
+          <>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => openAndroidPicker('date')}
+              style={[styles.scheduleAndroidDateButton, { backgroundColor: appTheme.colors.surface }]}
+            >
+              <Text style={[styles.scheduleAndroidDateText, { color: appTheme.colors.ink }]}>{formatScheduleDate(date)}</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => openAndroidPicker('time')}
+              style={[styles.scheduleAndroidDateButton, { backgroundColor: appTheme.colors.surface }]}
+            >
+              <Text style={[styles.scheduleAndroidDateText, { color: appTheme.colors.ink }]}>{formatScheduleTime(date)}</Text>
+            </Pressable>
+          </>
+        )}
+      </View>
+    </View>
+  );
+}
+
+function ScheduleSwitchRow({
+  label,
+  onValueChange,
+  value
+}: {
+  label: string;
+  onValueChange: (value: boolean) => void;
+  value: boolean;
+}) {
+  const appTheme = useAppTheme();
+
+  return (
+    <Pressable
+      accessibilityRole="switch"
+      accessibilityState={{ checked: value }}
+      onPress={() => onValueChange(!value)}
+      style={[styles.scheduleSwitchRow, { borderBottomColor: appTheme.colors.divider }]}
+    >
+      <Text style={[styles.scheduleRowLabel, { color: appTheme.colors.ink }]}>{label}</Text>
+      <View style={[
+        styles.scheduleSwitchTrack,
+        { backgroundColor: value ? appTheme.colors.success : appTheme.colors.border }
+      ]}>
+        <View style={[
+          styles.scheduleSwitchThumb,
+          { transform: [{ translateX: value ? 22 : 0 }] }
+        ]} />
+      </View>
+    </Pressable>
+  );
+}
+
+function ScheduleOptionRow({
+  label,
+  onPress,
+  value
+}: {
+  label: string;
+  onPress: () => void;
+  value: string;
+}) {
+  const appTheme = useAppTheme();
+
+  return (
+    <Pressable
+      accessibilityRole="button"
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.scheduleOptionRow,
+        { borderBottomColor: appTheme.colors.divider },
+        pressed && styles.pressed
+      ]}
+    >
+      <Text style={[styles.scheduleRowLabel, { color: appTheme.colors.ink }]}>{label}</Text>
+      <View style={styles.scheduleOptionValue}>
+        <Text style={[styles.scheduleRowValue, { color: appTheme.colors.muted }]}>{value}</Text>
+        <Feather color={appTheme.colors.muted} name="chevron-right" size={18} />
+      </View>
+    </Pressable>
+  );
+}
+
+function ScheduledCallsModal({
+  calls,
+  isOpen,
+  onClose,
+  onDelete
+}: {
+  calls: SynzappScheduledCall[];
+  isOpen: boolean;
+  onClose: () => void;
+  onDelete: (callId: string) => void;
+}) {
+  const appTheme = useAppTheme();
+  const insets = useSafeAreaInsets();
+  const modalTopPadding = getFullScreenModalTopPadding(insets.top);
+
+  return (
+    <Modal
+      allowSwipeDismissal={Platform.OS === 'ios'}
+      animationType="slide"
+      onRequestClose={onClose}
+      presentationStyle={getNativeFullHeightModalPresentationStyle()}
+      transparent={false}
+      visible={isOpen}
+    >
+      <View style={[
+        styles.callModalScreen,
+        {
+          backgroundColor: appTheme.colors.screen,
+          paddingTop: modalTopPadding
+        }
+      ]}>
+        <View style={styles.callModalHeader}>
+          <Pressable
+            accessibilityLabel="Close scheduled calls"
+            accessibilityRole="button"
+            onPress={onClose}
+            style={({ pressed }) => [styles.newChatHeaderIconButton, pressed && styles.pressed]}
+          >
+            <Feather color={appTheme.colors.ink} name="x" size={24} />
+          </Pressable>
+          <Text numberOfLines={1} style={[styles.callModalHeaderTitle, { color: appTheme.colors.ink }]}>Scheduled calls</Text>
+          <View style={styles.newChatHeaderSpacer} />
+        </View>
+
+        <ScrollView showsVerticalScrollIndicator={false} style={styles.callModalList}>
+          {calls.map((call) => (
+            <View
+              key={call.id}
+              style={[
+                styles.scheduledCallRow,
+                { borderBottomColor: appTheme.colors.divider }
+              ]}
+            >
+              <View style={[styles.scheduledCallIcon, { backgroundColor: appTheme.colors.primarySoft }]}>
+                <Feather color={appTheme.colors.primary} name={call.callType === 'video' ? 'video' : 'phone'} size={18} />
+              </View>
+              <View style={styles.chatText}>
+                <Text numberOfLines={1} style={[styles.callHistoryTitle, { color: appTheme.colors.ink }]}>{call.title}</Text>
+                <Text numberOfLines={1} style={[styles.callHistorySubtitle, { color: appTheme.colors.muted }]}>
+                  {formatScheduledCallDateTime(call.startsAt)}
+                </Text>
+              </View>
+              <Pressable
+                accessibilityLabel={`Delete ${call.title}`}
+                accessibilityRole="button"
+                onPress={() => onDelete(call.id)}
+                style={({ pressed }) => [styles.callHistoryIconButton, pressed && styles.pressed]}
+              >
+                <Feather color={appTheme.colors.red} name="trash-2" size={18} />
+              </Pressable>
+            </View>
+          ))}
+
+          {!calls.length ? (
+            <Text style={[styles.batchEmpty, { color: appTheme.colors.muted }]}>No scheduled calls yet</Text>
+          ) : null}
+        </ScrollView>
+      </View>
+    </Modal>
   );
 }
 
@@ -12658,6 +17768,7 @@ function ChatFilterChip({
   label: string;
   onPress: () => void;
 }) {
+  const appTheme = useAppTheme();
   const labelText = typeof count === 'number' && count > 0 ? `${label} ${count}` : label;
 
   return (
@@ -12668,7 +17779,10 @@ function ChatFilterChip({
       onPress={onPress}
       style={({ pressed }) => [
         styles.chatFilterChip,
-        isActive && styles.chatFilterChipActive,
+        {
+          backgroundColor: isActive ? appTheme.colors.primarySoft : appTheme.colors.surfaceElevated,
+          borderColor: isActive ? appTheme.colors.primary : appTheme.colors.border
+        },
         pressed && styles.pressed
       ]}
     >
@@ -12676,7 +17790,7 @@ function ChatFilterChip({
         numberOfLines={1}
         style={[
           styles.chatFilterChipText,
-          isActive && styles.chatFilterChipTextActive
+          { color: isActive ? appTheme.colors.primary : appTheme.colors.mutedStrong }
         ]}
       >
         {labelText}
@@ -12696,6 +17810,8 @@ function ChatsUtilityRow({
   label: string;
   onPress: () => void;
 }) {
+  const appTheme = useAppTheme();
+
   return (
     <Pressable
       accessibilityLabel={label}
@@ -12704,9 +17820,11 @@ function ChatsUtilityRow({
       style={({ pressed }) => [styles.chatsUtilityRow, pressed && styles.pressed]}
     >
       <View style={styles.chatsUtilityIcon}>
-        <Feather color="#64748B" name={icon} size={17} />
+        <Feather color={appTheme.colors.muted} name={icon} size={17} />
       </View>
-      <Text numberOfLines={1} style={styles.chatsUtilityText}>{label}</Text>
+      <Text numberOfLines={1} style={[styles.chatsUtilityText, { color: appTheme.colors.mutedStrong }]}>
+        {label}
+      </Text>
       {typeof count === 'number' && count > 0 ? (
         <View style={styles.unreadBadge}>
           <Text style={styles.unreadText}>{count > 99 ? '99+' : count}</Text>
@@ -12735,6 +17853,7 @@ function NewChatModal({
   profilePhotoHeaders?: Record<string, string>;
   search: string;
 }) {
+  const appTheme = useAppTheme();
   const filteredContacts = filterChatContacts(contacts, search);
   const insets = useSafeAreaInsets();
   const modalTopPadding = getFullScreenModalTopPadding(insets.top);
@@ -12748,7 +17867,13 @@ function NewChatModal({
       transparent={false}
       visible={isOpen}
     >
-      <View style={[styles.newChatModalScreen, { paddingTop: modalTopPadding }]}>
+      <View style={[
+        styles.newChatModalScreen,
+        {
+          backgroundColor: appTheme.colors.screen,
+          paddingTop: modalTopPadding
+        }
+      ]}>
         <View style={styles.newChatHeader}>
           <Pressable
             accessibilityLabel="Close new chat"
@@ -12756,9 +17881,9 @@ function NewChatModal({
             onPress={onCancel}
             style={({ pressed }) => [styles.newChatHeaderIconButton, pressed && styles.pressed]}
           >
-            <Feather color={colors.ink} name="x" size={24} />
+            <Feather color={appTheme.colors.ink} name="x" size={24} />
           </Pressable>
-          <Text style={styles.newChatHeaderTitle}>New Chat</Text>
+          <Text style={[styles.newChatHeaderTitle, { color: appTheme.colors.ink }]}>New Chat</Text>
           <View style={styles.newChatHeaderSpacer} />
         </View>
 
@@ -12772,12 +17897,16 @@ function NewChatModal({
           accessibilityLabel="Create new group"
           accessibilityRole="button"
           onPress={onOpenAddMembers}
-          style={({ pressed }) => [styles.newGroupEntry, pressed && styles.pressed]}
+          style={({ pressed }) => [
+            styles.newGroupEntry,
+            { borderBottomColor: appTheme.colors.divider },
+            pressed && styles.pressed
+          ]}
         >
-          <View style={styles.newGroupIcon}>
+          <View style={[styles.newGroupIcon, { backgroundColor: appTheme.colors.primary }]}>
             <Feather color="#FFFFFF" name="users" size={20} />
           </View>
-          <Text style={styles.newGroupText}>New Group</Text>
+          <Text style={[styles.newGroupText, { color: appTheme.colors.ink }]}>New Group</Text>
         </Pressable>
 
         <ScrollView
@@ -12795,7 +17924,9 @@ function NewChatModal({
           ))}
 
           {!filteredContacts.length ? (
-            <Text style={styles.batchEmpty}>{search.trim() ? 'No contacts found' : 'No organization contacts yet'}</Text>
+            <Text style={[styles.batchEmpty, { color: appTheme.colors.muted }]}>
+              {search.trim() ? 'No contacts found' : 'No organization contacts yet'}
+            </Text>
           ) : null}
         </ScrollView>
       </View>
@@ -12830,6 +17961,7 @@ function AddMembersModal({
   selectedMemberIds: Record<string, boolean>;
   selectedMembers: ChatContact[];
 }) {
+  const appTheme = useAppTheme();
   const filteredContacts = filterChatContacts(contacts, search);
   const insets = useSafeAreaInsets();
   const modalTopPadding = getFullScreenModalTopPadding(insets.top);
@@ -12843,7 +17975,13 @@ function AddMembersModal({
       transparent={false}
       visible={isOpen}
     >
-      <View style={[styles.newChatModalScreen, { paddingTop: modalTopPadding }]}>
+      <View style={[
+        styles.newChatModalScreen,
+        {
+          backgroundColor: appTheme.colors.screen,
+          paddingTop: modalTopPadding
+        }
+      ]}>
         <View style={styles.newChatHeader}>
           <Pressable
             accessibilityLabel="Close add members"
@@ -12851,12 +17989,12 @@ function AddMembersModal({
             onPress={onBack}
             style={({ pressed }) => [styles.newChatHeaderIconButton, pressed && styles.pressed]}
           >
-            <Feather color={colors.ink} name="x" size={24} />
+            <Feather color={appTheme.colors.ink} name="x" size={24} />
           </Pressable>
           <View style={styles.newChatCenteredTitleWrap}>
-            <Text style={styles.newChatHeaderTitle}>Add members</Text>
+            <Text style={[styles.newChatHeaderTitle, { color: appTheme.colors.ink }]}>Add members</Text>
             {selectedCount > 0 ? (
-              <Text style={styles.newChatHeaderSubtitle}>{selectedCount} selected</Text>
+              <Text style={[styles.newChatHeaderSubtitle, { color: appTheme.colors.muted }]}>{selectedCount} selected</Text>
             ) : null}
           </View>
           <Pressable
@@ -12881,7 +18019,10 @@ function AddMembersModal({
         />
 
         {selectedMembers.length ? (
-          <View style={styles.addMembersSelectedPanel}>
+          <View style={[
+            styles.addMembersSelectedPanel,
+            { backgroundColor: appTheme.colors.surface }
+          ]}>
             <ScrollView
               contentContainerStyle={styles.addMembersSelectedContent}
               horizontal
@@ -12906,7 +18047,7 @@ function AddMembersModal({
                       <Feather color="#FFFFFF" name="x" size={13} />
                     </Pressable>
                   </View>
-                  <Text numberOfLines={2} style={styles.addMembersSelectedName}>{member.displayName}</Text>
+                  <Text numberOfLines={2} style={[styles.addMembersSelectedName, { color: appTheme.colors.ink }]}>{member.displayName}</Text>
                 </View>
               ))}
             </ScrollView>
@@ -12918,7 +18059,7 @@ function AddMembersModal({
           showsVerticalScrollIndicator={false}
           style={styles.newChatContactList}
         >
-          <Text style={styles.addMembersSectionTitle}>Frequently contacted</Text>
+          <Text style={[styles.addMembersSectionTitle, { color: appTheme.colors.muted }]}>Frequently contacted</Text>
           {filteredContacts.map((contact) => (
             <ChatMemberSelectRow
               contact={contact}
@@ -12930,7 +18071,9 @@ function AddMembersModal({
           ))}
 
           {!filteredContacts.length ? (
-            <Text style={styles.batchEmpty}>{search.trim() ? 'No members found' : 'No organization members yet'}</Text>
+            <Text style={[styles.batchEmpty, { color: appTheme.colors.muted }]}>
+              {search.trim() ? 'No members found' : 'No organization members yet'}
+            </Text>
           ) : null}
         </ScrollView>
       </View>
@@ -12967,6 +18110,7 @@ function GroupAddMembersModal({
   selectedMemberIds: Record<string, boolean>;
   selectedMembers: ChatContact[];
 }) {
+  const appTheme = useAppTheme();
   const filteredContacts = filterChatContacts(contacts, search);
   const insets = useSafeAreaInsets();
   const modalTopPadding = getFullScreenModalTopPadding(insets.top);
@@ -12981,7 +18125,13 @@ function GroupAddMembersModal({
       transparent={false}
       visible={isOpen}
     >
-      <View style={[styles.newChatModalScreen, { paddingTop: modalTopPadding }]}>
+      <View style={[
+        styles.newChatModalScreen,
+        {
+          backgroundColor: appTheme.colors.screen,
+          paddingTop: modalTopPadding
+        }
+      ]}>
         <View style={styles.newChatHeader}>
           <Pressable
             accessibilityLabel="Close add members"
@@ -12990,12 +18140,12 @@ function GroupAddMembersModal({
             onPress={onCancel}
             style={({ pressed }) => [styles.newChatHeaderIconButton, pressed && !isSaving && styles.pressed]}
           >
-            <Feather color={colors.ink} name="x" size={24} />
+            <Feather color={appTheme.colors.ink} name="x" size={24} />
           </Pressable>
           <View style={styles.newChatCenteredTitleWrap}>
-            <Text style={styles.newChatHeaderTitle}>Add members</Text>
+            <Text style={[styles.newChatHeaderTitle, { color: appTheme.colors.ink }]}>Add members</Text>
             {selectedCount > 0 ? (
-              <Text style={styles.newChatHeaderSubtitle}>{selectedCount} selected</Text>
+              <Text style={[styles.newChatHeaderSubtitle, { color: appTheme.colors.muted }]}>{selectedCount} selected</Text>
             ) : null}
           </View>
           <Pressable
@@ -13024,7 +18174,10 @@ function GroupAddMembersModal({
         />
 
         {selectedMembers.length ? (
-          <View style={styles.addMembersSelectedPanel}>
+          <View style={[
+            styles.addMembersSelectedPanel,
+            { backgroundColor: appTheme.colors.surface }
+          ]}>
             <ScrollView
               contentContainerStyle={styles.addMembersSelectedContent}
               horizontal
@@ -13050,7 +18203,7 @@ function GroupAddMembersModal({
                       <Feather color="#FFFFFF" name="x" size={13} />
                     </Pressable>
                   </View>
-                  <Text numberOfLines={2} style={styles.addMembersSelectedName}>{member.displayName}</Text>
+                  <Text numberOfLines={2} style={[styles.addMembersSelectedName, { color: appTheme.colors.ink }]}>{member.displayName}</Text>
                 </View>
               ))}
             </ScrollView>
@@ -13062,7 +18215,7 @@ function GroupAddMembersModal({
           showsVerticalScrollIndicator={false}
           style={styles.newChatContactList}
         >
-          <Text style={styles.addMembersSectionTitle}>Available members</Text>
+          <Text style={[styles.addMembersSectionTitle, { color: appTheme.colors.muted }]}>Available members</Text>
           {filteredContacts.map((contact) => (
             <ChatMemberSelectRow
               contact={contact}
@@ -13074,7 +18227,9 @@ function GroupAddMembersModal({
           ))}
 
           {!filteredContacts.length ? (
-            <Text style={styles.batchEmpty}>{search.trim() ? 'No members found' : 'Everyone available is already in this group.'}</Text>
+            <Text style={[styles.batchEmpty, { color: appTheme.colors.muted }]}>
+              {search.trim() ? 'No members found' : 'Everyone available is already in this group.'}
+            </Text>
           ) : null}
         </ScrollView>
       </View>
@@ -13109,6 +18264,7 @@ function GroupDetailsModal({
   permissionMode: 'ADMINS' | 'ALL_MEMBERS';
   profilePhotoHeaders?: Record<string, string>;
 }) {
+  const appTheme = useAppTheme();
   const canCreate = groupName.trim().length > 0 && members.length > 0;
   const insets = useSafeAreaInsets();
   const modalTopPadding = getFullScreenModalTopPadding(insets.top);
@@ -13122,7 +18278,13 @@ function GroupDetailsModal({
       transparent={false}
       visible={isOpen}
     >
-      <View style={[styles.newChatModalScreen, { paddingTop: modalTopPadding }]}>
+      <View style={[
+        styles.newChatModalScreen,
+        {
+          backgroundColor: appTheme.colors.screen,
+          paddingTop: modalTopPadding
+        }
+      ]}>
         <View style={styles.newChatHeader}>
           <Pressable
             accessibilityLabel="Back to add members"
@@ -13132,7 +18294,7 @@ function GroupDetailsModal({
           >
             <Text style={styles.backButtonText}>‹</Text>
           </Pressable>
-          <Text style={styles.newChatHeaderTitle}>New Group</Text>
+          <Text style={[styles.newChatHeaderTitle, { color: appTheme.colors.ink }]}>New Group</Text>
           <Pressable
             accessibilityLabel="Create group"
             accessibilityRole="button"
@@ -13148,17 +18310,21 @@ function GroupDetailsModal({
           </Pressable>
         </View>
 
-        <View style={styles.groupNameRow}>
+        <View style={[styles.groupNameRow, { borderBottomColor: appTheme.colors.divider }]}>
           <Pressable
             accessibilityLabel="Add group photo"
             accessibilityRole="button"
             onPress={onPickPhoto}
-            style={({ pressed }) => [styles.groupPhotoButton, pressed && styles.pressed]}
+            style={({ pressed }) => [
+              styles.groupPhotoButton,
+              { backgroundColor: appTheme.colors.primarySoft },
+              pressed && styles.pressed
+            ]}
           >
             {groupPhotoUri ? (
               <Image resizeMode="cover" source={{ uri: groupPhotoUri }} style={styles.groupPhotoImage} />
             ) : (
-              <Ionicons color={colors.primary} name="camera" size={23} />
+              <Ionicons color={appTheme.colors.primary} name="camera" size={23} />
             )}
           </Pressable>
           <TextInput
@@ -13166,8 +18332,8 @@ function GroupDetailsModal({
             autoCorrect={false}
             onChangeText={onChangeGroupName}
             placeholder="Group name"
-            placeholderTextColor="#8B95A5"
-            style={styles.groupNameInput}
+            placeholderTextColor={appTheme.colors.muted}
+            style={[styles.groupNameInput, { color: appTheme.colors.ink }]}
             value={groupName}
           />
         </View>
@@ -13176,20 +18342,27 @@ function GroupDetailsModal({
           accessibilityLabel="Open group permissions"
           accessibilityRole="button"
           onPress={onOpenPermissions}
-          style={({ pressed }) => [styles.groupPermissionRow, pressed && styles.pressed]}
+          style={({ pressed }) => [
+            styles.groupPermissionRow,
+            {
+              backgroundColor: appTheme.colors.screen,
+              borderBottomColor: appTheme.colors.divider
+            },
+            pressed && styles.pressed
+          ]}
         >
           <View>
-            <Text style={styles.groupPermissionTitle}>Group permission</Text>
-            <Text style={styles.groupPermissionSubtitle}>
+            <Text style={[styles.groupPermissionTitle, { color: appTheme.colors.ink }]}>Group permission</Text>
+            <Text style={[styles.groupPermissionSubtitle, { color: appTheme.colors.muted }]}>
               {permissionMode === 'ALL_MEMBERS'
                 ? 'All members can participate'
                 : 'Only admins can manage key actions'}
             </Text>
           </View>
-          <Feather color="#64748B" name="chevron-right" size={20} />
+          <Feather color={appTheme.colors.muted} name="chevron-right" size={20} />
         </Pressable>
 
-        <Text style={styles.groupMembersTitle}>Members</Text>
+        <Text style={[styles.groupMembersTitle, { color: appTheme.colors.muted }]}>Members</Text>
         <ScrollView
           contentContainerStyle={styles.groupMembersContent}
           horizontal
@@ -13213,7 +18386,7 @@ function GroupDetailsModal({
                   <Feather color="#FFFFFF" name="x" size={13} />
                 </Pressable>
               </View>
-              <Text numberOfLines={2} style={styles.groupMemberName}>{member.displayName}</Text>
+              <Text numberOfLines={2} style={[styles.groupMemberName, { color: appTheme.colors.ink }]}>{member.displayName}</Text>
             </View>
           ))}
         </ScrollView>
@@ -13233,6 +18406,7 @@ function GroupPermissionsModal({
   onSelectPermission: (value: 'ADMINS' | 'ALL_MEMBERS') => void;
   permissionMode: 'ADMINS' | 'ALL_MEMBERS';
 }) {
+  const appTheme = useAppTheme();
   const insets = useSafeAreaInsets();
   const modalTopPadding = getFullScreenModalTopPadding(insets.top);
 
@@ -13245,7 +18419,13 @@ function GroupPermissionsModal({
       transparent={false}
       visible={isOpen}
     >
-      <View style={[styles.newChatModalScreen, { paddingTop: modalTopPadding }]}>
+      <View style={[
+        styles.newChatModalScreen,
+        {
+          backgroundColor: appTheme.colors.screen,
+          paddingTop: modalTopPadding
+        }
+      ]}>
         <View style={styles.newChatHeader}>
           <Pressable
             accessibilityLabel="Back to group details"
@@ -13253,9 +18433,9 @@ function GroupPermissionsModal({
             onPress={onBack}
             style={({ pressed }) => [styles.newChatHeaderIconButton, pressed && styles.pressed]}
           >
-            <Text style={styles.backButtonText}>‹</Text>
+            <Text style={[styles.backButtonText, { color: appTheme.colors.primary }]}>‹</Text>
           </Pressable>
-          <Text style={styles.newChatHeaderTitle}>Group permissions</Text>
+          <Text style={[styles.newChatHeaderTitle, { color: appTheme.colors.ink }]}>Group permissions</Text>
           <View style={styles.newChatHeaderSpacer} />
         </View>
 
@@ -13289,6 +18469,7 @@ function GroupCallOptionsModal({
   onSelect: (option: GroupCallOption) => void;
   onlineCount: number;
 }) {
+  const appTheme = useAppTheme();
   const options: Array<{ icon: keyof typeof Feather.glyphMap; id: GroupCallOption; label: string }> = [
     { icon: 'phone', id: 'voice', label: 'Voice call' },
     { icon: 'video', id: 'video', label: 'Video call' },
@@ -13309,12 +18490,28 @@ function GroupCallOptionsModal({
           accessibilityLabel="Close group call options"
           accessibilityRole="button"
           onPress={onClose}
-          style={styles.groupCallOptionsBackdrop}
+          style={[
+            styles.groupCallOptionsBackdrop,
+            { backgroundColor: appTheme.colors.overlay }
+          ]}
         />
-        <View accessibilityViewIsModal style={styles.groupCallOptionsPanel}>
-          <View style={styles.groupCallOptionsHeader}>
-            <Text numberOfLines={1} style={styles.groupCallOptionsTitle}>{groupName}</Text>
-            <Text style={styles.groupCallOptionsSubtitle}>{formatGroupOnlineCount(onlineCount)}</Text>
+        <View
+          accessibilityViewIsModal
+          style={[
+            styles.groupCallOptionsPanel,
+            {
+              backgroundColor: appTheme.colors.surfaceElevated,
+              borderColor: appTheme.colors.border
+            }
+          ]}
+        >
+          <View style={[styles.groupCallOptionsHeader, { borderBottomColor: appTheme.colors.divider }]}>
+            <Text numberOfLines={1} style={[styles.groupCallOptionsTitle, { color: appTheme.colors.ink }]}>
+              {groupName}
+            </Text>
+            <Text style={[styles.groupCallOptionsSubtitle, { color: appTheme.colors.muted }]}>
+              {formatGroupOnlineCount(onlineCount)}
+            </Text>
           </View>
           {options.map((option) => (
             <Pressable
@@ -13324,8 +18521,8 @@ function GroupCallOptionsModal({
               onPress={() => onSelect(option.id)}
               style={({ pressed }) => [styles.groupCallOptionRow, pressed && styles.pressed]}
             >
-              <Feather color="#334155" name={option.icon} size={20} />
-              <Text style={styles.groupCallOptionText}>{option.label}</Text>
+              <Feather color={appTheme.colors.mutedStrong} name={option.icon} size={20} />
+              <Text style={[styles.groupCallOptionText, { color: appTheme.colors.ink }]}>{option.label}</Text>
             </Pressable>
           ))}
         </View>
@@ -13361,6 +18558,7 @@ function GroupCallPeopleModal({
   selectedCount: number;
   selectedMemberIds: Record<string, boolean>;
 }) {
+  const appTheme = useAppTheme();
   const filteredContacts = filterChatContacts(contacts, search);
   const insets = useSafeAreaInsets();
   const modalTopPadding = getFullScreenModalTopPadding(insets.top);
@@ -13375,7 +18573,13 @@ function GroupCallPeopleModal({
       transparent={false}
       visible={isOpen}
     >
-      <View style={[styles.newChatModalScreen, { paddingTop: modalTopPadding }]}>
+      <View style={[
+        styles.newChatModalScreen,
+        {
+          backgroundColor: appTheme.colors.screen,
+          paddingTop: modalTopPadding
+        }
+      ]}>
         <View style={styles.newChatHeader}>
           <Pressable
             accessibilityLabel="Close select people"
@@ -13383,11 +18587,13 @@ function GroupCallPeopleModal({
             onPress={onCancel}
             style={({ pressed }) => [styles.newChatHeaderIconButton, pressed && styles.pressed]}
           >
-            <Feather color={colors.ink} name="x" size={24} />
+            <Feather color={appTheme.colors.ink} name="x" size={24} />
           </Pressable>
           <View style={styles.newChatCenteredTitleWrap}>
-            <Text style={styles.newChatHeaderTitle}>{getGroupCallPeopleTitle(mode)}</Text>
-            <Text style={styles.newChatHeaderSubtitle}>
+            <Text style={[styles.newChatHeaderTitle, { color: appTheme.colors.ink }]}>
+              {getGroupCallPeopleTitle(mode)}
+            </Text>
+            <Text style={[styles.newChatHeaderSubtitle, { color: appTheme.colors.muted }]}>
               {selectedCount > 0 ? `${selectedCount} selected` : formatGroupOnlineCount(onlineCount)}
             </Text>
           </View>
@@ -13428,7 +18634,9 @@ function GroupCallPeopleModal({
           ))}
 
           {!filteredContacts.length ? (
-            <Text style={styles.batchEmpty}>{search.trim() ? 'No people found' : 'No group members available'}</Text>
+            <Text style={[styles.batchEmpty, { color: appTheme.colors.muted }]}>
+              {search.trim() ? 'No people found' : 'No group members available'}
+            </Text>
           ) : null}
         </ScrollView>
       </View>
@@ -13463,6 +18671,7 @@ function AddToGroupModal({
   selectedCount: number;
   selectedGroupIds: Record<string, boolean>;
 }) {
+  const appTheme = useAppTheme();
   const filteredGroups = filterAddableChatGroups(groups, search);
   const insets = useSafeAreaInsets();
   const modalTopPadding = getFullScreenModalTopPadding(insets.top);
@@ -13477,7 +18686,13 @@ function AddToGroupModal({
       transparent={false}
       visible={isOpen}
     >
-      <View style={[styles.newChatModalScreen, { paddingTop: modalTopPadding }]}>
+      <View style={[
+        styles.newChatModalScreen,
+        {
+          backgroundColor: appTheme.colors.screen,
+          paddingTop: modalTopPadding
+        }
+      ]}>
         <View style={styles.newChatHeader}>
           <Pressable
             accessibilityLabel="Close select groups"
@@ -13486,11 +18701,11 @@ function AddToGroupModal({
             onPress={onCancel}
             style={({ pressed }) => [styles.newChatHeaderIconButton, pressed && !isSaving && styles.pressed]}
           >
-            <Feather color={colors.ink} name="x" size={24} />
+            <Feather color={appTheme.colors.ink} name="x" size={24} />
           </Pressable>
           <View style={styles.newChatCenteredTitleWrap}>
-            <Text style={styles.newChatHeaderTitle}>Select groups</Text>
-            <Text style={styles.newChatHeaderSubtitle}>{selectedCount}/10</Text>
+            <Text style={[styles.newChatHeaderTitle, { color: appTheme.colors.ink }]}>Select groups</Text>
+            <Text style={[styles.newChatHeaderSubtitle, { color: appTheme.colors.muted }]}>{selectedCount}/10</Text>
           </View>
           <Pressable
             accessibilityLabel={`Add ${contactName} to selected groups`}
@@ -13519,7 +18734,7 @@ function AddToGroupModal({
 
         {isLoading && !groups.length ? (
           <View style={styles.loadingRow}>
-            <ActivityIndicator color={colors.primary} />
+            <ActivityIndicator color={appTheme.colors.primary} />
           </View>
         ) : (
           <ScrollView
@@ -13539,7 +18754,7 @@ function AddToGroupModal({
             ))}
 
             {!filteredGroups.length ? (
-              <Text style={styles.batchEmpty}>
+              <Text style={[styles.batchEmpty, { color: appTheme.colors.muted }]}>
                 {search.trim() ? 'No groups found' : `${contactName} can already access every available group.`}
               </Text>
             ) : null}
@@ -13561,6 +18776,8 @@ function AddToGroupRow({
   isSelected: boolean;
   onToggle: () => void;
 }) {
+  const appTheme = useAppTheme();
+
   return (
     <Pressable
       accessibilityLabel={`Select ${group.name}`}
@@ -13568,19 +18785,34 @@ function AddToGroupRow({
       accessibilityState={{ checked: isSelected, disabled: isDisabled }}
       disabled={isDisabled}
       onPress={onToggle}
-      style={({ pressed }) => [styles.newChatContactRow, pressed && !isDisabled && styles.pressed]}
+      style={({ pressed }) => [
+        styles.newChatContactRow,
+        {
+          backgroundColor: appTheme.colors.screen,
+          borderBottomColor: appTheme.colors.divider
+        },
+        pressed && !isDisabled && styles.pressed
+      ]}
     >
       <View style={[
         styles.addToGroupAvatar,
-        group.isDepartmentDefault && styles.addToGroupAvatarDepartment
+        group.isDepartmentDefault && styles.addToGroupAvatarDepartment,
+        { backgroundColor: appTheme.colors.primarySoft }
       ]}>
-        <Ionicons color={colors.primary} name={group.isDepartmentDefault ? 'people' : 'chatbubbles'} size={21} />
+        <Ionicons color={appTheme.colors.primary} name={group.isDepartmentDefault ? 'people' : 'chatbubbles'} size={21} />
       </View>
       <View style={styles.chatText}>
-        <Text numberOfLines={1} style={styles.chatTitle}>{group.name}</Text>
-        <Text numberOfLines={1} style={styles.chatPreview}>{getAddableGroupSubtitle(group)}</Text>
+        <Text numberOfLines={1} style={[styles.chatTitle, { color: appTheme.colors.ink }]}>{group.name}</Text>
+        <Text numberOfLines={1} style={[styles.chatPreview, { color: appTheme.colors.muted }]}>{getAddableGroupSubtitle(group)}</Text>
       </View>
-      <View style={[styles.memberSelectCheck, isSelected && styles.memberSelectCheckActive]}>
+      <View style={[
+        styles.memberSelectCheck,
+        {
+          borderColor: isSelected ? appTheme.colors.primary : appTheme.colors.muted
+        },
+        isSelected && styles.memberSelectCheckActive,
+        isSelected && { backgroundColor: appTheme.colors.primary }
+      ]}>
         {isSelected ? <Feather color="#FFFFFF" name="check" size={14} /> : null}
       </View>
     </Pressable>
@@ -13606,6 +18838,7 @@ function ChatNotificationSettingsModal({
   onSelectMuteMode: () => void;
   settings: ChatNotificationSettings | null;
 }) {
+  const appTheme = useAppTheme();
   const insets = useSafeAreaInsets();
   const modalTopPadding = getFullScreenModalTopPadding(insets.top);
 
@@ -13624,19 +18857,29 @@ function ChatNotificationSettingsModal({
       transparent={false}
       visible={isOpen}
     >
-      <View style={[styles.notificationSettingsScreen, { paddingTop: modalTopPadding }]}>
+      <View style={[
+        styles.notificationSettingsScreen,
+        {
+          backgroundColor: appTheme.colors.screen,
+          paddingTop: modalTopPadding
+        }
+      ]}>
         <View style={styles.notificationSettingsTopBar}>
           <Pressable
             accessibilityLabel={chat.chatType === 'GROUP' ? 'Back to group info' : 'Back to contact info'}
             accessibilityRole="button"
             onPress={onClose}
-            style={({ pressed }) => [styles.groupInfoTopButton, pressed && styles.pressed]}
+            style={({ pressed }) => [
+              styles.groupInfoTopButton,
+              { backgroundColor: appTheme.colors.surface },
+              pressed && styles.pressed
+            ]}
           >
-            <Text style={styles.backButtonText}>‹</Text>
+            <Text style={[styles.backButtonText, { color: appTheme.colors.primary }]}>‹</Text>
           </Pressable>
           <View style={styles.notificationSettingsHeaderText}>
-            <Text numberOfLines={1} style={styles.notificationSettingsTitle}>Notifications</Text>
-            <Text numberOfLines={1} style={styles.notificationSettingsSubtitle}>{chat.title}</Text>
+            <Text numberOfLines={1} style={[styles.notificationSettingsTitle, { color: appTheme.colors.ink }]}>Notifications</Text>
+            <Text numberOfLines={1} style={[styles.notificationSettingsSubtitle, { color: appTheme.colors.muted }]}>{chat.title}</Text>
           </View>
           <View style={styles.groupInfoTopButtonSpacer} />
         </View>
@@ -13646,9 +18889,9 @@ function ChatNotificationSettingsModal({
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          <Text style={styles.notificationSettingsSectionLabel}>Messages</Text>
+          <Text style={[styles.notificationSettingsSectionLabel, { color: appTheme.colors.muted }]}>Messages</Text>
 
-          <View style={styles.notificationSettingsSection}>
+          <View style={[styles.notificationSettingsSection, { backgroundColor: appTheme.colors.surfaceElevated }]}>
             <ChatNotificationSettingsRow
               disabled={isSaving}
               label="Mute notifications"
@@ -13665,8 +18908,8 @@ function ChatNotificationSettingsModal({
 
           {isLoading || isSaving ? (
             <View style={styles.notificationSettingsLoadingRow}>
-              <ActivityIndicator color={colors.primary} />
-              <Text style={styles.notificationSettingsLoadingText}>
+              <ActivityIndicator color={appTheme.colors.primary} />
+              <Text style={[styles.notificationSettingsLoadingText, { color: appTheme.colors.muted }]}>
                 {isSaving ? 'Saving settings...' : 'Loading settings...'}
               </Text>
             </View>
@@ -13688,6 +18931,8 @@ function ChatNotificationSettingsRow({
   onPress: () => void;
   value: string;
 }) {
+  const appTheme = useAppTheme();
+
   return (
     <Pressable
       accessibilityLabel={label}
@@ -13696,14 +18941,18 @@ function ChatNotificationSettingsRow({
       onPress={onPress}
       style={({ pressed }) => [
         styles.notificationSettingsRow,
+        {
+          backgroundColor: appTheme.colors.surfaceElevated,
+          borderBottomColor: appTheme.colors.divider
+        },
         pressed && styles.pressed,
         disabled && styles.disabled
       ]}
     >
-      <Text numberOfLines={1} style={styles.notificationSettingsRowLabel}>{label}</Text>
+      <Text numberOfLines={1} style={[styles.notificationSettingsRowLabel, { color: appTheme.colors.ink }]}>{label}</Text>
       <View style={styles.notificationSettingsRowValueWrap}>
-        <Text numberOfLines={1} style={styles.notificationSettingsRowValue}>{value}</Text>
-        <Feather color="#A7B3C3" name="chevron-right" size={19} />
+        <Text numberOfLines={1} style={[styles.notificationSettingsRowValue, { color: appTheme.colors.muted }]}>{value}</Text>
+        <Feather color={appTheme.colors.muted} name="chevron-right" size={19} />
       </View>
     </Pressable>
   );
@@ -13730,6 +18979,7 @@ function DirectChatTranscriptLanguageModal({
   search: string;
   transcriptLanguage: ChatTranscriptLanguageSetting | null;
 }) {
+  const appTheme = useAppTheme();
   const insets = useSafeAreaInsets();
   const modalTopPadding = getFullScreenModalTopPadding(insets.top);
 
@@ -13757,17 +19007,27 @@ function DirectChatTranscriptLanguageModal({
       transparent={false}
       visible={isOpen}
     >
-      <View style={[styles.transcriptLanguageScreen, { paddingTop: modalTopPadding }]}>
+      <View style={[
+        styles.transcriptLanguageScreen,
+        {
+          backgroundColor: appTheme.colors.screen,
+          paddingTop: modalTopPadding
+        }
+      ]}>
         <View style={styles.transcriptLanguageTopBar}>
           <Pressable
             accessibilityLabel="Back to contact info"
             accessibilityRole="button"
             onPress={onClose}
-            style={({ pressed }) => [styles.groupInfoTopButton, pressed && styles.pressed]}
+            style={({ pressed }) => [
+              styles.groupInfoTopButton,
+              { backgroundColor: appTheme.colors.surface },
+              pressed && styles.pressed
+            ]}
           >
-            <Feather color={colors.ink} name="x" size={22} />
+            <Feather color={appTheme.colors.ink} name="x" size={22} />
           </Pressable>
-          <Text numberOfLines={1} style={styles.transcriptLanguageTitle}>Chat transcript language</Text>
+          <Text numberOfLines={1} style={[styles.transcriptLanguageTitle, { color: appTheme.colors.ink }]}>Chat transcript language</Text>
           <View style={styles.groupInfoTopButtonSpacer} />
         </View>
 
@@ -13785,8 +19045,8 @@ function DirectChatTranscriptLanguageModal({
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          <View style={styles.transcriptLanguageNote}>
-            <Text style={styles.transcriptLanguageNoteText}>
+          <View style={[styles.transcriptLanguageNote, { backgroundColor: appTheme.colors.surfaceElevated }]}>
+            <Text style={[styles.transcriptLanguageNoteText, { color: appTheme.colors.muted }]}>
               This language is for transcripts in this chat only. To change the language for all transcripts, go to Transcript language in Settings.
             </Text>
           </View>
@@ -13808,13 +19068,13 @@ function DirectChatTranscriptLanguageModal({
           />
 
           {!hasMatches ? (
-            <Text style={styles.transcriptLanguageEmpty}>No languages found</Text>
+            <Text style={[styles.transcriptLanguageEmpty, { color: appTheme.colors.muted }]}>No languages found</Text>
           ) : null}
 
           {isLoading || isSaving ? (
             <View style={styles.notificationSettingsLoadingRow}>
-              <ActivityIndicator color={colors.primary} />
-              <Text style={styles.notificationSettingsLoadingText}>
+              <ActivityIndicator color={appTheme.colors.primary} />
+              <Text style={[styles.notificationSettingsLoadingText, { color: appTheme.colors.muted }]}>
                 {isSaving ? 'Saving language...' : 'Loading language...'}
               </Text>
             </View>
@@ -13838,14 +19098,16 @@ function TranscriptLanguageSection({
   selectedLanguageCode: ChatTranscriptLanguageCode;
   title: string;
 }) {
+  const appTheme = useAppTheme();
+
   if (!languages.length) {
     return null;
   }
 
   return (
     <View style={styles.transcriptLanguageSectionWrap}>
-      <Text style={styles.transcriptLanguageSectionTitle}>{title}</Text>
-      <View style={styles.transcriptLanguageSection}>
+      <Text style={[styles.transcriptLanguageSectionTitle, { color: appTheme.colors.muted }]}>{title}</Text>
+      <View style={[styles.transcriptLanguageSection, { backgroundColor: appTheme.colors.surfaceElevated }]}>
         {languages.map((language) => (
           <TranscriptLanguageRow
             disabled={disabled}
@@ -13871,6 +19133,8 @@ function TranscriptLanguageRow({
   language: TranscriptLanguageOption;
   onSelect: () => void;
 }) {
+  const appTheme = useAppTheme();
+
   return (
     <Pressable
       accessibilityLabel={language.label}
@@ -13880,13 +19144,17 @@ function TranscriptLanguageRow({
       onPress={onSelect}
       style={({ pressed }) => [
         styles.transcriptLanguageRow,
+        {
+          backgroundColor: appTheme.colors.surfaceElevated,
+          borderBottomColor: appTheme.colors.divider
+        },
         pressed && styles.pressed,
         disabled && styles.disabled
       ]}
     >
-      <Text numberOfLines={1} style={styles.transcriptLanguageRowText}>{language.label}</Text>
+      <Text numberOfLines={1} style={[styles.transcriptLanguageRowText, { color: appTheme.colors.ink }]}>{language.label}</Text>
       {isSelected ? (
-        <Feather color="#22C55E" name="check" size={20} />
+        <Feather color={appTheme.colors.success} name="check" size={20} />
       ) : null}
     </Pressable>
   );
@@ -13913,6 +19181,7 @@ function DirectContactDetailsModal({
   onStartVoiceCall: () => void;
   profilePhotoHeaders?: Record<string, string>;
 }) {
+  const appTheme = useAppTheme();
   const insets = useSafeAreaInsets();
   const modalTopPadding = getFullScreenModalTopPadding(insets.top);
 
@@ -13933,15 +19202,25 @@ function DirectContactDetailsModal({
       transparent={false}
       visible={isOpen}
     >
-      <View style={[styles.directContactDetailsScreen, { paddingTop: modalTopPadding }]}>
+      <View style={[
+        styles.directContactDetailsScreen,
+        {
+          backgroundColor: appTheme.colors.screen,
+          paddingTop: modalTopPadding
+        }
+      ]}>
         <View style={styles.directContactDetailsTopBar}>
           <Pressable
             accessibilityLabel="Close contact details"
             accessibilityRole="button"
             onPress={onClose}
-            style={({ pressed }) => [styles.groupInfoTopButton, pressed && styles.pressed]}
+            style={({ pressed }) => [
+              styles.groupInfoTopButton,
+              { backgroundColor: appTheme.colors.surface },
+              pressed && styles.pressed
+            ]}
           >
-            <Feather color={colors.ink} name="x" size={22} />
+            <Feather color={appTheme.colors.ink} name="x" size={22} />
           </Pressable>
         </View>
 
@@ -13957,46 +19236,58 @@ function DirectContactDetailsModal({
               size={104}
               uri={profilePhotoUrl}
             />
-            <Text numberOfLines={2} style={styles.directContactDetailsName}>{displayName}</Text>
-            <Text numberOfLines={1} style={styles.directContactDetailsRole}>
+            <Text numberOfLines={2} style={[styles.directContactDetailsName, { color: appTheme.colors.ink }]}>{displayName}</Text>
+            <Text numberOfLines={1} style={[styles.directContactDetailsRole, { color: appTheme.colors.muted }]}>
               {details?.roleName || chat.roleName || 'Synzapp contact'}
             </Text>
           </View>
 
-          <View style={styles.directContactPhoneCard}>
+          <View style={[styles.directContactPhoneCard, { backgroundColor: appTheme.colors.surfaceElevated }]}>
             <View style={styles.directContactPhoneText}>
-              <Text style={styles.directContactPhoneLabel}>mobile</Text>
-              <Text numberOfLines={1} style={styles.directContactPhoneNumber}>{phoneNumber}</Text>
+              <Text style={[styles.directContactPhoneLabel, { color: appTheme.colors.muted }]}>mobile</Text>
+              <Text numberOfLines={1} style={[styles.directContactPhoneNumber, { color: appTheme.colors.success }]}>{phoneNumber}</Text>
             </View>
             <View style={styles.directContactPhoneActions}>
               <Pressable
                 accessibilityLabel="Message contact"
                 accessibilityRole="button"
                 onPress={onClose}
-                style={({ pressed }) => [styles.directContactActionButton, pressed && styles.pressed]}
+                style={({ pressed }) => [
+                  styles.directContactActionButton,
+                  { backgroundColor: appTheme.colors.primarySoft },
+                  pressed && styles.pressed
+                ]}
               >
-                <Ionicons color={colors.primary} name="chatbubble" size={18} />
+                <Ionicons color={appTheme.colors.primary} name="chatbubble" size={18} />
               </Pressable>
               <Pressable
                 accessibilityLabel="Video call contact"
                 accessibilityRole="button"
                 onPress={onStartVideoCall}
-                style={({ pressed }) => [styles.directContactActionButton, pressed && styles.pressed]}
+                style={({ pressed }) => [
+                  styles.directContactActionButton,
+                  { backgroundColor: appTheme.colors.primarySoft },
+                  pressed && styles.pressed
+                ]}
               >
-                <Feather color={colors.primary} name="video" size={18} />
+                <Feather color={appTheme.colors.primary} name="video" size={18} />
               </Pressable>
               <Pressable
                 accessibilityLabel="Call contact"
                 accessibilityRole="button"
                 onPress={onStartVoiceCall}
-                style={({ pressed }) => [styles.directContactActionButton, pressed && styles.pressed]}
+                style={({ pressed }) => [
+                  styles.directContactActionButton,
+                  { backgroundColor: appTheme.colors.primarySoft },
+                  pressed && styles.pressed
+                ]}
               >
-                <Feather color={colors.primary} name="phone" size={18} />
+                <Feather color={appTheme.colors.primary} name="phone" size={18} />
               </Pressable>
             </View>
           </View>
 
-          <View style={styles.directContactDetailsCard}>
+          <View style={[styles.directContactDetailsCard, { backgroundColor: appTheme.colors.surfaceElevated }]}>
             <ProfileDetailRow label="Phone" value={phoneNumber} />
             <ProfileDetailRow label="Company" value={details?.companyName || 'Your organization'} />
             <ProfileDetailRow label="Department" value={details?.departmentName || 'Not assigned'} />
@@ -14009,15 +19300,19 @@ function DirectContactDetailsModal({
             accessibilityLabel={`Add ${displayName} to group`}
             accessibilityRole="button"
             onPress={onAddToGroup}
-            style={({ pressed }) => [styles.directContactAddGroupRow, pressed && styles.pressed]}
+            style={({ pressed }) => [
+              styles.directContactAddGroupRow,
+              { backgroundColor: appTheme.colors.surfaceElevated },
+              pressed && styles.pressed
+            ]}
           >
-            <Text style={styles.directContactAddGroupText}>Add to group</Text>
+            <Text style={[styles.directContactAddGroupText, { color: appTheme.colors.success }]}>Add to group</Text>
           </Pressable>
 
           {isLoading ? (
             <View style={styles.notificationSettingsLoadingRow}>
-              <ActivityIndicator color={colors.primary} />
-              <Text style={styles.notificationSettingsLoadingText}>Loading contact details...</Text>
+              <ActivityIndicator color={appTheme.colors.primary} />
+              <Text style={[styles.notificationSettingsLoadingText, { color: appTheme.colors.muted }]}>Loading contact details...</Text>
             </View>
           ) : null}
         </ScrollView>
@@ -14063,6 +19358,7 @@ function ContactInfoModal({
   onStartVoiceCall: () => void;
   profilePhotoHeaders?: Record<string, string>;
 }) {
+  const appTheme = useAppTheme();
   const insets = useSafeAreaInsets();
   const modalTopPadding = getFullScreenModalTopPadding(insets.top);
 
@@ -14082,17 +19378,27 @@ function ContactInfoModal({
       transparent={false}
       visible={isOpen}
     >
-      <View style={[styles.groupInfoScreen, { paddingTop: modalTopPadding }]}>
+      <View style={[
+        styles.groupInfoScreen,
+        {
+          backgroundColor: appTheme.colors.screen,
+          paddingTop: modalTopPadding
+        }
+      ]}>
         <View style={styles.contactInfoTopBar}>
           <Pressable
             accessibilityLabel="Close contact info"
             accessibilityRole="button"
             onPress={onClose}
-            style={({ pressed }) => [styles.groupInfoTopButton, pressed && styles.pressed]}
+            style={({ pressed }) => [
+              styles.groupInfoTopButton,
+              { backgroundColor: appTheme.colors.surface },
+              pressed && styles.pressed
+            ]}
           >
-            <Text style={styles.backButtonText}>‹</Text>
+            <Text style={[styles.backButtonText, { color: appTheme.colors.primary }]}>‹</Text>
           </Pressable>
-          <Text numberOfLines={1} style={styles.contactInfoHeaderTitle}>Contact info</Text>
+          <Text numberOfLines={1} style={[styles.contactInfoHeaderTitle, { color: appTheme.colors.ink }]}>Contact info</Text>
           <View style={styles.groupInfoTopButtonSpacer} />
         </View>
 
@@ -14108,11 +19414,11 @@ function ContactInfoModal({
               size={104}
               uri={chat.profilePhotoUrl}
             />
-            <Text numberOfLines={2} style={styles.contactInfoName}>{chat.title}</Text>
+            <Text numberOfLines={2} style={[styles.contactInfoName, { color: appTheme.colors.ink }]}>{chat.title}</Text>
             {phoneNumber ? (
-              <Text numberOfLines={1} style={styles.contactInfoMeta}>{phoneNumber}</Text>
+              <Text numberOfLines={1} style={[styles.contactInfoMeta, { color: appTheme.colors.muted }]}>{phoneNumber}</Text>
             ) : null}
-            <Text numberOfLines={1} style={styles.contactInfoPresence}>
+            <Text numberOfLines={1} style={[styles.contactInfoPresence, { color: appTheme.colors.muted }]}>
               {getContactInfoPresenceText(chat)}
             </Text>
           </View>
@@ -14123,7 +19429,7 @@ function ContactInfoModal({
             <GroupInfoActionButton icon="search" label="Search" onPress={onOpenSearch} />
           </View>
 
-          <View style={styles.groupInfoSection}>
+          <View style={[styles.groupInfoSection, { backgroundColor: appTheme.colors.surfaceElevated }]}>
             <GroupInfoSettingRow
               icon="bell"
               label="Notifications"
@@ -14132,7 +19438,7 @@ function ContactInfoModal({
             />
           </View>
 
-          <View style={styles.groupInfoSection}>
+          <View style={[styles.groupInfoSection, { backgroundColor: appTheme.colors.surfaceElevated }]}>
             <GroupInfoSettingRow
               icon="file-text"
               label="Transcript language"
@@ -14141,7 +19447,7 @@ function ContactInfoModal({
             />
           </View>
 
-          <View style={styles.groupInfoSection}>
+          <View style={[styles.groupInfoSection, { backgroundColor: appTheme.colors.surfaceElevated }]}>
             <GroupInfoSettingRow
               icon="user"
               label="Contact details"
@@ -14149,9 +19455,12 @@ function ContactInfoModal({
             />
           </View>
 
-          <View style={styles.groupInfoSection}>
-            <View style={styles.contactInfoCommonHeader}>
-              <Text style={styles.groupInfoMembersTitle}>
+          <View style={[styles.groupInfoSection, { backgroundColor: appTheme.colors.surfaceElevated }]}>
+            <View style={[
+              styles.contactInfoCommonHeader,
+              { borderBottomColor: appTheme.colors.divider }
+            ]}>
+              <Text style={[styles.groupInfoMembersTitle, { color: appTheme.colors.ink }]}>
                 {formatCommonGroupCount(commonGroups.length)}
               </Text>
             </View>
@@ -14199,12 +19508,21 @@ function ContactCommonGroupRow({
   onOpen: () => void;
   profilePhotoHeaders?: Record<string, string>;
 }) {
+  const appTheme = useAppTheme();
+
   return (
     <Pressable
       accessibilityLabel={`Open ${group.displayName}`}
       accessibilityRole="button"
       onPress={onOpen}
-      style={({ pressed }) => [styles.contactInfoCommonGroupRow, pressed && styles.pressed]}
+      style={({ pressed }) => [
+        styles.contactInfoCommonGroupRow,
+        {
+          backgroundColor: appTheme.colors.surfaceElevated,
+          borderBottomColor: appTheme.colors.divider
+        },
+        pressed && styles.pressed
+      ]}
     >
       <ProfileAvatar
         headers={profilePhotoHeaders}
@@ -14213,12 +19531,12 @@ function ContactCommonGroupRow({
         uri={group.profilePhotoUrl}
       />
       <View style={styles.chatText}>
-        <Text numberOfLines={1} style={styles.groupInfoMemberName}>{group.displayName}</Text>
-        <Text numberOfLines={1} style={styles.contactInfoCommonGroupSubtitle}>
+        <Text numberOfLines={1} style={[styles.groupInfoMemberName, { color: appTheme.colors.ink }]}>{group.displayName}</Text>
+        <Text numberOfLines={1} style={[styles.contactInfoCommonGroupSubtitle, { color: appTheme.colors.muted }]}>
           {getCommonGroupPreview(group, contactName)}
         </Text>
       </View>
-      <Feather color="#A7B3C3" name="chevron-right" size={18} />
+      <Feather color={appTheme.colors.muted} name="chevron-right" size={18} />
     </Pressable>
   );
 }
@@ -14266,6 +19584,7 @@ function GroupInfoModal({
   profilePhotoHeaders?: Record<string, string>;
   starredCount: number;
 }) {
+  const appTheme = useAppTheme();
   const insets = useSafeAreaInsets();
   const modalTopPadding = getFullScreenModalTopPadding(insets.top);
   const directContactById = useMemo(() => new Map(
@@ -14292,15 +19611,25 @@ function GroupInfoModal({
       transparent={false}
       visible={isOpen}
     >
-      <View style={[styles.groupInfoScreen, { paddingTop: modalTopPadding }]}>
+      <View style={[
+        styles.groupInfoScreen,
+        {
+          backgroundColor: appTheme.colors.screen,
+          paddingTop: modalTopPadding
+        }
+      ]}>
         <View style={styles.groupInfoTopBar}>
           <Pressable
             accessibilityLabel="Close group info"
             accessibilityRole="button"
             onPress={onClose}
-            style={({ pressed }) => [styles.groupInfoTopButton, pressed && styles.pressed]}
+            style={({ pressed }) => [
+              styles.groupInfoTopButton,
+              { backgroundColor: appTheme.colors.surface },
+              pressed && styles.pressed
+            ]}
           >
-            <Text style={styles.backButtonText}>‹</Text>
+            <Text style={[styles.backButtonText, { color: appTheme.colors.primary }]}>‹</Text>
           </Pressable>
           <View style={styles.groupInfoTopButtonSpacer} />
         </View>
@@ -14317,12 +19646,12 @@ function GroupInfoModal({
               size={92}
               uri={chat.profilePhotoUrl}
             />
-            <Text numberOfLines={3} style={styles.groupInfoTitle}>{chat.title}</Text>
-            <Text numberOfLines={1} style={styles.groupInfoCompany}>
+            <Text numberOfLines={3} style={[styles.groupInfoTitle, { color: appTheme.colors.ink }]}>{chat.title}</Text>
+            <Text numberOfLines={1} style={[styles.groupInfoCompany, { color: appTheme.colors.muted }]}>
               Group in "{companyName}"
             </Text>
-            <Text style={styles.groupInfoMemberCount}>{memberCountLabel}</Text>
-            <Text numberOfLines={2} style={styles.groupInfoDescription}>{groupDescription}</Text>
+            <Text style={[styles.groupInfoMemberCount, { color: appTheme.colors.primary }]}>{memberCountLabel}</Text>
+            <Text numberOfLines={2} style={[styles.groupInfoDescription, { color: appTheme.colors.muted }]}>{groupDescription}</Text>
           </View>
 
           <View style={styles.groupInfoActionGrid}>
@@ -14332,7 +19661,7 @@ function GroupInfoModal({
             <GroupInfoActionButton icon="search" label="Search" onPress={onOpenSearchMessages} />
           </View>
 
-          <View style={styles.groupInfoSection}>
+          <View style={[styles.groupInfoSection, { backgroundColor: appTheme.colors.surfaceElevated }]}>
             <GroupInfoSettingRow
               icon="users"
               label={companyName}
@@ -14341,7 +19670,7 @@ function GroupInfoModal({
             />
           </View>
 
-          <View style={styles.groupInfoSection}>
+          <View style={[styles.groupInfoSection, { backgroundColor: appTheme.colors.surfaceElevated }]}>
             <GroupInfoSettingRow
               icon="star"
               label="Starred"
@@ -14356,16 +19685,19 @@ function GroupInfoModal({
             />
           </View>
 
-          <View style={styles.groupInfoSection}>
-            <View style={styles.groupInfoMembersHeader}>
-              <Text style={styles.groupInfoMembersTitle}>{memberCountLabel}</Text>
+          <View style={[styles.groupInfoSection, { backgroundColor: appTheme.colors.surfaceElevated }]}>
+            <View style={[
+              styles.groupInfoMembersHeader,
+              { borderBottomColor: appTheme.colors.divider }
+            ]}>
+              <Text style={[styles.groupInfoMembersTitle, { color: appTheme.colors.ink }]}>{memberCountLabel}</Text>
               <Pressable
                 accessibilityLabel="Search members"
                 accessibilityRole="button"
                 onPress={onOpenMembers}
                 style={({ pressed }) => [styles.groupInfoMemberSearchButton, pressed && styles.pressed]}
               >
-                <Feather color={colors.ink} name="search" size={18} />
+                <Feather color={appTheme.colors.ink} name="search" size={18} />
               </Pressable>
             </View>
 
@@ -14395,15 +19727,19 @@ function GroupInfoModal({
           </View>
 
           {showExitGroup ? (
-            <View style={styles.groupInfoSection}>
+            <View style={[styles.groupInfoSection, { backgroundColor: appTheme.colors.surfaceElevated }]}>
               <Pressable
                 accessibilityLabel="Exit group"
                 accessibilityRole="button"
                 onPress={onExitGroup}
-                style={({ pressed }) => [styles.groupInfoExitRow, pressed && styles.pressed]}
+                style={({ pressed }) => [
+                  styles.groupInfoExitRow,
+                  { backgroundColor: appTheme.colors.surfaceElevated },
+                  pressed && styles.pressed
+                ]}
               >
-                <Feather color="#DC2626" name="log-out" size={20} />
-                <Text style={styles.groupInfoExitText}>Exit group</Text>
+                <Feather color={appTheme.colors.destructive} name="log-out" size={20} />
+                <Text style={[styles.groupInfoExitText, { color: appTheme.colors.destructive }]}>Exit group</Text>
               </Pressable>
             </View>
           ) : null}
@@ -14422,15 +19758,21 @@ function GroupInfoActionButton({
   label: string;
   onPress: () => void;
 }) {
+  const appTheme = useAppTheme();
+
   return (
     <Pressable
       accessibilityLabel={label}
       accessibilityRole="button"
       onPress={onPress}
-      style={({ pressed }) => [styles.groupInfoActionButton, pressed && styles.pressed]}
+      style={({ pressed }) => [
+        styles.groupInfoActionButton,
+        { backgroundColor: appTheme.colors.surfaceElevated },
+        pressed && styles.pressed
+      ]}
     >
-      <Feather color={colors.primary} name={icon} size={22} />
-      <Text numberOfLines={1} style={styles.groupInfoActionText}>{label}</Text>
+      <Feather color={appTheme.colors.primary} name={icon} size={22} />
+      <Text numberOfLines={1} style={[styles.groupInfoActionText, { color: appTheme.colors.ink }]}>{label}</Text>
     </Pressable>
   );
 }
@@ -14446,23 +19788,32 @@ function GroupInfoSettingRow({
   onPress: () => void;
   value?: string;
 }) {
+  const appTheme = useAppTheme();
+
   return (
     <Pressable
       accessibilityLabel={label}
       accessibilityRole="button"
       onPress={onPress}
-      style={({ pressed }) => [styles.groupInfoSettingRow, pressed && styles.pressed]}
+      style={({ pressed }) => [
+        styles.groupInfoSettingRow,
+        {
+          backgroundColor: appTheme.colors.surfaceElevated,
+          borderBottomColor: appTheme.colors.divider
+        },
+        pressed && styles.pressed
+      ]}
     >
-      <View style={styles.groupInfoSettingIcon}>
-        <Feather color={colors.primary} name={icon} size={19} />
+      <View style={[styles.groupInfoSettingIcon, { backgroundColor: appTheme.colors.primarySoft }]}>
+        <Feather color={appTheme.colors.primary} name={icon} size={19} />
       </View>
       <View style={styles.chatText}>
-        <Text numberOfLines={1} style={styles.groupInfoSettingLabel}>{label}</Text>
+        <Text numberOfLines={1} style={[styles.groupInfoSettingLabel, { color: appTheme.colors.ink }]}>{label}</Text>
         {value ? (
-          <Text numberOfLines={1} style={styles.groupInfoSettingValue}>{value}</Text>
+          <Text numberOfLines={1} style={[styles.groupInfoSettingValue, { color: appTheme.colors.muted }]}>{value}</Text>
         ) : null}
       </View>
-      <Feather color="#A7B3C3" name="chevron-right" size={19} />
+      <Feather color={appTheme.colors.muted} name="chevron-right" size={19} />
     </Pressable>
   );
 }
@@ -14478,11 +19829,18 @@ function GroupInfoMemberRow({
   member: ChatGroupMember;
   profilePhotoHeaders?: Record<string, string>;
 }) {
+  const appTheme = useAppTheme();
   const subtitle = getGroupInfoMemberSubtitle(member, directContact, isCurrentUser);
   const badge = getGroupInfoMemberBadge(member);
 
   return (
-    <View style={styles.groupInfoMemberRow}>
+    <View style={[
+      styles.groupInfoMemberRow,
+      {
+        backgroundColor: appTheme.colors.surfaceElevated,
+        borderBottomColor: appTheme.colors.divider
+      }
+    ]}>
       <ProfileAvatar
         headers={profilePhotoHeaders}
         name={member.displayName}
@@ -14490,17 +19848,17 @@ function GroupInfoMemberRow({
         uri={member.profilePhotoUrl || directContact?.profilePhotoUrl || null}
       />
       <View style={styles.chatText}>
-        <Text numberOfLines={1} style={styles.groupInfoMemberName}>
+        <Text numberOfLines={1} style={[styles.groupInfoMemberName, { color: appTheme.colors.ink }]}>
           {isCurrentUser ? 'You' : member.displayName}
         </Text>
         {subtitle ? (
-          <Text numberOfLines={1} style={styles.groupInfoMemberSubtitle}>{subtitle}</Text>
+          <Text numberOfLines={1} style={[styles.groupInfoMemberSubtitle, { color: appTheme.colors.muted }]}>{subtitle}</Text>
         ) : null}
       </View>
       {badge ? (
-        <Text numberOfLines={1} style={styles.groupInfoMemberBadge}>{badge}</Text>
+        <Text numberOfLines={1} style={[styles.groupInfoMemberBadge, { color: appTheme.colors.muted }]}>{badge}</Text>
       ) : null}
-      <Feather color="#A7B3C3" name="chevron-right" size={18} />
+      <Feather color={appTheme.colors.muted} name="chevron-right" size={18} />
     </View>
   );
 }
@@ -14832,19 +20190,35 @@ function GroupPermissionOption({
   onPress: () => void;
   title: string;
 }) {
+  const appTheme = useAppTheme();
+
   return (
     <Pressable
       accessibilityRole="radio"
       accessibilityState={{ checked: isSelected }}
       onPress={onPress}
-      style={({ pressed }) => [styles.groupPermissionOption, pressed && styles.pressed]}
+      style={({ pressed }) => [
+        styles.groupPermissionOption,
+        {
+          backgroundColor: appTheme.colors.screen,
+          borderBottomColor: appTheme.colors.divider
+        },
+        pressed && styles.pressed
+      ]}
     >
-      <View style={[styles.memberSelectCheck, isSelected && styles.memberSelectCheckActive]}>
+      <View style={[
+        styles.memberSelectCheck,
+        {
+          borderColor: isSelected ? appTheme.colors.primary : appTheme.colors.muted
+        },
+        isSelected && styles.memberSelectCheckActive,
+        isSelected && { backgroundColor: appTheme.colors.primary }
+      ]}>
         {isSelected ? <Feather color="#FFFFFF" name="check" size={14} /> : null}
       </View>
       <View style={styles.chatText}>
-        <Text style={styles.groupPermissionTitle}>{title}</Text>
-        <Text style={styles.groupPermissionSubtitle}>{description}</Text>
+        <Text style={[styles.groupPermissionTitle, { color: appTheme.colors.ink }]}>{title}</Text>
+        <Text style={[styles.groupPermissionSubtitle, { color: appTheme.colors.muted }]}>{description}</Text>
       </View>
     </Pressable>
   );
@@ -14859,11 +20233,20 @@ function ChatContactPickRow({
   onPress: () => void;
   profilePhotoHeaders?: Record<string, string>;
 }) {
+  const appTheme = useAppTheme();
+
   return (
     <Pressable
       accessibilityRole="button"
       onPress={onPress}
-      style={({ pressed }) => [styles.newChatContactRow, pressed && styles.pressed]}
+      style={({ pressed }) => [
+        styles.newChatContactRow,
+        {
+          backgroundColor: appTheme.colors.screen,
+          borderBottomColor: appTheme.colors.divider
+        },
+        pressed && styles.pressed
+      ]}
     >
       <ProfileAvatar
         headers={profilePhotoHeaders}
@@ -14872,8 +20255,8 @@ function ChatContactPickRow({
         uri={contact.profilePhotoUrl}
       />
       <View style={styles.chatText}>
-        <Text numberOfLines={1} style={styles.chatTitle}>{contact.displayName}</Text>
-        <Text numberOfLines={1} style={styles.chatPreview}>{contact.roleName}</Text>
+        <Text numberOfLines={1} style={[styles.chatTitle, { color: appTheme.colors.ink }]}>{contact.displayName}</Text>
+        <Text numberOfLines={1} style={[styles.chatPreview, { color: appTheme.colors.muted }]}>{contact.roleName}</Text>
       </View>
     </Pressable>
   );
@@ -14890,12 +20273,21 @@ function ChatMemberSelectRow({
   onToggle: () => void;
   profilePhotoHeaders?: Record<string, string>;
 }) {
+  const appTheme = useAppTheme();
+
   return (
     <Pressable
       accessibilityRole="checkbox"
       accessibilityState={{ checked: isSelected }}
       onPress={onToggle}
-      style={({ pressed }) => [styles.newChatContactRow, pressed && styles.pressed]}
+      style={({ pressed }) => [
+        styles.newChatContactRow,
+        {
+          backgroundColor: appTheme.colors.screen,
+          borderBottomColor: appTheme.colors.divider
+        },
+        pressed && styles.pressed
+      ]}
     >
       <ProfileAvatar
         headers={profilePhotoHeaders}
@@ -14904,10 +20296,17 @@ function ChatMemberSelectRow({
         uri={contact.profilePhotoUrl}
       />
       <View style={styles.chatText}>
-        <Text numberOfLines={1} style={styles.chatTitle}>{contact.displayName}</Text>
-        <Text numberOfLines={1} style={styles.chatPreview}>{contact.roleName}</Text>
+        <Text numberOfLines={1} style={[styles.chatTitle, { color: appTheme.colors.ink }]}>{contact.displayName}</Text>
+        <Text numberOfLines={1} style={[styles.chatPreview, { color: appTheme.colors.muted }]}>{contact.roleName}</Text>
       </View>
-      <View style={[styles.memberSelectCheck, isSelected && styles.memberSelectCheckActive]}>
+      <View style={[
+        styles.memberSelectCheck,
+        {
+          borderColor: isSelected ? appTheme.colors.primary : appTheme.colors.muted
+        },
+        isSelected && styles.memberSelectCheckActive,
+        isSelected && { backgroundColor: appTheme.colors.primary }
+      ]}>
         {isSelected ? <Feather color="#FFFFFF" name="check" size={14} /> : null}
       </View>
     </Pressable>
@@ -14924,6 +20323,8 @@ function EmployeesTab({
   isSavingInvite,
   onAddContact,
   onCancelDraft,
+  onPermanentlyRemoveDeletedEmployee,
+  onReactivateDeletedEmployee,
   onSelectEmployee,
   onSendDraft,
   profilePhotoHeaders
@@ -14937,10 +20338,14 @@ function EmployeesTab({
   isSavingInvite: boolean;
   onAddContact: () => void;
   onCancelDraft: () => void;
+  onPermanentlyRemoveDeletedEmployee: (employee: EmployeeListItem) => void;
+  onReactivateDeletedEmployee: (employee: EmployeeListItem) => void;
   onSelectEmployee: (employee: EmployeeListItem) => void;
   onSendDraft: () => void;
   profilePhotoHeaders?: Record<string, string>;
 }) {
+  const appTheme = useAppTheme();
+
   return (
     <View>
       {inviteDraft ? (
@@ -14956,13 +20361,13 @@ function EmployeesTab({
 
       {isLoading ? (
         <View style={styles.loadingRow}>
-          <ActivityIndicator color={colors.primary} />
+          <ActivityIndicator color={appTheme.colors.primary} />
         </View>
       ) : null}
 
       {!isLoading && !employees.length ? (
         <View style={styles.emptyState}>
-          <Text style={styles.emptyTitle}>No employees yet</Text>
+          <Text style={[styles.emptyTitle, { color: appTheme.colors.muted }]}>No employees yet</Text>
         </View>
       ) : null}
 
@@ -14972,6 +20377,8 @@ function EmployeesTab({
           employee={employee}
           isUpdatingLifecycle={isUpdatingLifecycle}
           key={employee.id}
+          onPermanentlyRemoveDeleted={() => onPermanentlyRemoveDeletedEmployee(employee)}
+          onReactivateDeleted={() => onReactivateDeletedEmployee(employee)}
           onSelect={() => onSelectEmployee(employee)}
           profilePhotoHeaders={profilePhotoHeaders}
         />
@@ -14995,22 +20402,29 @@ function InviteDraftPanel({
   onCancel: () => void;
   onSend: () => void;
 }) {
+  const appTheme = useAppTheme();
   const contactCount = draft.contacts.length;
   const actionDisabled = isPickingContact || isSavingInvite;
   const isBatchMode = draft.mode === 'batch';
 
   return (
-    <View style={styles.inviteDraft}>
+    <View style={[
+      styles.inviteDraft,
+      {
+        backgroundColor: appTheme.colors.surfaceElevated,
+        borderColor: appTheme.colors.border
+      }
+    ]}>
       <View style={styles.inviteDraftHeader}>
         <View style={styles.chatText}>
-          <Text style={styles.chatTitle}>
+          <Text style={[styles.chatTitle, { color: appTheme.colors.ink }]}>
             {isBatchMode
               ? contactCount === 1
                 ? 'Batch import - 1 selected'
                 : `Batch import - ${contactCount} selected`
               : 'Ready to invite'}
           </Text>
-          <Text style={styles.chatPreview}>
+          <Text style={[styles.chatPreview, { color: appTheme.colors.muted }]}>
             {draft.department.name} - {draft.role.name}
           </Text>
         </View>
@@ -15024,7 +20438,7 @@ function InviteDraftPanel({
             actionDisabled && styles.disabled
           ]}
         >
-          <Text style={styles.textOnlyButtonText}>Cancel</Text>
+          <Text style={[styles.textOnlyButtonText, { color: appTheme.colors.muted }]}>Cancel</Text>
         </Pressable>
       </View>
 
@@ -15040,11 +20454,12 @@ function InviteDraftPanel({
             onPress={onAddContact}
             style={({ pressed }) => [
               styles.secondaryActionButton,
+              { borderColor: appTheme.colors.border },
               pressed && !actionDisabled && styles.pressed,
               actionDisabled && styles.disabled
             ]}
           >
-            <Text style={styles.secondaryActionButtonText}>
+            <Text style={[styles.secondaryActionButtonText, { color: appTheme.colors.ink }]}>
               {isPickingContact ? 'Opening contacts' : 'Add another contact'}
             </Text>
           </Pressable>
@@ -15056,6 +20471,7 @@ function InviteDraftPanel({
           onPress={onSend}
           style={({ pressed }) => [
             styles.primaryActionButton,
+            { backgroundColor: appTheme.colors.primary },
             !isBatchMode && styles.singleInviteActionButton,
             pressed && !actionDisabled && contactCount > 0 && styles.pressed,
             (actionDisabled || contactCount === 0) && styles.disabled
@@ -15071,16 +20487,35 @@ function InviteDraftPanel({
 }
 
 function InviteDraftContactRow({ contact }: { contact: InviteContactDraft }) {
-  const name = contact.displayName || maskLocalPhoneNumber(contact.phoneNumber);
+  const appTheme = useAppTheme();
+  const formattedPhoneNumber = formatPhoneNumberForInviteDisplay(contact.phoneNumber);
+  const hasDisplayName = Boolean(contact.displayName?.trim());
+  const name = hasDisplayName ? contact.displayName?.trim() || formattedPhoneNumber : formattedPhoneNumber;
+  const subtitle = hasDisplayName ? formattedPhoneNumber : 'Phone invite';
 
   return (
-    <View style={styles.inviteDraftContactRow}>
-      <View style={[styles.avatar, styles.inviteDraftAvatar]}>
-        <Text style={styles.avatarText}>{getInitials(name)}</Text>
+    <View style={[
+      styles.inviteDraftContactRow,
+      { backgroundColor: appTheme.colors.surface }
+    ]}>
+      <View style={[
+        styles.inviteDraftAvatar,
+        {
+          backgroundColor: appTheme.colors.primarySoft,
+          borderColor: appTheme.colors.primary
+        }
+      ]}>
+        {hasDisplayName ? (
+          <Text style={[styles.inviteDraftAvatarText, { color: appTheme.colors.primary }]}>
+            {getInitials(name)}
+          </Text>
+        ) : (
+          <Feather color={appTheme.colors.primary} name="phone" size={18} />
+        )}
       </View>
       <View style={styles.chatText}>
-        <Text style={styles.chatTitle}>{name}</Text>
-        <Text style={styles.chatPreview}>{maskLocalPhoneNumber(contact.phoneNumber)}</Text>
+        <Text style={[styles.chatTitle, { color: appTheme.colors.ink }]}>{name}</Text>
+        <Text style={[styles.chatPreview, { color: appTheme.colors.muted }]}>{subtitle}</Text>
       </View>
     </View>
   );
@@ -15107,6 +20542,9 @@ function BatchContactModal({
   selectedPhoneNumbers: string[];
   visible: boolean;
 }) {
+  const appTheme = useAppTheme();
+  const insets = useSafeAreaInsets();
+  const modalTopPadding = getFullScreenModalTopPadding(insets.top);
   const selectedPhoneNumberSet = new Set(selectedPhoneNumbers);
   const query = search.trim().toLowerCase();
   const visibleCandidates = query
@@ -15124,7 +20562,13 @@ function BatchContactModal({
       transparent={false}
       visible={visible}
     >
-      <View style={styles.batchModalScreen}>
+      <View style={[
+        styles.batchModalScreen,
+        {
+          backgroundColor: appTheme.colors.screen,
+          paddingTop: modalTopPadding
+        }
+      ]}>
         <View style={styles.batchModalHeader}>
           <Pressable
             accessibilityLabel="Close contacts"
@@ -15137,7 +20581,7 @@ function BatchContactModal({
               isLoading && styles.disabled
             ]}
           >
-            <Text style={styles.backButtonText}>‹</Text>
+            <Text style={[styles.backButtonText, { color: appTheme.colors.primary }]}>‹</Text>
           </Pressable>
 
           <Pressable
@@ -15146,6 +20590,7 @@ function BatchContactModal({
             onPress={onConfirm}
             style={({ pressed }) => [
               styles.batchDoneButton,
+              { backgroundColor: appTheme.colors.primary },
               pressed && !isLoading && selectedPhoneNumbers.length > 0 && styles.pressed,
               (isLoading || selectedPhoneNumbers.length === 0) && styles.disabled
             ]}
@@ -15154,28 +20599,34 @@ function BatchContactModal({
           </Pressable>
         </View>
 
-        <Text style={styles.batchModalTitle}>Select contacts</Text>
-        <Text style={styles.batchSelectedCount}>
+        <Text style={[styles.batchModalTitle, { color: appTheme.colors.ink }]}>Select contacts</Text>
+        <Text style={[styles.batchSelectedCount, { color: appTheme.colors.muted }]}>
           {selectedPhoneNumbers.length === 1
             ? '1 contact selected'
             : `${selectedPhoneNumbers.length} contacts selected`}
         </Text>
 
-        <View style={styles.batchSearchBox}>
+        <View style={[
+          styles.batchSearchBox,
+          {
+            backgroundColor: appTheme.colors.input,
+            borderColor: appTheme.colors.border
+          }
+        ]}>
           <TextInput
             autoCapitalize="none"
             autoCorrect={false}
             onChangeText={onSearchChange}
             placeholder="Search contacts"
-            placeholderTextColor="#8B95A5"
-            style={styles.batchSearchInput}
+            placeholderTextColor={appTheme.colors.muted}
+            style={[styles.batchSearchInput, { color: appTheme.colors.ink }]}
             value={search}
           />
         </View>
 
         {isLoading ? (
           <View style={styles.batchLoading}>
-            <ActivityIndicator color={colors.primary} />
+            <ActivityIndicator color={appTheme.colors.primary} />
           </View>
         ) : (
           <FlatList
@@ -15183,7 +20634,7 @@ function BatchContactModal({
             data={visibleCandidates}
             keyboardShouldPersistTaps="handled"
             keyExtractor={(item) => item.id}
-            ListEmptyComponent={<Text style={styles.batchEmpty}>No contacts found</Text>}
+            ListEmptyComponent={<Text style={[styles.batchEmpty, { color: appTheme.colors.muted }]}>No contacts found</Text>}
             renderItem={({ item }) => (
               <BatchContactRow
                 contact={item}
@@ -15209,6 +20660,8 @@ function BatchContactRow({
   isSelected: boolean;
   onToggle: () => void;
 }) {
+  const appTheme = useAppTheme();
+
   return (
     <Pressable
       accessibilityRole="checkbox"
@@ -15216,18 +20669,25 @@ function BatchContactRow({
       onPress={onToggle}
       style={({ pressed }) => [
         styles.batchContactRow,
+        {
+          backgroundColor: appTheme.colors.screen,
+          borderBottomColor: appTheme.colors.divider
+        },
         pressed && styles.pressed
       ]}
     >
       <View style={[
         styles.batchContactSelector,
+        {
+          borderColor: isSelected ? appTheme.colors.primary : appTheme.colors.muted
+        },
         isSelected && styles.batchContactSelectorActive
       ]}>
-        {isSelected ? <View style={styles.batchContactSelectorInner} /> : null}
+        {isSelected ? <View style={[styles.batchContactSelectorInner, { backgroundColor: appTheme.colors.primary }]} /> : null}
       </View>
       <View style={styles.chatText}>
-        <Text style={styles.chatTitle}>{contact.displayName}</Text>
-        <Text style={styles.chatPreview}>{contact.subtitle}</Text>
+        <Text style={[styles.chatTitle, { color: appTheme.colors.ink }]}>{contact.displayName}</Text>
+        <Text style={[styles.chatPreview, { color: appTheme.colors.muted }]}>{contact.subtitle}</Text>
       </View>
     </Pressable>
   );
@@ -15246,10 +20706,12 @@ function YouTab({
   profile: CurrentUserProfile | null;
   profilePhotoHeaders?: Record<string, string>;
 }) {
+  const appTheme = useAppTheme();
+
   if (isLoading && !profile) {
     return (
       <View style={styles.youLoading}>
-        <ActivityIndicator color={colors.primary} />
+        <ActivityIndicator color={appTheme.colors.primary} />
       </View>
     );
   }
@@ -15257,7 +20719,7 @@ function YouTab({
   if (!profile) {
     return (
       <View style={styles.emptyState}>
-        <Text style={styles.emptyTitle}>Profile unavailable</Text>
+        <Text style={[styles.emptyTitle, { color: appTheme.colors.muted }]}>Profile unavailable</Text>
       </View>
     );
   }
@@ -15282,12 +20744,20 @@ function YouTab({
             size={96}
             uri={profile.profilePhotoUrl}
           />
-          <View style={styles.youAvatarAddBadge}>
+          <View style={[
+            styles.youAvatarAddBadge,
+            {
+              backgroundColor: appTheme.colors.primary,
+              borderColor: appTheme.colors.screen
+            }
+          ]}>
             <Text style={styles.youAvatarAddText}>+</Text>
           </View>
         </Pressable>
 
-        <Text numberOfLines={1} style={styles.youName}>{profile.displayName}</Text>
+        <Text numberOfLines={1} style={[styles.youName, { color: appTheme.colors.ink }]}>
+          {profile.displayName}
+        </Text>
         <Pressable
           accessibilityRole="button"
           disabled={isSavingPhoto}
@@ -15298,7 +20768,7 @@ function YouTab({
             isSavingPhoto && styles.disabled
           ]}
         >
-          <Text style={styles.youPhotoActionText}>
+          <Text style={[styles.youPhotoActionText, { color: appTheme.colors.primary }]}>
             {isSavingPhoto
               ? 'Updating photo...'
               : profile.profilePhotoUrl
@@ -15322,10 +20792,12 @@ function YouTab({
 }
 
 function ProfileDetailRow({ label, value }: { label: string; value: string }) {
+  const appTheme = useAppTheme();
+
   return (
-    <View style={styles.profileDetailRow}>
-      <Text style={styles.profileDetailLabel}>{label}</Text>
-      <Text numberOfLines={2} style={styles.profileDetailValue}>{value}</Text>
+    <View style={[styles.profileDetailRow, { borderBottomColor: appTheme.colors.divider }]}>
+      <Text style={[styles.profileDetailLabel, { color: appTheme.colors.muted }]}>{label}</Text>
+      <Text numberOfLines={2} style={[styles.profileDetailValue, { color: appTheme.colors.ink }]}>{value}</Text>
     </View>
   );
 }
@@ -15336,47 +20808,44 @@ function SettingsList({
   canManageGroups,
   canManageUsers,
   canManageSecurity,
+  onOpenAppearance,
   onOpenChatBackup,
   onOpenCompanyProfile,
   onOpenDepartmentAdminPermissions,
   onOpenDepartmentsAndRoles,
   onOpenGroups,
   onOpenMyDevices,
+  onOpenOfflineAi,
   onOpenRolePermissions,
-  onOpenSecurity
+  onOpenSecurity,
+  offlineAiState,
+  themePreference
 }: {
   canManageCompanyProfile: boolean;
   canManageDirectory: boolean;
   canManageGroups: boolean;
   canManageUsers: boolean;
   canManageSecurity: boolean;
+  onOpenAppearance: () => void;
   onOpenChatBackup: () => void;
   onOpenCompanyProfile: () => void;
   onOpenDepartmentAdminPermissions: () => void;
   onOpenDepartmentsAndRoles: () => void;
   onOpenGroups: () => void;
   onOpenMyDevices: () => void;
+  onOpenOfflineAi: () => void;
   onOpenRolePermissions: () => void;
   onOpenSecurity: () => void;
+  offlineAiState: OfflineAiModelState | null;
+  themePreference: AppThemePreference;
 }) {
-  const hasVisibleSettings = canManageDirectory ||
-    canManageCompanyProfile ||
-    canManageGroups ||
-    canManageUsers ||
-    canManageSecurity ||
-    onOpenChatBackup ||
-    onOpenMyDevices;
-
-  if (!hasVisibleSettings) {
-    return (
-      <View style={styles.emptyState}>
-        <Text style={styles.emptyTitle}>No settings available yet</Text>
-      </View>
-    );
-  }
-
   return (
     <View style={styles.settingsList}>
+      <SettingsListItem
+        onPress={onOpenAppearance}
+        subtitle={getThemePreferenceLabel(themePreference)}
+        title="Appearance"
+      />
       {canManageDirectory ? (
         <SettingsListItem
           onPress={onOpenDepartmentsAndRoles}
@@ -15429,8 +20898,31 @@ function SettingsList({
         subtitle="Encrypted chat history"
         title="Chat backup"
       />
+      <SettingsListItem
+        onPress={onOpenOfflineAi}
+        subtitle={getSettingsOfflineAiSubtitle(offlineAiState)}
+        title="Synzapp AI"
+      />
     </View>
   );
+}
+
+function getSettingsOfflineAiSubtitle(state: OfflineAiModelState | null): string {
+  if (state?.status === 'installed') {
+    return `Offline AI ready - ${formatOfflineAiBytes(state.downloadedBytes)} on this device`;
+  }
+
+  if (state?.status === 'downloading') {
+    const progressPercent = Math.round(Math.max(0, Math.min(state.progress || 0, 1)) * 100);
+
+    return `Installing on this device - ${progressPercent}%`;
+  }
+
+  if (state?.status === 'failed') {
+    return 'Install needs attention';
+  }
+
+  return `Install secure offline AI - ${formatOfflineAiBytes(synzappOfflineAiModel.sizeBytes)}`;
 }
 
 function ChatBackupSettings({
@@ -15454,10 +20946,12 @@ function ChatBackupSettings({
   onShowRecoveryKey: () => void;
   policy: ChatBackupPolicy;
 }) {
+  const appTheme = useAppTheme();
+
   if (isLoadingPolicy) {
     return (
       <View style={styles.loadingRow}>
-        <ActivityIndicator color={colors.primary} />
+        <ActivityIndicator color={appTheme.colors.primary} />
       </View>
     );
   }
@@ -15469,7 +20963,7 @@ function ChatBackupSettings({
 
   return (
     <View style={styles.backupSettings}>
-      <Text style={styles.securitySectionTitle}>Organization policy</Text>
+      <Text style={[styles.securitySectionTitle, { color: appTheme.colors.muted }]}>Organization policy</Text>
       <SettingsListItem
         subtitle={backupStatus}
         title="Encrypted chat backup"
@@ -15504,7 +20998,7 @@ function ChatBackupSettings({
         </>
       ) : null}
 
-      <Text style={styles.securitySectionTitle}>This device</Text>
+      <Text style={[styles.securitySectionTitle, { color: appTheme.colors.muted }]}>This device</Text>
       <SettingsListItem
         onPress={policy.encryptedBackupsEnabled ? onBackupNow : undefined}
         subtitle={
@@ -15551,21 +21045,23 @@ function SecuritySettings({
   isRevoking: boolean;
   onRevokeDevice: (device: TenantDevice) => void;
 }) {
+  const appTheme = useAppTheme();
+
   if (isLoading) {
     return (
       <View style={styles.loadingRow}>
-        <ActivityIndicator color={colors.primary} />
+        <ActivityIndicator color={appTheme.colors.primary} />
       </View>
     );
   }
 
   if (!devices.length) {
-    return <Text style={styles.emptySmall}>No registered devices yet</Text>;
+    return <Text style={[styles.emptySmall, { color: appTheme.colors.muted }]}>No registered devices yet</Text>;
   }
 
   return (
     <View style={styles.securityList}>
-      <Text style={styles.securitySectionTitle}>Tenant registered devices</Text>
+      <Text style={[styles.securitySectionTitle, { color: appTheme.colors.muted }]}>Tenant registered devices</Text>
       {devices.map((device) => (
         <DeviceRow
           device={device}
@@ -15589,21 +21085,23 @@ function MyDevicesSettings({
   isRevoking: boolean;
   onRevokeDevice: (device: CurrentUserDevice) => void;
 }) {
+  const appTheme = useAppTheme();
+
   if (isLoading) {
     return (
       <View style={styles.loadingRow}>
-        <ActivityIndicator color={colors.primary} />
+        <ActivityIndicator color={appTheme.colors.primary} />
       </View>
     );
   }
 
   if (!devices.length) {
-    return <Text style={styles.emptySmall}>No registered devices yet</Text>;
+    return <Text style={[styles.emptySmall, { color: appTheme.colors.muted }]}>No registered devices yet</Text>;
   }
 
   return (
     <View style={styles.securityList}>
-      <Text style={styles.securitySectionTitle}>Your registered devices</Text>
+      <Text style={[styles.securitySectionTitle, { color: appTheme.colors.muted }]}>Your registered devices</Text>
       {devices.map((device) => (
         <DeviceRow
           device={device}
@@ -15625,6 +21123,7 @@ function DeviceRow({
   isRevoking: boolean;
   onRevoke?: () => void;
 }) {
+  const appTheme = useAppTheme();
   const isRevoked = device.status === 'REVOKED';
   const isCurrentDevice = 'isCurrentDevice' in device && device.isCurrentDevice;
   const meta = [
@@ -15634,14 +21133,20 @@ function DeviceRow({
   ].filter(Boolean).join(' - ');
 
   return (
-    <View style={styles.deviceRow}>
-      <View style={styles.deviceIcon}>
-        <Feather color={colors.primary} name={getDeviceIconName(device.platform)} size={20} />
+    <View style={[styles.deviceRow, { backgroundColor: appTheme.colors.screen, borderBottomColor: appTheme.colors.divider }]}>
+      <View style={[styles.deviceIcon, { backgroundColor: appTheme.colors.primarySoft }]}>
+        <Feather color={appTheme.colors.primary} name={getDeviceIconName(device.platform)} size={20} />
       </View>
       <View style={styles.chatText}>
-        <Text style={styles.chatTitle}>{device.displayName}</Text>
-        <Text numberOfLines={2} style={styles.chatPreview}>{meta}</Text>
-        <Text numberOfLines={1} style={isRevoked ? styles.deviceStatusRevoked : styles.deviceStatusActive}>
+        <Text style={[styles.chatTitle, { color: appTheme.colors.ink }]}>{device.displayName}</Text>
+        <Text numberOfLines={2} style={[styles.chatPreview, { color: appTheme.colors.muted }]}>{meta}</Text>
+        <Text
+          numberOfLines={1}
+          style={[
+            isRevoked ? styles.deviceStatusRevoked : styles.deviceStatusActive,
+            { color: isRevoked ? appTheme.colors.destructive : appTheme.colors.primary }
+          ]}
+        >
           {isRevoked ? 'Revoked' : isCurrentDevice ? 'Current' : 'Active'}
         </Text>
       </View>
@@ -15673,6 +21178,8 @@ function SettingsListItem({
   subtitle: string;
   title: string;
 }) {
+  const appTheme = useAppTheme();
+
   return (
     <Pressable
       accessibilityRole="button"
@@ -15680,18 +21187,22 @@ function SettingsListItem({
       onPress={onPress}
       style={({ pressed }) => [
         styles.settingsListItem,
+        {
+          backgroundColor: appTheme.colors.screen,
+          borderBottomColor: appTheme.colors.divider
+        },
         pressed && onPress && styles.pressed
       ]}
     >
-      <View style={styles.settingsListIcon}>
-        <Text style={styles.settingsListIconText}>{title.slice(0, 1)}</Text>
+      <View style={[styles.settingsListIcon, { backgroundColor: appTheme.colors.primarySoft }]}>
+        <Text style={[styles.settingsListIconText, { color: appTheme.colors.primary }]}>{title.slice(0, 1)}</Text>
       </View>
       <View style={styles.chatText}>
-        <Text style={styles.chatTitle}>{title}</Text>
-        <Text style={styles.chatPreview}>{subtitle}</Text>
+        <Text style={[styles.chatTitle, { color: appTheme.colors.ink }]}>{title}</Text>
+        <Text style={[styles.chatPreview, { color: appTheme.colors.muted }]}>{subtitle}</Text>
       </View>
       {onPress ? (
-        <Text style={styles.chevronText}>›</Text>
+        <Text style={[styles.chevronText, { color: appTheme.colors.muted }]}>›</Text>
       ) : null}
     </Pressable>
   );
@@ -15712,12 +21223,13 @@ function DepartmentAdminPermissionSettings({
   permissions: DepartmentAdminPermission[];
   profilePhotoHeaders?: Record<string, string>;
 }) {
+  const appTheme = useAppTheme();
   const departmentAdmins = employees.filter((employee) => employee.role === 'DEPT_ADMIN');
 
   if (isLoading && !departmentAdmins.length) {
     return (
       <View style={styles.loadingRow}>
-        <ActivityIndicator color={colors.primary} />
+        <ActivityIndicator color={appTheme.colors.primary} />
       </View>
     );
   }
@@ -15725,7 +21237,7 @@ function DepartmentAdminPermissionSettings({
   if (!departmentAdmins.length) {
     return (
       <View style={styles.emptyState}>
-        <Text style={styles.emptyTitle}>No Department Admins yet</Text>
+        <Text style={[styles.emptyTitle, { color: appTheme.colors.muted }]}>No Department Admins yet</Text>
       </View>
     );
   }
@@ -15759,10 +21271,12 @@ function RolePermissionSettings({
   permissions: RolePermission[];
   roles: TenantRole[];
 }) {
+  const appTheme = useAppTheme();
+
   if (isLoading && !roles.length) {
     return (
       <View style={styles.loadingRow}>
-        <ActivityIndicator color={colors.primary} />
+        <ActivityIndicator color={appTheme.colors.primary} />
       </View>
     );
   }
@@ -15770,7 +21284,7 @@ function RolePermissionSettings({
   if (!roles.length) {
     return (
       <View style={styles.emptyState}>
-        <Text style={styles.emptyTitle}>No roles yet</Text>
+        <Text style={[styles.emptyTitle, { color: appTheme.colors.muted }]}>No roles yet</Text>
       </View>
     );
   }
@@ -15801,17 +21315,18 @@ function RolePermissionSection({
   permissions: RolePermission[];
   role: TenantRole;
 }) {
+  const appTheme = useAppTheme();
   const enabledPermissionSet = new Set(role.permissions || []);
 
   return (
-    <View style={styles.permissionEmployeeSection}>
+    <View style={[styles.permissionEmployeeSection, { borderBottomColor: appTheme.colors.divider }]}>
       <View style={styles.permissionEmployeeHeader}>
-        <View style={styles.settingsListIcon}>
-          <Text style={styles.settingsListIconText}>{role.name.slice(0, 1)}</Text>
+        <View style={[styles.settingsListIcon, { backgroundColor: appTheme.colors.primarySoft }]}>
+          <Text style={[styles.settingsListIconText, { color: appTheme.colors.primary }]}>{role.name.slice(0, 1)}</Text>
         </View>
         <View style={styles.chatText}>
-          <Text style={styles.chatTitle}>{role.name}</Text>
-          <Text numberOfLines={1} style={styles.chatPreview}>
+          <Text style={[styles.chatTitle, { color: appTheme.colors.ink }]}>{role.name}</Text>
+          <Text numberOfLines={1} style={[styles.chatPreview, { color: appTheme.colors.muted }]}>
             {role.description || role.status}
           </Text>
         </View>
@@ -15829,19 +21344,24 @@ function RolePermissionSection({
             onPress={() => onTogglePermission(role, permission)}
             style={({ pressed }) => [
               styles.permissionRow,
+              { backgroundColor: appTheme.colors.screen },
               pressed && !isSaving && styles.pressed,
               isSaving && styles.disabled
             ]}
           >
             <View style={[
               styles.permissionCheck,
-              isEnabled && styles.permissionCheckActive
+              {
+                borderColor: isEnabled ? appTheme.colors.primary : appTheme.colors.muted
+              },
+              isEnabled && styles.permissionCheckActive,
+              isEnabled && { backgroundColor: appTheme.colors.primary }
             ]}>
               {isEnabled ? <Feather color="#FFFFFF" name="check" size={13} /> : null}
             </View>
             <View style={styles.chatText}>
-              <Text style={styles.permissionTitle}>{permission.title}</Text>
-              <Text numberOfLines={2} style={styles.permissionDescription}>
+              <Text style={[styles.permissionTitle, { color: appTheme.colors.ink }]}>{permission.title}</Text>
+              <Text numberOfLines={2} style={[styles.permissionDescription, { color: appTheme.colors.muted }]}>
                 {permission.description}
               </Text>
             </View>
@@ -15865,11 +21385,12 @@ function DepartmentAdminPermissionEmployee({
   permissions: DepartmentAdminPermission[];
   profilePhotoHeaders?: Record<string, string>;
 }) {
+  const appTheme = useAppTheme();
   const enabledPermissionSet = new Set(employee.departmentAdminPermissions || []);
   const employeeName = employee.displayName || employee.phoneMasked;
 
   return (
-    <View style={styles.permissionEmployeeSection}>
+    <View style={[styles.permissionEmployeeSection, { borderBottomColor: appTheme.colors.divider }]}>
       <View style={styles.permissionEmployeeHeader}>
         <ProfileAvatar
           headers={profilePhotoHeaders}
@@ -15878,8 +21399,8 @@ function DepartmentAdminPermissionEmployee({
           uri={employee.profilePhotoUrl}
         />
         <View style={styles.chatText}>
-          <Text style={styles.chatTitle}>{employeeName}</Text>
-          <Text numberOfLines={1} style={styles.chatPreview}>
+          <Text style={[styles.chatTitle, { color: appTheme.colors.ink }]}>{employeeName}</Text>
+          <Text numberOfLines={1} style={[styles.chatPreview, { color: appTheme.colors.muted }]}>
             {employee.departmentName} - {employee.roleName}
           </Text>
         </View>
@@ -15897,19 +21418,24 @@ function DepartmentAdminPermissionEmployee({
             onPress={() => onTogglePermission(employee, permission)}
             style={({ pressed }) => [
               styles.permissionRow,
+              { backgroundColor: appTheme.colors.screen },
               pressed && !isSaving && styles.pressed,
               isSaving && styles.disabled
             ]}
           >
             <View style={[
               styles.permissionCheck,
-              isEnabled && styles.permissionCheckActive
+              {
+                borderColor: isEnabled ? appTheme.colors.primary : appTheme.colors.muted
+              },
+              isEnabled && styles.permissionCheckActive,
+              isEnabled && { backgroundColor: appTheme.colors.primary }
             ]}>
               {isEnabled ? <Feather color="#FFFFFF" name="check" size={13} /> : null}
             </View>
             <View style={styles.chatText}>
-              <Text style={styles.permissionTitle}>{permission.title}</Text>
-              <Text numberOfLines={2} style={styles.permissionDescription}>
+              <Text style={[styles.permissionTitle, { color: appTheme.colors.ink }]}>{permission.title}</Text>
+              <Text numberOfLines={2} style={[styles.permissionDescription, { color: appTheme.colors.muted }]}>
                 {permission.description}
               </Text>
             </View>
@@ -15927,10 +21453,12 @@ function GroupsSettings({
   groups: TenantGroup[];
   isLoading: boolean;
 }) {
+  const appTheme = useAppTheme();
+
   if (isLoading && !groups.length) {
     return (
       <View style={styles.loadingRow}>
-        <ActivityIndicator color={colors.primary} />
+        <ActivityIndicator color={appTheme.colors.primary} />
       </View>
     );
   }
@@ -15938,7 +21466,7 @@ function GroupsSettings({
   if (!groups.length) {
     return (
       <View style={styles.emptyState}>
-        <Text style={styles.emptyTitle}>No groups yet</Text>
+        <Text style={[styles.emptyTitle, { color: appTheme.colors.muted }]}>No groups yet</Text>
       </View>
     );
   }
@@ -15946,17 +21474,26 @@ function GroupsSettings({
   return (
     <View style={styles.groupList}>
       {groups.map((group) => (
-        <View style={styles.groupRow} key={group.groupId}>
-          <View style={styles.groupIcon}>
-            <Feather color={colors.primary} name="users" size={18} />
+        <View
+          key={group.groupId}
+          style={[
+            styles.groupRow,
+            {
+              backgroundColor: appTheme.colors.screen,
+              borderBottomColor: appTheme.colors.divider
+            }
+          ]}
+        >
+          <View style={[styles.groupIcon, { backgroundColor: appTheme.colors.primarySoft }]}>
+            <Feather color={appTheme.colors.primary} name="users" size={18} />
           </View>
           <View style={styles.chatText}>
-            <Text style={styles.chatTitle}>{group.name}</Text>
-            <Text numberOfLines={1} style={styles.chatPreview}>
+            <Text style={[styles.chatTitle, { color: appTheme.colors.ink }]}>{group.name}</Text>
+            <Text numberOfLines={1} style={[styles.chatPreview, { color: appTheme.colors.muted }]}>
               {getGroupSubtitle(group)}
             </Text>
           </View>
-          <Text numberOfLines={1} style={styles.groupMeta}>
+          <Text numberOfLines={1} style={[styles.groupMeta, { color: appTheme.colors.muted }]}>
             {group.memberCount === 1 ? '1 member' : `${group.memberCount} members`}
           </Text>
         </View>
@@ -15974,10 +21511,12 @@ function GroupsTab({
   isLoading: boolean;
   onOpenGroup: (group: TenantGroup) => void;
 }) {
+  const appTheme = useAppTheme();
+
   if (isLoading && !groups.length) {
     return (
       <View style={styles.loadingRow}>
-        <ActivityIndicator color={colors.primary} />
+        <ActivityIndicator color={appTheme.colors.primary} />
       </View>
     );
   }
@@ -15985,7 +21524,7 @@ function GroupsTab({
   if (!groups.length) {
     return (
       <View style={styles.emptyState}>
-        <Text style={styles.emptyTitle}>No groups yet</Text>
+        <Text style={[styles.emptyTitle, { color: appTheme.colors.muted }]}>No groups yet</Text>
       </View>
     );
   }
@@ -15998,18 +21537,25 @@ function GroupsTab({
           accessibilityRole="button"
           key={group.groupId}
           onPress={() => onOpenGroup(group)}
-          style={({ pressed }) => [styles.groupRow, pressed && styles.pressed]}
+          style={({ pressed }) => [
+            styles.groupRow,
+            {
+              backgroundColor: appTheme.colors.screen,
+              borderBottomColor: appTheme.colors.divider
+            },
+            pressed && styles.pressed
+          ]}
         >
-          <View style={styles.groupIcon}>
-            <Ionicons color={colors.primary} name="people" size={20} />
+          <View style={[styles.groupIcon, { backgroundColor: appTheme.colors.primarySoft }]}>
+            <Ionicons color={appTheme.colors.primary} name="people" size={20} />
           </View>
           <View style={styles.chatText}>
-            <Text style={styles.chatTitle}>{group.name}</Text>
-            <Text numberOfLines={1} style={styles.chatPreview}>
+            <Text style={[styles.chatTitle, { color: appTheme.colors.ink }]}>{group.name}</Text>
+            <Text numberOfLines={1} style={[styles.chatPreview, { color: appTheme.colors.muted }]}>
               {getGroupSubtitle(group)}
             </Text>
           </View>
-          <Text numberOfLines={1} style={styles.groupMeta}>
+          <Text numberOfLines={1} style={[styles.groupMeta, { color: appTheme.colors.muted }]}>
             {group.memberCount === 1 ? '1 member' : `${group.memberCount} members`}
           </Text>
         </Pressable>
@@ -16043,6 +21589,7 @@ function CompanyProfileSettings({
   profile: CompanyProfile | null;
   profilePhotoHeaders?: Record<string, string>;
 }) {
+  const appTheme = useAppTheme();
   const [didLogoFail, setDidLogoFail] = useState(false);
   const companyLogoUrl = profile?.companyLogoUrl || null;
   const companyLogoCacheKey = profile?.companyLogoCacheKey || null;
@@ -16054,7 +21601,7 @@ function CompanyProfileSettings({
   if (isLoading && !profile) {
     return (
       <View style={styles.loadingRow}>
-        <ActivityIndicator color={colors.primary} />
+        <ActivityIndicator color={appTheme.colors.primary} />
       </View>
     );
   }
@@ -16077,11 +21624,15 @@ function CompanyProfileSettings({
         onPress={onChangeLogo}
         style={({ pressed }) => [
           styles.companyLogoRow,
+          {
+            backgroundColor: appTheme.colors.screen,
+            borderBottomColor: appTheme.colors.divider
+          },
           pressed && !isSavingLogo && styles.pressed,
           isSavingLogo && styles.disabled
         ]}
       >
-        <View style={styles.companyLogoBox}>
+        <View style={[styles.companyLogoBox, { backgroundColor: appTheme.colors.primarySoft }]}>
           {companyLogoSource ? (
             <Image
               onError={() => setDidLogoFail(true)}
@@ -16090,18 +21641,18 @@ function CompanyProfileSettings({
               style={styles.companyLogoImage}
             />
           ) : (
-            <Feather name="image" color={colors.primary} size={22} />
+            <Feather name="image" color={appTheme.colors.primary} size={22} />
           )}
         </View>
         <View style={styles.chatText}>
-          <Text style={styles.chatTitle}>
+          <Text style={[styles.chatTitle, { color: appTheme.colors.ink }]}>
             {isSavingLogo
               ? 'Updating company logo...'
               : companyLogoUrl
                 ? 'Change company logo'
                 : 'Add company logo'}
           </Text>
-          <Text style={styles.chatPreview}>Optional</Text>
+          <Text style={[styles.chatPreview, { color: appTheme.colors.muted }]}>Optional</Text>
         </View>
       </Pressable>
       <SettingsInput
@@ -16128,7 +21679,7 @@ function CompanyProfileSettings({
       </Pressable>
 
       {profile ? (
-        <View style={styles.companyProfileMeta}>
+        <View style={[styles.companyProfileMeta, { borderTopColor: appTheme.colors.divider }]}>
           <ProfileDetailRow label="Security" value={formatSettingValue(profile.securityMode)} />
           <ProfileDetailRow label="Retention" value={formatSettingValue(profile.retentionPolicy)} />
           <ProfileDetailRow label="Status" value={formatEmployeeStatus(profile.status)} />
@@ -16149,6 +21700,7 @@ function DirectorySettings({
   isLoading: boolean;
   roles: TenantRole[];
 }) {
+  const appTheme = useAppTheme();
   const records = filter === 'Departments'
     ? departments.map((department) => ({
         id: department.departmentId,
@@ -16164,7 +21716,7 @@ function DirectorySettings({
   if (isLoading) {
     return (
       <View style={styles.loadingRow}>
-        <ActivityIndicator color={colors.primary} />
+        <ActivityIndicator color={appTheme.colors.primary} />
       </View>
     );
   }
@@ -16272,6 +21824,10 @@ function AddGroupModal({
   onSave: () => void;
   visible: boolean;
 }) {
+  const appTheme = useAppTheme();
+  const insets = useSafeAreaInsets();
+  const modalTopPadding = getFullScreenModalTopPadding(insets.top);
+
   if (Platform.OS === 'ios') {
     return null;
   }
@@ -16403,6 +21959,7 @@ function ChatRow({
   onToggleFavorite: () => void;
   profilePhotoHeaders?: Record<string, string>;
 }) {
+  const appTheme = useAppTheme();
   const translateX = useRef(new Animated.Value(0)).current;
   const offsetRef = useRef(0);
   const canSwipe = canUseChatListActions(chat);
@@ -16482,7 +22039,10 @@ function ChatRow({
   };
 
   return (
-    <View style={styles.chatSwipeShell}>
+    <View style={[
+      styles.chatSwipeShell,
+      { backgroundColor: appTheme.colors.screen }
+    ]}>
       {canSwipe ? (
         <View pointerEvents={offsetRef.current > 0 ? 'auto' : 'box-none'} style={styles.chatSwipeLeftActions}>
           <Pressable
@@ -16523,6 +22083,7 @@ function ChatRow({
       <Animated.View
         style={[
           styles.chatSwipeContent,
+          { backgroundColor: appTheme.colors.screen },
           { transform: [{ translateX }] }
         ]}
         {...(canSwipe ? panResponder.panHandlers : {})}
@@ -16540,6 +22101,10 @@ function ChatRow({
           style={({ pressed }) => [
             styles.chatRow,
             styles.contactChatRow,
+            {
+              backgroundColor: appTheme.colors.screen,
+              borderBottomColor: appTheme.colors.divider
+            },
             pressed && styles.pressed
           ]}
         >
@@ -16552,19 +22117,34 @@ function ChatRow({
 
           <View style={styles.chatText}>
             <View style={styles.chatTitleRow}>
-              <Text numberOfLines={1} style={[styles.chatTitle, styles.chatListTitle]}>{chat.title}</Text>
+              <Text
+                numberOfLines={1}
+                style={[
+                  styles.chatTitle,
+                  styles.chatListTitle,
+                  { color: appTheme.colors.ink }
+                ]}
+              >
+                {chat.title}
+              </Text>
               {chat.isFavorite ? <Feather color="#F59E0B" name="star" size={13} /> : null}
             </View>
             {getChatListPreviewText(chat) ? (
-              <Text numberOfLines={2} style={styles.chatPreview}>{getChatListPreviewText(chat)}</Text>
+              <Text numberOfLines={2} style={[styles.chatPreview, { color: appTheme.colors.muted }]}>
+                {getChatListPreviewText(chat)}
+              </Text>
             ) : !chat.hasActiveDevice ? (
-              <Text numberOfLines={1} style={styles.chatPreview}>Waiting for secure device</Text>
+              <Text numberOfLines={1} style={[styles.chatPreview, { color: appTheme.colors.muted }]}>
+                Waiting for secure device
+              </Text>
             ) : null}
           </View>
 
           <View style={styles.chatMeta}>
             {chat.lastMessageAt ? (
-              <Text style={styles.chatTime}>{formatChatListTime(chat.lastMessageAt)}</Text>
+              <Text style={[styles.chatTime, { color: appTheme.colors.muted }]}>
+                {formatChatListTime(chat.lastMessageAt)}
+              </Text>
             ) : null}
             {chat.unreadCount > 0 ? (
               <View style={styles.unreadBadge}>
@@ -16576,6 +22156,245 @@ function ChatRow({
       </Animated.View>
     </View>
   );
+}
+
+function filterCallHistory(history: SynzappCallHistoryEntry[], search: string): SynzappCallHistoryEntry[] {
+  const normalizedSearch = search.trim().toLowerCase();
+
+  if (!normalizedSearch) {
+    return history;
+  }
+
+  return history.filter((entry) =>
+    entry.title.toLowerCase().includes(normalizedSearch) ||
+    entry.callerName.toLowerCase().includes(normalizedSearch) ||
+    getCallHistoryStatusLabel(entry).toLowerCase().includes(normalizedSearch)
+  );
+}
+
+function filterCallContacts(contacts: ChatContact[], search: string): ChatContact[] {
+  const normalizedSearch = search.trim().toLowerCase();
+
+  if (!normalizedSearch) {
+    return contacts;
+  }
+
+  const searchDigits = search.replace(/\D/g, '');
+
+  return contacts.filter((contact) => (
+    contact.displayName.toLowerCase().includes(normalizedSearch) ||
+    (contact.roleName || contact.role || '').toLowerCase().includes(normalizedSearch) ||
+    (contact.phoneMasked || '').toLowerCase().includes(normalizedSearch) ||
+    (searchDigits ? (contact.phoneMasked || '').replace(/\D/g, '').endsWith(searchDigits.slice(-4)) : false)
+  ));
+}
+
+function findRegisteredCallContactForDialInput(contacts: ChatContact[], dialInput: string): ChatContact | null {
+  const dialDigits = dialInput.replace(/\D/g, '');
+
+  if (dialDigits.length < 4) {
+    return null;
+  }
+
+  const dialLastFour = dialDigits.slice(-4);
+  return contacts.find((contact) => {
+    const contactDigits = (contact.phoneMasked || '').replace(/\D/g, '');
+    return contactDigits.length >= 4 && contactDigits.endsWith(dialLastFour);
+  }) || null;
+}
+
+function getCallHistoryStatusLabel(entry: SynzappCallHistoryEntry): string {
+  const modeLabel = entry.mode === 'video' ? 'Video' : 'Audio';
+
+  if (entry.status === 'answered' || entry.status === 'ended') {
+    return `${entry.direction === 'outgoing' ? 'Outgoing' : 'Incoming'} ${modeLabel}`;
+  }
+
+  if (entry.status === 'ringing') {
+    return entry.direction === 'outgoing' ? `Outgoing ${modeLabel}` : `Incoming ${modeLabel}`;
+  }
+
+  if (entry.status === 'missed') {
+    return 'Missed';
+  }
+
+  if (entry.status === 'declined') {
+    return 'Declined';
+  }
+
+  if (entry.status === 'busy') {
+    return 'Busy';
+  }
+
+  if (entry.status === 'failed') {
+    return 'Failed';
+  }
+
+  return 'Canceled';
+}
+
+function getCallHistoryDetailText(entry: SynzappCallHistoryEntry): string {
+  return [
+    getCallHistoryStatusLabel(entry),
+    `${entry.mode === 'video' ? 'Video' : 'Audio'} call`,
+    formatScheduledCallDateTime(entry.createdAt)
+  ].join('\n');
+}
+
+function formatCallHistoryTime(value: string): string {
+  return formatChatListTime(value);
+}
+
+function isFinalSynzappCallHistoryStatus(status: SynzappCallHistoryStatus): boolean {
+  return status === 'answered' ||
+    status === 'busy' ||
+    status === 'canceled' ||
+    status === 'declined' ||
+    status === 'ended' ||
+    status === 'failed' ||
+    status === 'missed';
+}
+
+function getSynzappCallHistoryStatusFromEndReason(
+  reason: SynzappCallEndReason,
+  direction: SynzappCallDirection,
+  activeStatus: SynzappCallStatus
+): SynzappCallHistoryStatus {
+  if (reason === 'busy' || reason === 'declined' || reason === 'failed' || reason === 'missed') {
+    return reason;
+  }
+
+  if (activeStatus === 'ringing') {
+    return direction === 'incoming' ? 'missed' : 'canceled';
+  }
+
+  return 'ended';
+}
+
+function createScheduleCallDraft(profileName: string | null): ScheduleCallDraft {
+  const startsAt = roundDateToNextHalfHour(new Date(Date.now() + 30 * 60 * 1000));
+  const endsAt = new Date(startsAt.getTime() + 30 * 60 * 1000);
+  const ownerName = profileName?.trim();
+
+  return {
+    callType: 'video',
+    description: '',
+    endsAt,
+    includeEndTime: true,
+    reminderMinutes: 15,
+    requireApproval: false,
+    startsAt,
+    title: ownerName ? `${ownerName}'s call` : 'Synzapp call'
+  };
+}
+
+function normalizeScheduleCallDraft(draft: ScheduleCallDraft): ScheduleCallDraft {
+  const startsAt = new Date(draft.startsAt);
+  const minimumEndAt = new Date(startsAt.getTime() + 15 * 60 * 1000);
+  const endsAt = draft.endsAt.getTime() <= startsAt.getTime() ? minimumEndAt : draft.endsAt;
+
+  return {
+    ...draft,
+    description: draft.description.slice(0, 2048),
+    endsAt,
+    startsAt
+  };
+}
+
+function roundDateToNextHalfHour(date: Date): Date {
+  const nextDate = new Date(date);
+  const minutes = nextDate.getMinutes();
+  const roundedMinutes = minutes <= 30 ? 30 : 60;
+
+  nextDate.setMinutes(roundedMinutes, 0, 0);
+
+  return nextDate;
+}
+
+function mergeDateTimeValue(currentDate: Date, nextDate: Date, mode: 'date' | 'time'): Date {
+  const mergedDate = new Date(currentDate);
+
+  if (mode === 'date') {
+    mergedDate.setFullYear(nextDate.getFullYear(), nextDate.getMonth(), nextDate.getDate());
+  } else {
+    mergedDate.setHours(nextDate.getHours(), nextDate.getMinutes(), 0, 0);
+  }
+
+  return mergedDate;
+}
+
+function formatCallKeypadDigits(value: string): string {
+  const hasPlus = value.startsWith('+');
+  const digits = value.replace(/\D/g, '');
+
+  if (!digits) {
+    return '';
+  }
+
+  if (digits.startsWith('1')) {
+    return formatManualInvitePhoneNumberInput(`${hasPlus ? '+' : ''}${digits}`);
+  }
+
+  return `${hasPlus ? '+' : ''}${chunkPhoneDigits(digits, 3).join(' ')}`;
+}
+
+function getKeypadLetters(digit: string): string {
+  const lettersByDigit: Record<string, string> = {
+    '2': 'A B C',
+    '3': 'D E F',
+    '4': 'G H I',
+    '5': 'J K L',
+    '6': 'M N O',
+    '7': 'P Q R S',
+    '8': 'T U V',
+    '9': 'W X Y Z',
+    '0': '+'
+  };
+
+  return lettersByDigit[digit] || '';
+}
+
+function getNextReminderMinutes(currentReminder: number): number {
+  const reminderOptions = [0, 5, 15, 30, 60];
+  const currentIndex = reminderOptions.indexOf(currentReminder);
+  return reminderOptions[(currentIndex + 1) % reminderOptions.length] || 15;
+}
+
+function formatReminderMinutes(minutes: number): string {
+  if (minutes <= 0) {
+    return 'At time of call';
+  }
+
+  if (minutes === 60) {
+    return '1 hour before';
+  }
+
+  return `${minutes} minutes before`;
+}
+
+function formatScheduleDate(date: Date): string {
+  return date.toLocaleDateString(undefined, {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric'
+  });
+}
+
+function formatScheduleTime(date: Date): string {
+  return date.toLocaleTimeString(undefined, {
+    hour: 'numeric',
+    minute: '2-digit'
+  });
+}
+
+function formatScheduledCallDateTime(value: string): string {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+
+  return `${formatScheduleDate(date)} at ${formatScheduleTime(date)}`;
 }
 
 function ChatMoreActionsModal({
@@ -16659,6 +22478,255 @@ function ChatMoreActionsModal({
               label="Delete"
               onPress={() => onDelete(chat)}
             />
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function ClearChatModal({
+  chat,
+  isClearing,
+  onClearMediaFiles,
+  onClearMessages,
+  onClose,
+  summary
+}: {
+  chat: ChatItem | null;
+  isClearing: boolean;
+  onClearMediaFiles: (chat: ChatItem) => void;
+  onClearMessages: (chat: ChatItem) => void;
+  onClose: () => void;
+  summary: ClearChatSummary;
+}) {
+  if (!chat) {
+    return null;
+  }
+
+  const mediaLabel = summary.mediaFileCount === 0
+    ? 'No media files on this device'
+    : summary.mediaFileCount === 1
+    ? 'Clear 1 media file'
+    : summary.mediaFileCount > 1
+      ? `Clear ${summary.mediaFileCount} media files`
+      : 'Clear media files';
+  const messageLabel = summary.messageCount === 1
+    ? 'Clear 1 message'
+    : summary.messageCount > 1
+      ? `Clear ${summary.messageCount} messages`
+      : 'Clear all messages';
+
+  return (
+    <Modal
+      animationType="slide"
+      onRequestClose={onClose}
+      transparent
+      visible
+    >
+      <View style={styles.chatMoreRoot}>
+        <Pressable
+          accessibilityLabel="Close clear chat"
+          accessibilityRole="button"
+          disabled={isClearing}
+          onPress={onClose}
+          style={styles.chatMoreBackdrop}
+        />
+        <View style={styles.clearChatSheet}>
+          <View style={styles.chatMoreHandle} />
+          <View style={styles.chatMoreHeader}>
+            <Text numberOfLines={1} style={styles.chatMoreTitle}>Clear chat</Text>
+            <Pressable
+              accessibilityLabel="Close clear chat"
+              accessibilityRole="button"
+              disabled={isClearing}
+              onPress={onClose}
+              style={({ pressed }) => [
+                styles.chatMoreCloseButton,
+                pressed && !isClearing && styles.pressed,
+                isClearing && styles.disabled
+              ]}
+            >
+              <Feather color={colors.ink} name="x" size={22} />
+            </Pressable>
+          </View>
+
+          <Text numberOfLines={2} style={styles.clearChatDescription}>
+            This only clears {chat.title} for your account. Other members keep their copy.
+          </Text>
+
+          <View style={styles.chatMoreActionGroup}>
+            <ClearChatActionRow
+              disabled={isClearing || summary.mediaSizeBytes <= 0}
+              icon="image"
+              label={mediaLabel}
+              onPress={() => onClearMediaFiles(chat)}
+              sizeLabel={formatByteCount(summary.mediaSizeBytes)}
+            />
+            <ClearChatActionRow
+              destructive
+              disabled={isClearing}
+              icon="x-circle"
+              label={messageLabel}
+              onPress={() => onClearMessages(chat)}
+              sizeLabel={formatByteCount(summary.totalSizeBytes)}
+            />
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function ClearChatActionRow({
+  destructive,
+  disabled,
+  icon,
+  label,
+  onPress,
+  sizeLabel
+}: {
+  destructive?: boolean;
+  disabled?: boolean;
+  icon: keyof typeof Feather.glyphMap;
+  label: string;
+  onPress: () => void;
+  sizeLabel: string;
+}) {
+  return (
+    <Pressable
+      accessibilityLabel={label}
+      accessibilityRole="button"
+      disabled={disabled}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.clearChatActionRow,
+        pressed && !disabled && styles.pressed,
+        disabled && styles.clearChatActionRowDisabled
+      ]}
+    >
+      <View style={[styles.clearChatActionIcon, destructive && styles.clearChatActionIconDestructive]}>
+        <Feather color={destructive ? '#DC2626' : colors.primary} name={icon} size={20} />
+      </View>
+      <Text style={[styles.clearChatActionText, destructive && styles.clearChatActionTextDestructive]}>
+        {label}
+      </Text>
+      <Text style={styles.clearChatActionSize}>{sizeLabel}</Text>
+    </Pressable>
+  );
+}
+
+function ThemePreferenceModal({
+  currentPreference,
+  onClose,
+  onSelect,
+  visible
+}: {
+  currentPreference: AppThemePreference;
+  onClose: () => void;
+  onSelect: (preference: AppThemePreference) => void;
+  visible: boolean;
+}) {
+  const appTheme = useAppTheme();
+  const options: Array<{
+    description: string;
+    icon: keyof typeof Feather.glyphMap;
+    label: string;
+    value: AppThemePreference;
+  }> = [
+    {
+      description: 'Follow the phone or tablet display setting.',
+      icon: 'smartphone',
+      label: 'System',
+      value: 'system'
+    },
+    {
+      description: 'Use the bright Synzapp interface.',
+      icon: 'sun',
+      label: 'Light',
+      value: 'light'
+    },
+    {
+      description: 'Use the low-light Synzapp interface.',
+      icon: 'moon',
+      label: 'Dark',
+      value: 'dark'
+    }
+  ];
+
+  return (
+    <Modal
+      animationType="slide"
+      onRequestClose={onClose}
+      transparent
+      visible={visible}
+    >
+      <View style={styles.chatMoreRoot}>
+        <Pressable
+          accessibilityLabel="Close appearance settings"
+          accessibilityRole="button"
+          onPress={onClose}
+          style={styles.chatMoreBackdrop}
+        />
+        <View style={[
+          styles.themeSheet,
+          { backgroundColor: appTheme.colors.surface }
+        ]}>
+          <View style={styles.chatMoreHandle} />
+          <View style={styles.chatMoreHeader}>
+            <Text numberOfLines={1} style={[styles.chatMoreTitle, { color: appTheme.colors.ink }]}>Appearance</Text>
+            <Pressable
+              accessibilityLabel="Close appearance settings"
+              accessibilityRole="button"
+              onPress={onClose}
+              style={({ pressed }) => [
+                styles.chatMoreCloseButton,
+                { backgroundColor: appTheme.colors.surfaceElevated },
+                pressed && styles.pressed
+              ]}
+            >
+              <Feather color={appTheme.colors.ink} name="x" size={22} />
+            </Pressable>
+          </View>
+
+          <Text style={[styles.themeSheetDescription, { color: appTheme.colors.muted }]}>
+            Choose how Synzapp should match this device.
+          </Text>
+
+          <View style={[styles.chatMoreActionGroup, { backgroundColor: appTheme.colors.surfaceElevated }]}>
+            {options.map((option) => {
+              const isSelected = currentPreference === option.value;
+
+              return (
+                <Pressable
+                  accessibilityLabel={`Use ${option.label} appearance`}
+                  accessibilityRole="radio"
+                  accessibilityState={{ checked: isSelected }}
+                  key={option.value}
+                  onPress={() => onSelect(option.value)}
+                  style={({ pressed }) => [
+                    styles.themeOptionRow,
+                    { borderBottomColor: appTheme.colors.divider },
+                    pressed && styles.pressed
+                  ]}
+                >
+                  <View style={[
+                    styles.themeOptionIcon,
+                    { backgroundColor: appTheme.colors.primarySoft },
+                    isSelected && styles.themeOptionIconSelected
+                  ]}>
+                    <Feather color={isSelected ? '#FFFFFF' : appTheme.colors.primary} name={option.icon} size={20} />
+                  </View>
+                  <View style={styles.chatText}>
+                    <Text style={[styles.themeOptionTitle, { color: appTheme.colors.ink }]}>{option.label}</Text>
+                    <Text style={[styles.themeOptionDescription, { color: appTheme.colors.muted }]}>{option.description}</Text>
+                  </View>
+                  <View style={[styles.archiveSettingsRadio, isSelected && styles.archiveSettingsRadioSelected]}>
+                    {isSelected ? <View style={styles.archiveSettingsRadioDot} /> : null}
+                  </View>
+                </Pressable>
+              );
+            })}
           </View>
         </View>
       </View>
@@ -16823,42 +22891,204 @@ function EmployeeRow({
   canManageUsers,
   employee,
   isUpdatingLifecycle,
+  onPermanentlyRemoveDeleted,
+  onReactivateDeleted,
   onSelect,
   profilePhotoHeaders
 }: {
   canManageUsers: boolean;
   employee: EmployeeListItem;
   isUpdatingLifecycle: boolean;
+  onPermanentlyRemoveDeleted: () => void;
+  onReactivateDeleted: () => void;
   onSelect: () => void;
   profilePhotoHeaders?: Record<string, string>;
 }) {
+  const appTheme = useAppTheme();
   const hasActions = canManageUsers && getEmployeeActionOptions(employee).length > 0;
+  const statusValue = employee.statusValue.toUpperCase();
+  const canSwipeReactivate = hasActions && !isUpdatingLifecycle && statusValue === 'DELETED';
+  const canSwipeRemove = hasActions &&
+    !isUpdatingLifecycle &&
+    (statusValue === 'DELETED' || statusValue === 'INVITED');
+  const canSwipe = canSwipeReactivate || canSwipeRemove;
+  const translateX = useRef(new Animated.Value(0)).current;
+  const offsetRef = useRef(0);
+
+  const closeSwipe = () => {
+    offsetRef.current = 0;
+    Animated.spring(translateX, {
+      damping: 20,
+      mass: 0.75,
+      stiffness: 170,
+      toValue: 0,
+      useNativeDriver: true
+    }).start();
+  };
+
+  const snapSwipe = (toValue: number) => {
+    offsetRef.current = toValue;
+    Animated.spring(translateX, {
+      damping: 20,
+      mass: 0.75,
+      stiffness: 170,
+      toValue,
+      useNativeDriver: true
+    }).start();
+  };
+
+  const panResponder = useMemo(() => PanResponder.create({
+    onMoveShouldSetPanResponder: (_event, gestureState) =>
+      canSwipe &&
+      Math.abs(gestureState.dx) > 4 &&
+      Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.08,
+    onMoveShouldSetPanResponderCapture: (_event, gestureState) =>
+      canSwipe &&
+      Math.abs(gestureState.dx) > 6 &&
+      Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.08,
+    onPanResponderGrant: () => {
+      translateX.stopAnimation((value) => {
+        offsetRef.current = value;
+      });
+    },
+    onPanResponderMove: (_event, gestureState) => {
+      const minValue = canSwipeRemove ? -CHAT_ROW_LEFT_ACTION_WIDTH : 0;
+      const maxValue = canSwipeReactivate ? CHAT_ROW_LEFT_ACTION_WIDTH : 0;
+      const nextValue = Math.max(
+        minValue,
+        Math.min(maxValue, offsetRef.current + gestureState.dx)
+      );
+
+      translateX.setValue(nextValue);
+    },
+    onPanResponderRelease: (_event, gestureState) => {
+      const intendedDelete = canSwipeRemove &&
+        (gestureState.dx <= -CHAT_ROW_SWIPE_TRIGGER || gestureState.vx <= -0.18);
+      const intendedReactivate = canSwipeReactivate &&
+        (gestureState.dx >= CHAT_ROW_SWIPE_TRIGGER || gestureState.vx >= 0.18);
+
+      if (intendedDelete) {
+        snapSwipe(-CHAT_ROW_LEFT_ACTION_WIDTH);
+        return;
+      }
+
+      if (intendedReactivate) {
+        snapSwipe(CHAT_ROW_LEFT_ACTION_WIDTH);
+        return;
+      }
+
+      closeSwipe();
+    },
+    onPanResponderTerminate: closeSwipe,
+    onPanResponderTerminationRequest: () => false,
+    onStartShouldSetPanResponder: () => false
+  }), [canSwipe, canSwipeReactivate, canSwipeRemove, translateX]);
+
+  useEffect(() => {
+    closeSwipe();
+  }, [employee.id, employee.statusValue]);
+
+  const runSwipeAction = (action: () => void) => {
+    closeSwipe();
+    action();
+  };
 
   return (
-    <Pressable
-      accessibilityRole={hasActions ? 'button' : undefined}
-      disabled={!hasActions || isUpdatingLifecycle}
-      onPress={onSelect}
-      style={({ pressed }) => [
-      styles.chatRow,
-      pressed && hasActions && !isUpdatingLifecycle && styles.pressed,
-      isUpdatingLifecycle && styles.disabled
+    <View style={[
+      styles.employeeSwipeShell,
+      { backgroundColor: appTheme.colors.screen }
     ]}>
-      <ProfileAvatar
-        headers={profilePhotoHeaders}
-        name={employee.name}
-        size={44}
-        uri={employee.profilePhotoUrl}
-      />
-      <View style={styles.chatText}>
-        <Text style={styles.chatTitle}>{employee.name}</Text>
-        <Text style={styles.chatPreview}>{employee.department}</Text>
-      </View>
-      <View style={styles.employeeMeta}>
-        <Text numberOfLines={1} style={styles.employeeRole}>{employee.role}</Text>
-        <Text numberOfLines={1} style={styles.employeeStatus}>{employee.status}</Text>
-      </View>
-    </Pressable>
+      {canSwipeReactivate ? (
+        <View style={styles.employeeSwipeLeftActions}>
+          <Pressable
+            accessibilityLabel={`Reactivate ${employee.name}`}
+            accessibilityRole="button"
+            onPress={() => runSwipeAction(onReactivateDeleted)}
+            style={({ pressed }) => [
+              styles.chatSwipeAction,
+              styles.employeeSwipeReactivateAction,
+              pressed && styles.pressed
+            ]}
+          >
+            <Feather color="#FFFFFF" name="rotate-ccw" size={21} />
+            <Text style={styles.chatSwipeActionText}>Reactivate</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
+      {canSwipeRemove ? (
+        <View style={styles.employeeSwipeRightActions}>
+          <Pressable
+            accessibilityLabel={statusValue === 'INVITED' ? `Remove invite for ${employee.name}` : `Permanently remove ${employee.name}`}
+            accessibilityRole="button"
+            onPress={() => runSwipeAction(onPermanentlyRemoveDeleted)}
+            style={({ pressed }) => [
+              styles.chatSwipeAction,
+              styles.employeeSwipeRemoveAction,
+              pressed && styles.pressed
+            ]}
+          >
+            <Feather color="#FFFFFF" name="trash-2" size={21} />
+            <Text style={styles.chatSwipeActionText}>Remove</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
+      <Animated.View
+        style={[
+          styles.chatSwipeContent,
+          { backgroundColor: appTheme.colors.screen },
+          { transform: [{ translateX }] }
+        ]}
+        {...(canSwipe ? panResponder.panHandlers : {})}
+      >
+        <Pressable
+          accessibilityRole={hasActions ? 'button' : undefined}
+          disabled={!hasActions || isUpdatingLifecycle}
+          onPress={() => {
+            if (offsetRef.current !== 0) {
+              closeSwipe();
+              return;
+            }
+
+            onSelect();
+          }}
+          style={({ pressed }) => [
+            styles.chatRow,
+            {
+              backgroundColor: appTheme.colors.screen,
+              borderBottomColor: appTheme.colors.divider
+            },
+            pressed && hasActions && !isUpdatingLifecycle && styles.pressed,
+            isUpdatingLifecycle && styles.disabled
+          ]}
+        >
+          {employee.isPhoneOnly && !employee.profilePhotoUrl ? (
+            <View style={[
+              styles.employeePhoneAvatar,
+              { backgroundColor: appTheme.colors.primarySoft }
+            ]}>
+              <Feather color={appTheme.colors.primary} name="phone" size={19} />
+            </View>
+          ) : (
+            <ProfileAvatar
+              headers={profilePhotoHeaders}
+              name={employee.name}
+              size={44}
+              uri={employee.profilePhotoUrl}
+            />
+          )}
+          <View style={styles.chatText}>
+            <Text style={[styles.chatTitle, { color: appTheme.colors.ink }]}>{employee.name}</Text>
+            <Text style={[styles.chatPreview, { color: appTheme.colors.muted }]}>{employee.department}</Text>
+          </View>
+          <View style={styles.employeeMeta}>
+            <Text numberOfLines={1} style={[styles.employeeRole, { color: appTheme.colors.muted }]}>{employee.role}</Text>
+            <Text numberOfLines={1} style={[styles.employeeStatus, { color: appTheme.colors.primary }]}>{employee.status}</Text>
+          </View>
+        </Pressable>
+      </Animated.View>
+    </View>
   );
 }
 
@@ -16875,64 +23105,101 @@ function ManualInviteModal({
   phone: string;
   visible: boolean;
 }) {
-  if (Platform.OS === 'ios') {
-    return null;
-  }
-
-  const canConfirm = phone.trim().length >= 8;
+  const appTheme = useAppTheme();
+  const insets = useSafeAreaInsets();
+  const canConfirm = Boolean(normalizeManualInvitePhoneNumber(phone));
 
   return (
     <Modal
-      animationType="slide"
+      animationType="fade"
       onRequestClose={onCancel}
-      presentationStyle="fullScreen"
-      transparent={false}
+      transparent
       visible={visible}
     >
-      <View style={styles.manualInviteModalScreen}>
-        <View style={styles.batchModalHeader}>
-          <Pressable
-            accessibilityLabel="Cancel manual employee add"
-            accessibilityRole="button"
-            onPress={onCancel}
-            style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}
-          >
-            <Text style={styles.backButtonText}>‹</Text>
-          </Pressable>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={[
+          styles.manualInviteOverlay,
+          {
+            backgroundColor: appTheme.colors.overlay,
+            paddingBottom: Math.max(insets.bottom, 18),
+            paddingTop: Math.max(insets.top, 18)
+          }
+        ]}>
+        <Pressable
+          accessibilityLabel="Close add employee"
+          accessibilityRole="button"
+          onPress={onCancel}
+          style={StyleSheet.absoluteFill}
+        />
 
-          <Pressable
-            accessibilityRole="button"
-            disabled={!canConfirm}
-            onPress={onConfirm}
-            style={({ pressed }) => [
-              styles.batchDoneButton,
-              pressed && canConfirm && styles.pressed,
-              !canConfirm && styles.disabled
-            ]}
-          >
-            <Text style={styles.batchDoneButtonText}>Add</Text>
-          </Pressable>
+        <View style={[
+          styles.manualInviteDialog,
+          {
+            backgroundColor: appTheme.colors.surfaceElevated,
+            borderColor: appTheme.colors.border
+          }
+        ]}>
+          <Text style={[styles.manualInviteTitle, { color: appTheme.colors.ink }]}>Add employee</Text>
+          <Text style={[styles.manualInviteHelp, { color: appTheme.colors.mutedStrong }]}>
+            Enter the phone number with country code, for example +1 (469) 555 4444.
+          </Text>
+
+          <View style={[
+            styles.manualInviteInputBox,
+            {
+              backgroundColor: appTheme.colors.input,
+              borderColor: appTheme.colors.border
+            }
+          ]}>
+            <TextInput
+              autoComplete="tel"
+              autoCorrect={false}
+              autoFocus
+              keyboardType="phone-pad"
+              onChangeText={onChangePhone}
+              placeholder="+1 (469) 555 4444"
+              placeholderTextColor={appTheme.colors.muted}
+              style={[styles.manualInviteInput, { color: appTheme.colors.ink }]}
+              textContentType="telephoneNumber"
+              value={phone}
+            />
+          </View>
+
+          <View style={styles.manualInviteActionRow}>
+            <Pressable
+              accessibilityRole="button"
+              onPress={onCancel}
+              style={({ pressed }) => [
+                styles.manualInviteActionButton,
+                { backgroundColor: appTheme.colors.surface },
+                pressed && styles.pressed
+              ]}
+            >
+              <Text style={[styles.manualInviteSecondaryText, { color: appTheme.colors.ink }]}>Cancel</Text>
+            </Pressable>
+
+            <Pressable
+              accessibilityRole="button"
+              disabled={!canConfirm}
+              onPress={onConfirm}
+              style={({ pressed }) => [
+                styles.manualInviteActionButton,
+                { backgroundColor: canConfirm ? appTheme.colors.primary : appTheme.colors.surface },
+                pressed && canConfirm && styles.pressed,
+                !canConfirm && styles.disabled
+              ]}
+            >
+              <Text style={[
+                styles.manualInvitePrimaryText,
+                { color: canConfirm ? '#FFFFFF' : appTheme.colors.muted }
+              ]}>
+                Add
+              </Text>
+            </Pressable>
+          </View>
         </View>
-
-        <Text style={styles.batchModalTitle}>Add employee</Text>
-        <Text style={styles.manualInviteHelp}>
-          Enter the phone number with country code.
-        </Text>
-
-        <View style={styles.batchSearchBox}>
-          <TextInput
-            autoComplete="tel"
-            autoCorrect={false}
-            keyboardType="phone-pad"
-            onChangeText={onChangePhone}
-            placeholder="+14695554444"
-            placeholderTextColor="#8B95A5"
-            style={styles.batchSearchInput}
-            textContentType="telephoneNumber"
-            value={phone}
-          />
-        </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
@@ -16950,16 +23217,18 @@ function SettingsInput({
   placeholder: string;
   value: string;
 }) {
+  const appTheme = useAppTheme();
+
   return (
-    <View style={styles.settingsInputBox}>
+    <View style={[styles.settingsInputBox, { borderBottomColor: appTheme.colors.divider }]}>
       <TextInput
         autoCapitalize={autoCapitalize}
         autoCorrect={false}
         keyboardType={keyboardType}
         onChangeText={onChangeText}
         placeholder={placeholder}
-        placeholderTextColor="#8B95A5"
-        style={styles.settingsInput}
+        placeholderTextColor={appTheme.colors.muted}
+        style={[styles.settingsInput, { color: appTheme.colors.ink }]}
         value={value}
       />
     </View>
@@ -17037,20 +23306,31 @@ function TenantRecordList({
   emptyText: string;
   records: Array<{ id: string; meta: string; name: string }>;
 }) {
+  const appTheme = useAppTheme();
+
   if (!records.length) {
-    return <Text style={styles.emptySmall}>{emptyText}</Text>;
+    return <Text style={[styles.emptySmall, { color: appTheme.colors.muted }]}>{emptyText}</Text>;
   }
 
   return (
     <View style={styles.recordList}>
       {records.map((record) => (
-        <View key={record.id} style={styles.recordRow}>
-          <View style={styles.recordInitial}>
-            <Text style={styles.recordInitialText}>{record.name.slice(0, 1)}</Text>
+        <View
+          key={record.id}
+          style={[
+            styles.recordRow,
+            {
+              backgroundColor: appTheme.colors.screen,
+              borderBottomColor: appTheme.colors.divider
+            }
+          ]}
+        >
+          <View style={[styles.recordInitial, { backgroundColor: appTheme.colors.primarySoft }]}>
+            <Text style={[styles.recordInitialText, { color: appTheme.colors.primary }]}>{record.name.slice(0, 1)}</Text>
           </View>
           <View style={styles.chatText}>
-            <Text style={styles.chatTitle}>{record.name}</Text>
-            <Text numberOfLines={1} style={styles.chatPreview}>{record.meta}</Text>
+            <Text style={[styles.chatTitle, { color: appTheme.colors.ink }]}>{record.name}</Text>
+            <Text numberOfLines={1} style={[styles.chatPreview, { color: appTheme.colors.muted }]}>{record.meta}</Text>
           </View>
         </View>
       ))}
@@ -17059,21 +23339,26 @@ function TenantRecordList({
 }
 
 function SearchIcon() {
+  const appTheme = useAppTheme();
+
   return (
     <View style={styles.searchIcon}>
-      <View style={styles.searchLens} />
-      <View style={styles.searchHandle} />
+      <View style={[styles.searchLens, { borderColor: appTheme.colors.ink }]} />
+      <View style={[styles.searchHandle, { backgroundColor: appTheme.colors.ink }]} />
     </View>
   );
 }
 
 function QrIcon() {
+  const appTheme = useAppTheme();
+  const cellStyle = [styles.qrCell, { borderColor: appTheme.colors.mutedStrong }];
+
   return (
     <View style={styles.qrIcon}>
-      <View style={styles.qrCell} />
-      <View style={styles.qrCell} />
-      <View style={styles.qrCell} />
-      <View style={styles.qrCell} />
+      <View style={cellStyle} />
+      <View style={cellStyle} />
+      <View style={cellStyle} />
+      <View style={cellStyle} />
     </View>
   );
 }
@@ -17090,6 +23375,7 @@ function FilterIcon() {
 
 function FooterTabButton({
   active,
+  badgeCount = 0,
   minHeight,
   onPress,
   profile,
@@ -17097,12 +23383,14 @@ function FooterTabButton({
   tab
 }: {
   active: boolean;
+  badgeCount?: number;
   minHeight: number;
   onPress: () => void;
   profile: CurrentUserProfile | null;
   profilePhotoHeaders?: Record<string, string>;
   tab: FooterTab;
 }) {
+  const appTheme = useAppTheme();
   const activeProgress = useRef(new Animated.Value(active ? 1 : 0)).current;
 
   useEffect(() => {
@@ -17145,6 +23433,7 @@ function FooterTabButton({
         style={[
           styles.footerTabActivePill,
           {
+            backgroundColor: appTheme.colors.footerActive,
             opacity: pillOpacity,
             transform: [{ scale: pillScale }]
           }
@@ -17154,15 +23443,21 @@ function FooterTabButton({
         styles.footerTabContent,
         { transform: [{ scale: contentScale }] }
       ]}>
-        <FooterIcon
-          active={active}
-          profile={profile}
-          profilePhotoHeaders={profilePhotoHeaders}
-          tab={tab}
-        />
-        <Text style={[
+	        <FooterIcon
+	          active={active}
+	          profile={profile}
+	          profilePhotoHeaders={profilePhotoHeaders}
+	          tab={tab}
+	        />
+	        {badgeCount > 0 ? (
+	          <View style={styles.footerTabBadge}>
+	            <Text style={styles.footerTabBadgeText}>{badgeCount > 99 ? '99+' : badgeCount}</Text>
+	          </View>
+	        ) : null}
+	        <Text style={[
           styles.footerTabText,
-          active && styles.footerTabTextActive
+          active && styles.footerTabTextActive,
+          { color: active ? appTheme.colors.primary : appTheme.colors.ink }
         ]}>
           {tab}
         </Text>
@@ -17182,13 +23477,18 @@ function FooterIcon({
   profilePhotoHeaders?: Record<string, string>;
   tab: FooterTab;
 }) {
-  const iconColor = active ? '#4F46E5' : '#111827';
+  const appTheme = useAppTheme();
+  const iconColor = active ? appTheme.colors.primary : appTheme.colors.mutedStrong;
 
   if (tab === 'You') {
     return (
       <View style={[
         styles.footerProfileAvatar,
-        active && styles.footerProfileAvatarActive
+        active && styles.footerProfileAvatarActive,
+        active && {
+          backgroundColor: appTheme.colors.primarySoft,
+          borderColor: appTheme.colors.primary
+        }
       ]}>
         <ProfileAvatar
           headers={profilePhotoHeaders}
@@ -17202,6 +23502,10 @@ function FooterIcon({
 
   if (tab === 'Employees') {
     return <Ionicons color={iconColor} name={active ? 'people' : 'people-outline'} size={27} />;
+  }
+
+  if (tab === 'Calls') {
+    return <Ionicons color={iconColor} name={active ? 'call' : 'call-outline'} size={27} />;
   }
 
   if (tab === 'Groups') {
@@ -17357,32 +23661,58 @@ function getEmployeeActionOptions(employee: EmployeeListItem): EmployeeActionOpt
     successMessage: (employeeName) => `${employeeName} can sign in again after phone verification.`,
     successTitle: 'Employee reactivated'
   };
-  const anonymizeOption: EmployeeActionOption = {
-    action: 'ANONYMIZE',
-    confirmButton: 'Anonymize',
+  const deleteOption: EmployeeActionOption = {
+    action: 'DELETE',
+    confirmButton: 'Delete',
     confirmMessage: (employeeName) =>
-      `${employeeName}'s personal profile fields will be anonymized and access will remain blocked.`,
-    confirmTitle: 'Anonymize employee?',
-    label: 'Delete or anonymize',
-    reason: 'Anonymized by organization admin',
-    successMessage: () => 'The employee profile has been anonymized.',
-    successTitle: 'Employee anonymized'
+      `${employeeName} will be deleted from active employee access. Their devices will be revoked, but the record can still be reactivated or permanently removed later.`,
+    confirmTitle: 'Delete employee?',
+    label: 'Delete',
+    reason: 'Deleted by organization admin',
+    successMessage: (employeeName) => `${employeeName} has been deleted from active access.`,
+    successTitle: 'Employee deleted'
+  };
+  const permanentDeleteOption: EmployeeActionOption = {
+    action: 'PERMANENT_DELETE',
+    confirmButton: 'Remove',
+    confirmMessage: (employeeName) =>
+      `${employeeName} will be permanently removed from the employee directory. This clears the approval record for this phone number and cannot be undone.`,
+    confirmTitle: 'Permanently remove employee?',
+    label: 'Permanently remove',
+    reason: 'Permanently removed by organization admin',
+    successMessage: (employeeName) => `${employeeName} has been permanently removed.`,
+    successTitle: 'Employee removed'
+  };
+  const removeInviteOption: EmployeeActionOption = {
+    action: 'REMOVE_INVITE',
+    confirmButton: 'Remove',
+    confirmMessage: (employeeName) =>
+      `${employeeName}'s pending invite will be removed from this organization. This clears the phone number so it can be invited correctly later.`,
+    confirmTitle: 'Remove invite?',
+    label: 'Remove invite',
+    reason: 'Invite removed by organization admin',
+    successMessage: (employeeName) => `${employeeName}'s invite has been removed.`,
+    successTitle: 'Invite removed'
   };
 
   if (status === 'ACTIVE') {
-    return [changeRoleOption, departmentAdminOption, deactivateOption, archiveOption, anonymizeOption];
+    return [changeRoleOption, departmentAdminOption, deactivateOption, archiveOption, deleteOption];
   }
 
   if (status === 'INVITED') {
-    return [changeRoleOption, departmentAdminOption, deactivateOption, anonymizeOption];
+    return [changeRoleOption, departmentAdminOption, removeInviteOption];
   }
 
   if (status === 'DEACTIVATED' || status === 'SUSPENDED') {
-    return [reactivateOption, archiveOption, anonymizeOption];
+    return [reactivateOption, archiveOption, deleteOption];
   }
 
   if (status === 'ARCHIVED') {
-    return [reactivateOption, anonymizeOption];
+    return [reactivateOption, deleteOption];
+  }
+
+  if (status === 'DELETED') {
+    return [reactivateOption, permanentDeleteOption];
   }
 
   return [];
@@ -17391,8 +23721,18 @@ function getEmployeeActionOptions(employee: EmployeeListItem): EmployeeActionOpt
 function isEmployeeLifecycleAction(action: EmployeeAction): action is EmployeeLifecycleAction {
   return action === 'DEACTIVATE' ||
     action === 'ARCHIVE' ||
+    action === 'DELETE' ||
     action === 'ANONYMIZE' ||
+    action === 'PERMANENT_DELETE' ||
+    action === 'REMOVE_INVITE' ||
     action === 'REACTIVATE';
+}
+
+function isDestructiveEmployeeAction(action: EmployeeAction): boolean {
+  return action === 'DELETE' ||
+    action === 'ANONYMIZE' ||
+    action === 'PERMANENT_DELETE' ||
+    action === 'REMOVE_INVITE';
 }
 
 function getErrorMessage(error: unknown, fallback: string): string {
@@ -17401,6 +23741,138 @@ function getErrorMessage(error: unknown, fallback: string): string {
   }
 
   return fallback;
+}
+
+function createSynzappCallId(): string {
+  const segment = (length: number) => Array.from({ length }, () =>
+    Math.floor(Math.random() * 16).toString(16)
+  ).join('');
+
+  return `${segment(8)}-${segment(4)}-4${segment(3)}-${((8 + Math.floor(Math.random() * 4)).toString(16))}${segment(3)}-${segment(12)}`;
+}
+
+function getSynzappWebRtcRuntime(): WebRtcRuntime {
+  try {
+    const runtime = require('react-native-webrtc') as WebRtcRuntime;
+
+    if (!runtime?.RTCPeerConnection || !runtime.mediaDevices?.getUserMedia) {
+      throw new Error('Calling is not available in this installed build.');
+    }
+
+    return runtime;
+  } catch {
+    throw new Error('Please install the latest Synzapp development build to use secure calls.');
+  }
+}
+
+function getOptionalCallKeepRuntime(): any | null {
+  if (Platform.OS === 'android') {
+    return null;
+  }
+
+  try {
+    const module = require('react-native-callkeep');
+
+    return module?.default || module;
+  } catch {
+    return null;
+  }
+}
+
+function getOptionalInCallManagerRuntime(): any | null {
+  try {
+    const module = require('react-native-incall-manager');
+
+    return module?.default || module;
+  } catch {
+    return null;
+  }
+}
+
+function getOptionalRtcView(): React.ComponentType<any> | null {
+  try {
+    const runtime = require('react-native-webrtc') as WebRtcRuntime;
+
+    return runtime?.RTCView || null;
+  } catch {
+    return null;
+  }
+}
+
+function getSynzappCallStatusLabel(callState: ActiveSynzappCall): string {
+  if (callState.status === 'ringing') {
+    return 'Incoming secure call...';
+  }
+
+  if (callState.status === 'calling') {
+    return callState.call.mode === 'video' ? 'Video calling...' : 'Calling...';
+  }
+
+  if (callState.status === 'connecting') {
+    return 'Connecting securely...';
+  }
+
+  if (callState.status === 'connected') {
+    return callState.call.chatType === 'GROUP' ? 'Group call connected' : 'Call connected';
+  }
+
+  return 'Ending call...';
+}
+
+function createRtcSessionDescription(runtime: WebRtcRuntime, payload: unknown): unknown {
+  return runtime.RTCSessionDescription ? new runtime.RTCSessionDescription(payload) : payload;
+}
+
+function createRtcIceCandidate(runtime: WebRtcRuntime, payload: unknown): unknown {
+  return runtime.RTCIceCandidate ? new runtime.RTCIceCandidate(payload) : payload;
+}
+
+function serializeSynzappCallSignalPayload(payload: unknown): unknown {
+  if (!payload || typeof payload !== 'object') {
+    return payload;
+  }
+
+  if ('toJSON' in payload && typeof (payload as { toJSON?: () => unknown }).toJSON === 'function') {
+    return (payload as { toJSON: () => unknown }).toJSON();
+  }
+
+  return payload;
+}
+
+function getNativeCallKeepEndReason(RNCallKeep: any, reason: SynzappCallEndReason): number {
+  const endReasons = RNCallKeep?.CONSTANTS?.END_CALL_REASONS || {};
+
+  if (reason === 'missed') {
+    return endReasons.MISSED || endReasons.UNANSWERED || 6;
+  }
+
+  if (reason === 'failed') {
+    return endReasons.FAILED || 1;
+  }
+
+  if (reason === 'declined' || reason === 'busy') {
+    return endReasons.DECLINED_ELSEWHERE || endReasons.REMOTE_ENDED || 2;
+  }
+
+  return endReasons.REMOTE_ENDED || 2;
+}
+
+function partitionCallSignals<T>(
+  items: T[],
+  predicate: (item: T) => boolean
+): [T[], T[]] {
+  const matchingItems: T[] = [];
+  const remainingItems: T[] = [];
+
+  items.forEach((item) => {
+    if (predicate(item)) {
+      matchingItems.push(item);
+    } else {
+      remainingItems.push(item);
+    }
+  });
+
+  return [matchingItems, remainingItems];
 }
 
 function omitRecordKey<T>(record: Record<string, T>, key: string): Record<string, T> {
@@ -17762,6 +24234,18 @@ function isMediaTransferActive(media: ChatMediaAttachment): boolean {
     media.transferStatus === 'downloading';
 }
 
+function shouldSkipAutomaticMediaDownload(media: ChatMediaAttachment): boolean {
+  if (media.kind !== 'file') {
+    return false;
+  }
+
+  const sizeBytes = Math.max(media.sizeBytes || 0, 0);
+
+  return sizeBytes <= 0 ||
+    sizeBytes > CHAT_SMALL_FILE_AUTO_DOWNLOAD_MAX_BYTES ||
+    sizeBytes > CHAT_MEDIA_LIMITS.file;
+}
+
 function getMediaTransferLabel(media: ChatMediaAttachment): string {
   if (media.transferStatus === 'queued') {
     return 'Queued';
@@ -17818,6 +24302,132 @@ function getMediaItemsTransferProgress(mediaItems: ChatMediaAttachment[]): numbe
 
 function getMediaItemsSize(mediaItems: ChatMediaAttachment[]): number {
   return mediaItems.reduce((total, media) => total + Math.max(media.sizeBytes || 0, 0), 0);
+}
+
+function buildClearChatSummary(messages: ChatMessage[]): ClearChatSummary {
+  const uniqueMessagesForSummary = uniqueChatMessages(messages);
+  let mediaFileCount = 0;
+  let mediaSizeBytes = 0;
+  let allMediaSizeBytes = 0;
+  let textSizeBytes = 0;
+
+  uniqueMessagesForSummary.forEach((message) => {
+    const mediaItems = getMessageMediaItems(message);
+    const localMediaItems = mediaItems.filter(hasClearableLocalMedia);
+
+    mediaFileCount += localMediaItems.length;
+    mediaSizeBytes += getMediaItemsSize(localMediaItems);
+    allMediaSizeBytes += getMediaItemsSize(mediaItems);
+    textSizeBytes += getChatMessageStorageByteEstimate(message);
+  });
+
+  return {
+    mediaFileCount,
+    mediaSizeBytes,
+    messageCount: uniqueMessagesForSummary.length,
+    textSizeBytes,
+    totalSizeBytes: allMediaSizeBytes + textSizeBytes
+  };
+}
+
+async function clearDownloadedMediaFilesFromMessages(messages: ChatMessage[]): Promise<ChatMessage[]> {
+  const uniqueMessagesForCleanup = uniqueChatMessages(messages);
+  const deletableLocalUris = new Set<string>();
+
+  uniqueMessagesForCleanup.forEach((message) => {
+    getMessageMediaItems(message).forEach((media) => {
+      const localUri = getDeletableLocalMediaUri(media);
+
+      if (localUri) {
+        deletableLocalUris.add(localUri);
+      }
+    });
+  });
+
+  await Promise.all([...deletableLocalUris].map((localUri) =>
+    FileSystem.deleteAsync(localUri, { idempotent: true }).catch(() => undefined)
+  ));
+
+  return uniqueMessagesForCleanup.map(clearLocalMediaReferencesFromMessage);
+}
+
+function clearLocalMediaReferencesFromMessage(message: ChatMessage): ChatMessage {
+  const mediaItems = getMessageMediaItems(message).map(clearLocalMediaReference);
+  const primaryMedia = mediaItems[0] || null;
+
+  return {
+    ...message,
+    image: primaryMedia?.kind === 'image' ? toChatImageAttachment(primaryMedia) : null,
+    media: primaryMedia,
+    mediaItems: Array.isArray(message.mediaItems) && message.mediaItems.length ? mediaItems : []
+  };
+}
+
+function clearLocalMediaReference(media: ChatMediaAttachment): ChatMediaAttachment {
+  const nextMedia: ChatMediaAttachment = {
+    ...media,
+    localUri: undefined,
+    transferProgress: undefined,
+    transferStatus: undefined
+  };
+
+  if (nextMedia.kind === 'image') {
+    const imageAttachment: ChatImageAttachment = {
+      ...toChatImageAttachment(nextMedia),
+      dataUrl: undefined
+    };
+
+    return imageAttachment;
+  }
+
+  return nextMedia;
+}
+
+function getDeletableLocalMediaUri(media: ChatMediaAttachment): string {
+  const localUri = typeof media.localUri === 'string' ? media.localUri.trim() : '';
+
+  if (!localUri || localUri.startsWith('data:')) {
+    return '';
+  }
+
+  const allowedPrefixes = [FileSystem.documentDirectory, FileSystem.cacheDirectory]
+    .filter((prefix): prefix is string => Boolean(prefix));
+
+  return allowedPrefixes.some((prefix) => localUri.startsWith(prefix))
+    ? localUri
+    : '';
+}
+
+function hasClearableLocalMedia(media: ChatMediaAttachment): boolean {
+  return Boolean(getDeletableLocalMediaUri(media));
+}
+
+function getChatMessageStorageByteEstimate(message: ChatMessage): number {
+  const textBytes = getUtf8ByteLength(message.text || '');
+  const replyBytes = message.replyTo ? getUtf8ByteLength(message.replyTo.text || '') : 0;
+
+  return textBytes + replyBytes + 180;
+}
+
+function getUtf8ByteLength(value: string): number {
+  let bytes = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const codePoint = value.charCodeAt(index);
+
+    if (codePoint <= 0x7F) {
+      bytes += 1;
+    } else if (codePoint <= 0x7FF) {
+      bytes += 2;
+    } else if (codePoint >= 0xD800 && codePoint <= 0xDBFF) {
+      bytes += 4;
+      index += 1;
+    } else {
+      bytes += 3;
+    }
+  }
+
+  return bytes;
 }
 
 function toLocalChatMediaInput(media: ChatMediaAttachment): LocalChatMediaInput {
@@ -18177,8 +24787,14 @@ async function cacheChatGroupMemberPhotos(
   })));
 }
 
-function mapApprovedEmployeeToListItem(employee: ApprovedEmployee): EmployeeListItem {
-  const name = employee.displayName || employee.phoneMasked;
+function mapApprovedEmployeeToListItem(
+  employee: ApprovedEmployee,
+  phoneDisplayOverride?: string
+): EmployeeListItem {
+  const phoneDisplay = getApprovedEmployeePhoneDisplay(employee, phoneDisplayOverride);
+  const displayName = employee.displayName?.trim() || '';
+  const hasRealDisplayName = Boolean(displayName && !isMaskedPhoneLabel(displayName));
+  const name = hasRealDisplayName ? displayName : phoneDisplay;
   const baseRole = employee.role || 'EMPLOYEE';
 
   return {
@@ -18186,7 +24802,9 @@ function mapApprovedEmployeeToListItem(employee: ApprovedEmployee): EmployeeList
     department: employee.departmentName,
     id: employee.approvedPhoneId,
     initials: getInitials(name),
+    isPhoneOnly: !hasRealDisplayName,
     name,
+    phoneFormatted: phoneDisplay,
     profilePhotoUrl: employee.profilePhotoUrl,
     role: baseRole === 'DEPT_ADMIN' ? `${employee.roleName} · Dept admin` : employee.roleName,
     roleId: employee.roleId,
@@ -18195,36 +24813,97 @@ function mapApprovedEmployeeToListItem(employee: ApprovedEmployee): EmployeeList
   };
 }
 
+function getApprovedEmployeeDisplayLabel(
+  employee: ApprovedEmployee,
+  phoneDisplayOverride?: string
+): string {
+  const phoneDisplay = getApprovedEmployeePhoneDisplay(employee, phoneDisplayOverride);
+  const displayName = employee.displayName?.trim() || '';
+
+  return displayName && !isMaskedPhoneLabel(displayName) ? displayName : phoneDisplay;
+}
+
+function getApprovedEmployeePhoneDisplay(
+  employee: ApprovedEmployee,
+  phoneDisplayOverride?: string
+): string {
+  return phoneDisplayOverride ||
+    employee.phoneFormatted ||
+    employee.phoneMasked ||
+    'Phone number';
+}
+
+function buildInvitedEmployeePhoneDisplayMap(
+  employees: ApprovedEmployee[],
+  contacts: InviteContactDraft[]
+): Record<string, string> {
+  const usedContactIndexes = new Set<number>();
+  const phoneDisplayByEmployeeId: Record<string, string> = {};
+
+  employees.forEach((employee) => {
+    const matchingContactIndex = contacts.findIndex((contact, index) => {
+      if (usedContactIndexes.has(index)) {
+        return false;
+      }
+
+      const formattedPhoneNumber = formatPhoneNumberForInviteDisplay(contact.phoneNumber);
+
+      return (
+        formattedPhoneNumber === employee.phoneFormatted ||
+        maskLocalPhoneNumber(contact.phoneNumber) === employee.phoneMasked ||
+        getPhoneLastFourDigits(contact.phoneNumber) === employee.phoneLast4
+      );
+    });
+
+    if (matchingContactIndex < 0) {
+      return;
+    }
+
+    usedContactIndexes.add(matchingContactIndex);
+    phoneDisplayByEmployeeId[employee.approvedPhoneId] = formatPhoneNumberForInviteDisplay(
+      contacts[matchingContactIndex].phoneNumber
+    );
+  });
+
+  return phoneDisplayByEmployeeId;
+}
+
+function isMaskedPhoneLabel(value: string): boolean {
+  return value.includes('*');
+}
+
 function mapChatContactToChatItem(contact: ChatContact): ChatItem {
+  const visibleContact = applyClearedChatVisibility(contact);
+
   return {
-    chatType: contact.chatType === 'GROUP' ? 'GROUP' : 'DIRECT',
-    clearedAt: contact.clearedAt || null,
-    contactId: contact.contactId,
-    conversationId: contact.conversationId,
-    hasActiveDevice: contact.hasActiveDevice,
-    id: `${contact.chatType === 'GROUP' ? 'group' : 'contact'}-${contact.contactId}`,
-    initials: contact.initials,
-    isArchived: contact.isArchived === true,
-    isDepartmentDefault: contact.isDepartmentDefault === true,
-    isFavorite: contact.isFavorite === true,
-    isSpam: contact.isSpam === true,
-    isOnline: contact.isOnline === true,
-    lastMessageAt: contact.lastMessageAt,
-    lastSeenAt: contact.lastSeenAt,
-    memberCount: contact.memberCount,
-    members: contact.members,
-    memberPolicy: contact.memberPolicy,
-    phoneMasked: contact.phoneMasked || null,
-    profilePhotoCacheKey: contact.profilePhotoCacheKey,
-    preview: contact.preview || '',
-    profilePhotoUrl: contact.profilePhotoUrl,
-    role: contact.role,
-    roleName: contact.roleName,
-    spammedAt: contact.spammedAt || null,
-    status: contact.status,
-    title: contact.displayName,
-    trashSegments: contact.trashSegments || [],
-    unreadCount: contact.unreadCount || 0
+    chatType: visibleContact.chatType === 'GROUP' ? 'GROUP' : 'DIRECT',
+    clearedAt: visibleContact.clearedAt || null,
+    contactId: visibleContact.contactId,
+    conversationId: visibleContact.conversationId,
+    hasActiveDevice: visibleContact.hasActiveDevice,
+    id: `${visibleContact.chatType === 'GROUP' ? 'group' : 'contact'}-${visibleContact.contactId}`,
+    initials: visibleContact.initials,
+    isArchived: visibleContact.isArchived === true,
+    isDepartmentDefault: visibleContact.isDepartmentDefault === true,
+    isFavorite: visibleContact.isFavorite === true,
+    isSpam: visibleContact.isSpam === true,
+    isOnline: visibleContact.isOnline === true,
+    lastMessageAt: visibleContact.lastMessageAt,
+    lastSeenAt: visibleContact.lastSeenAt,
+    memberCount: visibleContact.memberCount,
+    members: visibleContact.members,
+    memberPolicy: visibleContact.memberPolicy,
+    phoneMasked: visibleContact.phoneMasked || null,
+    profilePhotoCacheKey: visibleContact.profilePhotoCacheKey,
+    preview: visibleContact.preview || '',
+    profilePhotoUrl: visibleContact.profilePhotoUrl,
+    role: visibleContact.role,
+    roleName: visibleContact.roleName,
+    spammedAt: visibleContact.spammedAt || null,
+    status: visibleContact.status,
+    title: visibleContact.displayName,
+    trashSegments: visibleContact.trashSegments || [],
+    unreadCount: visibleContact.unreadCount || 0
   };
 }
 
@@ -18579,11 +25258,16 @@ function applyChatListFilter(chats: ChatItem[], filter: ChatListFilter): ChatIte
 function shouldShowActiveChatInList(chat: ChatItem): boolean {
   return Boolean(
     chat.isSpam !== true && (
+      chat.clearedAt ||
       chat.lastMessageAt ||
       chat.preview.trim() ||
       chat.unreadCount > 0
     )
   );
+}
+
+function hasChatKnownMessages(chat: ChatItem): boolean {
+  return Boolean(chat.lastMessageAt || chat.preview.trim() || chat.unreadCount > 0);
 }
 
 function shouldShowTrashChatInList(chat: ChatItem): boolean {
@@ -18626,6 +25310,10 @@ function getActiveTrashSegments(chat: Pick<ChatItem, 'spammedAt' | 'trashSegment
 }
 
 function getChatListPreviewText(chat: ChatItem): string {
+  if (isChatItemClearedThroughLastMessage(chat)) {
+    return '';
+  }
+
   const preview = chat.preview.trim();
 
   if (preview) {
@@ -18975,23 +25663,26 @@ function getNativeFullHeightModalPresentationStyle(): 'fullScreen' | 'pageSheet'
 }
 
 function applyLocalChatPreview(contact: ChatContact, messages: ChatMessage[]): ChatContact {
-  const localMessages = uniqueChatMessages(messages);
+  const visibleContact = applyClearedChatVisibility(contact);
+  const localMessages = uniqueChatMessages(messages).filter((message) =>
+    !isMessageHiddenByContactClear(visibleContact, message)
+  );
   const latestMessage = localMessages.at(-1);
   const latestPreview = latestMessage ? getMessageListPreview(latestMessage) : '';
 
   if (!latestMessage && !latestPreview) {
-    return contact;
+    return visibleContact;
   }
 
   const lastMessageAt = latestMessage &&
-    (!contact.lastMessageAt || latestMessage.sentAt > contact.lastMessageAt)
+    (!visibleContact.lastMessageAt || latestMessage.sentAt > visibleContact.lastMessageAt)
     ? latestMessage.sentAt
-    : contact.lastMessageAt;
+    : visibleContact.lastMessageAt;
 
   return {
-    ...contact,
+    ...visibleContact,
     lastMessageAt,
-    preview: latestPreview || contact.preview
+    preview: latestPreview || visibleContact.preview
   };
 }
 
@@ -19072,36 +25763,54 @@ function mergeChatContactVisibleState(
   currentContact: ChatContact | undefined,
   nextContact: ChatContact
 ): ChatContact {
-  const mergedContact = mergeChatContactCachedPhoto(currentContact, nextContact);
+  const currentVisibleContact = currentContact ? applyClearedChatVisibility(currentContact) : undefined;
+  const mergedContact = applyClearedChatVisibility(mergeChatContactCachedPhoto(currentVisibleContact, nextContact));
 
-  if (!currentContact) {
+  if (!currentVisibleContact) {
     return mergedContact;
   }
 
-  const currentPreview = currentContact.preview?.trim() || '';
-  const nextPreview = mergedContact.preview?.trim() || '';
+  if (isChatContactClearedThroughLastMessage(mergedContact)) {
+    return mergedContact;
+  }
 
   if (
-    currentContact.lastMessageAt &&
-    (!mergedContact.lastMessageAt || currentContact.lastMessageAt > mergedContact.lastMessageAt)
+    isChatContactClearedThroughLastMessage(currentVisibleContact) &&
+    isNextContactStillCoveredByClear(currentVisibleContact, mergedContact)
   ) {
     return {
       ...mergedContact,
-      lastMessageAt: currentContact.lastMessageAt,
-      preview: currentContact.preview,
-      unreadCount: currentContact.unreadCount
+      clearedAt: currentVisibleContact.clearedAt || mergedContact.clearedAt,
+      lastMessageAt: null,
+      preview: '',
+      unreadCount: 0
+    };
+  }
+
+  const currentPreview = currentVisibleContact.preview?.trim() || '';
+  const nextPreview = mergedContact.preview?.trim() || '';
+
+  if (
+    currentVisibleContact.lastMessageAt &&
+    (!mergedContact.lastMessageAt || currentVisibleContact.lastMessageAt > mergedContact.lastMessageAt)
+  ) {
+    return {
+      ...mergedContact,
+      lastMessageAt: currentVisibleContact.lastMessageAt,
+      preview: currentVisibleContact.preview,
+      unreadCount: currentVisibleContact.unreadCount
     };
   }
 
   if (
     currentPreview &&
-    currentContact.lastMessageAt &&
+    currentVisibleContact.lastMessageAt &&
     mergedContact.lastMessageAt &&
-    currentContact.lastMessageAt >= mergedContact.lastMessageAt
+    currentVisibleContact.lastMessageAt >= mergedContact.lastMessageAt
   ) {
     return {
       ...mergedContact,
-      preview: currentContact.preview
+      preview: currentVisibleContact.preview
     };
   }
 
@@ -19112,11 +25821,68 @@ function mergeChatContactVisibleState(
   if (!nextPreview) {
     return {
       ...mergedContact,
-      preview: currentContact.preview
+      preview: currentVisibleContact.preview
     };
   }
 
   return mergedContact;
+}
+
+function applyClearedChatVisibility(contact: ChatContact): ChatContact {
+  if (!isChatContactClearedThroughLastMessage(contact)) {
+    return contact;
+  }
+
+  return {
+    ...contact,
+    lastMessageAt: null,
+    preview: '',
+    unreadCount: 0
+  };
+}
+
+function isChatContactClearedThroughLastMessage(contact: Pick<ChatContact, 'clearedAt' | 'lastMessageAt'>): boolean {
+  return isClearedThroughTimestamp(contact.clearedAt || null, contact.lastMessageAt || null);
+}
+
+function isChatItemClearedThroughLastMessage(chat: Pick<ChatItem, 'clearedAt' | 'lastMessageAt'>): boolean {
+  return isClearedThroughTimestamp(chat.clearedAt || null, chat.lastMessageAt || null);
+}
+
+function isMessageHiddenByContactClear(contact: Pick<ChatContact, 'clearedAt'>, message: ChatMessage): boolean {
+  const clearedAtMs = getTimestampMs(contact.clearedAt || null);
+  const messageSentAtMs = getTimestampMs(message.sentAt);
+
+  return clearedAtMs !== null && messageSentAtMs !== null && messageSentAtMs <= clearedAtMs;
+}
+
+function isNextContactStillCoveredByClear(currentContact: ChatContact, nextContact: ChatContact): boolean {
+  const clearedAtMs = getTimestampMs(currentContact.clearedAt || null);
+  const nextLastMessageAtMs = getTimestampMs(nextContact.lastMessageAt || null);
+
+  return clearedAtMs !== null && (nextLastMessageAtMs === null || nextLastMessageAtMs <= clearedAtMs);
+}
+
+function isClearedThroughTimestamp(clearedAt: string | null, lastMessageAt: string | null): boolean {
+  const clearedAtMs = getTimestampMs(clearedAt);
+
+  if (clearedAtMs === null) {
+    return false;
+  }
+
+  const lastMessageAtMs = getTimestampMs(lastMessageAt);
+
+  return lastMessageAtMs === null || lastMessageAtMs <= clearedAtMs;
+}
+
+function getTimestampMs(value: string | null | undefined): number | null {
+  if (!value) {
+    return null;
+  }
+
+  const timestampMs = Date.parse(value);
+
+  return Number.isFinite(timestampMs) ? timestampMs : null;
 }
 
 function mergeChatContactCachedPhoto(
@@ -19567,6 +26333,286 @@ function normalizeContactPhoneNumber(phoneNumber: Contacts.PhoneNumber): string 
   return null;
 }
 
+const SUPPORTED_CALLING_CODES = [
+  '1', '7', '20', '27', '30', '31', '32', '33', '34', '36', '39', '40', '41', '43', '44',
+  '45', '46', '47', '48', '49', '51', '52', '53', '54', '55', '56', '57', '58', '60',
+  '61', '62', '63', '64', '65', '66', '81', '82', '84', '86', '90', '91', '92', '93',
+  '94', '95', '98', '211', '212', '213', '216', '218', '220', '221', '222', '223',
+  '224', '225', '226', '227', '228', '229', '230', '231', '232', '233', '234', '235',
+  '236', '237', '238', '239', '240', '241', '242', '243', '244', '245', '246', '248',
+  '249', '250', '251', '252', '253', '254', '255', '256', '257', '258', '260', '261',
+  '262', '263', '264', '265', '266', '267', '268', '269', '290', '291', '297', '298',
+  '299', '350', '351', '352', '353', '354', '355', '356', '357', '358', '359', '370',
+  '371', '372', '373', '374', '375', '376', '377', '378', '380', '381', '382', '383',
+  '385', '386', '387', '389', '420', '421', '423', '500', '501', '502', '503', '504',
+  '505', '506', '507', '508', '509', '590', '591', '592', '593', '594', '595', '596',
+  '597', '598', '599', '670', '672', '673', '674', '675', '676', '677', '678', '679',
+  '680', '681', '682', '683', '685', '686', '687', '688', '689', '690', '691', '692',
+  '850', '852', '853', '855', '856', '880', '886', '960', '961', '962', '963', '964',
+  '965', '966', '967', '968', '970', '971', '972', '973', '974', '975', '976', '977',
+  '992', '993', '994', '995', '996', '998'
+].sort((first, second) => second.length - first.length);
+
+const MAX_NATIONAL_DIGITS_BY_CALLING_CODE: Record<string, number> = {
+  '1': 10,
+  '7': 10,
+  '20': 10,
+  '27': 9,
+  '30': 10,
+  '31': 9,
+  '32': 9,
+  '33': 9,
+  '34': 9,
+  '39': 10,
+  '44': 10,
+  '49': 11,
+  '52': 10,
+  '61': 9,
+  '81': 10,
+  '86': 11,
+  '91': 10,
+  '92': 10,
+  '93': 9,
+  '94': 9,
+  '98': 10,
+  '212': 9,
+  '213': 9,
+  '216': 8,
+  '218': 9,
+  '220': 7,
+  '221': 9,
+  '222': 8,
+  '223': 8,
+  '224': 9,
+  '225': 10,
+  '226': 8,
+  '227': 8,
+  '228': 8,
+  '229': 8,
+  '230': 8,
+  '231': 8,
+  '232': 8,
+  '233': 9,
+  '234': 10,
+  '235': 8,
+  '236': 8,
+  '237': 9,
+  '238': 7,
+  '239': 7,
+  '240': 9,
+  '241': 9,
+  '242': 9,
+  '243': 9,
+  '244': 9,
+  '245': 7,
+  '248': 7,
+  '249': 9,
+  '250': 9,
+  '251': 9,
+  '252': 9,
+  '253': 8,
+  '254': 9,
+  '255': 9,
+  '256': 9,
+  '257': 8,
+  '258': 9,
+  '260': 9,
+  '261': 9,
+  '263': 9,
+  '264': 9,
+  '265': 9,
+  '266': 8,
+  '267': 8,
+  '268': 8,
+  '269': 7,
+  '350': 8,
+  '351': 9,
+  '353': 9,
+  '354': 7,
+  '355': 9,
+  '356': 8,
+  '357': 8,
+  '358': 10,
+  '359': 9,
+  '370': 8,
+  '371': 8,
+  '372': 8,
+  '373': 8,
+  '374': 8,
+  '375': 9,
+  '376': 6,
+  '377': 8,
+  '380': 9,
+  '381': 9,
+  '382': 8,
+  '383': 8,
+  '385': 9,
+  '386': 8,
+  '387': 8,
+  '389': 8,
+  '420': 9,
+  '421': 9,
+  '423': 7,
+  '500': 5,
+  '501': 7,
+  '502': 8,
+  '503': 8,
+  '504': 8,
+  '505': 8,
+  '506': 8,
+  '507': 8,
+  '509': 8,
+  '590': 9,
+  '591': 8,
+  '592': 7,
+  '593': 9,
+  '594': 9,
+  '595': 9,
+  '596': 9,
+  '597': 7,
+  '598': 8,
+  '599': 7,
+  '670': 8,
+  '673': 7,
+  '675': 8,
+  '676': 7,
+  '677': 7,
+  '678': 7,
+  '679': 7,
+  '680': 7,
+  '681': 6,
+  '682': 5,
+  '685': 7,
+  '686': 8,
+  '687': 6,
+  '688': 5,
+  '689': 8,
+  '690': 4,
+  '691': 7,
+  '692': 7,
+  '850': 10,
+  '852': 8,
+  '853': 8,
+  '855': 9,
+  '856': 10,
+  '880': 10,
+  '886': 9,
+  '960': 7,
+  '961': 8,
+  '962': 9,
+  '963': 9,
+  '964': 10,
+  '965': 8,
+  '966': 9,
+  '967': 9,
+  '968': 8,
+  '970': 9,
+  '971': 9,
+  '972': 9,
+  '973': 8,
+  '974': 8,
+  '975': 8,
+  '976': 8,
+  '977': 10,
+  '992': 9,
+  '993': 8,
+  '994': 9,
+  '995': 9,
+  '996': 9,
+  '998': 9
+};
+
+function formatManualInvitePhoneNumberInput(rawPhoneNumber: string): string {
+  const hasExplicitPlus = rawPhoneNumber.trim().startsWith('+');
+  const digits = rawPhoneNumber.replace(/\D/g, '');
+
+  if (!digits) {
+    return hasExplicitPlus ? '+' : '';
+  }
+
+  if (!hasExplicitPlus && (digits.length <= 10 || (digits.length === 11 && digits.startsWith('1')))) {
+    return formatNanpPhoneInput((digits.length === 11 ? digits.slice(1) : digits).slice(0, 10));
+  }
+
+  const callingCode = detectCallingCode(digits);
+  const nationalDigits = limitNationalPhoneDigits(
+    callingCode,
+    digits.slice(callingCode.length)
+  );
+
+  if (callingCode === '1') {
+    return formatNanpPhoneInput(nationalDigits);
+  }
+
+  return formatGenericPhoneInput(callingCode, nationalDigits);
+}
+
+function formatPhoneNumberForInviteDisplay(phoneNumber: string): string {
+  return formatManualInvitePhoneNumberInput(phoneNumber);
+}
+
+function detectCallingCode(digits: string): string {
+  const callingCode = SUPPORTED_CALLING_CODES.find((code) => digits.startsWith(code));
+
+  if (callingCode) {
+    return callingCode;
+  }
+
+  return digits.slice(0, Math.min(3, digits.length));
+}
+
+function formatNanpPhoneInput(nationalDigits: string): string {
+  const areaCode = nationalDigits.slice(0, 3);
+  const prefix = nationalDigits.slice(3, 6);
+  const lineNumber = nationalDigits.slice(6, 10);
+  const remainingDigits = nationalDigits.slice(10);
+  let formattedPhoneNumber = '+1';
+
+  if (areaCode) {
+    formattedPhoneNumber += areaCode.length === 3 ? ` (${areaCode})` : ` (${areaCode}`;
+  }
+
+  if (prefix) {
+    formattedPhoneNumber += ` ${prefix}`;
+  }
+
+  if (lineNumber) {
+    formattedPhoneNumber += ` ${lineNumber}`;
+  }
+
+  if (remainingDigits) {
+    formattedPhoneNumber += ` ${chunkPhoneDigits(remainingDigits, 4).join(' ')}`;
+  }
+
+  return formattedPhoneNumber;
+}
+
+function formatGenericPhoneInput(callingCode: string, nationalDigits: string): string {
+  if (!nationalDigits) {
+    return `+${callingCode}`;
+  }
+
+  return `+${callingCode} ${chunkPhoneDigits(nationalDigits, 3).join(' ')}`;
+}
+
+function limitNationalPhoneDigits(callingCode: string, nationalDigits: string): string {
+  return nationalDigits.slice(0, getMaxNationalDigitsForCallingCode(callingCode));
+}
+
+function getMaxNationalDigitsForCallingCode(callingCode: string): number {
+  return MAX_NATIONAL_DIGITS_BY_CALLING_CODE[callingCode] || Math.max(1, 15 - callingCode.length);
+}
+
+function chunkPhoneDigits(digits: string, size: number): string[] {
+  const chunks: string[] = [];
+
+  for (let index = 0; index < digits.length; index += size) {
+    chunks.push(digits.slice(index, index + size));
+  }
+
+  return chunks;
+}
+
 function normalizeManualInvitePhoneNumber(rawPhoneNumber: string): string | null {
   const trimmedPhoneNumber = rawPhoneNumber.trim();
 
@@ -19624,6 +26670,10 @@ function maskLocalPhoneNumber(phoneNumber: string): string {
   const lastFourDigits = digits.slice(-4);
 
   return lastFourDigits ? `*****${lastFourDigits}` : '*****';
+}
+
+function getPhoneLastFourDigits(phoneNumber: string): string {
+  return phoneNumber.replace(/\D/g, '').slice(-4);
 }
 
 function selectPhoneNumber(
@@ -19718,6 +26768,10 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     minHeight: 38
   },
+  topActionsLeftSpacer: {
+    height: 44,
+    width: 44
+  },
   spamHeader: {
     alignItems: 'center',
     flexDirection: 'row',
@@ -19800,6 +26854,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 18
   },
+  rightActionsCompact: {
+    gap: 0
+  },
   chatSearchBox: {
     alignItems: 'center',
     backgroundColor: '#F3F4F6',
@@ -19826,6 +26883,446 @@ const styles = StyleSheet.create({
     gap: 8,
     marginBottom: 2,
     paddingBottom: 8
+  },
+  callsTab: {
+    gap: 8,
+    paddingTop: 1
+  },
+  callQuickActions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: 4,
+    paddingVertical: 10
+  },
+  callQuickAction: {
+    alignItems: 'center',
+    flex: 1,
+    gap: 7,
+    justifyContent: 'center',
+    minHeight: 74
+  },
+  callQuickActionIcon: {
+    alignItems: 'center',
+    borderRadius: 22,
+    height: 48,
+    justifyContent: 'center',
+    position: 'relative',
+    width: 48
+  },
+  callQuickActionBadge: {
+    alignItems: 'center',
+    backgroundColor: '#22C55E',
+    borderRadius: 8,
+    justifyContent: 'center',
+    minWidth: 16,
+    paddingHorizontal: 4,
+    position: 'absolute',
+    right: -2,
+    top: -2
+  },
+  callQuickActionBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '700',
+    lineHeight: 14
+  },
+  callQuickActionLabel: {
+    fontSize: 12,
+    fontWeight: '500',
+    lineHeight: 16
+  },
+  callsSectionTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    lineHeight: 24,
+    paddingHorizontal: 6,
+    paddingTop: 6
+  },
+  callHistoryRow: {
+    alignItems: 'center',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 10,
+    minHeight: 68,
+    paddingHorizontal: 6,
+    paddingVertical: 8
+  },
+  callHistoryDeleteButton: {
+    alignItems: 'center',
+    backgroundColor: '#EF4444',
+    borderRadius: 13,
+    height: 26,
+    justifyContent: 'center',
+    width: 26
+  },
+  callHistoryTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    lineHeight: 21
+  },
+  callHistorySubtitleRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 4,
+    minWidth: 0
+  },
+  callHistorySubtitle: {
+    flexShrink: 1,
+    fontSize: 13,
+    fontWeight: '500',
+    lineHeight: 17
+  },
+  callHistoryMeta: {
+    alignItems: 'flex-end',
+    gap: 7,
+    justifyContent: 'center',
+    minWidth: 86
+  },
+  callHistoryTime: {
+    fontSize: 13,
+    fontWeight: '500',
+    lineHeight: 17
+  },
+  callHistoryActions: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8
+  },
+  callHistoryIconButton: {
+    alignItems: 'center',
+    borderRadius: 17,
+    height: 34,
+    justifyContent: 'center',
+    width: 34
+  },
+  callHistoryInfoButton: {
+    alignItems: 'center',
+    height: 30,
+    justifyContent: 'center',
+    width: 30
+  },
+  callOptionsRoot: {
+    bottom: 0,
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    zIndex: 100
+  },
+  callOptionsBackdrop: {
+    ...StyleSheet.absoluteFillObject
+  },
+  callOptionsPanel: {
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    minWidth: 210,
+    overflow: 'hidden',
+    position: 'absolute',
+    right: 14,
+    shadowColor: '#000000',
+    shadowOffset: { height: 10, width: 0 },
+    shadowOpacity: 0.18,
+    shadowRadius: 18,
+    top: 56
+  },
+  callOptionsRow: {
+    alignItems: 'center',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 12,
+    minHeight: 48,
+    paddingHorizontal: 14
+  },
+  callOptionsRowText: {
+    fontSize: 15,
+    fontWeight: '600',
+    lineHeight: 20
+  },
+  callModalScreen: {
+    flex: 1,
+    paddingHorizontal: 12
+  },
+  callModalHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    minHeight: 52,
+    paddingBottom: 8
+  },
+  callModalHeaderTitle: {
+    flexShrink: 1,
+    fontSize: 17,
+    fontWeight: '700',
+    lineHeight: 22,
+    textAlign: 'center'
+  },
+  callModalHeaderSubtitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    lineHeight: 15,
+    textAlign: 'center'
+  },
+  callModalDoneButton: {
+    alignItems: 'center',
+    borderRadius: 18,
+    height: 38,
+    justifyContent: 'center',
+    width: 46
+  },
+  callModalNextButton: {
+    alignItems: 'center',
+    borderRadius: 18,
+    justifyContent: 'center',
+    minHeight: 38,
+    minWidth: 62,
+    paddingHorizontal: 14
+  },
+  callModalNextText: {
+    fontSize: 15,
+    fontWeight: '700',
+    lineHeight: 20
+  },
+  callModalList: {
+    flex: 1
+  },
+  callModalSectionLabel: {
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 19,
+    paddingHorizontal: 18,
+    paddingTop: 14
+  },
+  callContactRow: {
+    alignItems: 'center',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 10,
+    minHeight: 66,
+    paddingHorizontal: 4,
+    paddingVertical: 8
+  },
+  callContactTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    lineHeight: 21
+  },
+  callContactSubtitle: {
+    fontSize: 13,
+    fontWeight: '500',
+    lineHeight: 17
+  },
+  callContactRadio: {
+    alignItems: 'center',
+    borderRadius: 11,
+    borderWidth: 1.5,
+    height: 22,
+    justifyContent: 'center',
+    width: 22
+  },
+  callContactCallIcon: {
+    alignItems: 'center',
+    borderRadius: 18,
+    height: 36,
+    justifyContent: 'center',
+    width: 36
+  },
+  callKeypadScreen: {
+    alignItems: 'center',
+    flex: 1,
+    justifyContent: 'space-between',
+    paddingHorizontal: 18
+  },
+  callKeypadDisplay: {
+    alignItems: 'center',
+    minHeight: 78,
+    justifyContent: 'center',
+    width: '100%'
+  },
+  callKeypadDigits: {
+    fontSize: 30,
+    fontWeight: '600',
+    lineHeight: 38,
+    maxWidth: '96%',
+    textAlign: 'center'
+  },
+  callKeypadHint: {
+    fontSize: 13,
+    fontWeight: '600',
+    lineHeight: 18,
+    marginTop: 4
+  },
+  callKeypadGrid: {
+    alignContent: 'center',
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 18,
+    justifyContent: 'center',
+    maxWidth: 310
+  },
+  callKeypadButton: {
+    alignItems: 'center',
+    borderRadius: 36,
+    height: 72,
+    justifyContent: 'center',
+    width: 72
+  },
+  callKeypadButtonText: {
+    fontSize: 30,
+    fontWeight: '500',
+    lineHeight: 34
+  },
+  callKeypadButtonLetters: {
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0,
+    lineHeight: 13,
+    minHeight: 13
+  },
+  callKeypadStartButton: {
+    alignItems: 'center',
+    borderRadius: 34,
+    height: 68,
+    justifyContent: 'center',
+    width: 68
+  },
+  callFavoritesHelper: {
+    borderRadius: 18,
+    fontSize: 13,
+    fontWeight: '500',
+    lineHeight: 18,
+    marginVertical: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    textAlign: 'center'
+  },
+  scheduleCallContent: {
+    flexGrow: 1,
+    gap: 14,
+    paddingHorizontal: 12
+  },
+  scheduleCallCard: {
+    borderRadius: 14,
+    overflow: 'hidden'
+  },
+  scheduleCallTitleInput: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    fontSize: 16,
+    fontWeight: '600',
+    minHeight: 52,
+    paddingHorizontal: 16,
+    paddingVertical: 12
+  },
+  scheduleCallDescriptionInput: {
+    fontSize: 15,
+    fontWeight: '400',
+    minHeight: 86,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    textAlignVertical: 'top'
+  },
+  scheduleCallCounter: {
+    alignSelf: 'flex-end',
+    fontSize: 12,
+    fontWeight: '600',
+    lineHeight: 16,
+    paddingBottom: 10,
+    paddingHorizontal: 16
+  },
+  scheduleDateTimeRow: {
+    alignItems: 'center',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    minHeight: 54,
+    paddingHorizontal: 16
+  },
+  scheduleDateControls: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    justifyContent: 'flex-end'
+  },
+  scheduleAndroidDateButton: {
+    borderRadius: 8,
+    minHeight: 32,
+    justifyContent: 'center',
+    paddingHorizontal: 10
+  },
+  scheduleAndroidDateText: {
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 18
+  },
+  scheduleSwitchRow: {
+    alignItems: 'center',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    minHeight: 54,
+    paddingHorizontal: 16
+  },
+  scheduleSwitchTrack: {
+    borderRadius: 16,
+    height: 32,
+    justifyContent: 'center',
+    paddingHorizontal: 2,
+    width: 56
+  },
+  scheduleSwitchThumb: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    height: 28,
+    shadowColor: '#000000',
+    shadowOffset: { height: 1, width: 0 },
+    shadowOpacity: 0.16,
+    shadowRadius: 3,
+    width: 28
+  },
+  scheduleOptionRow: {
+    alignItems: 'center',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    minHeight: 54,
+    paddingHorizontal: 16
+  },
+  scheduleRowLabel: {
+    flexShrink: 0,
+    fontSize: 15,
+    fontWeight: '600',
+    lineHeight: 20
+  },
+  scheduleRowValue: {
+    fontSize: 14,
+    fontWeight: '600',
+    lineHeight: 18
+  },
+  scheduleOptionValue: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 4
+  },
+  scheduleCallFootnote: {
+    fontSize: 12,
+    fontWeight: '500',
+    lineHeight: 17,
+    paddingHorizontal: 12
+  },
+  scheduledCallRow: {
+    alignItems: 'center',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 10,
+    minHeight: 68,
+    paddingHorizontal: 4,
+    paddingVertical: 8
+  },
+  scheduledCallIcon: {
+    alignItems: 'center',
+    borderRadius: 22,
+    height: 44,
+    justifyContent: 'center',
+    width: 44
   },
   spamScreen: {
     gap: 6,
@@ -20034,6 +27531,162 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     lineHeight: 20
   },
+  callOverlayRoot: {
+    backgroundColor: '#000000',
+    flex: 1,
+    overflow: 'hidden',
+    paddingHorizontal: 18
+  },
+  callRemoteVideo: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#000000'
+  },
+  callOverlayPattern: {
+    ...StyleSheet.absoluteFillObject
+  },
+  callPatternDot: {
+    backgroundColor: '#134E4A',
+    borderRadius: 18,
+    height: 36,
+    position: 'absolute',
+    width: 36
+  },
+  callTopBar: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    minHeight: 48,
+    zIndex: 2
+  },
+  callRoundButton: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+    borderRadius: 24,
+    borderWidth: 1,
+    height: 48,
+    justifyContent: 'center',
+    width: 48
+  },
+  callSecureBadge: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 168, 132, 0.15)',
+    borderColor: 'rgba(94, 234, 212, 0.18)',
+    borderRadius: 999,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 7,
+    paddingHorizontal: 13,
+    paddingVertical: 8
+  },
+  callSecureBadgeText: {
+    color: '#CCFBF1',
+    fontSize: 12,
+    fontWeight: '700',
+    lineHeight: 15
+  },
+  callIdentityArea: {
+    alignItems: 'center',
+    marginTop: 22,
+    paddingHorizontal: 18,
+    zIndex: 2
+  },
+  callTitle: {
+    color: '#FFFFFF',
+    fontSize: 24,
+    fontWeight: '800',
+    lineHeight: 31,
+    maxWidth: '100%',
+    textAlign: 'center'
+  },
+  callStatus: {
+    color: 'rgba(255, 255, 255, 0.72)',
+    fontSize: 15,
+    fontWeight: '600',
+    lineHeight: 20,
+    marginTop: 2,
+    textAlign: 'center'
+  },
+  callAvatarStage: {
+    alignItems: 'center',
+    flex: 1,
+    justifyContent: 'center',
+    minHeight: 280,
+    zIndex: 2
+  },
+  callAvatarHalo: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 168, 132, 0.1)',
+    borderColor: 'rgba(94, 234, 212, 0.13)',
+    borderRadius: 112,
+    borderWidth: 1,
+    height: 224,
+    justifyContent: 'center',
+    width: 224
+  },
+  callAvatarHaloInner: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    borderRadius: 94,
+    height: 188,
+    justifyContent: 'center',
+    width: 188
+  },
+  callLocalVideoWrap: {
+    backgroundColor: '#050505',
+    borderColor: 'rgba(94, 234, 212, 0.52)',
+    borderRadius: 18,
+    borderWidth: 2,
+    bottom: 12,
+    height: 156,
+    overflow: 'hidden',
+    position: 'absolute',
+    right: 4,
+    width: 112,
+    zIndex: 3
+  },
+  callLocalVideo: {
+    height: '100%',
+    width: '100%'
+  },
+  callLocalVideoOff: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.72)',
+    justifyContent: 'center'
+  },
+  callControlsDock: {
+    alignItems: 'center',
+    alignSelf: 'center',
+    backgroundColor: 'rgba(16, 16, 16, 0.92)',
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 34,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 11,
+    justifyContent: 'center',
+    minHeight: 76,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    zIndex: 2
+  },
+  callControlButton: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
+    borderRadius: 26,
+    height: 52,
+    justifyContent: 'center',
+    width: 52
+  },
+  callAnswerButton: {
+    backgroundColor: '#00A884'
+  },
+  callEndButton: {
+    backgroundColor: '#EF4444'
+  },
+  callEndIconFlip: {
+    transform: [{ rotate: '135deg' }]
+  },
   messageHeader: {
     alignItems: 'center',
     backgroundColor: colors.primary,
@@ -20152,11 +27805,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     minWidth: 34
   },
-  roundIconButton: {
+  topMenuButton: {
     alignItems: 'center',
-    height: 34,
+    height: 44,
     justifyContent: 'center',
-    width: 34
+    width: 44
   },
   iconButton: {
     alignItems: 'center',
@@ -20184,40 +27837,6 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.08,
     shadowRadius: 10,
     width: 40
-  },
-  employeeTopActions: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: 8
-  },
-  inviteButton: {
-    alignItems: 'center',
-    backgroundColor: colors.primary,
-    borderRadius: 15,
-    justifyContent: 'center',
-    minHeight: 30,
-    paddingHorizontal: 14
-  },
-  inviteButtonSecondary: {
-    alignItems: 'center',
-    borderColor: '#D7DEE8',
-    borderRadius: 15,
-    borderWidth: 1,
-    justifyContent: 'center',
-    minHeight: 30,
-    paddingHorizontal: 12
-  },
-  inviteButtonSecondaryText: {
-    color: colors.ink,
-    fontSize: 14,
-    fontWeight: '400',
-    lineHeight: 19
-  },
-  inviteButtonText: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    fontWeight: '400',
-    lineHeight: 19
   },
   youContent: {
     paddingTop: 8
@@ -20440,9 +28059,206 @@ const styles = StyleSheet.create({
     maxWidth: 340,
     textAlign: 'center'
   },
+  aiEmptyHistory: {
+    alignItems: 'center',
+    flex: 1,
+    justifyContent: 'center',
+    minHeight: 520,
+    paddingHorizontal: 10
+  },
+  aiStartChatButton: {
+    alignItems: 'center',
+    borderRadius: 999,
+    flexDirection: 'row',
+    gap: 8,
+    justifyContent: 'center',
+    marginTop: 22,
+    minHeight: 48,
+    paddingHorizontal: 22
+  },
+  aiStartChatText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '800',
+    lineHeight: 19
+  },
+  aiHistoryList: {
+    paddingTop: 4
+  },
+  aiHistorySwipeShell: {
+    minHeight: 72,
+    overflow: 'hidden',
+    position: 'relative'
+  },
+  aiHistorySwipeRightActions: {
+    bottom: 0,
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    width: AI_HISTORY_ROW_ACTION_WIDTH
+  },
+  aiHistorySwipeAction: {
+    alignItems: 'center',
+    backgroundColor: '#DC2626',
+    justifyContent: 'center',
+    width: AI_HISTORY_ROW_ACTION_WIDTH
+  },
+  aiHistoryRow: {
+    alignItems: 'center',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 12,
+    minHeight: 72,
+    paddingHorizontal: 4,
+    paddingVertical: 10
+  },
+  aiHistoryIcon: {
+    alignItems: 'center',
+    borderRadius: 24,
+    height: 48,
+    justifyContent: 'center',
+    overflow: 'hidden',
+    width: 48
+  },
+  aiHistoryText: {
+    flex: 1,
+    minWidth: 0
+  },
+  aiHistoryTitleRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 10
+  },
+  aiHistoryTitle: {
+    flex: 1,
+    fontSize: 16,
+    fontWeight: '700',
+    lineHeight: 21,
+    minWidth: 0
+  },
+  aiHistoryTime: {
+    fontSize: 12,
+    fontWeight: '500',
+    lineHeight: 16
+  },
+  aiHistoryPreview: {
+    fontSize: 14,
+    fontWeight: '400',
+    lineHeight: 19,
+    marginTop: 3
+  },
+  aiThreadContent: {
+    gap: 8,
+    paddingBottom: 14,
+    paddingHorizontal: 10,
+    paddingTop: 12
+  },
+  aiThreadEmptyContent: {
+    flexGrow: 1,
+    justifyContent: 'center'
+  },
+  aiChatBubbleRow: {
+    alignItems: 'flex-end',
+    flexDirection: 'row'
+  },
+  aiChatBubbleRowMine: {
+    justifyContent: 'flex-end'
+  },
+  aiChatBubbleRowTheirs: {
+    justifyContent: 'flex-start'
+  },
+  aiChatBubble: {
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    maxWidth: '82%',
+    minWidth: 92,
+    paddingHorizontal: 10,
+    paddingVertical: 7
+  },
+  aiChatBubbleMine: {
+    borderTopRightRadius: 5
+  },
+  aiChatBubbleTheirs: {
+    borderTopLeftRadius: 5
+  },
+  aiChatBubbleText: {
+    fontSize: 15,
+    fontWeight: '400',
+    lineHeight: 20
+  },
+  aiChatBubbleMetaRow: {
+    alignSelf: 'flex-end',
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 5,
+    marginTop: 3
+  },
+  aiChatBubbleTime: {
+    fontSize: 11,
+    fontWeight: '500',
+    lineHeight: 14
+  },
+  aiChatBubbleSeen: {
+    fontSize: 11,
+    fontWeight: '700',
+    lineHeight: 14
+  },
+  aiTypingBubble: {
+    alignItems: 'center',
+    borderRadius: 12,
+    borderTopLeftRadius: 5,
+    borderWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 8,
+    maxWidth: '82%',
+    minHeight: 42,
+    paddingHorizontal: 12,
+    paddingVertical: 8
+  },
+  aiTypingText: {
+    fontSize: 14,
+    fontWeight: '600',
+    lineHeight: 18
+  },
+  aiOfflineStatusCard: {
+    alignItems: 'center',
+    borderRadius: 14,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 11,
+    minHeight: 70,
+    paddingHorizontal: 13,
+    paddingVertical: 12
+  },
+  aiOfflineStatusIcon: {
+    alignItems: 'center',
+    borderRadius: 18,
+    height: 36,
+    justifyContent: 'center',
+    width: 36
+  },
+  aiOfflineStatusText: {
+    flex: 1,
+    minWidth: 0
+  },
+  aiOfflineStatusTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    lineHeight: 20
+  },
+  aiOfflineStatusBody: {
+    fontSize: 13,
+    fontWeight: '400',
+    lineHeight: 18,
+    marginTop: 2
+  },
   aiSuggestionList: {
     gap: 10,
-    paddingTop: 6
+    maxWidth: 360,
+    paddingTop: 6,
+    width: '100%'
   },
   aiSuggestionRow: {
     alignItems: 'center',
@@ -20464,10 +28280,13 @@ const styles = StyleSheet.create({
     lineHeight: 20
   },
   aiComposer: {
+    alignItems: 'flex-end',
     backgroundColor: '#F8FAFC',
     borderTopColor: '#E5E7EB',
     borderTopWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: 10,
+    flexDirection: 'row',
+    gap: 7,
+    paddingHorizontal: 8,
     paddingTop: 8
   },
   aiInputBox: {
@@ -20510,6 +28329,78 @@ const styles = StyleSheet.create({
     marginBottom: 1,
     width: 36
   },
+  aiAttachmentTray: {
+    borderRadius: 18,
+    borderWidth: StyleSheet.hairlineWidth,
+    marginBottom: 5,
+    maxHeight: 74
+  },
+  aiAttachmentTrayContent: {
+    gap: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 8
+  },
+  aiAttachmentChip: {
+    alignItems: 'center',
+    borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 7,
+    maxWidth: 230,
+    minHeight: 46,
+    paddingLeft: 10,
+    paddingRight: 4
+  },
+  aiAttachmentChipText: {
+    minWidth: 0,
+    width: 132
+  },
+  aiAttachmentChipName: {
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 17
+  },
+  aiAttachmentChipMeta: {
+    fontSize: 11,
+    fontWeight: '500',
+    lineHeight: 15,
+    marginTop: 1
+  },
+  aiAttachmentChipRemove: {
+    alignItems: 'center',
+    height: 30,
+    justifyContent: 'center',
+    width: 28
+  },
+  aiMessageAttachmentList: {
+    gap: 6,
+    marginBottom: 6
+  },
+  aiMessageAttachmentCard: {
+    alignItems: 'center',
+    borderRadius: 9,
+    borderWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 8,
+    minHeight: 42,
+    paddingHorizontal: 9,
+    paddingVertical: 7
+  },
+  aiMessageAttachmentText: {
+    flex: 1,
+    minWidth: 0
+  },
+  aiMessageAttachmentName: {
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 17
+  },
+  aiMessageAttachmentMeta: {
+    fontSize: 11,
+    fontWeight: '500',
+    lineHeight: 15,
+    marginTop: 1
+  },
   aiMark: {
     position: 'relative'
   },
@@ -20541,6 +28432,149 @@ const styles = StyleSheet.create({
   messageListContentSearching: {
     paddingBottom: 86,
     paddingTop: 76
+  },
+  emptyChatSecurityWrap: {
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingTop: 6
+  },
+  emptyChatSecurityCard: {
+    alignItems: 'flex-start',
+    alignSelf: 'center',
+    backgroundColor: '#FFF7D6',
+    borderColor: 'rgba(124, 90, 18, 0.14)',
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 6,
+    maxWidth: 330,
+    paddingHorizontal: 10,
+    paddingVertical: 8
+  },
+  emptyChatSecurityIcon: {
+    alignItems: 'center',
+    height: 17,
+    justifyContent: 'center',
+    marginTop: 1,
+    width: 16
+  },
+  emptyChatSecurityText: {
+    color: '#3F3215',
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '500',
+    lineHeight: 16,
+    textAlign: 'center'
+  },
+  emptyChatSecurityLink: {
+    color: '#2563EB',
+    fontWeight: '700'
+  },
+  chatPrivacySheet: {
+    backgroundColor: '#FFFFFF',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    maxHeight: '82%',
+    paddingBottom: 28,
+    paddingHorizontal: 22,
+    paddingTop: 26,
+    shadowColor: '#0F172A',
+    shadowOffset: { height: -8, width: 0 },
+    shadowOpacity: 0.18,
+    shadowRadius: 22
+  },
+  chatPrivacyCloseButton: {
+    alignItems: 'center',
+    backgroundColor: '#F4F6F8',
+    borderRadius: 22,
+    height: 44,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: 16,
+    top: 16,
+    width: 44,
+    zIndex: 2
+  },
+  chatPrivacyHero: {
+    alignItems: 'center',
+    alignSelf: 'center',
+    height: 96,
+    justifyContent: 'center',
+    marginTop: 8,
+    position: 'relative',
+    width: 116
+  },
+  chatPrivacyDevice: {
+    alignItems: 'center',
+    backgroundColor: '#E7F7F4',
+    borderColor: 'rgba(15, 118, 110, 0.14)',
+    borderRadius: 24,
+    borderWidth: 1,
+    height: 74,
+    justifyContent: 'center',
+    width: 92
+  },
+  chatPrivacyBadge: {
+    alignItems: 'center',
+    backgroundColor: colors.primary,
+    borderColor: '#FFFFFF',
+    borderRadius: 16,
+    borderWidth: 3,
+    bottom: 8,
+    height: 32,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: 10,
+    width: 32
+  },
+  chatPrivacyTitle: {
+    color: colors.ink,
+    fontSize: 24,
+    fontWeight: '800',
+    lineHeight: 30,
+    marginTop: 8,
+    textAlign: 'center'
+  },
+  chatPrivacyBody: {
+    color: '#475569',
+    fontSize: 15,
+    fontWeight: '400',
+    lineHeight: 21,
+    marginTop: 12,
+    textAlign: 'center'
+  },
+  chatPrivacyPointList: {
+    gap: 12,
+    marginTop: 22
+  },
+  chatPrivacyPointRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 12,
+    minHeight: 32
+  },
+  chatPrivacyPointIcon: {
+    alignItems: 'center',
+    borderRadius: 15,
+    height: 30,
+    justifyContent: 'center',
+    width: 30
+  },
+  chatPrivacyPointText: {
+    color: colors.ink,
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '500',
+    lineHeight: 20
+  },
+  chatPrivacyFooter: {
+    color: '#64748B',
+    fontSize: 13,
+    fontWeight: '400',
+    lineHeight: 18,
+    marginTop: 20,
+    textAlign: 'center'
   },
   chatSearchHeader: {
     alignItems: 'center',
@@ -22299,6 +30333,44 @@ const styles = StyleSheet.create({
   employeeAvatar: {
     backgroundColor: '#3F67EA'
   },
+  employeePhoneAvatar: {
+    alignItems: 'center',
+    borderRadius: 22,
+    height: 44,
+    justifyContent: 'center',
+    width: 44
+  },
+  employeeSwipeShell: {
+    backgroundColor: '#FFFFFF',
+    minHeight: 58,
+    overflow: 'hidden',
+    position: 'relative'
+  },
+  employeeSwipeLeftActions: {
+    bottom: 0,
+    flexDirection: 'row',
+    left: 0,
+    position: 'absolute',
+    top: 0,
+    width: CHAT_ROW_LEFT_ACTION_WIDTH
+  },
+  employeeSwipeRightActions: {
+    bottom: 0,
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    width: CHAT_ROW_LEFT_ACTION_WIDTH
+  },
+  employeeSwipeReactivateAction: {
+    backgroundColor: '#16A34A',
+    width: CHAT_ROW_LEFT_ACTION_WIDTH
+  },
+  employeeSwipeRemoveAction: {
+    backgroundColor: '#DC2626',
+    width: CHAT_ROW_LEFT_ACTION_WIDTH
+  },
   avatarText: {
     color: '#FFFFFF',
     fontSize: 18,
@@ -22448,6 +30520,122 @@ const styles = StyleSheet.create({
   },
   chatMoreActionTextDestructive: {
     color: '#DC2626'
+  },
+  clearChatSheet: {
+    backgroundColor: '#F4F6F8',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingBottom: 22,
+    paddingHorizontal: 12,
+    shadowColor: '#0F172A',
+    shadowOffset: { height: -6, width: 0 },
+    shadowOpacity: 0.16,
+    shadowRadius: 18
+  },
+  clearChatDescription: {
+    color: '#64748B',
+    fontSize: 13,
+    fontWeight: '400',
+    lineHeight: 18,
+    marginBottom: 12,
+    marginHorizontal: 10,
+    marginTop: -4,
+    textAlign: 'center'
+  },
+  clearChatActionRow: {
+    alignItems: 'center',
+    borderBottomColor: '#E5E7EB',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 12,
+    minHeight: 58,
+    paddingHorizontal: 14
+  },
+  clearChatActionRowDisabled: {
+    opacity: 0.48
+  },
+  clearChatActionIcon: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderRadius: 18,
+    height: 36,
+    justifyContent: 'center',
+    width: 36
+  },
+  clearChatActionIconDestructive: {
+    backgroundColor: '#FEE2E2'
+  },
+  clearChatActionText: {
+    color: colors.ink,
+    flex: 1,
+    fontSize: 16,
+    fontWeight: '500',
+    lineHeight: 21
+  },
+  clearChatActionTextDestructive: {
+    color: '#DC2626'
+  },
+  clearChatActionSize: {
+    color: '#64748B',
+    fontSize: 15,
+    fontWeight: '500',
+    lineHeight: 20,
+    maxWidth: 96,
+    textAlign: 'right'
+  },
+  themeSheet: {
+    backgroundColor: '#F4F6F8',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingBottom: 24,
+    paddingHorizontal: 12,
+    shadowColor: '#0F172A',
+    shadowOffset: { height: -6, width: 0 },
+    shadowOpacity: 0.16,
+    shadowRadius: 18
+  },
+  themeSheetDescription: {
+    color: '#64748B',
+    fontSize: 14,
+    fontWeight: '400',
+    lineHeight: 19,
+    marginBottom: 12,
+    marginHorizontal: 8,
+    marginTop: -4,
+    textAlign: 'center'
+  },
+  themeOptionRow: {
+    alignItems: 'center',
+    borderBottomColor: '#E5E7EB',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 12,
+    minHeight: 68,
+    paddingHorizontal: 14,
+    paddingVertical: 10
+  },
+  themeOptionIcon: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderRadius: 19,
+    height: 38,
+    justifyContent: 'center',
+    width: 38
+  },
+  themeOptionIconSelected: {
+    backgroundColor: colors.primary
+  },
+  themeOptionTitle: {
+    color: colors.ink,
+    fontSize: 16,
+    fontWeight: '700',
+    lineHeight: 21
+  },
+  themeOptionDescription: {
+    color: '#64748B',
+    fontSize: 13,
+    fontWeight: '400',
+    lineHeight: 18
   },
   archiveSettingsScreen: {
     backgroundColor: '#F4F6F8',
@@ -22667,11 +30855,12 @@ const styles = StyleSheet.create({
     textAlign: 'right'
   },
   inviteDraft: {
-    borderBottomColor: '#E5E7EB',
-    borderBottomWidth: 1,
-    gap: 8,
-    paddingBottom: 12,
-    paddingTop: 4
+    borderColor: '#E5E7EB',
+    borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    gap: 10,
+    marginBottom: 12,
+    padding: 12
   },
   inviteDraftHeader: {
     alignItems: 'center',
@@ -22681,20 +30870,31 @@ const styles = StyleSheet.create({
   },
   inviteDraftContactRow: {
     alignItems: 'center',
+    borderRadius: 13,
     flexDirection: 'row',
-    gap: 10,
-    minHeight: 48,
-    paddingVertical: 3
+    gap: 12,
+    minHeight: 58,
+    paddingHorizontal: 10,
+    paddingVertical: 8
   },
   inviteDraftAvatar: {
-    backgroundColor: '#0F766E',
-    height: 38,
-    width: 38
+    alignItems: 'center',
+    borderRadius: 23,
+    borderWidth: StyleSheet.hairlineWidth,
+    height: 46,
+    justifyContent: 'center',
+    width: 46
+  },
+  inviteDraftAvatarText: {
+    color: colors.primary,
+    fontSize: 15,
+    fontWeight: '800',
+    lineHeight: 20
   },
   inviteDraftActions: {
     flexDirection: 'row',
     gap: 10,
-    paddingTop: 2
+    paddingTop: 0
   },
   textOnlyButton: {
     alignItems: 'center',
@@ -22749,11 +30949,28 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingTop: 18
   },
-  manualInviteModalScreen: {
-    backgroundColor: '#FFFFFF',
+  manualInviteOverlay: {
+    alignItems: 'center',
     flex: 1,
-    paddingHorizontal: 14,
-    paddingTop: 18
+    justifyContent: 'center',
+    paddingHorizontal: 28
+  },
+  manualInviteDialog: {
+    borderRadius: 22,
+    borderWidth: StyleSheet.hairlineWidth,
+    padding: 20,
+    shadowColor: '#000000',
+    shadowOffset: { height: 14, width: 0 },
+    shadowOpacity: 0.18,
+    shadowRadius: 26,
+    width: '100%'
+  },
+  manualInviteTitle: {
+    color: colors.ink,
+    fontSize: 18,
+    fontWeight: '700',
+    lineHeight: 23,
+    marginBottom: 4
   },
   batchModalHeader: {
     alignItems: 'center',
@@ -22780,7 +30997,46 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '400',
     lineHeight: 19,
-    marginBottom: 8
+    marginBottom: 16
+  },
+  manualInviteInputBox: {
+    borderRadius: 22,
+    borderWidth: 1,
+    justifyContent: 'center',
+    marginBottom: 16,
+    minHeight: 48,
+    paddingHorizontal: 16
+  },
+  manualInviteInput: {
+    color: colors.ink,
+    fontSize: 18,
+    fontWeight: '500',
+    minHeight: 48,
+    paddingHorizontal: 0
+  },
+  manualInviteActionRow: {
+    flexDirection: 'row',
+    gap: 10
+  },
+  manualInviteActionButton: {
+    alignItems: 'center',
+    borderRadius: 20,
+    flex: 1,
+    justifyContent: 'center',
+    minHeight: 44,
+    paddingHorizontal: 14
+  },
+  manualInviteSecondaryText: {
+    color: colors.ink,
+    fontSize: 15,
+    fontWeight: '700',
+    lineHeight: 19
+  },
+  manualInvitePrimaryText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '700',
+    lineHeight: 19
   },
   batchDoneButton: {
     alignItems: 'center',
@@ -23010,6 +31266,7 @@ const styles = StyleSheet.create({
   },
   groupCallOptionsPanel: {
     backgroundColor: '#FFFFFF',
+    borderWidth: StyleSheet.hairlineWidth,
     borderRadius: 14,
     elevation: 18,
     minWidth: 238,
@@ -23821,6 +32078,147 @@ const styles = StyleSheet.create({
   settingsList: {
     paddingTop: 4
   },
+  offlineAiOverlay: {
+    alignItems: 'center',
+    flex: 1,
+    justifyContent: 'center',
+    padding: 20
+  },
+  offlineAiCard: {
+    borderRadius: 26,
+    borderWidth: StyleSheet.hairlineWidth,
+    gap: 14,
+    maxWidth: 430,
+    padding: 22,
+    position: 'relative',
+    width: '100%'
+  },
+  offlineAiClose: {
+    alignItems: 'center',
+    borderRadius: 18,
+    height: 36,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: 14,
+    top: 14,
+    width: 36,
+    zIndex: 2
+  },
+  offlineAiHeader: {
+    alignItems: 'center',
+    paddingTop: 6
+  },
+  offlineAiMarkShell: {
+    alignItems: 'center',
+    borderRadius: 42,
+    height: 84,
+    justifyContent: 'center',
+    width: 84
+  },
+  offlineAiTitle: {
+    fontSize: 21,
+    fontWeight: '800',
+    lineHeight: 27,
+    marginTop: 12,
+    paddingHorizontal: 36,
+    textAlign: 'center'
+  },
+  offlineAiBody: {
+    fontSize: 14,
+    fontWeight: '400',
+    lineHeight: 20,
+    marginTop: 8,
+    textAlign: 'center'
+  },
+  offlineAiInfoPanel: {
+    borderRadius: 16,
+    overflow: 'hidden'
+  },
+  offlineAiInfoRow: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    gap: 4,
+    paddingHorizontal: 13,
+    paddingVertical: 11
+  },
+  offlineAiInfoLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    lineHeight: 16,
+    textTransform: 'uppercase'
+  },
+  offlineAiInfoValue: {
+    fontSize: 14,
+    fontWeight: '500',
+    lineHeight: 19
+  },
+  offlineAiProgressBlock: {
+    gap: 7
+  },
+  offlineAiProgressHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between'
+  },
+  offlineAiProgressText: {
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 18
+  },
+  offlineAiProgressTrack: {
+    borderRadius: 999,
+    height: 10,
+    overflow: 'hidden',
+    width: '100%'
+  },
+  offlineAiProgressFill: {
+    borderRadius: 999,
+    height: '100%'
+  },
+  offlineAiDownloadedText: {
+    fontSize: 12,
+    fontWeight: '500',
+    lineHeight: 16
+  },
+  offlineAiFailureText: {
+    borderRadius: 12,
+    fontSize: 13,
+    fontWeight: '600',
+    lineHeight: 18,
+    paddingHorizontal: 12,
+    paddingVertical: 10
+  },
+  offlineAiActions: {
+    flexDirection: 'row',
+    gap: 10,
+    justifyContent: 'flex-end'
+  },
+  offlineAiSecondaryButton: {
+    alignItems: 'center',
+    borderRadius: 999,
+    flex: 1,
+    justifyContent: 'center',
+    minHeight: 46,
+    paddingHorizontal: 14
+  },
+  offlineAiSecondaryText: {
+    fontSize: 15,
+    fontWeight: '700',
+    lineHeight: 19
+  },
+  offlineAiPrimaryButton: {
+    alignItems: 'center',
+    borderRadius: 999,
+    flex: 1,
+    justifyContent: 'center',
+    minHeight: 46,
+    paddingHorizontal: 14
+  },
+  offlineAiPrimaryText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '800',
+    lineHeight: 19
+  },
   organizationDeletionOverlay: {
     alignItems: 'center',
     backgroundColor: 'rgba(15, 23, 42, 0.34)',
@@ -24494,7 +32892,26 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 2,
     justifyContent: 'center',
-    minWidth: 0
+    minWidth: 0,
+    position: 'relative'
+  },
+  footerTabBadge: {
+    alignItems: 'center',
+    backgroundColor: '#22C55E',
+    borderRadius: 9,
+    justifyContent: 'center',
+    minHeight: 18,
+    minWidth: 18,
+    paddingHorizontal: 5,
+    position: 'absolute',
+    right: -10,
+    top: -5
+  },
+  footerTabBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '800',
+    lineHeight: 13
   },
   footerTabText: {
     color: '#111827',

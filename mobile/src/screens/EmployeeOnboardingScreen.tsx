@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -19,7 +19,8 @@ import {
 import { pickNativeProfilePhoto } from '../services/profilePhotoPicker';
 import { signOutOrgAdmin } from '../services/phoneAuth';
 import { BackendAuthSession, EmployeeDraft, VerifiedOrgAdmin } from '../types/auth';
-import { colors } from '../theme/colors';
+import { useAppTheme } from '../theme/AppThemeProvider';
+import type { AppColors } from '../theme/colors';
 
 const EMPLOYEE_ACCESS_DENIED_MESSAGE = 'This phone number is not approved for employee access. Please contact your company administrator.';
 
@@ -41,6 +42,8 @@ export function EmployeeOnboardingScreen({
   onProfileCreated,
   onSignOut
 }: EmployeeOnboardingScreenProps) {
+  const appTheme = useAppTheme();
+  const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
   const [draft, setDraft] = useState(initialDraft);
   const [context, setContext] = useState<EmployeeOnboardingContext | null>(null);
   const [profilePhotoUri, setProfilePhotoUri] = useState<string | null>(null);
@@ -200,7 +203,7 @@ export function EmployeeOnboardingScreen({
 
         {isLoadingContext ? (
           <View style={styles.loadingContext}>
-            <ActivityIndicator color={colors.primary} />
+            <ActivityIndicator color={appTheme.colors.primary} />
             <Text style={styles.loadingText}>Checking company access...</Text>
           </View>
         ) : null}
@@ -284,7 +287,7 @@ export function EmployeeOnboardingScreen({
 
         {isCreatingProfile ? (
           <View style={styles.loading}>
-            <ActivityIndicator color={colors.primary} />
+            <ActivityIndicator color={appTheme.colors.primary} />
           </View>
         ) : null}
 
@@ -309,6 +312,9 @@ interface ConfirmationRowProps {
 }
 
 function ConfirmationRow({ label, value }: ConfirmationRowProps) {
+  const appTheme = useAppTheme();
+  const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
+
   return (
     <View style={styles.confirmationRow}>
       <Text style={styles.confirmationLabel}>{label}</Text>
@@ -324,13 +330,16 @@ interface ProfileInputProps {
 }
 
 function ProfileInput({ value, onChangeText, placeholder }: ProfileInputProps) {
+  const appTheme = useAppTheme();
+  const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
+
   return (
     <View style={styles.inputBox}>
       <TextInput
         value={value}
         onChangeText={onChangeText}
         placeholder={placeholder}
-        placeholderTextColor="#64748B"
+        placeholderTextColor={appTheme.colors.muted}
         autoCapitalize="words"
         autoCorrect={false}
         style={styles.input}
@@ -362,7 +371,8 @@ function getPrimaryButtonLabel(isCreatingProfile: boolean, isProfileCreated: boo
   return 'Continue';
 }
 
-const styles = StyleSheet.create({
+function createStyles(colors: AppColors) {
+  return StyleSheet.create({
   screen: {
     backgroundColor: colors.background,
     flex: 1,
@@ -409,7 +419,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center'
   },
   loadingText: {
-    color: '#64748B',
+    color: colors.muted,
     fontSize: 14,
     fontWeight: '400',
     lineHeight: 19
@@ -418,7 +428,7 @@ const styles = StyleSheet.create({
     gap: 2
   },
   confirmationRow: {
-    borderBottomColor: 'rgba(15, 118, 110, 0.18)',
+    borderBottomColor: colors.divider,
     borderBottomWidth: 1,
     flexDirection: 'row',
     gap: 10,
@@ -426,7 +436,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8
   },
   confirmationLabel: {
-    color: '#64748B',
+    color: colors.muted,
     fontSize: 14,
     fontWeight: '400',
     lineHeight: 19,
@@ -445,7 +455,7 @@ const styles = StyleSheet.create({
   },
   photoPicker: {
     alignItems: 'center',
-    borderBottomColor: 'rgba(15, 118, 110, 0.35)',
+    borderBottomColor: colors.border,
     borderBottomWidth: 1,
     flexDirection: 'row',
     gap: 14,
@@ -455,7 +465,7 @@ const styles = StyleSheet.create({
   },
   photoPreview: {
     alignItems: 'center',
-    backgroundColor: '#E0ECFF',
+    backgroundColor: colors.blueSoft,
     borderRadius: 26,
     height: 52,
     justifyContent: 'center',
@@ -467,7 +477,7 @@ const styles = StyleSheet.create({
     width: 52
   },
   photoInitials: {
-    color: '#4F6FEA',
+    color: colors.blue,
     fontSize: 25,
     fontWeight: '400',
     lineHeight: 29
@@ -482,13 +492,13 @@ const styles = StyleSheet.create({
     lineHeight: 21
   },
   photoSubtitle: {
-    color: '#64748B',
+    color: colors.muted,
     fontSize: 13,
     fontWeight: '400',
     lineHeight: 18
   },
   inputBox: {
-    borderBottomColor: 'rgba(15, 118, 110, 0.35)',
+    borderBottomColor: colors.border,
     borderBottomWidth: 1,
     justifyContent: 'center',
     minHeight: 54
@@ -510,20 +520,20 @@ const styles = StyleSheet.create({
   primaryButton: {
     alignItems: 'center',
     alignSelf: 'center',
-    backgroundColor: '#4F6FEA',
+    backgroundColor: colors.blue,
     borderRadius: 8,
     elevation: 8,
     justifyContent: 'center',
     minHeight: 54,
     minWidth: 180,
     paddingHorizontal: 26,
-    shadowColor: '#304ECF',
+    shadowColor: colors.blue,
     shadowOffset: { height: 10, width: 0 },
     shadowOpacity: 0.22,
     shadowRadius: 18
   },
   primaryButtonText: {
-    color: colors.card,
+    color: '#FFFFFF',
     fontSize: 17,
     fontWeight: '400'
   },
@@ -542,7 +552,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18
   },
   secondaryButtonText: {
-    color: '#253244',
+    color: colors.mutedStrong,
     fontSize: 16,
     fontWeight: '400'
   },
@@ -553,3 +563,4 @@ const styles = StyleSheet.create({
     opacity: 0.52
   }
 });
+}

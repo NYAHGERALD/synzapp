@@ -9,6 +9,7 @@ const {
 
 const SERVICE_CLASS = 'com.synzapp.mobile.notifications.SynzappFirebaseMessagingService';
 const LARGE_ICON_RESOURCE = 'notification_large_icon';
+const LITERT_GPU_NATIVE_LIBRARIES = ['libvndksupport.so', 'libOpenCL.so'];
 const SERVICE_SOURCE = `package com.synzapp.mobile.notifications
 
 import android.app.NotificationChannel
@@ -21,6 +22,9 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
+import android.media.AudioAttributes
+import android.media.RingtoneManager
+import android.net.Uri
 import android.os.Build
 import android.util.Base64
 import android.util.Log
@@ -40,11 +44,45 @@ import javax.crypto.spec.SecretKeySpec
 
 class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
   override fun onMessageReceived(remoteMessage: RemoteMessage) {
+    if (handleSynzappCallEnded(remoteMessage)) {
+      return
+    }
+
+    if (handleSynzappIncomingCall(remoteMessage)) {
+      return
+    }
+
     if (handleSynzappEncryptedPreview(remoteMessage)) {
       return
     }
 
     super.onMessageReceived(remoteMessage)
+  }
+
+  private fun handleSynzappCallEnded(remoteMessage: RemoteMessage): Boolean {
+    val data = remoteMessage.data
+
+    if (data["type"] != "call.ended") {
+      return false
+    }
+
+    val callId = data["callId"] ?: remoteMessage.messageId ?: return true
+    val notificationManager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    notificationManager.cancel(callId.hashCode())
+
+    return true
+  }
+
+  private fun handleSynzappIncomingCall(remoteMessage: RemoteMessage): Boolean {
+    val data = remoteMessage.data
+
+    if (data["type"] != "call.incoming") {
+      return false
+    }
+
+    showIncomingCallNotification(remoteMessage)
+
+    return true
   }
 
   private fun handleSynzappEncryptedPreview(remoteMessage: RemoteMessage): Boolean {
@@ -114,6 +152,101 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
     return JSONObject(storedIdentity)
   }
 
+  private fun showIncomingCallNotification(remoteMessage: RemoteMessage) {
+    val context = applicationContext
+    val data = remoteMessage.data
+    val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+    if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) {
+      Log.w(TAG, "Synzapp call invite was received but Android notifications are disabled for this app")
+    }
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      val ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+      val audioAttributes = AudioAttributes.Builder()
+        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+        .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+        .build()
+      val existingChannel = notificationManager.getNotificationChannel(CALLS_CHANNEL_ID)
+
+      if (existingChannel == null) {
+        val channel = NotificationChannel(CALLS_CHANNEL_ID, "Synzapp calls", NotificationManager.IMPORTANCE_HIGH)
+        channel.enableVibration(true)
+        channel.lockscreenVisibility = NotificationCompat.VISIBILITY_PUBLIC
+        channel.setSound(ringtoneUri, audioAttributes)
+        channel.setShowBadge(true)
+        notificationManager.createNotificationChannel(channel)
+      }
+    }
+
+    val callId = data["callId"] ?: remoteMessage.messageId ?: "synzapp-call"
+    val notificationId = callId.hashCode()
+    val mode = data["mode"] ?: "voice"
+    val callerName = data["callerName"]?.takeIf { it.isNotBlank() }
+      ?: data["title"]?.takeIf { it.isNotBlank() }
+      ?: "Synzapp"
+    val body = if (mode == "video") "Incoming video call" else "Incoming voice call"
+    val callUri = Uri.Builder()
+      .scheme("synzapp")
+      .authority("call")
+      .appendPath("incoming")
+      .appendQueryParameter("type", data["type"])
+      .appendQueryParameter("callId", data["callId"])
+      .appendQueryParameter("callerName", data["callerName"])
+      .appendQueryParameter("callerUid", data["callerUid"])
+      .appendQueryParameter("chatType", data["chatType"])
+      .appendQueryParameter("contactId", data["contactId"])
+      .appendQueryParameter("createdAt", data["createdAt"])
+      .appendQueryParameter("mode", data["mode"])
+      .appendQueryParameter("participantUids", data["participantUids"])
+      .appendQueryParameter("tenantId", data["tenantId"])
+      .appendQueryParameter("title", data["title"])
+      .build()
+    val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
+      flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+      this.data = callUri
+      putExtra("type", data["type"])
+      putExtra("callId", data["callId"])
+      putExtra("callerName", data["callerName"])
+      putExtra("callerUid", data["callerUid"])
+      putExtra("chatType", data["chatType"])
+      putExtra("contactId", data["contactId"])
+      putExtra("createdAt", data["createdAt"])
+      putExtra("mode", data["mode"])
+      putExtra("participantUids", data["participantUids"])
+      putExtra("tenantId", data["tenantId"])
+      putExtra("title", data["title"])
+    }
+    val pendingIntent = launchIntent?.let {
+      PendingIntent.getActivity(
+        context,
+        notificationId,
+        it,
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+      )
+    }
+    val notificationBuilder = NotificationCompat.Builder(context, CALLS_CHANNEL_ID)
+      .setAutoCancel(false)
+      .setCategory(NotificationCompat.CATEGORY_CALL)
+      .setContentText(body)
+      .setContentTitle(callerName)
+      .setDefaults(NotificationCompat.DEFAULT_ALL)
+      .setOngoing(true)
+      .setPriority(NotificationCompat.PRIORITY_MAX)
+      .setSmallIcon(getNotificationSmallIcon(context))
+      .setTimeoutAfter(CALL_RING_TIMEOUT_MS)
+      .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+
+    if (pendingIntent != null) {
+      notificationBuilder
+        .setContentIntent(pendingIntent)
+        .setFullScreenIntent(pendingIntent, true)
+    }
+
+    loadLargeIcon(context)?.let { notificationBuilder.setLargeIcon(it) }
+    notificationManager.notify(notificationId, notificationBuilder.build())
+  }
+
   private fun showNotification(remoteMessage: RemoteMessage, body: String) {
     val context = applicationContext
     val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -154,12 +287,6 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
       )
     }
-    val notificationIcon = context.resources.getIdentifier("notification_icon", "drawable", context.packageName)
-    val smallIcon = when {
-      notificationIcon != 0 -> notificationIcon
-      context.applicationInfo.icon != 0 -> context.applicationInfo.icon
-      else -> android.R.drawable.sym_def_app_icon
-    }
     val largeIcon = loadSenderAvatarLargeIcon(context, remoteMessage.data)
     val notificationBuilder = NotificationCompat.Builder(context, CHANNEL_ID)
       .setAutoCancel(true)
@@ -168,7 +295,7 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
       .setContentTitle(title)
       .setDefaults(NotificationCompat.DEFAULT_ALL)
       .setPriority(NotificationCompat.PRIORITY_HIGH)
-      .setSmallIcon(smallIcon)
+      .setSmallIcon(getNotificationSmallIcon(context))
       .setStyle(NotificationCompat.BigTextStyle().bigText(body))
 
     if (badgeCount != null) {
@@ -189,6 +316,16 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
   }
 
   private fun decodeBase64(value: String): ByteArray = Base64.decode(value, Base64.NO_WRAP)
+
+  private fun getNotificationSmallIcon(context: Context): Int {
+    val notificationIcon = context.resources.getIdentifier("notification_icon", "drawable", context.packageName)
+
+    return when {
+      notificationIcon != 0 -> notificationIcon
+      context.applicationInfo.icon != 0 -> context.applicationInfo.icon
+      else -> android.R.drawable.sym_def_app_icon
+    }
+  }
 
   private fun loadSenderAvatarLargeIcon(context: Context, data: Map<String, String>): Bitmap? {
     val primaryCacheKey = data["notificationSenderProfilePhotoCacheKey"]
@@ -318,6 +455,8 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
   }
 
   companion object {
+    private const val CALL_RING_TIMEOUT_MS = 60_000L
+    private const val CALLS_CHANNEL_ID = "synzapp-calls"
     private const val CHANNEL_ID = "chat-messages"
     private const val DERIVATION_LABEL = "Synzapp notification preview v1"
     private const val LARGE_ICON_SIZE = 128
@@ -366,6 +505,19 @@ module.exports = function withSynzappAndroidNotificationPreview(config) {
 
     manifest.$ = manifest.$ || {};
     manifest.$['xmlns:tools'] = manifest.$['xmlns:tools'] || 'http://schemas.android.com/tools';
+    application['uses-native-library'] = [
+      ...(application['uses-native-library'] || []).filter((nativeLibrary) => {
+        const name = nativeLibrary.$?.['android:name'];
+
+        return !LITERT_GPU_NATIVE_LIBRARIES.includes(name);
+      }),
+      ...LITERT_GPU_NATIVE_LIBRARIES.map((name) => ({
+        $: {
+          'android:name': name,
+          'android:required': 'false'
+        }
+      }))
+    ];
     application.service = (application.service || []).filter((service) => {
       const name = service.$?.['android:name'];
 

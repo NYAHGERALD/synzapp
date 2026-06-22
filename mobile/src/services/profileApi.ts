@@ -61,6 +61,16 @@ export interface CurrentUserDevice {
   uid: string;
 }
 
+export type SynzappAiDeviceInstallStatus = 'available' | 'downloading' | 'failed' | 'installed';
+
+export interface CurrentDeviceSynzappAiStatus {
+  askButtonVisible: boolean;
+  modelId: string | null;
+  readyAt: string | null;
+  status: SynzappAiDeviceInstallStatus;
+  updatedAt: string | null;
+}
+
 interface CreateEmployeeProfileInput extends EmployeeDraft {
   idToken: string;
   profilePhotoDataUrl?: string;
@@ -195,6 +205,55 @@ export async function revokeCurrentUserDevice(input: {
   return body.device;
 }
 
+export async function getCurrentDeviceSynzappAiStatus(idToken: string): Promise<CurrentDeviceSynzappAiStatus> {
+  const deviceHeaders = await getRegisteredDeviceHeaders(idToken);
+  const response = await fetch(`${getSynzappApiBaseUrl()}/api/profile/me/synzapp-ai/device-status`, {
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${idToken}`,
+      ...deviceHeaders
+    },
+    method: 'GET'
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  const body = await response.json() as { synzappAi?: CurrentDeviceSynzappAiStatus };
+
+  return normalizeCurrentDeviceSynzappAiStatus(body.synzappAi);
+}
+
+export async function updateCurrentDeviceSynzappAiStatus(input: {
+  idToken: string;
+  modelId?: string | null;
+  status: SynzappAiDeviceInstallStatus;
+}): Promise<CurrentDeviceSynzappAiStatus> {
+  const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
+  const response = await fetch(`${getSynzappApiBaseUrl()}/api/profile/me/synzapp-ai/device-status`, {
+    body: JSON.stringify({
+      modelId: input.modelId || null,
+      status: input.status
+    }),
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${input.idToken}`,
+      'Content-Type': 'application/json',
+      ...deviceHeaders
+    },
+    method: 'PUT'
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  const body = await response.json() as { synzappAi?: CurrentDeviceSynzappAiStatus };
+
+  return normalizeCurrentDeviceSynzappAiStatus(body.synzappAi);
+}
+
 export async function getEmployeeOnboardingContext(idToken: string): Promise<EmployeeOnboardingContext> {
   const response = await fetch(`${getSynzappApiBaseUrl()}/api/profile/employee/context`, {
     headers: {
@@ -259,4 +318,21 @@ function normalizeCurrentUserProfile(profile: CurrentUserProfile): CurrentUserPr
     permissions: profile.permissions || [],
     profilePhotoUrl: normalizeSynzappApiUrl(profile.profilePhotoUrl)
   };
+}
+
+function normalizeCurrentDeviceSynzappAiStatus(status?: CurrentDeviceSynzappAiStatus): CurrentDeviceSynzappAiStatus {
+  return {
+    askButtonVisible: status?.askButtonVisible === true,
+    modelId: typeof status?.modelId === 'string' && status.modelId.trim() ? status.modelId.trim() : null,
+    readyAt: typeof status?.readyAt === 'string' && status.readyAt.trim() ? status.readyAt.trim() : null,
+    status: isSynzappAiDeviceInstallStatus(status?.status) ? status.status : 'available',
+    updatedAt: typeof status?.updatedAt === 'string' && status.updatedAt.trim() ? status.updatedAt.trim() : null
+  };
+}
+
+function isSynzappAiDeviceInstallStatus(value: unknown): value is SynzappAiDeviceInstallStatus {
+  return value === 'available' ||
+    value === 'downloading' ||
+    value === 'failed' ||
+    value === 'installed';
 }

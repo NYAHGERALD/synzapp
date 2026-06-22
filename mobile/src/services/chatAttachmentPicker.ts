@@ -10,6 +10,7 @@ type ChatCameraSource = 'library' | 'photo' | 'video';
 const CHAT_IMAGE_MAX_WIDTH = 1280;
 const CHAT_IMAGE_QUALITY = 0.7;
 const CHAT_VIDEO_MIN_COMPRESS_MB = 3;
+const CHAT_VIDEO_MAX_DIMENSION = 960;
 const CHAT_LIBRARY_SELECTION_LIMIT = 10;
 const CHAT_IMAGE_RETRY_WIDTHS = [1280, 1080, 960, 720];
 
@@ -151,15 +152,26 @@ async function prepareVideoMedia(
   asset: ImagePicker.ImagePickerAsset,
   onProgress?: (progress: number) => void
 ): Promise<LocalChatMediaInput> {
-  const compressedUri = await compressVideo(asset.uri, onProgress);
+  const originalContentType = getAssetVideoContentType(asset);
+  const compressedUri = await compressVideo(asset.uri, originalContentType === 'video/mp4', onProgress);
+  const sizeBytes = await getFileSize(compressedUri);
+  const isCompressedOutput = compressedUri !== asset.uri;
+
+  if (sizeBytes <= 0) {
+    throw new Error('Unable to prepare this video. Please choose another video.');
+  }
+
+  if (sizeBytes > CHAT_MEDIA_LIMITS.video) {
+    throw new Error('Video is too large after compression. Please choose a shorter video.');
+  }
 
   return {
-    contentType: asset.mimeType || 'video/mp4',
+    contentType: isCompressedOutput ? 'video/mp4' : originalContentType,
     durationMs: asset.duration || undefined,
-    fileName: getAssetFileName(asset, 'video.mp4'),
+    fileName: isCompressedOutput ? getVideoFileName(asset) : getAssetFileName(asset, 'video.mp4'),
     height: asset.height || undefined,
     kind: 'video',
-    sizeBytes: await getFileSize(compressedUri),
+    sizeBytes,
     uri: compressedUri,
     width: asset.width || undefined
   };
@@ -167,8 +179,11 @@ async function prepareVideoMedia(
 
 async function compressVideo(
   uri: string,
+  allowOriginalFallback: boolean,
   onProgress?: (progress: number) => void
 ): Promise<string> {
+  const originalSizeBytes = await getFileSize(uri);
+
   try {
     const compressor = await import('react-native-compressor');
 
@@ -176,13 +191,26 @@ async function compressVideo(
       uri,
       {
         compressionMethod: 'auto',
-        maxSize: 1280,
+        maxSize: CHAT_VIDEO_MAX_DIMENSION,
         minimumFileSizeForCompress: CHAT_VIDEO_MIN_COMPRESS_MB
       },
       (progress: number) => onProgress?.(Math.min(Math.max(progress, 0), 1))
     );
-  } catch {
-    throw new Error('Video compression is not available in this build. Rebuild the app with media compression support.');
+  } catch (error) {
+    if (
+      allowOriginalFallback &&
+      !isVideoCompressorUnavailableError(error) &&
+      originalSizeBytes > 0 &&
+      originalSizeBytes <= CHAT_MEDIA_LIMITS.video
+    ) {
+      return uri;
+    }
+
+    if (isVideoCompressorUnavailableError(error)) {
+      throw new Error('Video compression is not available in this build. Please install the latest Synzapp development build.');
+    }
+
+    throw new Error('Unable to compress this video. Please choose a shorter video or try again.');
   }
 }
 
@@ -290,6 +318,21 @@ function normalizeSupportedImageContentType(contentType?: string | null): string
   }
 
   return null;
+}
+
+function getAssetVideoContentType(asset: ImagePicker.ImagePickerAsset): 'video/mp4' | 'video/quicktime' {
+  const safeContentType = (asset.mimeType || '').trim().toLowerCase();
+
+  if (safeContentType === 'video/mp4') {
+    return 'video/mp4';
+  }
+
+  const fileNameExtension = getAssetFileName(asset, '').split('.').pop()?.toLowerCase();
+  const uriExtension = asset.uri.split('?')[0]?.split('.').pop()?.toLowerCase() || '';
+
+  return fileNameExtension === 'mp4' || uriExtension === 'mp4'
+    ? 'video/mp4'
+    : 'video/quicktime';
 }
 
 function isImageManipulatorContextError(error: unknown): boolean {
@@ -420,4 +463,19 @@ async function getFileSize(uri: string): Promise<number> {
 
 function getAssetFileName(asset: ImagePicker.ImagePickerAsset, fallback: string): string {
   return (asset.fileName || fallback).replace(/[^\w .()+-]/g, '_').slice(0, 120) || fallback;
+}
+
+function getVideoFileName(asset: ImagePicker.ImagePickerAsset): string {
+  const rawFileName = getAssetFileName(asset, 'video.mp4');
+  const baseName = rawFileName.replace(/\.[A-Za-z0-9]+$/, '').trim() || 'video';
+
+  return `${baseName.slice(0, 112)}.mp4`;
+}
+
+function isVideoCompressorUnavailableError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return /cannot find module|native module|turbo.?module|not available|undefined is not an object|video.*compress/i.test(error.message);
 }

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -33,9 +33,20 @@ import {
   ProfileRoleSelection,
   VerifiedOrgAdmin
 } from './src/types/auth';
-import { colors } from './src/theme/colors';
+import { AppThemeProvider, useAppTheme } from './src/theme/AppThemeProvider';
+import type { AppColors } from './src/theme/colors';
 
 export default function App() {
+  return (
+    <AppThemeProvider>
+      <SynzappApp />
+    </AppThemeProvider>
+  );
+}
+
+function SynzappApp() {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme.colors), [theme.colors]);
   const [step, setStep] = useState<AuthStep>('phone');
   const [phoneSession, setPhoneSession] = useState<FirebasePhoneSession | null>(null);
   const [verifiedAdmin, setVerifiedAdmin] = useState<VerifiedOrgAdmin | null>(null);
@@ -146,7 +157,7 @@ export default function App() {
   return (
     <SafeAreaProvider style={styles.safeAreaProvider}>
       <SafeAreaView style={styles.safeArea}>
-        <StatusBar style="dark" />
+        <StatusBar style={theme.isDark ? 'light' : 'dark'} />
 
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
@@ -162,7 +173,7 @@ export default function App() {
             <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
               {isRestoringSession ? (
                 <View style={styles.restoring}>
-                  <ActivityIndicator color={colors.primary} />
+                  <ActivityIndicator color={theme.colors.primary} />
                   <Text style={styles.restoringText}>Opening Synzapp...</Text>
                 </View>
               ) : null}
@@ -243,7 +254,8 @@ function getProfileStepFromBackendRole(verifiedAdmin: VerifiedOrgAdmin): AuthSte
   return 'role-select';
 }
 
-const styles = StyleSheet.create({
+function createStyles(colors: AppColors) {
+  return StyleSheet.create({
   safeAreaProvider: {
     flex: 1
   },
@@ -269,4 +281,5 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '400'
   }
-});
+  });
+}

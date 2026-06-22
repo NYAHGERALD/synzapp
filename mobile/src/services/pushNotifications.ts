@@ -3,9 +3,13 @@ import { Platform } from 'react-native';
 import { getSynzappApiBaseUrl } from './apiConfig';
 import type { ChatContact } from './chatApi';
 import { getRegisteredDeviceHeaders } from './deviceIdentity';
+import {
+  addSynzappVoipTokenListener,
+  getSynzappVoipToken
+} from './voipCalls';
 
 type PushPlatform = 'android' | 'ios' | 'unknown';
-type PushProvider = 'expo' | 'fcm';
+type PushProvider = 'apnsVoip' | 'expo' | 'fcm';
 type ExpoNotificationsModule = typeof import('expo-notifications');
 type NotificationSubscription = {
   remove: () => void;
@@ -26,6 +30,7 @@ interface ExpoProjectConfig {
 }
 
 const CHAT_MESSAGES_CHANNEL_ID = 'chat-messages';
+const CALLS_CHANNEL_ID = 'synzapp-calls';
 const MAX_APP_BADGE_COUNT = 9999;
 let notificationHandlerConfigured = false;
 let notificationsModulePromise: Promise<ExpoNotificationsModule> | null = null;
@@ -38,6 +43,22 @@ export interface ChatPushNotificationData {
   sentAt: string;
   type: 'chat.message';
 }
+
+export interface CallPushNotificationData {
+  callId: string;
+  callerName: string;
+  callerUid: string;
+  chatType: 'DIRECT' | 'GROUP';
+  contactId: string;
+  createdAt: string;
+  mode: 'voice' | 'video';
+  participantUids: string[];
+  tenantId: string;
+  title: string;
+  type: 'call.incoming';
+}
+
+type SynzappPushNotificationData = ChatPushNotificationData | CallPushNotificationData;
 
 export async function configureSynzappNotificationHandling(): Promise<ExpoNotificationsModule | null> {
   const Notifications = await getNotificationsModule();
@@ -68,21 +89,76 @@ export async function registerDevicePushNotifications(idToken: string): Promise<
     return false;
   }
 
+  const didRegisterVoipToken = await registerDeviceVoipPushNotifications(idToken);
   const Notifications = await configureSynzappNotificationHandling();
 
   if (!Notifications) {
-    return false;
+    return didRegisterVoipToken;
   }
 
-  await ensureChatNotificationChannel(Notifications);
+  await Promise.all([
+    ensureChatNotificationChannel(Notifications),
+    ensureCallNotificationChannel(Notifications)
+  ]);
 
   const permission = await ensureNotificationPermission(Notifications);
 
   if (!permission) {
-    return false;
+    return didRegisterVoipToken;
   }
 
   const pushToken = await getPushToken(Notifications);
+  await registerPushTokenWithBackend(idToken, {
+    platform: getPushPlatform(),
+    provider: pushToken.provider,
+    token: pushToken.token
+  });
+
+  return true;
+}
+
+async function registerDeviceVoipPushNotifications(idToken: string): Promise<boolean> {
+  if (Platform.OS !== 'ios') {
+    return false;
+  }
+
+  let didRegister = false;
+  const registerToken = async (token: string): Promise<void> => {
+    await registerPushTokenWithBackend(idToken, {
+      platform: 'ios',
+      provider: 'apnsVoip',
+      token
+    });
+    didRegister = true;
+  };
+
+  const tokenSubscription = addSynzappVoipTokenListener((token) => {
+    void registerToken(token).catch(() => undefined);
+  });
+
+  try {
+    const voipToken = await getSynzappVoipToken();
+
+    if (voipToken) {
+      await registerToken(voipToken);
+    }
+  } catch {
+    didRegister = false;
+  } finally {
+    tokenSubscription.remove();
+  }
+
+  return didRegister;
+}
+
+async function registerPushTokenWithBackend(
+  idToken: string,
+  input: {
+    platform: PushPlatform;
+    provider: PushProvider;
+    token: string;
+  }
+): Promise<void> {
   const deviceHeaders = await getRegisteredDeviceHeaders(idToken);
   const deviceId = deviceHeaders['X-Synzapp-Device-Id'];
 
@@ -93,9 +169,9 @@ export async function registerDevicePushNotifications(idToken: string): Promise<
   const response = await fetch(`${getSynzappApiBaseUrl()}/api/profile/me/push-token`, {
     body: JSON.stringify({
       deviceId,
-      platform: getPushPlatform(),
-      provider: pushToken.provider,
-      token: pushToken.token
+      platform: input.platform,
+      provider: input.provider,
+      token: input.token
     }),
     headers: {
       Accept: 'application/json',
@@ -109,8 +185,6 @@ export async function registerDevicePushNotifications(idToken: string): Promise<
   if (!response.ok) {
     throw new Error(await getResponseErrorMessage(response));
   }
-
-  return true;
 }
 
 export async function syncSynzappUnreadBadgeCount(
@@ -142,6 +216,8 @@ export function getSynzappUnreadBadgeCount(
 }
 
 export function addChatPushNotificationListeners(handlers: {
+  onCallReceived?: (data: CallPushNotificationData) => void;
+  onCallResponse?: (data: CallPushNotificationData) => void;
   onReceived?: (data: ChatPushNotificationData) => void;
   onResponse?: (data: ChatPushNotificationData) => void;
 }): () => void {
@@ -156,28 +232,34 @@ export function addChatPushNotificationListeners(handlers: {
       }
 
       receivedSubscription = Notifications.addNotificationReceivedListener((notification) => {
-        const data = parseChatPushNotificationData(notification.request.content.data);
+        const data = parseSynzappPushNotificationData(notification.request.content.data);
 
-        if (data) {
+        if (data?.type === 'chat.message') {
           handlers.onReceived?.(data);
+        } else if (data?.type === 'call.incoming') {
+          handlers.onCallReceived?.(data);
         }
       });
       responseSubscription = Notifications.addNotificationResponseReceivedListener((response) => {
-        const data = parseChatPushNotificationData(response.notification.request.content.data);
+        const data = parseSynzappPushNotificationData(response.notification.request.content.data);
 
-        if (data) {
+        if (data?.type === 'chat.message') {
           handlers.onResponse?.(data);
+        } else if (data?.type === 'call.incoming') {
+          handlers.onCallResponse?.(data);
         }
       });
 
       void Notifications.getLastNotificationResponseAsync()
         .then((response) => {
           const data = response
-            ? parseChatPushNotificationData(response.notification.request.content.data)
+            ? parseSynzappPushNotificationData(response.notification.request.content.data)
             : null;
 
-          if (data) {
+          if (data?.type === 'chat.message') {
             handlers.onResponse?.(data);
+          } else if (data?.type === 'call.incoming') {
+            handlers.onCallResponse?.(data);
           }
         })
         .catch(() => undefined);
@@ -231,6 +313,20 @@ async function ensureChatNotificationChannel(Notifications: ExpoNotificationsMod
     name: 'Chat messages',
     sound: 'default',
     vibrationPattern: [0, 250, 250, 250]
+  });
+}
+
+async function ensureCallNotificationChannel(Notifications: ExpoNotificationsModule): Promise<void> {
+  if (Platform.OS !== 'android') {
+    return;
+  }
+
+  await Notifications.setNotificationChannelAsync(CALLS_CHANNEL_ID, {
+    importance: Notifications.AndroidImportance.MAX,
+    lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+    name: 'Synzapp calls',
+    sound: 'default',
+    vibrationPattern: [0, 500, 250, 500, 250, 500]
   });
 }
 
@@ -296,6 +392,10 @@ function getPushPlatform(): PushPlatform {
   return 'unknown';
 }
 
+function parseSynzappPushNotificationData(data: unknown): SynzappPushNotificationData | null {
+  return parseChatPushNotificationData(data) || parseCallPushNotificationData(data);
+}
+
 function parseChatPushNotificationData(data: unknown): ChatPushNotificationData | null {
   if (!data || typeof data !== 'object') {
     return null;
@@ -321,6 +421,65 @@ function parseChatPushNotificationData(data: unknown): ChatPushNotificationData 
     sentAt: payload.sentAt,
     type: 'chat.message'
   };
+}
+
+function parseCallPushNotificationData(data: unknown): CallPushNotificationData | null {
+  if (!data || typeof data !== 'object') {
+    return null;
+  }
+
+  const payload = data as Record<string, unknown>;
+
+  if (
+    payload.type !== 'call.incoming' ||
+    typeof payload.callId !== 'string' ||
+    typeof payload.callerUid !== 'string' ||
+    typeof payload.contactId !== 'string' ||
+    typeof payload.createdAt !== 'string'
+  ) {
+    return null;
+  }
+
+  return {
+    callId: payload.callId,
+    callerName: typeof payload.callerName === 'string' && payload.callerName.trim()
+      ? payload.callerName
+      : 'Synzapp user',
+    callerUid: payload.callerUid,
+    chatType: payload.chatType === 'GROUP' ? 'GROUP' : 'DIRECT',
+    contactId: payload.contactId,
+    createdAt: payload.createdAt,
+    mode: payload.mode === 'video' ? 'video' : 'voice',
+    participantUids: parseParticipantUids(payload.participantUids),
+    tenantId: typeof payload.tenantId === 'string' ? payload.tenantId : '',
+    title: typeof payload.title === 'string' && payload.title.trim() ? payload.title : 'Synzapp call',
+    type: 'call.incoming'
+  };
+}
+
+function parseParticipantUids(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.filter((uid): uid is string => typeof uid === 'string' && Boolean(uid.trim()));
+  }
+
+  if (typeof value !== 'string' || !value.trim()) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+
+    if (Array.isArray(parsed)) {
+      return parsed.filter((uid): uid is string => typeof uid === 'string' && Boolean(uid.trim()));
+    }
+  } catch {
+    return value
+      .split(',')
+      .map((uid) => uid.trim())
+      .filter(Boolean);
+  }
+
+  return [];
 }
 
 async function getResponseErrorMessage(response: Response): Promise<string> {

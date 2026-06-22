@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActionSheetIOS,
   ActivityIndicator,
@@ -17,7 +17,8 @@ import { requestOtpPreflight } from '../services/backendAuth';
 import { getUserAuthMessage } from '../services/authErrors';
 import { sendOrgAdminPhoneCode } from '../services/phoneAuth';
 import { FirebasePhoneSession } from '../types/auth';
-import { colors } from '../theme/colors';
+import { useAppTheme } from '../theme/AppThemeProvider';
+import type { AppColors } from '../theme/colors';
 
 type CountryCode = 'US' | 'CA' | 'MX' | 'UK';
 
@@ -72,6 +73,8 @@ interface OrgAdminPhoneScreenProps {
 }
 
 export function OrgAdminPhoneScreen({ onCodeSent }: OrgAdminPhoneScreenProps) {
+  const appTheme = useAppTheme();
+  const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
   const [selectedCountry, setSelectedCountry] = useState<CountryOption>(COUNTRY_OPTIONS[0]);
   const [phoneNumber, setPhoneNumber] = useState('');
   const [isCountryPickerOpen, setIsCountryPickerOpen] = useState(false);
@@ -209,7 +212,7 @@ export function OrgAdminPhoneScreen({ onCodeSent }: OrgAdminPhoneScreenProps) {
               keyboardType="phone-pad"
               textContentType="telephoneNumber"
               placeholder={selectedCountry.placeholder}
-              placeholderTextColor="#64748B"
+              placeholderTextColor={appTheme.colors.muted}
               style={styles.phoneInput}
             />
           </View>
@@ -237,7 +240,7 @@ export function OrgAdminPhoneScreen({ onCodeSent }: OrgAdminPhoneScreenProps) {
 
         {isSending ? (
           <View style={styles.loading}>
-            <ActivityIndicator color={colors.primary} />
+            <ActivityIndicator color={appTheme.colors.primary} />
           </View>
         ) : null}
       </View>
@@ -401,7 +404,8 @@ function isNetworkConnectionMessage(message: string): boolean {
   return /network|connection/i.test(message);
 }
 
-const styles = StyleSheet.create({
+function createStyles(colors: AppColors) {
+  return StyleSheet.create({
   screen: {
     backgroundColor: colors.background,
     flex: 1,
@@ -441,14 +445,14 @@ const styles = StyleSheet.create({
   },
   phoneBox: {
     alignItems: 'center',
-    borderBottomColor: 'rgba(15, 118, 110, 0.35)',
+    borderBottomColor: colors.border,
     borderBottomWidth: 1,
     flexDirection: 'row',
     minHeight: 54,
     paddingHorizontal: 2
   },
   helperText: {
-    color: '#475569',
+    color: colors.muted,
     fontSize: 13,
     fontWeight: '400',
     paddingLeft: 2
@@ -468,12 +472,12 @@ const styles = StyleSheet.create({
     lineHeight: 25
   },
   codeText: {
-    color: '#253244',
+    color: colors.mutedStrong,
     fontSize: 17,
     fontWeight: '400'
   },
   phoneDivider: {
-    backgroundColor: 'rgba(100, 116, 139, 0.4)',
+    backgroundColor: colors.border,
     height: 28,
     marginHorizontal: 12,
     width: 1
@@ -488,20 +492,20 @@ const styles = StyleSheet.create({
   sendButton: {
     alignItems: 'center',
     alignSelf: 'center',
-    backgroundColor: '#4F6FEA',
+    backgroundColor: colors.blue,
     borderRadius: 8,
     elevation: 8,
     justifyContent: 'center',
     minHeight: 54,
     minWidth: 180,
     paddingHorizontal: 26,
-    shadowColor: '#304ECF',
+    shadowColor: colors.blue,
     shadowOffset: { height: 10, width: 0 },
     shadowOpacity: 0.22,
     shadowRadius: 18
   },
   sendButtonText: {
-    color: colors.card,
+    color: '#FFFFFF',
     fontSize: 17,
     fontWeight: '400'
   },
@@ -517,7 +521,7 @@ const styles = StyleSheet.create({
     minHeight: 26
   },
   modalBackdrop: {
-    backgroundColor: 'rgba(15, 23, 42, 0.32)',
+    backgroundColor: colors.overlay,
     flex: 1,
     justifyContent: 'flex-end',
     paddingBottom: 28,
@@ -530,25 +534,25 @@ const styles = StyleSheet.create({
     backgroundColor: colors.card,
     borderRadius: 14,
     overflow: 'hidden',
-    shadowColor: '#0F172A',
+    shadowColor: '#000000',
     shadowOffset: { height: 14, width: 0 },
     shadowOpacity: 0.2,
     shadowRadius: 26
   },
   countryMenuHeader: {
-    borderBottomColor: 'rgba(226, 232, 240, 0.92)',
+    borderBottomColor: colors.divider,
     borderBottomWidth: 1,
     paddingHorizontal: 18,
     paddingVertical: 14
   },
   countryMenuTitle: {
-    color: '#172033',
+    color: colors.ink,
     fontSize: 16,
     fontWeight: '400'
   },
   countryOption: {
     alignItems: 'center',
-    borderBottomColor: 'rgba(226, 232, 240, 0.9)',
+    borderBottomColor: colors.divider,
     borderBottomWidth: 1,
     flexDirection: 'row',
     gap: 16,
@@ -558,10 +562,10 @@ const styles = StyleSheet.create({
     paddingVertical: 12
   },
   countryOptionSelected: {
-    backgroundColor: 'rgba(79, 111, 234, 0.08)'
+    backgroundColor: colors.primarySoft
   },
   countryOptionPressed: {
-    backgroundColor: 'rgba(79, 111, 234, 0.16)'
+    opacity: 0.8
   },
   countryOptionIdentity: {
     alignItems: 'center',
@@ -578,8 +582,9 @@ const styles = StyleSheet.create({
     fontWeight: '400'
   },
   countryOptionCode: {
-    color: '#253244',
+    color: colors.mutedStrong,
     fontSize: 16,
     fontWeight: '400'
   }
 });
+}

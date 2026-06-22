@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -15,7 +15,8 @@ import { createOrgAdminProfile } from '../services/profileApi';
 import { pickNativeProfilePhoto } from '../services/profilePhotoPicker';
 import { signOutOrgAdmin } from '../services/phoneAuth';
 import { BackendAuthSession, OrgAdminDraft, VerifiedOrgAdmin } from '../types/auth';
-import { colors } from '../theme/colors';
+import { useAppTheme } from '../theme/AppThemeProvider';
+import type { AppColors } from '../theme/colors';
 
 interface OrgAdminOnboardingScreenProps {
   verifiedAdmin: VerifiedOrgAdmin;
@@ -37,6 +38,8 @@ export function OrgAdminOnboardingScreen({
   onProfileCreated,
   onSignOut
 }: OrgAdminOnboardingScreenProps) {
+  const appTheme = useAppTheme();
+  const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
   const [draft, setDraft] = useState(initialDraft);
   const [profilePhotoUri, setProfilePhotoUri] = useState<string | null>(null);
   const [profilePhotoDataUrl, setProfilePhotoDataUrl] = useState<string | undefined>();
@@ -200,7 +203,7 @@ export function OrgAdminOnboardingScreen({
 
         {isCreatingProfile ? (
           <View style={styles.loading}>
-            <ActivityIndicator color={colors.primary} />
+            <ActivityIndicator color={appTheme.colors.primary} />
           </View>
         ) : null}
 
@@ -224,13 +227,16 @@ interface ProfileInputProps {
 }
 
 function ProfileInput({ value, onChangeText, placeholder }: ProfileInputProps) {
+  const appTheme = useAppTheme();
+  const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
+
   return (
     <View style={styles.inputBox}>
       <TextInput
         value={value}
         onChangeText={onChangeText}
         placeholder={placeholder}
-        placeholderTextColor="#64748B"
+        placeholderTextColor={appTheme.colors.muted}
         autoCapitalize="words"
         autoCorrect={false}
         style={styles.input}
@@ -258,7 +264,8 @@ function getPrimaryButtonLabel(isCreatingProfile: boolean, isProfileCreated: boo
   return 'Continue';
 }
 
-const styles = StyleSheet.create({
+function createStyles(colors: AppColors) {
+  return StyleSheet.create({
   screen: {
     backgroundColor: colors.background,
     flex: 1,
@@ -304,7 +311,7 @@ const styles = StyleSheet.create({
   },
   photoPicker: {
     alignItems: 'center',
-    borderBottomColor: 'rgba(15, 118, 110, 0.35)',
+    borderBottomColor: colors.border,
     borderBottomWidth: 1,
     flexDirection: 'row',
     gap: 14,
@@ -314,7 +321,7 @@ const styles = StyleSheet.create({
   },
   photoPreview: {
     alignItems: 'center',
-    backgroundColor: '#E0ECFF',
+    backgroundColor: colors.blueSoft,
     borderRadius: 26,
     height: 52,
     justifyContent: 'center',
@@ -326,7 +333,7 @@ const styles = StyleSheet.create({
     width: 52
   },
   photoInitials: {
-    color: '#4F6FEA',
+    color: colors.blue,
     fontSize: 25,
     fontWeight: '400',
     lineHeight: 29
@@ -342,13 +349,13 @@ const styles = StyleSheet.create({
     lineHeight: 22
   },
   photoSubtitle: {
-    color: '#475569',
+    color: colors.muted,
     fontSize: 14,
     fontWeight: '400',
     lineHeight: 19
   },
   inputBox: {
-    borderBottomColor: 'rgba(15, 118, 110, 0.35)',
+    borderBottomColor: colors.border,
     borderBottomWidth: 1,
     minHeight: 54,
     justifyContent: 'center'
@@ -370,20 +377,20 @@ const styles = StyleSheet.create({
   primaryButton: {
     alignItems: 'center',
     alignSelf: 'center',
-    backgroundColor: '#4F6FEA',
+    backgroundColor: colors.blue,
     borderRadius: 8,
     elevation: 8,
     justifyContent: 'center',
     minHeight: 54,
     minWidth: 180,
     paddingHorizontal: 26,
-    shadowColor: '#304ECF',
+    shadowColor: colors.blue,
     shadowOffset: { height: 10, width: 0 },
     shadowOpacity: 0.22,
     shadowRadius: 18
   },
   primaryButtonText: {
-    color: colors.card,
+    color: '#FFFFFF',
     fontSize: 17,
     fontWeight: '400'
   },
@@ -398,7 +405,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18
   },
   secondaryButtonText: {
-    color: '#253244',
+    color: colors.mutedStrong,
     fontSize: 16,
     fontWeight: '400'
   },
@@ -414,3 +421,4 @@ const styles = StyleSheet.create({
     minHeight: 24
   }
 });
+}

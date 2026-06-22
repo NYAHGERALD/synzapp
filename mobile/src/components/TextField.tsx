@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import {
   KeyboardTypeOptions,
   StyleSheet,
@@ -7,7 +7,8 @@ import {
   TextInputProps,
   View
 } from 'react-native';
-import { colors } from '../theme/colors';
+import { useAppTheme } from '../theme/AppThemeProvider';
+import type { AppColors } from '../theme/colors';
 
 interface TextFieldProps extends Omit<TextInputProps, 'style'> {
   label: string;
@@ -17,6 +18,9 @@ interface TextFieldProps extends Omit<TextInputProps, 'style'> {
 }
 
 export function TextField({ label, value, onChangeText, keyboardType, ...props }: TextFieldProps) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme.colors), [theme.colors]);
+
   return (
     <View style={styles.root}>
       <Text style={styles.label}>{label}</Text>
@@ -24,7 +28,7 @@ export function TextField({ label, value, onChangeText, keyboardType, ...props }
         value={value}
         onChangeText={onChangeText}
         keyboardType={keyboardType}
-        placeholderTextColor="#8B95A5"
+        placeholderTextColor={theme.colors.muted}
         autoCorrect={false}
         style={styles.input}
         {...props}
@@ -33,7 +37,8 @@ export function TextField({ label, value, onChangeText, keyboardType, ...props }
   );
 }
 
-const styles = StyleSheet.create({
+function createStyles(colors: AppColors) {
+  return StyleSheet.create({
   root: {
     gap: 7
   },
@@ -43,7 +48,7 @@ const styles = StyleSheet.create({
     fontWeight: '800'
   },
   input: {
-    backgroundColor: '#FBFCFE',
+    backgroundColor: colors.input,
     borderColor: colors.border,
     borderRadius: 8,
     borderWidth: 1,
@@ -52,4 +57,5 @@ const styles = StyleSheet.create({
     minHeight: 50,
     paddingHorizontal: 14
   }
-});
+  });
+}

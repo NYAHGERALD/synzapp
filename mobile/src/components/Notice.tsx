@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import { colors } from '../theme/colors';
+import { useAppTheme } from '../theme/AppThemeProvider';
+import type { AppColors } from '../theme/colors';
 
 interface NoticeProps {
   title: string;
@@ -9,6 +10,8 @@ interface NoticeProps {
 }
 
 export function Notice({ title, body, tone = 'info' }: NoticeProps) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme.colors), [theme.colors]);
   const toneStyle = tone === 'error'
     ? styles.error
     : tone === 'success'
@@ -23,7 +26,8 @@ export function Notice({ title, body, tone = 'info' }: NoticeProps) {
   );
 }
 
-const styles = StyleSheet.create({
+function createStyles(colors: AppColors) {
+  return StyleSheet.create({
   root: {
     borderRadius: 8,
     gap: 5,
@@ -49,4 +53,5 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     lineHeight: 21
   }
-});
+  });
+}

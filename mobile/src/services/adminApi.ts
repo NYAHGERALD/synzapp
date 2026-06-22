@@ -47,6 +47,7 @@ export interface ApprovedEmployee {
   departmentId: string;
   departmentName: string;
   displayName: string | null;
+  phoneFormatted?: string | null;
   phoneLast4: string;
   phoneMasked: string;
   profilePhotoCacheKey: string | null;
@@ -58,7 +59,14 @@ export interface ApprovedEmployee {
   status: string;
 }
 
-export type EmployeeLifecycleAction = 'DEACTIVATE' | 'ARCHIVE' | 'ANONYMIZE' | 'REACTIVATE';
+export type EmployeeLifecycleAction =
+  | 'DEACTIVATE'
+  | 'ARCHIVE'
+  | 'DELETE'
+  | 'ANONYMIZE'
+  | 'PERMANENT_DELETE'
+  | 'REMOVE_INVITE'
+  | 'REACTIVATE';
 
 export interface TenantDevice {
   createdAt: string | null;

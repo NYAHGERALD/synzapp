@@ -47,6 +47,48 @@ const chatMediaCacheDirectory = FileSystem.documentDirectory
     ? `${FileSystem.cacheDirectory}Synzapp/Media/`
     : null;
 
+export async function cacheLocalChatMedia(media: LocalChatMediaInput): Promise<LocalChatMediaInput> {
+  ensureMediaSize(media.kind, media.sizeBytes);
+
+  if (isDataUri(media.uri) || isSynzappMediaCacheUri(media.uri)) {
+    return media;
+  }
+
+  await ensureMediaCacheDirectory();
+
+  const sourceInfo = await FileSystem.getInfoAsync(media.uri);
+
+  if (!sourceInfo.exists) {
+    throw new Error('This media is no longer available on this device.');
+  }
+
+  const sourceSizeBytes = typeof sourceInfo.size === 'number' && sourceInfo.size > 0
+    ? sourceInfo.size
+    : media.sizeBytes;
+
+  ensureMediaSize(media.kind, sourceSizeBytes);
+
+  const cachedUri = getMediaCacheFileUri(
+    `local_${Date.now()}_${randomHex(5)}_${sanitizeLocalCacheFileName(media.fileName, media.kind)}`
+  );
+
+  await FileSystem.copyAsync({
+    from: media.uri,
+    to: cachedUri
+  });
+
+  const cachedInfo = await FileSystem.getInfoAsync(cachedUri);
+  const cachedSizeBytes = cachedInfo.exists && typeof cachedInfo.size === 'number' && cachedInfo.size > 0
+    ? cachedInfo.size
+    : sourceSizeBytes;
+
+  return {
+    ...media,
+    sizeBytes: cachedSizeBytes,
+    uri: cachedUri
+  };
+}
+
 export async function uploadEncryptedChatMedia(input: {
   chatType?: 'DIRECT' | 'GROUP';
   contactId: string;
@@ -54,20 +96,22 @@ export async function uploadEncryptedChatMedia(input: {
   media: LocalChatMediaInput;
   onProgress?: (progress: number) => void;
 }): Promise<ChatMediaAttachment> {
-  ensureMediaSize(input.media.kind, input.media.sizeBytes);
+  const localMedia = await cacheLocalChatMedia(input.media);
+
+  ensureMediaSize(localMedia.kind, localMedia.sizeBytes);
   input.onProgress?.(0.08);
-  const encryptedMedia = await encryptLocalMediaFile(input.media.uri);
+  const encryptedMedia = await encryptLocalMediaFile(localMedia.uri);
 
   input.onProgress?.(0.42);
   const session = await createMediaUploadSession({
     chatType: input.chatType,
     contactId: input.contactId,
-    contentType: input.media.contentType,
+    contentType: localMedia.contentType,
     encryptedSizeBytes: encryptedMedia.encryptedSizeBytes,
-    fileName: input.media.fileName,
+    fileName: localMedia.fileName,
     idToken: input.idToken,
-    kind: input.media.kind,
-    originalSizeBytes: input.media.sizeBytes
+    kind: localMedia.kind,
+    originalSizeBytes: localMedia.sizeBytes
   });
 
   await uploadEncryptedFile({
@@ -84,20 +128,20 @@ export async function uploadEncryptedChatMedia(input: {
   input.onProgress?.(0.92);
 
   return {
-    contentType: input.media.contentType,
-    durationMs: input.media.durationMs,
+    contentType: localMedia.contentType,
+    durationMs: localMedia.durationMs,
     encryptedSizeBytes: encryptedMedia.encryptedSizeBytes,
-    fileName: input.media.fileName,
-    height: input.media.height,
+    fileName: localMedia.fileName,
+    height: localMedia.height,
     key: encryptedMedia.key,
-    kind: input.media.kind,
-    localUri: input.media.uri,
+    kind: localMedia.kind,
+    localUri: localMedia.uri,
     mediaId: session.mediaId,
     nonce: encryptedMedia.nonce,
-    sizeBytes: input.media.sizeBytes,
+    sizeBytes: localMedia.sizeBytes,
     transferProgress: 0.92,
     transferStatus: 'uploading',
-    width: input.media.width
+    width: localMedia.width
   };
 }
 
@@ -109,7 +153,11 @@ export async function downloadAndDecryptChatMedia(input: {
   onProgress?: (progress: number) => void;
 }): Promise<string> {
   if (input.media.localUri) {
-    return input.media.localUri;
+    const localUri = await getExistingLocalMediaUri(input.media.localUri);
+
+    if (localUri) {
+      return localUri;
+    }
   }
 
   if (!input.media.mediaId || !input.media.key || !input.media.nonce) {
@@ -118,6 +166,7 @@ export async function downloadAndDecryptChatMedia(input: {
 
   const encryptedUri = getMediaCacheFileUri(`${input.media.mediaId}.encrypted`);
   const plainUri = getMediaCacheFileUri(`${input.media.mediaId}.${getFileExtension(input.media)}`);
+  const plainTemporaryUri = getMediaCacheFileUri(`${input.media.mediaId}.${getFileExtension(input.media)}.download`);
 
   await ensureMediaCacheDirectory();
   const cachedPlainFile = await FileSystem.getInfoAsync(plainUri);
@@ -164,8 +213,14 @@ export async function downloadAndDecryptChatMedia(input: {
     throw new Error('Unable to decrypt this media.');
   }
 
-  await FileSystem.writeAsStringAsync(plainUri, fromByteArray(plaintext), {
+  await FileSystem.deleteAsync(plainTemporaryUri, { idempotent: true }).catch(() => undefined);
+  await FileSystem.writeAsStringAsync(plainTemporaryUri, fromByteArray(plaintext), {
     encoding: FileSystem.EncodingType.Base64
+  });
+  await FileSystem.deleteAsync(plainUri, { idempotent: true }).catch(() => undefined);
+  await FileSystem.moveAsync({
+    from: plainTemporaryUri,
+    to: plainUri
   });
   await FileSystem.deleteAsync(encryptedUri, { idempotent: true }).catch(() => undefined);
   input.onProgress?.(1);
@@ -349,12 +404,51 @@ function getMediaCacheFileUri(fileName: string): string {
   return `${chatMediaCacheDirectory}${fileName.replace(/[^A-Za-z0-9._-]/g, '_')}`;
 }
 
+function isDataUri(uri: string): boolean {
+  return uri.trim().startsWith('data:');
+}
+
+function isSynzappMediaCacheUri(uri: string): boolean {
+  return Boolean(chatMediaCacheDirectory && uri.startsWith(chatMediaCacheDirectory));
+}
+
+async function getExistingLocalMediaUri(uri: string): Promise<string | null> {
+  if (isDataUri(uri)) {
+    return uri;
+  }
+
+  if (!uri.trim()) {
+    return null;
+  }
+
+  const info = await FileSystem.getInfoAsync(uri).catch(() => null);
+
+  return info?.exists ? uri : null;
+}
+
 async function ensureMediaCacheDirectory(): Promise<void> {
   if (!chatMediaCacheDirectory) {
     throw new Error('Local media storage is not available.');
   }
 
   await FileSystem.makeDirectoryAsync(chatMediaCacheDirectory, { intermediates: true }).catch(() => undefined);
+}
+
+function sanitizeLocalCacheFileName(fileName: string, kind: ChatMediaKind): string {
+  const fallbackName = kind === 'image'
+    ? 'photo.jpg'
+    : kind === 'video'
+      ? 'video.mp4'
+      : kind === 'audio'
+        ? 'voice-note.m4a'
+        : 'attachment';
+  const safeFileName = (fileName || fallbackName)
+    .trim()
+    .replace(/[^\w .()+-]/g, '_')
+    .replace(/\s+/g, '_')
+    .slice(0, 96);
+
+  return safeFileName || fallbackName;
 }
 
 function getFileExtension(media: ChatMediaAttachment): string {
