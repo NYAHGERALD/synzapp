@@ -30,6 +30,7 @@ export interface ChatContact {
   members?: ChatGroupMember[];
   memberPolicy?: 'DEPARTMENT_PLUS_EXPLICIT' | 'EXPLICIT';
   messagePermissionMode?: 'ADMINS' | 'ALL_MEMBERS';
+  phoneFormatted?: string | null;
   phoneMasked?: string | null;
   preview: string;
   profilePhotoCacheKey: string | null;
@@ -1133,6 +1134,7 @@ function normalizeChatContact(contact: ChatContact): ChatContact {
     members: Array.isArray(contact.members) ? contact.members.map(normalizeChatGroupMember) : undefined,
     memberPolicy: contact.memberPolicy === 'DEPARTMENT_PLUS_EXPLICIT' ? 'DEPARTMENT_PLUS_EXPLICIT' : contact.memberPolicy === 'EXPLICIT' ? 'EXPLICIT' : undefined,
     messagePermissionMode: contact.messagePermissionMode === 'ADMINS' ? 'ADMINS' : contact.messagePermissionMode === 'ALL_MEMBERS' ? 'ALL_MEMBERS' : undefined,
+    phoneFormatted: typeof contact.phoneFormatted === 'string' && contact.phoneFormatted.trim() ? contact.phoneFormatted.trim() : null,
     phoneMasked: typeof contact.phoneMasked === 'string' && contact.phoneMasked.trim() ? contact.phoneMasked.trim() : null,
     profilePhotoUrl: normalizeSynzappApiUrl(contact.profilePhotoUrl),
     spammedAt: typeof contact.spammedAt === 'string' ? contact.spammedAt : null,

@@ -754,15 +754,7 @@ function buildDirectChatId(uid: string, contactId: string): string {
 }
 
 function getVisibleChatContactRoles(role: SynzappRole): SynzappRole[] {
-  if (role === 'ORG_ADMIN') {
-    return ['ORG_ADMIN', 'EMPLOYEE', 'DEPT_ADMIN'];
-  }
-
-  if (role === 'DEPT_ADMIN') {
-    return ['ORG_ADMIN', 'EMPLOYEE'];
-  }
-
-  return ['ORG_ADMIN', 'DEPT_ADMIN'];
+  return ['ORG_ADMIN', 'DEPT_ADMIN', 'EMPLOYEE'];
 }
 
 function authorizationError(message: string): Error {

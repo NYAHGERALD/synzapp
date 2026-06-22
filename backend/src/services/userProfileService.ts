@@ -84,6 +84,7 @@ export interface ChatContact {
   isOnline: boolean;
   lastMessageAt: string | null;
   lastSeenAt: string | null;
+  phoneFormatted: string | null;
   phoneMasked: string | null;
   preview: string;
   profilePhotoCacheKey: string | null;
@@ -207,7 +208,11 @@ export async function listCurrentUserChatContacts(decodedToken: DecodedIdToken):
 
       return doc.id !== decodedToken.uid && Boolean(user.role && visibleRoles.includes(user.role));
     });
-  const activeDeviceUserIds = await getActiveDeviceUserIds(context.tenantId);
+  const contactIds = visibleContacts.map((doc) => doc.id);
+  const [activeDeviceUserIds, formattedPhoneByUid] = await Promise.all([
+    getActiveDeviceUserIds(context.tenantId),
+    getAuthPhoneFormattedByUid(contactIds)
+  ]);
   const contacts = await Promise.all(visibleContacts.map(async (doc) => {
     const chatId = buildDirectChatId(decodedToken.uid, doc.id);
     const chatSnapshot = await organizationRef.collection('directChats').doc(chatId).get();
@@ -220,7 +225,8 @@ export async function listCurrentUserChatContacts(decodedToken: DecodedIdToken):
       directChat,
       activeDeviceUserIds.has(doc.id),
       preferences.get(buildChatPreferenceKey('DIRECT', doc.id)),
-      archiveSettings
+      archiveSettings,
+      formattedPhoneByUid.get(doc.id) || null
     );
   }));
 
@@ -1030,7 +1036,8 @@ function buildChatContact(
   directChat?: DirectChatRecord | null,
   hasActiveDevice = false,
   preference?: ChatUserPreference,
-  archiveSettings?: ChatArchiveSettings
+  archiveSettings?: ChatArchiveSettings,
+  phoneFormatted?: string | null
 ): ChatContact {
   const displayName = getDisplayName(user);
   const roleName = user.roleName || formatRoleName(user.role || 'EMPLOYEE');
@@ -1059,6 +1066,7 @@ function buildChatContact(
     isOnline: presence.isOnline,
     lastMessageAt: visibleLastMessageSentAtMs ? new Date(visibleLastMessageSentAtMs).toISOString() : null,
     lastSeenAt: presence.lastSeenAt,
+    phoneFormatted: phoneFormatted || null,
     phoneMasked: user.phoneMasked || null,
     preview: visibleLastMessageSentAtMs ? directChat?.lastMessageText || '' : '',
     profilePhotoCacheKey: user.profilePhotoStoragePath
@@ -1103,6 +1111,32 @@ async function getActiveDeviceUserIds(tenantId: string): Promise<Set<string>> {
   });
 
   return userIds;
+}
+
+async function getAuthPhoneFormattedByUid(uids: string[]): Promise<Map<string, string>> {
+  const phoneByUid = new Map<string, string>();
+
+  for (let index = 0; index < uids.length; index += 100) {
+    const uidBatch = uids.slice(index, index + 100);
+
+    if (!uidBatch.length) {
+      continue;
+    }
+
+    const result = await adminAuth
+      .getUsers(uidBatch.map((uid) => ({ uid })))
+      .catch(() => null);
+
+    result?.users.forEach((user) => {
+      const normalizedPhone = user.phoneNumber ? normalizeE164Phone(user.phoneNumber) : '';
+
+      if (normalizedPhone) {
+        phoneByUid.set(user.uid, formatPhoneNumber(normalizedPhone));
+      }
+    });
+  }
+
+  return phoneByUid;
 }
 
 async function hasActiveDeviceForUser(tenantId: string, uid: string): Promise<boolean> {
@@ -1190,15 +1224,7 @@ function buildDirectChatId(uid: string, contactId: string): string {
 }
 
 function getVisibleChatContactRoles(role: SynzappRole): SynzappRole[] {
-  if (role === 'ORG_ADMIN') {
-    return ['ORG_ADMIN', 'EMPLOYEE', 'DEPT_ADMIN'];
-  }
-
-  if (role === 'DEPT_ADMIN') {
-    return ['ORG_ADMIN', 'EMPLOYEE'];
-  }
-
-  return ['ORG_ADMIN', 'DEPT_ADMIN'];
+  return ['ORG_ADMIN', 'DEPT_ADMIN', 'EMPLOYEE'];
 }
 
 async function uploadProfilePhoto(

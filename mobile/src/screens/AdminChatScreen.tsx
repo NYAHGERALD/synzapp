@@ -4327,13 +4327,11 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   }
 
   function handleAppendCallKeypadDigit(digit: string) {
-    setCallKeypadDigits((currentDigits) => {
-      if (currentDigits.replace(/\D/g, '').length >= 15) {
-        return currentDigits;
-      }
+    setCallKeypadDigits((currentDigits) => getNextCallKeypadInput(currentDigits, digit));
+  }
 
-      return `${currentDigits}${digit}`;
-    });
+  function handleAppendCallKeypadPlus() {
+    setCallKeypadDigits((currentDigits) => addPlusToCallKeypadInput(currentDigits));
   }
 
   function handleBackspaceCallKeypadDigit() {
@@ -9793,14 +9791,17 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       />
 
       <CallKeypadModal
+        contacts={registeredCallContacts}
         digits={callKeypadDigits}
         isOpen={isCallKeypadOpen}
         onAppendDigit={handleAppendCallKeypadDigit}
+        onAppendPlus={handleAppendCallKeypadPlus}
         onBackspace={handleBackspaceCallKeypadDigit}
         onClose={() => setIsCallKeypadOpen(false)}
         onStartCall={() => {
           void handleStartKeypadCall();
         }}
+        profilePhotoHeaders={profilePhotoHeaders}
       />
 
       <CallFavoritesModal
@@ -16542,7 +16543,7 @@ function CallContactRow({
       <View style={styles.chatText}>
         <Text numberOfLines={1} style={[styles.callContactTitle, { color: appTheme.colors.ink }]}>{contact.displayName}</Text>
         <Text numberOfLines={1} style={[styles.callContactSubtitle, { color: appTheme.colors.muted }]}>
-          {contact.roleName || contact.role || contact.phoneMasked || 'Company contact'}
+          {getCallContactSubtitle(contact)}
         </Text>
       </View>
       {trailing === 'radio' ? (
@@ -16563,23 +16564,30 @@ function CallContactRow({
 }
 
 function CallKeypadModal({
+  contacts,
   digits,
   isOpen,
   onAppendDigit,
+  onAppendPlus,
   onBackspace,
   onClose,
-  onStartCall
+  onStartCall,
+  profilePhotoHeaders
 }: {
+  contacts: ChatContact[];
   digits: string;
   isOpen: boolean;
   onAppendDigit: (digit: string) => void;
+  onAppendPlus: () => void;
   onBackspace: () => void;
   onClose: () => void;
   onStartCall: () => void;
+  profilePhotoHeaders?: Record<string, string>;
 }) {
   const appTheme = useAppTheme();
   const insets = useSafeAreaInsets();
   const modalTopPadding = getFullScreenModalTopPadding(insets.top);
+  const matchedContact = findRegisteredCallContactForDialInput(contacts, digits);
   const keypadRows = [
     ['1', '2', '3'],
     ['4', '5', '6'],
@@ -16604,24 +16612,27 @@ function CallKeypadModal({
           paddingTop: modalTopPadding
         }
       ]}>
-        <View style={styles.callModalHeader}>
+        <View style={styles.callKeypadHeader}>
           <Pressable
             accessibilityLabel="Close keypad"
             accessibilityRole="button"
             onPress={onClose}
-            style={({ pressed }) => [styles.newChatHeaderIconButton, pressed && styles.pressed]}
+            style={({ pressed }) => [styles.callKeypadHeaderIconButton, pressed && styles.callKeypadHeaderIconPressed]}
           >
-            <Feather color={appTheme.colors.ink} name="x" size={24} />
+            <Feather color={appTheme.colors.ink} name="x" size={30} />
           </Pressable>
-          <View style={styles.newChatHeaderSpacer} />
           <Pressable
             accessibilityLabel="Delete digit"
             accessibilityRole="button"
             disabled={!digits}
             onPress={onBackspace}
-            style={({ pressed }) => [styles.newChatHeaderIconButton, !digits && styles.disabled, pressed && styles.pressed]}
+            style={({ pressed }) => [
+              styles.callKeypadHeaderIconButton,
+              !digits && styles.disabled,
+              pressed && digits && styles.callKeypadHeaderIconPressed
+            ]}
           >
-            <Feather color={appTheme.colors.ink} name="delete" size={22} />
+            <Feather color={appTheme.colors.ink} name="delete" size={28} />
           </Pressable>
         </View>
 
@@ -16630,6 +16641,30 @@ function CallKeypadModal({
             {digits ? formatCallKeypadDigits(digits) : ' '}
           </Text>
           <Text style={[styles.callKeypadHint, { color: appTheme.colors.muted }]}>Company contacts only</Text>
+          {matchedContact ? (
+            <View style={[
+              styles.callKeypadMatchedContact,
+              {
+                backgroundColor: appTheme.colors.surfaceElevated,
+                borderColor: appTheme.colors.border
+              }
+            ]}>
+              <ProfileAvatar
+                headers={profilePhotoHeaders}
+                name={matchedContact.displayName}
+                size={48}
+                uri={matchedContact.profilePhotoUrl}
+              />
+              <View style={styles.callKeypadMatchedText}>
+                <Text numberOfLines={1} style={[styles.callKeypadMatchedName, { color: appTheme.colors.ink }]}>
+                  {matchedContact.displayName}
+                </Text>
+                <Text numberOfLines={1} style={[styles.callKeypadMatchedMeta, { color: appTheme.colors.muted }]}>
+                  {getCallContactSubtitle(matchedContact)}
+                </Text>
+              </View>
+            </View>
+          ) : null}
         </View>
 
         <View style={styles.callKeypadGrid}>
@@ -16638,11 +16673,13 @@ function CallKeypadModal({
               accessibilityLabel={`Dial ${digit}`}
               accessibilityRole="button"
               key={digit}
+              onLongPress={digit === '0' ? onAppendPlus : undefined}
               onPress={() => onAppendDigit(digit)}
+              pressRetentionOffset={12}
               style={({ pressed }) => [
                 styles.callKeypadButton,
                 { backgroundColor: appTheme.colors.surface },
-                pressed && styles.pressed
+                pressed && styles.callKeypadButtonPressed
               ]}
             >
               <Text style={[styles.callKeypadButtonText, { color: appTheme.colors.ink }]}>{digit}</Text>
@@ -16660,7 +16697,7 @@ function CallKeypadModal({
           style={({ pressed }) => [
             styles.callKeypadStartButton,
             { backgroundColor: appTheme.colors.success },
-            pressed && styles.pressed
+            pressed && styles.callKeypadStartButtonPressed
           ]}
         >
           <Ionicons color="#FFFFFF" name="call" size={28} />
@@ -22184,23 +22221,53 @@ function filterCallContacts(contacts: ChatContact[], search: string): ChatContac
   return contacts.filter((contact) => (
     contact.displayName.toLowerCase().includes(normalizedSearch) ||
     (contact.roleName || contact.role || '').toLowerCase().includes(normalizedSearch) ||
+    (contact.phoneFormatted || '').toLowerCase().includes(normalizedSearch) ||
     (contact.phoneMasked || '').toLowerCase().includes(normalizedSearch) ||
-    (searchDigits ? (contact.phoneMasked || '').replace(/\D/g, '').endsWith(searchDigits.slice(-4)) : false)
+    (searchDigits ? getCallContactPhoneDigits(contact).some((digits) => digits.includes(searchDigits)) : false)
   ));
 }
 
 function findRegisteredCallContactForDialInput(contacts: ChatContact[], dialInput: string): ChatContact | null {
-  const dialDigits = dialInput.replace(/\D/g, '');
+  const normalizedDialInput = normalizeCallDialInput(dialInput);
 
-  if (dialDigits.length < 4) {
+  if (!normalizedDialInput) {
     return null;
   }
 
-  const dialLastFour = dialDigits.slice(-4);
-  return contacts.find((contact) => {
-    const contactDigits = (contact.phoneMasked || '').replace(/\D/g, '');
-    return contactDigits.length >= 4 && contactDigits.endsWith(dialLastFour);
-  }) || null;
+  const dialDigits = normalizedDialInput.replace(/\D/g, '');
+
+  return contacts.find((contact) =>
+    getCallContactPhoneCandidates(contact).some((candidate) => {
+      const candidateDigits = candidate.replace(/\D/g, '');
+
+      return candidate === normalizedDialInput || candidateDigits === dialDigits;
+    })
+  ) || null;
+}
+
+function getCallContactSubtitle(contact: ChatContact): string {
+  return [
+    contact.roleName || contact.role || 'Company contact',
+    contact.phoneFormatted || contact.phoneMasked || ''
+  ].filter(Boolean).join(' · ');
+}
+
+function getCallContactPhoneCandidates(contact: ChatContact): string[] {
+  return [
+    contact.phoneFormatted,
+    contact.phoneMasked
+  ]
+    .map((value) => typeof value === 'string' ? normalizeCallDialInput(value) : null)
+    .filter((value): value is string => Boolean(value));
+}
+
+function getCallContactPhoneDigits(contact: ChatContact): string[] {
+  return [
+    contact.phoneFormatted,
+    contact.phoneMasked
+  ]
+    .map((value) => typeof value === 'string' ? value.replace(/\D/g, '') : '')
+    .filter((value) => value.length >= 4);
 }
 
 function getCallHistoryStatusLabel(entry: SynzappCallHistoryEntry): string {
@@ -22328,14 +22395,67 @@ function formatCallKeypadDigits(value: string): string {
   const digits = value.replace(/\D/g, '');
 
   if (!digits) {
-    return '';
+    return hasPlus ? '+' : value;
   }
 
-  if (digits.startsWith('1')) {
+  if ((!hasPlus && digits.length <= 10) || digits.startsWith('1')) {
     return formatManualInvitePhoneNumberInput(`${hasPlus ? '+' : ''}${digits}`);
   }
 
   return `${hasPlus ? '+' : ''}${chunkPhoneDigits(digits, 3).join(' ')}`;
+}
+
+function getNextCallKeypadInput(currentValue: string, nextValue: string): string {
+  if (nextValue === '+') {
+    return addPlusToCallKeypadInput(currentValue);
+  }
+
+  if (!/^\d$/.test(nextValue)) {
+    return currentValue.length >= 24 ? currentValue : `${currentValue}${nextValue}`;
+  }
+
+  return limitCallKeypadInput(`${currentValue}${nextValue}`);
+}
+
+function addPlusToCallKeypadInput(value: string): string {
+  if (value.startsWith('+')) {
+    return value;
+  }
+
+  return `+${value.replace(/\+/g, '')}`;
+}
+
+function limitCallKeypadInput(value: string): string {
+  if (/[#*]/.test(value)) {
+    return value.slice(0, 24);
+  }
+
+  const hasPlus = value.startsWith('+');
+  const digits = value.replace(/\D/g, '');
+
+  if (!hasPlus) {
+    return digits.startsWith('1')
+      ? digits.slice(0, 11)
+      : digits.slice(0, 10);
+  }
+
+  const callingCode = detectCallingCode(digits);
+  const maxDigits = callingCode
+    ? callingCode.length + getMaxNationalDigitsForCallingCode(callingCode)
+    : 15;
+  const limitedDigits = digits.slice(0, Math.min(maxDigits, 15));
+
+  return `${hasPlus ? '+' : ''}${limitedDigits}`;
+}
+
+function normalizeCallDialInput(value: string): string | null {
+  const trimmedValue = value.trim();
+
+  if (!trimmedValue || /[#*]/.test(trimmedValue)) {
+    return null;
+  }
+
+  return normalizeManualInvitePhoneNumber(trimmedValue);
 }
 
 function getKeypadLetters(digit: string): string {
@@ -27132,16 +27252,35 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: 18
   },
+  callKeypadHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    minHeight: 58,
+    paddingBottom: 6,
+    width: '100%'
+  },
+  callKeypadHeaderIconButton: {
+    alignItems: 'center',
+    borderRadius: 27,
+    height: 54,
+    justifyContent: 'center',
+    width: 54
+  },
+  callKeypadHeaderIconPressed: {
+    opacity: 0.72,
+    transform: [{ scale: 0.93 }]
+  },
   callKeypadDisplay: {
     alignItems: 'center',
-    minHeight: 78,
+    minHeight: 118,
     justifyContent: 'center',
     width: '100%'
   },
   callKeypadDigits: {
-    fontSize: 30,
-    fontWeight: '600',
-    lineHeight: 38,
+    fontSize: 36,
+    fontWeight: '700',
+    lineHeight: 44,
     maxWidth: '96%',
     textAlign: 'center'
   },
@@ -27151,32 +27290,64 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     marginTop: 4
   },
+  callKeypadMatchedContact: {
+    alignItems: 'center',
+    borderRadius: 24,
+    borderWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 14,
+    maxWidth: 330,
+    minHeight: 72,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    width: '88%'
+  },
+  callKeypadMatchedText: {
+    flex: 1,
+    minWidth: 0
+  },
+  callKeypadMatchedName: {
+    fontSize: 17,
+    fontWeight: '800',
+    lineHeight: 22
+  },
+  callKeypadMatchedMeta: {
+    fontSize: 13,
+    fontWeight: '600',
+    lineHeight: 18,
+    marginTop: 2
+  },
   callKeypadGrid: {
     alignContent: 'center',
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 18,
+    gap: 20,
     justifyContent: 'center',
-    maxWidth: 310
+    maxWidth: 336
   },
   callKeypadButton: {
     alignItems: 'center',
-    borderRadius: 36,
-    height: 72,
+    borderRadius: 40,
+    height: 80,
     justifyContent: 'center',
-    width: 72
+    width: 80
+  },
+  callKeypadButtonPressed: {
+    opacity: 0.82,
+    transform: [{ scale: 0.92 }]
   },
   callKeypadButtonText: {
-    fontSize: 30,
-    fontWeight: '500',
-    lineHeight: 34
+    fontSize: 36,
+    fontWeight: '600',
+    lineHeight: 40
   },
   callKeypadButtonLetters: {
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '700',
     letterSpacing: 0,
-    lineHeight: 13,
-    minHeight: 13
+    lineHeight: 14,
+    minHeight: 14
   },
   callKeypadStartButton: {
     alignItems: 'center',
@@ -27184,6 +27355,10 @@ const styles = StyleSheet.create({
     height: 68,
     justifyContent: 'center',
     width: 68
+  },
+  callKeypadStartButtonPressed: {
+    opacity: 0.84,
+    transform: [{ scale: 0.92 }]
   },
   callFavoritesHelper: {
     borderRadius: 18,
