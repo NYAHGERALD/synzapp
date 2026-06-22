@@ -1,6 +1,7 @@
 import { DecodedIdToken } from 'firebase-admin/auth';
 import { getMessaging, type Message } from 'firebase-admin/messaging';
-import { createHash } from 'crypto';
+import http2 from 'node:http2';
+import { createHash, createPrivateKey, createSign, type KeyObject } from 'crypto';
 import { adminApp, fieldValue, firestore } from '../config/firebaseAdmin.js';
 import { DevicePlatform, verifyActiveRegisteredDevice } from './deviceIdentityService.js';
 import type { EncryptedNotificationPreviewRecord } from './encryptedMessageEnvelopeService.js';
@@ -10,7 +11,7 @@ import {
   shouldTreatChatAsArchived
 } from './chatArchiveSettingsService.js';
 
-type PushProvider = 'expo' | 'fcm';
+type PushProvider = 'apnsVoip' | 'expo' | 'fcm';
 type PushTokenStatus = 'ACTIVE' | 'INACTIVE';
 export type ChatNotificationAlertTone = 'chime' | 'default' | 'pulse' | 'silent';
 export type ChatNotificationMuteMode = '1w' | '8h' | 'always' | 'off';
@@ -149,10 +150,24 @@ interface ExpoPushResponse {
   errors?: unknown[];
 }
 
+interface ApnsVoipConfig {
+  bundleId: string;
+  environment: 'production' | 'sandbox';
+  keyId: string;
+  privateKey: KeyObject;
+  teamId: string;
+}
+
+interface ApnsVoipPushMessage {
+  payload: Record<string, unknown>;
+  token: string;
+}
+
 const EXPO_PUSH_SEND_URL = 'https://exp.host/--/api/v2/push/send';
 const EXPO_PUSH_TOKEN_PATTERN = /^(Expo|Exponent)PushToken\[[A-Za-z0-9_-]+\]$/;
 const EXPO_PUSH_BATCH_SIZE = 100;
 const FCM_PUSH_BATCH_SIZE = 500;
+const APNS_VOIP_BATCH_SIZE = 100;
 const MAX_PUSH_BADGE_COUNT = 9999;
 const CALLS_CHANNEL_ID = 'synzapp-calls';
 const MUTE_DURATION_MS: Record<Exclude<ChatNotificationMuteMode, 'always' | 'off'>, number> = {
@@ -168,6 +183,7 @@ export async function registerCurrentUserPushToken(
   const safeToken = input.token.trim();
 
   if (
+    (input.provider === 'apnsVoip' && !isValidApnsVoipToken(safeToken)) ||
     (input.provider === 'expo' && !EXPO_PUSH_TOKEN_PATTERN.test(safeToken)) ||
     (input.provider === 'fcm' && !isValidFcmToken(safeToken))
   ) {
@@ -504,7 +520,7 @@ export async function sendChatMessagePushNotification(
         },
         record
       });
-    } else {
+    } else if (record.provider === 'expo') {
       expoTargets.push({
         message: {
           badge: unreadBadgeCount,
@@ -634,6 +650,7 @@ async function sendCallInvitePushNotificationToRecipient(
 
   const expoTargets: Array<{ message: ExpoPushMessage; record: PushTokenRecord & { deviceId: string } }> = [];
   const fcmTargets: Array<{ message: Message; record: PushTokenRecord & { deviceId: string } }> = [];
+  const apnsTargets: Array<{ message: ApnsVoipPushMessage; record: PushTokenRecord & { deviceId: string } }> = [];
   const notificationTitle = input.callerName || input.title || 'Synzapp';
   const notificationBody = `Incoming ${input.mode === 'video' ? 'video' : 'voice'} call`;
   const baseData: Record<string, string> = {
@@ -663,6 +680,20 @@ async function sendCallInvitePushNotificationToRecipient(
         record
       });
     } else {
+      if (record.provider === 'apnsVoip') {
+        apnsTargets.push({
+          message: {
+            payload: {
+              ...baseData,
+              aps: {}
+            },
+            token: record.token || ''
+          },
+          record
+        });
+        continue;
+      }
+
       expoTargets.push({
         message: {
           body: notificationBody,
@@ -680,6 +711,15 @@ async function sendCallInvitePushNotificationToRecipient(
   }
 
   const ticketResults: PushDeliveryTicket[] = [];
+
+  for (let index = 0; index < apnsTargets.length; index += APNS_VOIP_BATCH_SIZE) {
+    const targetBatch = apnsTargets.slice(index, index + APNS_VOIP_BATCH_SIZE);
+    const tickets = await sendApnsVoipPushBatch(targetBatch.map((target) => target.message));
+    const annotatedTickets = annotatePushTickets(tickets, targetBatch.map((target) => target.record));
+
+    ticketResults.push(...annotatedTickets);
+    await deactivateInvalidPushTokens(input.tenantId, recipientUid, annotatedTickets);
+  }
 
   for (let index = 0; index < expoTargets.length; index += EXPO_PUSH_BATCH_SIZE) {
     const targetBatch = expoTargets.slice(index, index + EXPO_PUSH_BATCH_SIZE);
@@ -777,6 +817,7 @@ async function sendCallEndedPushNotificationToRecipient(
   };
   const expoTargets: Array<{ message: ExpoPushMessage; record: PushTokenRecord & { deviceId: string } }> = [];
   const fcmTargets: Array<{ message: Message; record: PushTokenRecord & { deviceId: string } }> = [];
+  const apnsTargets: Array<{ message: ApnsVoipPushMessage; record: PushTokenRecord & { deviceId: string } }> = [];
 
   for (const record of pushTokens) {
     if (record.provider === 'fcm') {
@@ -786,6 +827,17 @@ async function sendCallEndedPushNotificationToRecipient(
             priority: 'high'
           },
           data: baseData,
+          token: record.token || ''
+        },
+        record
+      });
+    } else if (record.provider === 'apnsVoip') {
+      apnsTargets.push({
+        message: {
+          payload: {
+            ...baseData,
+            aps: {}
+          },
           token: record.token || ''
         },
         record
@@ -803,6 +855,15 @@ async function sendCallEndedPushNotificationToRecipient(
   }
 
   const ticketResults: PushDeliveryTicket[] = [];
+
+  for (let index = 0; index < apnsTargets.length; index += APNS_VOIP_BATCH_SIZE) {
+    const targetBatch = apnsTargets.slice(index, index + APNS_VOIP_BATCH_SIZE);
+    const tickets = await sendApnsVoipPushBatch(targetBatch.map((target) => target.message));
+    const annotatedTickets = annotatePushTickets(tickets, targetBatch.map((target) => target.record));
+
+    ticketResults.push(...annotatedTickets);
+    await deactivateInvalidPushTokens(input.tenantId, recipientUid, annotatedTickets);
+  }
 
   for (let index = 0; index < expoTargets.length; index += EXPO_PUSH_BATCH_SIZE) {
     const targetBatch = expoTargets.slice(index, index + EXPO_PUSH_BATCH_SIZE);
@@ -1025,6 +1086,92 @@ async function sendFcmPushBatch(messages: Message[]): Promise<ExpoPushTicket[]> 
   ));
 }
 
+async function sendApnsVoipPushBatch(messages: ApnsVoipPushMessage[]): Promise<ExpoPushTicket[]> {
+  const config = getApnsVoipConfig();
+
+  if (!config) {
+    return messages.map(() => ({
+      details: {
+        error: 'MissingApnsVoipCredentials'
+      },
+      message: 'APNs VoIP credentials are not configured.',
+      status: 'error'
+    }));
+  }
+
+  const client = http2.connect(getApnsVoipOrigin(config.environment));
+
+  try {
+    return await Promise.all(messages.map((message) => sendApnsVoipPush(client, config, message)));
+  } finally {
+    client.close();
+  }
+}
+
+function sendApnsVoipPush(
+  client: http2.ClientHttp2Session,
+  config: ApnsVoipConfig,
+  message: ApnsVoipPushMessage
+): Promise<ExpoPushTicket> {
+  return new Promise((resolve) => {
+    const apnsId = createHash('sha256')
+      .update(`${message.token}:${Date.now()}:${Math.random()}`)
+      .digest('hex')
+      .slice(0, 32);
+    const request = client.request({
+      ':method': 'POST',
+      ':path': `/3/device/${message.token}`,
+      authorization: `bearer ${createApnsProviderToken(config)}`,
+      'apns-expiration': '0',
+      'apns-id': apnsId,
+      'apns-priority': '10',
+      'apns-push-type': 'voip',
+      'apns-topic': `${config.bundleId}.voip`,
+      'content-type': 'application/json'
+    });
+    let status = 0;
+    let responseBody = '';
+
+    request.setEncoding('utf8');
+    request.on('response', (headers) => {
+      const rawStatus = headers[':status'];
+      status = typeof rawStatus === 'number' ? rawStatus : Number(rawStatus || 0);
+    });
+    request.on('data', (chunk) => {
+      responseBody += String(chunk);
+    });
+    request.on('end', () => {
+      if (status >= 200 && status < 300) {
+        resolve({
+          id: apnsId,
+          status: 'ok'
+        });
+        return;
+      }
+
+      const reason = getApnsErrorReason(responseBody);
+
+      resolve({
+        details: {
+          error: getApnsTicketError(status, reason)
+        },
+        message: reason || `APNs VoIP push failed with ${status}.`,
+        status: 'error'
+      });
+    });
+    request.on('error', (error) => {
+      resolve({
+        details: {
+          error: 'ApnsVoipRequestFailed'
+        },
+        message: error.message,
+        status: 'error'
+      });
+    });
+    request.end(JSON.stringify(message.payload));
+  });
+}
+
 function annotatePushTickets(
   tickets: ExpoPushTicket[],
   records: Array<PushTokenRecord & { deviceId: string }>
@@ -1073,6 +1220,10 @@ function isDeliverablePushToken(record: PushTokenRecord): boolean {
     return false;
   }
 
+  if (record.provider === 'apnsVoip') {
+    return isValidApnsVoipToken(record.token);
+  }
+
   if (record.provider === 'expo') {
     return EXPO_PUSH_TOKEN_PATTERN.test(record.token);
   }
@@ -1080,8 +1231,103 @@ function isDeliverablePushToken(record: PushTokenRecord): boolean {
   return record.provider === 'fcm' && isValidFcmToken(record.token);
 }
 
+function isValidApnsVoipToken(token: string): boolean {
+  return token.length >= 32 && token.length <= 512 && /^[A-Fa-f0-9]+$/.test(token);
+}
+
 function isValidFcmToken(token: string): boolean {
   return token.length >= 20 && token.length <= 4096 && /^[A-Za-z0-9:_-]+$/.test(token);
+}
+
+function getApnsVoipConfig(): ApnsVoipConfig | null {
+  const teamId = getEnvValue('APNS_TEAM_ID');
+  const keyId = getEnvValue('APNS_KEY_ID');
+  const rawPrivateKey = getEnvValue('APNS_AUTH_KEY');
+  const bundleId = getEnvValue('APNS_BUNDLE_ID') || 'com.synzapp.mobile';
+
+  if (!teamId || !keyId || !rawPrivateKey || !bundleId) {
+    return null;
+  }
+
+  try {
+    return {
+      bundleId,
+      environment: getApnsVoipEnvironment(),
+      keyId,
+      privateKey: createPrivateKey(rawPrivateKey.replace(/\\n/g, '\n')),
+      teamId
+    };
+  } catch {
+    return null;
+  }
+}
+
+function getApnsVoipEnvironment(): 'production' | 'sandbox' {
+  const environment = getEnvValue('APNS_ENVIRONMENT')?.toLowerCase();
+
+  return environment === 'production' ? 'production' : 'sandbox';
+}
+
+function getApnsVoipOrigin(environment: 'production' | 'sandbox'): string {
+  return environment === 'production'
+    ? 'https://api.push.apple.com'
+    : 'https://api.sandbox.push.apple.com';
+}
+
+function createApnsProviderToken(config: ApnsVoipConfig): string {
+  const header = encodeBase64Url(JSON.stringify({
+    alg: 'ES256',
+    kid: config.keyId
+  }));
+  const claims = encodeBase64Url(JSON.stringify({
+    iat: Math.floor(Date.now() / 1000),
+    iss: config.teamId
+  }));
+  const signingInput = `${header}.${claims}`;
+  const signature = createSign('SHA256')
+    .update(signingInput)
+    .end()
+    .sign(config.privateKey)
+    .toString('base64url');
+
+  return `${signingInput}.${signature}`;
+}
+
+function encodeBase64Url(value: string): string {
+  return Buffer.from(value).toString('base64url');
+}
+
+function getApnsErrorReason(responseBody: string): string {
+  if (!responseBody) {
+    return '';
+  }
+
+  try {
+    const body = JSON.parse(responseBody) as { reason?: unknown };
+
+    return typeof body.reason === 'string' ? body.reason : '';
+  } catch {
+    return '';
+  }
+}
+
+function getApnsTicketError(status: number, reason: string): string {
+  if (
+    status === 410 ||
+    reason === 'BadDeviceToken' ||
+    reason === 'DeviceTokenNotForTopic' ||
+    reason === 'Unregistered'
+  ) {
+    return 'DeviceNotRegistered';
+  }
+
+  return reason || `ApnsVoip${status || 'Error'}`;
+}
+
+function getEnvValue(name: string): string | null {
+  const value = process.env[name];
+
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
 function getFcmTicketError(code: string | undefined): string {

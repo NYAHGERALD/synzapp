@@ -132,7 +132,7 @@ const synzappAiDeviceStatusBodySchema = z.object({
 const pushTokenBodySchema = z.object({
   deviceId: safeDeviceIdSchema,
   platform: devicePlatformSchema,
-  provider: z.enum(['expo', 'fcm']),
+  provider: z.enum(['apnsVoip', 'expo', 'fcm']),
   token: z.string().trim().min(20).max(4096)
 });
 
