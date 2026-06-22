@@ -491,6 +491,22 @@ type FeatherIconName = React.ComponentProps<typeof Feather>['name'];
 type NewGroupFlowOrigin = 'contactInfo' | 'groupSwitcher' | 'newChat';
 type CallQuickAction = 'call' | 'favorites' | 'keypad' | 'schedule';
 
+interface CurrentUserDialIdentity {
+  phoneFormatted: string;
+  profilePhotoUrl: string | null;
+  roleName: string;
+}
+
+type CallDialMatch =
+  | {
+      kind: 'contact';
+      contact: ChatContact;
+    }
+  | {
+      kind: 'self';
+      self: CurrentUserDialIdentity;
+    };
+
 interface InviteContactDraft {
   displayName?: string;
   phoneNumber: string;
@@ -940,6 +956,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const directChatContacts = chatContacts.filter((contact) => (contact.chatType || 'DIRECT') !== 'GROUP');
   const groupChatContacts = chatContacts.filter((contact) => contact.chatType === 'GROUP');
   const registeredCallContacts = directChatContacts.filter((contact) => contact.status !== 'INVITED' && contact.status !== 'DELETED');
+  const currentUserDialIdentity = getCurrentUserDialIdentity(userProfile, verifiedAdmin.phoneNumber);
   const activeVisibleConversationChatItems = chatItems.filter(shouldShowActiveChatInList);
   const spamConversationChatItems = chatItems.filter(shouldShowTrashChatInList);
   const activeConversationChatItems = activeVisibleConversationChatItems.filter((chat) => !chat.isArchived);
@@ -4339,9 +4356,14 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   }
 
   async function handleStartKeypadCall() {
-    const contact = findRegisteredCallContactForDialInput(registeredCallContacts, callKeypadDigits);
+    const dialMatch = findCallDialMatch(registeredCallContacts, callKeypadDigits, currentUserDialIdentity);
 
-    if (!contact) {
+    if (dialMatch?.kind === 'self') {
+      Alert.alert('Sorry!', 'You cannot call yourself. Dial another number.');
+      return;
+    }
+
+    if (!dialMatch) {
       Alert.alert(
         'Registered contact required',
         'Synzapp calls are limited to registered people in this company. Select a company contact or enter a matching company phone number.'
@@ -4350,7 +4372,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     }
 
     setIsCallKeypadOpen(false);
-    await handleStartCallFromContact(contact, 'voice');
+    await handleStartCallFromContact(dialMatch.contact, 'voice');
   }
 
   function handleToggleCallFavorite(contactId: string) {
@@ -9792,6 +9814,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
 
       <CallKeypadModal
         contacts={registeredCallContacts}
+        currentUser={currentUserDialIdentity}
         digits={callKeypadDigits}
         isOpen={isCallKeypadOpen}
         onAppendDigit={handleAppendCallKeypadDigit}
@@ -16565,6 +16588,7 @@ function CallContactRow({
 
 function CallKeypadModal({
   contacts,
+  currentUser,
   digits,
   isOpen,
   onAppendDigit,
@@ -16575,6 +16599,7 @@ function CallKeypadModal({
   profilePhotoHeaders
 }: {
   contacts: ChatContact[];
+  currentUser: CurrentUserDialIdentity;
   digits: string;
   isOpen: boolean;
   onAppendDigit: (digit: string) => void;
@@ -16587,7 +16612,16 @@ function CallKeypadModal({
   const appTheme = useAppTheme();
   const insets = useSafeAreaInsets();
   const modalTopPadding = getFullScreenModalTopPadding(insets.top);
-  const matchedContact = findRegisteredCallContactForDialInput(contacts, digits);
+  const dialMatch = findCallDialMatch(contacts, digits, currentUser);
+  const matchedName = dialMatch?.kind === 'self'
+    ? 'You'
+    : dialMatch?.contact.displayName || '';
+  const matchedMeta = dialMatch?.kind === 'self'
+    ? currentUser.phoneFormatted
+    : dialMatch?.contact ? getCallContactSubtitle(dialMatch.contact) : '';
+  const matchedProfilePhotoUrl = dialMatch?.kind === 'self'
+    ? currentUser.profilePhotoUrl
+    : dialMatch?.contact.profilePhotoUrl || null;
   const keypadRows = [
     ['1', '2', '3'],
     ['4', '5', '6'],
@@ -16641,7 +16675,7 @@ function CallKeypadModal({
             {digits ? formatCallKeypadDigits(digits) : ' '}
           </Text>
           <Text style={[styles.callKeypadHint, { color: appTheme.colors.muted }]}>Company contacts only</Text>
-          {matchedContact ? (
+          {dialMatch ? (
             <View style={[
               styles.callKeypadMatchedContact,
               {
@@ -16651,16 +16685,16 @@ function CallKeypadModal({
             ]}>
               <ProfileAvatar
                 headers={profilePhotoHeaders}
-                name={matchedContact.displayName}
+                name={matchedName}
                 size={48}
-                uri={matchedContact.profilePhotoUrl}
+                uri={matchedProfilePhotoUrl}
               />
               <View style={styles.callKeypadMatchedText}>
                 <Text numberOfLines={1} style={[styles.callKeypadMatchedName, { color: appTheme.colors.ink }]}>
-                  {matchedContact.displayName}
+                  {matchedName}
                 </Text>
                 <Text numberOfLines={1} style={[styles.callKeypadMatchedMeta, { color: appTheme.colors.muted }]}>
-                  {getCallContactSubtitle(matchedContact)}
+                  {matchedMeta}
                 </Text>
               </View>
             </View>
@@ -22227,6 +22261,36 @@ function filterCallContacts(contacts: ChatContact[], search: string): ChatContac
   ));
 }
 
+function findCallDialMatch(
+  contacts: ChatContact[],
+  dialInput: string,
+  currentUser: CurrentUserDialIdentity
+): CallDialMatch | null {
+  const normalizedDialInput = normalizeCallDialInput(dialInput);
+
+  if (!normalizedDialInput) {
+    return null;
+  }
+
+  const selfPhone = normalizeCallDialInput(currentUser.phoneFormatted);
+
+  if (selfPhone === normalizedDialInput) {
+    return {
+      kind: 'self',
+      self: currentUser
+    };
+  }
+
+  const contact = findRegisteredCallContactForDialInput(contacts, normalizedDialInput);
+
+  return contact
+    ? {
+        contact,
+        kind: 'contact'
+      }
+    : null;
+}
+
 function findRegisteredCallContactForDialInput(contacts: ChatContact[], dialInput: string): ChatContact | null {
   const normalizedDialInput = normalizeCallDialInput(dialInput);
 
@@ -22243,6 +22307,19 @@ function findRegisteredCallContactForDialInput(contacts: ChatContact[], dialInpu
       return candidate === normalizedDialInput || candidateDigits === dialDigits;
     })
   ) || null;
+}
+
+function getCurrentUserDialIdentity(
+  profile: CurrentUserProfile | null,
+  fallbackPhoneNumber: string
+): CurrentUserDialIdentity {
+  const formattedFallbackPhone = formatPhoneNumberForInviteDisplay(fallbackPhoneNumber);
+
+  return {
+    phoneFormatted: profile?.phoneFormatted || formattedFallbackPhone,
+    profilePhotoUrl: profile?.profilePhotoUrl || null,
+    roleName: profile?.roleName || 'Current user'
+  };
 }
 
 function getCallContactSubtitle(contact: ChatContact): string {
