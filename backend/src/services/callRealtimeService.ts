@@ -4,6 +4,10 @@ import { DecodedIdToken } from 'firebase-admin/auth';
 import { adminAuth } from '../config/firebaseAdmin.js';
 import { verifyActiveRegisteredDevice } from './deviceIdentityService.js';
 import { getGroupChatContact } from './groupChatService.js';
+import {
+  sendCallEndedPushNotifications,
+  sendCallInvitePushNotifications
+} from './notificationService.js';
 import { getDirectChatContact, getCurrentUserProfile } from './userProfileService.js';
 
 type CallChatType = 'DIRECT' | 'GROUP';
@@ -263,6 +267,21 @@ class CallRealtimeConnection {
         type: 'incomingCall'
       });
     });
+    void sendCallInvitePushNotifications({
+      callId: call.callId,
+      callerName: call.callerName,
+      callerUid: call.callerUid,
+      chatType: call.chatType,
+      contactId: call.contactId,
+      createdAt: call.createdAt,
+      mode: call.mode,
+      participantUids: call.participantUids,
+      recipientUids: callContext.targetUids,
+      tenantId: call.tenantId,
+      title: call.title
+    }).catch((error) => {
+      console.warn('Unable to send Synzapp call invite push notifications', error);
+    });
   }
 
   private async buildDirectCallContext(contactId: string): Promise<{ targetUids: string[]; title: string }> {
@@ -360,6 +379,15 @@ class CallRealtimeConnection {
           type: 'callEnded'
         });
       }
+    });
+    void sendCallEndedPushNotifications({
+      callId: call.callId,
+      endedByUid: this.uid,
+      reason,
+      recipientUids: call.participantUids,
+      tenantId: call.tenantId
+    }).catch((error) => {
+      console.warn('Unable to send Synzapp call ended push notifications', error);
     });
     activeCalls.delete(call.callId);
   }
