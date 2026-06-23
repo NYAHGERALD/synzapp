@@ -9,6 +9,10 @@ import {
   verifyFirebaseSession
 } from '../services/authSessionService.js';
 import { writeAuditEvent } from '../services/auditService.js';
+import {
+  getCurrentUserProfile,
+  getCurrentUserProfilePhoto
+} from '../services/userProfileService.js';
 import { maskPhoneNumber } from '../utils/phone.js';
 
 const authRouter = Router();
@@ -119,6 +123,71 @@ authRouter.post(
     }
   }
 );
+
+authRouter.get('/web-profile', verifyAppCheck, async (req, res, next) => {
+  try {
+    const authorizationHeader = req.header('Authorization') || '';
+    const idToken = authorizationHeader.startsWith('Bearer ')
+      ? authorizationHeader.slice('Bearer '.length)
+      : '';
+
+    if (!idToken) {
+      res.status(401).json({ error: 'Missing Firebase ID token.' });
+      return;
+    }
+
+    const decodedToken = await verifyFirebaseSession(idToken);
+    const profile = await getCurrentUserProfile(decodedToken);
+
+    await writeAuditEvent({
+      action: 'AUTH_WEB_PROFILE',
+      phoneMasked: profile.phoneMasked,
+      req,
+      status: 'SUCCESS',
+      tenantId: profile.tenantId,
+      uid: profile.uid
+    }).catch(() => undefined);
+
+    res.json({ profile });
+  } catch (error) {
+    next(error);
+  }
+});
+
+authRouter.get('/web-profile/photo', verifyAppCheck, async (req, res, next) => {
+  try {
+    const authorizationHeader = req.header('Authorization') || '';
+    const idToken = authorizationHeader.startsWith('Bearer ')
+      ? authorizationHeader.slice('Bearer '.length)
+      : '';
+
+    if (!idToken) {
+      res.status(401).json({ error: 'Missing Firebase ID token.' });
+      return;
+    }
+
+    const decodedToken = await verifyFirebaseSession(idToken);
+    const profilePhoto = await getCurrentUserProfilePhoto(decodedToken);
+    const etag = `"${profilePhoto.cacheKey}"`;
+
+    res.setHeader('Cache-Control', 'private, max-age=86400, stale-while-revalidate=604800');
+    res.setHeader('Content-Type', profilePhoto.contentType);
+    res.setHeader('ETag', etag);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+
+    if (req.header('If-None-Match') === etag) {
+      res.status(304).end();
+      return;
+    }
+
+    profilePhoto.file
+      .createReadStream()
+      .on('error', next)
+      .pipe(res);
+  } catch (error) {
+    next(error);
+  }
+});
 
 authRouter.post('/logout', verifyAppCheck, async (req, res, next) => {
   try {
