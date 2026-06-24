@@ -123,6 +123,7 @@ const chatBackupPolicyBodySchema = z.object({
 });
 
 const companyProfileBodySchema = z.object({
+  calendarYearStartDate: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   companyAddress: z.string().trim().min(5).max(240),
   companyName: z.string().trim().min(2).max(120)
 });
@@ -160,6 +161,7 @@ adminRouter.patch('/company-profile', verifyAppCheck, async (req, res, next) => 
     await writeAuditEvent({
       action: 'COMPANY_PROFILE_UPDATED',
       metadata: {
+        calendarYearStartDate: companyProfile.calendarYearStartDate,
         companyName: companyProfile.companyName
       },
       req,

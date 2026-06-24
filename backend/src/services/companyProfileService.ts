@@ -5,6 +5,7 @@ import { buildAuthSession } from './authSessionService.js';
 interface CompanyProfileInput {
   companyAddress: string;
   companyName: string;
+  calendarYearStartDate?: string;
 }
 
 interface CompanyLogoInput {
@@ -18,6 +19,13 @@ interface TenantAdminContext {
 }
 
 interface OrganizationRecord {
+  calendarYear?: {
+    startDate?: string;
+    startDay?: number;
+    startMonth?: number;
+    startYear?: number;
+    weekOneStartsOn?: string;
+  };
   companyAddress?: string;
   companyLogoContentType?: string | null;
   companyLogoStoragePath?: string | null;
@@ -40,6 +48,11 @@ interface FirebaseDateLike {
 }
 
 export interface CompanyProfileResponse {
+  calendarYearStartDate: string;
+  calendarYearStartDay: number;
+  calendarYearStartMonth: number;
+  calendarYearStartYear: number;
+  calendarYearWeekOneStartsOn: string;
   companyAddress: string;
   companyLogoCacheKey: string | null;
   companyLogoUrl: string | null;
@@ -85,6 +98,9 @@ export async function updateCompanyProfile(
   const context = await requireCompanyAdmin(decodedToken);
   const companyName = input.companyName.trim();
   const companyAddress = input.companyAddress.trim();
+  const calendarYearStart = input.calendarYearStartDate
+    ? parseCalendarYearStartDate(input.calendarYearStartDate)
+    : undefined;
 
   if (companyName.length < 2) {
     throw validationError('Enter a company name.');
@@ -140,13 +156,27 @@ export async function updateCompanyProfile(
       }
     }
 
-    transaction.set(organizationRef, {
+    const organizationUpdate: Record<string, unknown> = {
       companyAddress,
       companyName,
       companySlug: nextCompanySlug,
       updatedAt: fieldValue.serverTimestamp(),
       updatedBy: context.uid
-    }, { merge: true });
+    };
+
+    if (calendarYearStart) {
+      organizationUpdate.calendarYear = {
+        startDate: calendarYearStart.startDate,
+        startDay: calendarYearStart.startDay,
+        startMonth: calendarYearStart.startMonth,
+        startYear: calendarYearStart.startYear,
+        updatedAt: fieldValue.serverTimestamp(),
+        updatedByUid: context.uid,
+        weekOneStartsOn: 'CALENDAR_YEAR_START'
+      };
+    }
+
+    transaction.set(organizationRef, organizationUpdate, { merge: true });
   });
 
   const refreshedSnapshot = await organizationRef.get();
@@ -262,7 +292,14 @@ function mapCompanyProfile(
   record: OrganizationRecord,
   fallbackTenantId: string
 ): CompanyProfileResponse {
+  const calendarYear = mapCalendarYearSettings(record);
+
   return {
+    calendarYearStartDate: calendarYear.startDate,
+    calendarYearStartDay: calendarYear.startDay,
+    calendarYearStartMonth: calendarYear.startMonth,
+    calendarYearStartYear: calendarYear.startYear,
+    calendarYearWeekOneStartsOn: calendarYear.weekOneStartsOn,
     companyAddress: record.companyAddress || '',
     companyLogoCacheKey: record.companyLogoStoragePath
       ? buildCompanyLogoCacheKey(record.tenantId || fallbackTenantId, record.companyLogoVersion)
@@ -276,6 +313,42 @@ function mapCompanyProfile(
     status: record.status || 'ACTIVE',
     tenantId: record.tenantId || fallbackTenantId,
     updatedAt: dateLikeToIso(record.updatedAt)
+  };
+}
+
+function mapCalendarYearSettings(record: OrganizationRecord): {
+  startDate: string;
+  startDay: number;
+  startMonth: number;
+  startYear: number;
+  weekOneStartsOn: string;
+} {
+  const startMonth = Number.isInteger(record.calendarYear?.startMonth)
+    ? record.calendarYear?.startMonth || 1
+    : 1;
+  const startDay = Number.isInteger(record.calendarYear?.startDay)
+    ? record.calendarYear?.startDay || 1
+    : 1;
+  const currentYear = new Date().getUTCFullYear();
+  const startYear = Number.isInteger(record.calendarYear?.startYear)
+    ? record.calendarYear?.startYear || currentYear
+    : currentYear;
+  const normalizedStartMonth = startMonth >= 1 && startMonth <= 12 ? startMonth : 1;
+  const normalizedStartDay = startDay >= 1 && startDay <= 31 ? startDay : 1;
+  const normalizedStartYear = startYear >= 1900 && startYear <= 2100 ? startYear : currentYear;
+  const fallbackStartDate = `${String(normalizedStartYear).padStart(4, '0')}-${String(normalizedStartMonth).padStart(2, '0')}-${String(normalizedStartDay).padStart(2, '0')}`;
+  const parsedStoredStartDate = record.calendarYear?.startDate
+    ? tryParseCalendarYearStartDate(record.calendarYear.startDate)
+    : null;
+  const parsedFallbackStartDate = tryParseCalendarYearStartDate(fallbackStartDate) ||
+    tryParseCalendarYearStartDate(`${currentYear}-01-01`);
+
+  return {
+    startDate: parsedStoredStartDate?.startDate || parsedFallbackStartDate?.startDate || `${currentYear}-01-01`,
+    startDay: parsedStoredStartDate?.startDay || parsedFallbackStartDate?.startDay || 1,
+    startMonth: parsedStoredStartDate?.startMonth || parsedFallbackStartDate?.startMonth || 1,
+    startYear: parsedStoredStartDate?.startYear || parsedFallbackStartDate?.startYear || currentYear,
+    weekOneStartsOn: record.calendarYear?.weekOneStartsOn || 'CALENDAR_YEAR_START'
   };
 }
 
@@ -365,6 +438,56 @@ function slugifyCompanyName(name: string): string {
     .slice(0, 80);
 
   return slug || `company-${Date.now()}`;
+}
+
+function parseCalendarYearStartDate(value: string): {
+  startDate: string;
+  startDay: number;
+  startMonth: number;
+  startYear: number;
+} {
+  const parsed = tryParseCalendarYearStartDate(value);
+
+  if (!parsed) {
+    throw validationError('Select a valid company calendar year start date.');
+  }
+
+  return parsed;
+}
+
+function tryParseCalendarYearStartDate(value: string): {
+  startDate: string;
+  startDay: number;
+  startMonth: number;
+  startYear: number;
+} | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+
+  if (!match) {
+    return null;
+  }
+
+  const startYear = Number(match[1]);
+  const startMonth = Number(match[2]);
+  const startDay = Number(match[3]);
+  const date = new Date(Date.UTC(startYear, startMonth - 1, startDay));
+
+  if (
+    date.getUTCFullYear() !== startYear ||
+    date.getUTCMonth() !== startMonth - 1 ||
+    date.getUTCDate() !== startDay ||
+    startYear < 1900 ||
+    startYear > 2100
+  ) {
+    return null;
+  }
+
+  return {
+    startDate: `${String(startYear).padStart(4, '0')}-${String(startMonth).padStart(2, '0')}-${String(startDay).padStart(2, '0')}`,
+    startDay,
+    startMonth,
+    startYear
+  };
 }
 
 function dateLikeToIso(dateLike?: FirebaseDateLike): string | null {

@@ -13,6 +13,7 @@ export interface OrgAdminDraft {
   companyAddress: string;
   adminFirstName: string;
   adminLastName: string;
+  calendarYearStartDate: string | null;
 }
 
 export interface EmployeeDraft {

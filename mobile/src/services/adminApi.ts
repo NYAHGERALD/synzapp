@@ -87,6 +87,11 @@ export interface TenantDevice {
 }
 
 export interface CompanyProfile {
+  calendarYearStartDate: string;
+  calendarYearStartDay: number;
+  calendarYearStartMonth: number;
+  calendarYearStartYear: number;
+  calendarYearWeekOneStartsOn: string;
   companyAddress: string;
   companyLogoCacheKey: string | null;
   companyLogoUrl: string | null;
@@ -254,12 +259,14 @@ export async function getCompanyProfile(idToken: string): Promise<CompanyProfile
 }
 
 export async function updateCompanyProfile(input: {
+  calendarYearStartDate: string;
   companyAddress: string;
   companyName: string;
   idToken: string;
 }): Promise<CompanyProfile> {
   const response = await adminFetch('/api/admin/company-profile', input.idToken, {
     body: JSON.stringify({
+      calendarYearStartDate: input.calendarYearStartDate,
       companyAddress: input.companyAddress,
       companyName: input.companyName
     }),
@@ -502,6 +509,11 @@ function normalizeApprovedEmployee(employee: ApprovedEmployee): ApprovedEmployee
 function normalizeCompanyProfile(profile: CompanyProfile): CompanyProfile {
   return {
     ...profile,
+    calendarYearStartDate: profile.calendarYearStartDate || '',
+    calendarYearStartDay: Number.isInteger(profile.calendarYearStartDay) ? profile.calendarYearStartDay : 1,
+    calendarYearStartMonth: Number.isInteger(profile.calendarYearStartMonth) ? profile.calendarYearStartMonth : 1,
+    calendarYearStartYear: Number.isInteger(profile.calendarYearStartYear) ? profile.calendarYearStartYear : new Date().getFullYear(),
+    calendarYearWeekOneStartsOn: profile.calendarYearWeekOneStartsOn || 'CALENDAR_YEAR_START',
     companyLogoUrl: normalizeSynzappApiUrl(profile.companyLogoUrl)
   };
 }

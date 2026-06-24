@@ -258,6 +258,14 @@ import {
   getThemePreferenceLabel,
   useAppTheme
 } from '../theme/AppThemeProvider';
+import {
+  calendarYearMaximumDate,
+  calendarYearMinimumDate,
+  formatCalendarYearStartDateInput,
+  getCalendarYearStartDateLabel,
+  isValidCalendarYearStartDate,
+  parseCalendarYearStartDate
+} from '../utils/calendarYear';
 
 interface AdminChatScreenProps {
   onOrganizationDeleted: () => void;
@@ -897,6 +905,9 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const [newGroupDepartment, setNewGroupDepartment] = useState<TenantDepartment | null>(null);
   const [companyAddressDraft, setCompanyAddressDraft] = useState('');
   const [companyNameDraft, setCompanyNameDraft] = useState('');
+  const [companyCalendarYearStartDateDraft, setCompanyCalendarYearStartDateDraft] = useState<string | null>(null);
+  const [companyCalendarYearPickerDate, setCompanyCalendarYearPickerDate] = useState<Date>(new Date());
+  const [isCompanyCalendarYearPickerOpen, setIsCompanyCalendarYearPickerOpen] = useState(false);
   const [organizationDeletionModal, setOrganizationDeletionModal] = useState<OrganizationDeletionModalState | null>(null);
   const [organizationDeletionConfirmation, setOrganizationDeletionConfirmation] = useState<FirebaseAuthTypes.ConfirmationResult | null>(null);
   const [isRequestingOrganizationDeletion, setIsRequestingOrganizationDeletion] = useState(false);
@@ -2230,6 +2241,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       setCompanyProfile(profile);
       setCompanyNameDraft(profile.companyName);
       setCompanyAddressDraft(profile.companyAddress);
+      setCompanyCalendarYearStartDateDraft(profile.calendarYearStartDate);
     } catch (nextError) {
       if (showError) {
         setError(getErrorMessage(nextError, 'Unable to load company profile.'));
@@ -7573,12 +7585,18 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       return;
     }
 
+    if (!isValidCalendarYearStartDate(companyCalendarYearStartDateDraft)) {
+      setError('Select the date your company calendar year starts.');
+      return;
+    }
+
     setError(null);
     setIsSavingCompanyProfile(true);
 
     try {
       const idToken = await getIdToken();
       const profile = await updateCompanyProfile({
+        calendarYearStartDate: companyCalendarYearStartDateDraft,
         companyAddress,
         companyName,
         idToken
@@ -7587,12 +7605,45 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       setCompanyProfile(profile);
       setCompanyNameDraft(profile.companyName);
       setCompanyAddressDraft(profile.companyAddress);
+      setCompanyCalendarYearStartDateDraft(profile.calendarYearStartDate);
       Alert.alert('Company profile updated', 'Your company profile has been saved.');
     } catch (nextError) {
       setError(getErrorMessage(nextError, 'Unable to update company profile.'));
     } finally {
       setIsSavingCompanyProfile(false);
     }
+  }
+
+  function handleSelectCompanyCalendarYearStartDate() {
+    if (!canManageCompanyProfile) {
+      return;
+    }
+
+    const selectedDate = parseCalendarYearStartDate(companyCalendarYearStartDateDraft) || new Date();
+    setCompanyCalendarYearPickerDate(selectedDate);
+
+    if (Platform.OS === 'android') {
+      DateTimePickerAndroid.open({
+        display: 'calendar',
+        maximumDate: calendarYearMaximumDate,
+        minimumDate: calendarYearMinimumDate,
+        mode: 'date',
+        onChange: (event, nextDate) => {
+          if (event.type === 'set' && nextDate) {
+            setCompanyCalendarYearStartDateDraft(formatCalendarYearStartDateInput(nextDate));
+          }
+        },
+        value: selectedDate
+      });
+      return;
+    }
+
+    setIsCompanyCalendarYearPickerOpen(true);
+  }
+
+  function handleConfirmCompanyCalendarYearStartDate() {
+    setCompanyCalendarYearStartDateDraft(formatCalendarYearStartDateInput(companyCalendarYearPickerDate));
+    setIsCompanyCalendarYearPickerOpen(false);
   }
 
   function handleOpenDeleteOrganization() {
@@ -9307,11 +9358,13 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           {activeTab === 'Settings' && settingsScreen === 'company-profile' ? (
             <CompanyProfileSettings
               companyAddress={companyAddressDraft}
+              calendarYearStartDate={companyCalendarYearStartDateDraft}
               companyName={companyNameDraft}
               isLoading={isLoadingCompanyProfile}
               isSavingLogo={isSavingCompanyLogo}
               isSaving={isSavingCompanyProfile}
               onAddressChange={setCompanyAddressDraft}
+              onCalendarYearStartDatePress={handleSelectCompanyCalendarYearStartDate}
               onChangeLogo={() => {
                 void handleUpdateCompanyLogo();
               }}
@@ -9856,6 +9909,13 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       />
 
       <NativeOptionPickerModal picker={nativeOptionPicker} />
+      <CompanyCalendarYearDatePickerModal
+        date={companyCalendarYearPickerDate}
+        isOpen={isCompanyCalendarYearPickerOpen}
+        onCancel={() => setIsCompanyCalendarYearPickerOpen(false)}
+        onChange={setCompanyCalendarYearPickerDate}
+        onConfirm={handleConfirmCompanyCalendarYearStartDate}
+      />
 
       <AddRecordModal
         description={newRecordDescription}
@@ -21637,11 +21697,13 @@ function GroupsTab({
 
 function CompanyProfileSettings({
   companyAddress,
+  calendarYearStartDate,
   companyName,
   isLoading,
   isSavingLogo,
   isSaving,
   onAddressChange,
+  onCalendarYearStartDatePress,
   onChangeLogo,
   onNameChange,
   onSave,
@@ -21649,11 +21711,13 @@ function CompanyProfileSettings({
   profilePhotoHeaders
 }: {
   companyAddress: string;
+  calendarYearStartDate: string | null;
   companyName: string;
   isLoading: boolean;
   isSavingLogo: boolean;
   isSaving: boolean;
   onAddressChange: (value: string) => void;
+  onCalendarYearStartDatePress: () => void;
   onChangeLogo: () => void;
   onNameChange: (value: string) => void;
   onSave: () => void;
@@ -21679,6 +21743,7 @@ function CompanyProfileSettings({
 
   const canSave = companyName.trim().length >= 2 &&
     companyAddress.trim().length >= 5 &&
+    isValidCalendarYearStartDate(calendarYearStartDate) &&
     !isSaving;
   const canLoadLogo = Boolean(companyLogoUrl && !didLogoFail);
   const companyLogoSource = canLoadLogo && companyLogoUrl
@@ -21738,6 +21803,29 @@ function CompanyProfileSettings({
       />
       <Pressable
         accessibilityRole="button"
+        onPress={onCalendarYearStartDatePress}
+        style={({ pressed }) => [
+          styles.companyCalendarYearRow,
+          {
+            backgroundColor: appTheme.colors.screen,
+            borderBottomColor: appTheme.colors.divider
+          },
+          pressed && styles.pressed
+        ]}
+      >
+        <View style={styles.chatText}>
+          <Text style={[styles.chatTitle, { color: appTheme.colors.ink }]}>Calendar year</Text>
+          <Text style={[styles.chatPreview, { color: appTheme.colors.muted }]}>
+            LSW Week 1 starts on this date for your company.
+          </Text>
+        </View>
+        <Text style={[styles.companyCalendarYearValue, { color: appTheme.colors.primary }]}>
+          {getCalendarYearStartDateLabel(calendarYearStartDate)}
+        </Text>
+        <Feather name="chevron-right" color={appTheme.colors.muted} size={18} />
+      </Pressable>
+      <Pressable
+        accessibilityRole="button"
         disabled={!canSave}
         onPress={onSave}
         style={({ pressed }) => [
@@ -21753,10 +21841,67 @@ function CompanyProfileSettings({
         <View style={[styles.companyProfileMeta, { borderTopColor: appTheme.colors.divider }]}>
           <ProfileDetailRow label="Security" value={formatSettingValue(profile.securityMode)} />
           <ProfileDetailRow label="Retention" value={formatSettingValue(profile.retentionPolicy)} />
+          <ProfileDetailRow label="Calendar year" value={getCalendarYearStartDateLabel(profile.calendarYearStartDate)} />
           <ProfileDetailRow label="Status" value={formatEmployeeStatus(profile.status)} />
         </View>
       ) : null}
     </View>
+  );
+}
+
+function CompanyCalendarYearDatePickerModal({
+  date,
+  isOpen,
+  onCancel,
+  onChange,
+  onConfirm
+}: {
+  date: Date;
+  isOpen: boolean;
+  onCancel: () => void;
+  onChange: (date: Date) => void;
+  onConfirm: () => void;
+}) {
+  const appTheme = useAppTheme();
+
+  if (Platform.OS !== 'ios' || !isOpen) {
+    return null;
+  }
+
+  return (
+    <Modal animationType="slide" transparent visible onRequestClose={onCancel}>
+      <View style={styles.companyCalendarPickerOverlay}>
+        <Pressable
+          accessibilityLabel="Close calendar picker"
+          accessibilityRole="button"
+          onPress={onCancel}
+          style={styles.companyCalendarPickerBackdrop}
+        />
+        <View style={[styles.companyCalendarPickerSheet, { backgroundColor: appTheme.colors.background }]}>
+          <View style={styles.companyCalendarPickerHeader}>
+            <Pressable accessibilityRole="button" onPress={onCancel} style={styles.companyCalendarPickerAction}>
+              <Text style={[styles.companyCalendarPickerCancelText, { color: appTheme.colors.mutedStrong }]}>Cancel</Text>
+            </Pressable>
+            <Text style={[styles.companyCalendarPickerTitle, { color: appTheme.colors.ink }]}>Calendar year starts</Text>
+            <Pressable accessibilityRole="button" onPress={onConfirm} style={styles.companyCalendarPickerAction}>
+              <Text style={[styles.companyCalendarPickerDoneText, { color: appTheme.colors.primary }]}>Done</Text>
+            </Pressable>
+          </View>
+          <DateTimePicker
+            display="inline"
+            maximumDate={calendarYearMaximumDate}
+            minimumDate={calendarYearMinimumDate}
+            mode="date"
+            onChange={(_, selectedDate) => {
+              if (selectedDate) {
+                onChange(selectedDate);
+              }
+            }}
+            value={date}
+          />
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -32702,6 +32847,64 @@ const styles = StyleSheet.create({
   companyLogoImage: {
     height: '100%',
     width: '100%'
+  },
+  companyCalendarYearRow: {
+    alignItems: 'center',
+    borderBottomColor: 'rgba(15, 118, 110, 0.22)',
+    borderBottomWidth: 1,
+    flexDirection: 'row',
+    gap: 10,
+    minHeight: 64,
+    paddingBottom: 12,
+    paddingTop: 4
+  },
+  companyCalendarYearValue: {
+    fontSize: 15,
+    fontWeight: '400',
+    lineHeight: 19,
+    maxWidth: 150,
+    textAlign: 'right'
+  },
+  companyCalendarPickerOverlay: {
+    flex: 1,
+    justifyContent: 'flex-end'
+  },
+  companyCalendarPickerBackdrop: {
+    backgroundColor: 'rgba(15, 23, 42, 0.32)',
+    ...StyleSheet.absoluteFillObject
+  },
+  companyCalendarPickerSheet: {
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingBottom: 18,
+    paddingHorizontal: 12,
+    paddingTop: 8
+  },
+  companyCalendarPickerHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    minHeight: 50
+  },
+  companyCalendarPickerAction: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 44,
+    minWidth: 72
+  },
+  companyCalendarPickerTitle: {
+    flex: 1,
+    fontSize: 17,
+    fontWeight: '500',
+    lineHeight: 22,
+    textAlign: 'center'
+  },
+  companyCalendarPickerCancelText: {
+    fontSize: 16,
+    fontWeight: '400'
+  },
+  companyCalendarPickerDoneText: {
+    fontSize: 16,
+    fontWeight: '500'
   },
   companyProfileMeta: {
     borderTopColor: '#E5E7EB',

@@ -3,12 +3,19 @@ import {
   ActivityIndicator,
   Alert,
   Image,
+  Modal,
+  Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View
 } from 'react-native';
+import DateTimePicker, {
+  DateTimePickerAndroid,
+  type DateTimePickerEvent
+} from '@react-native-community/datetimepicker';
 import { DismissibleError } from '../components/DismissibleError';
 import { getUserAuthMessage } from '../services/authErrors';
 import { createOrgAdminProfile } from '../services/profileApi';
@@ -17,6 +24,15 @@ import { signOutOrgAdmin } from '../services/phoneAuth';
 import { BackendAuthSession, OrgAdminDraft, VerifiedOrgAdmin } from '../types/auth';
 import { useAppTheme } from '../theme/AppThemeProvider';
 import type { AppColors } from '../theme/colors';
+import {
+  calendarYearMaximumDate,
+  calendarYearMinimumDate,
+  formatCalendarYearStartDateInput,
+  getCalendarYearStartDateLabel,
+  getDefaultCalendarYearStartDate,
+  isValidCalendarYearStartDate,
+  parseCalendarYearStartDate
+} from '../utils/calendarYear';
 
 interface OrgAdminOnboardingScreenProps {
   verifiedAdmin: VerifiedOrgAdmin;
@@ -29,7 +45,8 @@ const initialDraft: OrgAdminDraft = {
   companyName: '',
   companyAddress: '',
   adminFirstName: '',
-  adminLastName: ''
+  adminLastName: '',
+  calendarYearStartDate: null
 };
 
 export function OrgAdminOnboardingScreen({
@@ -45,6 +62,10 @@ export function OrgAdminOnboardingScreen({
   const [profilePhotoDataUrl, setProfilePhotoDataUrl] = useState<string | undefined>();
   const [isCreatingProfile, setIsCreatingProfile] = useState(false);
   const [isProfileCreated, setIsProfileCreated] = useState(false);
+  const [isCalendarPickerOpen, setIsCalendarPickerOpen] = useState(false);
+  const [calendarPickerDate, setCalendarPickerDate] = useState<Date>(() =>
+    parseCalendarYearStartDate(initialDraft.calendarYearStartDate) || new Date()
+  );
   const [error, setError] = useState<string | null>(null);
   const maskedPhoneNumber = verifiedAdmin.session.user.phoneMasked || maskPhoneNumber(verifiedAdmin.phoneNumber);
 
@@ -52,7 +73,8 @@ export function OrgAdminOnboardingScreen({
     draft.companyName.trim().length > 1 &&
     draft.companyAddress.trim().length > 4 &&
     draft.adminFirstName.trim().length > 1 &&
-    draft.adminLastName.trim().length > 1;
+    draft.adminLastName.trim().length > 1 &&
+    isValidCalendarYearStartDate(draft.calendarYearStartDate);
 
   async function handleSignOut() {
     await signOutOrgAdmin();
@@ -114,9 +136,55 @@ export function OrgAdminOnboardingScreen({
     }
   }
 
+  function handleOpenCalendarPicker() {
+    setError(null);
+    const selectedDate = parseCalendarYearStartDate(draft.calendarYearStartDate) ||
+      parseCalendarYearStartDate(getDefaultCalendarYearStartDate()) ||
+      new Date();
+
+    setCalendarPickerDate(selectedDate);
+
+    if (Platform.OS === 'android') {
+      DateTimePickerAndroid.open({
+        display: 'calendar',
+        maximumDate: calendarYearMaximumDate,
+        minimumDate: calendarYearMinimumDate,
+        mode: 'date',
+        onChange: handleAndroidCalendarDateChange,
+        value: selectedDate
+      });
+      return;
+    }
+
+    setIsCalendarPickerOpen(true);
+  }
+
+  function handleAndroidCalendarDateChange(event: DateTimePickerEvent, selectedDate?: Date) {
+    if (event.type !== 'set' || !selectedDate) {
+      return;
+    }
+
+    setDraft((currentDraft) => ({
+      ...currentDraft,
+      calendarYearStartDate: formatCalendarYearStartDateInput(selectedDate)
+    }));
+  }
+
+  function handleConfirmIosCalendarDate() {
+    setDraft((currentDraft) => ({
+      ...currentDraft,
+      calendarYearStartDate: formatCalendarYearStartDateInput(calendarPickerDate)
+    }));
+    setIsCalendarPickerOpen(false);
+  }
+
   return (
     <View style={styles.screen}>
-      <View style={styles.content}>
+      <ScrollView
+        contentContainerStyle={styles.content}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
         <View style={styles.brand}>
           <Image
             source={require('../../assets/Synzapp-Splash-screen.png')}
@@ -180,6 +248,25 @@ export function OrgAdminOnboardingScreen({
               />
             </View>
           </View>
+          <View style={styles.calendarYearSection}>
+            <Text style={styles.calendarYearTitle}>Calendar year starts</Text>
+            <Text style={styles.calendarYearSubtitle}>
+              LSW week numbers use this tenant setting. Week 1 starts on this date for your company.
+            </Text>
+            <Pressable
+              accessibilityRole="button"
+              onPress={handleOpenCalendarPicker}
+              style={({ pressed }) => [
+                styles.calendarDateButton,
+                pressed && styles.pressed
+              ]}
+            >
+              <Text style={styles.calendarDateButtonText}>
+                {getCalendarYearStartDateLabel(draft.calendarYearStartDate)}
+              </Text>
+              <Text style={styles.calendarDateButtonHint}>Tap to choose date</Text>
+            </Pressable>
+          </View>
         </View>
 
         {error ? (
@@ -215,7 +302,56 @@ export function OrgAdminOnboardingScreen({
             <Text style={styles.secondaryButtonText}>Sign out</Text>
           </Pressable>
         </View>
-      </View>
+      </ScrollView>
+
+      {Platform.OS === 'ios' ? (
+        <Modal
+          animationType="slide"
+          onRequestClose={() => setIsCalendarPickerOpen(false)}
+          transparent
+          visible={isCalendarPickerOpen}
+        >
+          <View style={styles.calendarModalOverlay}>
+            <Pressable
+              accessibilityLabel="Close calendar picker"
+              accessibilityRole="button"
+              onPress={() => setIsCalendarPickerOpen(false)}
+              style={styles.calendarModalBackdrop}
+            />
+            <View style={styles.calendarModalSheet}>
+              <View style={styles.calendarModalHeader}>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => setIsCalendarPickerOpen(false)}
+                  style={styles.calendarModalAction}
+                >
+                  <Text style={styles.calendarModalCancelText}>Cancel</Text>
+                </Pressable>
+                <Text style={styles.calendarModalTitle}>Calendar year starts</Text>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={handleConfirmIosCalendarDate}
+                  style={styles.calendarModalAction}
+                >
+                  <Text style={styles.calendarModalDoneText}>Done</Text>
+                </Pressable>
+              </View>
+              <DateTimePicker
+                display="inline"
+                maximumDate={calendarYearMaximumDate}
+                minimumDate={calendarYearMinimumDate}
+                mode="date"
+                onChange={(_, selectedDate) => {
+                  if (selectedDate) {
+                    setCalendarPickerDate(selectedDate);
+                  }
+                }}
+                value={calendarPickerDate}
+              />
+            </View>
+          </View>
+        </Modal>
+      ) : null}
     </View>
   );
 }
@@ -273,7 +409,7 @@ function createStyles(colors: AppColors) {
     overflow: 'hidden'
   },
   content: {
-    flex: 1,
+    flexGrow: 1,
     gap: 22,
     justifyContent: 'center',
     paddingBottom: 34,
@@ -308,6 +444,95 @@ function createStyles(colors: AppColors) {
   form: {
     gap: 14,
     marginTop: 6
+  },
+  calendarYearSection: {
+    borderBottomColor: colors.border,
+    borderBottomWidth: 1,
+    gap: 10,
+    paddingBottom: 12,
+    paddingTop: 2
+  },
+  calendarYearTitle: {
+    color: colors.ink,
+    fontSize: 17,
+    fontWeight: '400',
+    lineHeight: 22
+  },
+  calendarYearSubtitle: {
+    color: colors.muted,
+    fontSize: 13,
+    fontWeight: '400',
+    lineHeight: 18
+  },
+  calendarDateButton: {
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    justifyContent: 'center',
+    minHeight: 56,
+    minWidth: 190,
+    paddingHorizontal: 16
+  },
+  calendarDateButtonText: {
+    color: colors.ink,
+    fontSize: 17,
+    fontWeight: '400',
+    lineHeight: 22
+  },
+  calendarDateButtonHint: {
+    color: colors.muted,
+    fontSize: 12,
+    fontWeight: '400',
+    lineHeight: 16,
+    marginTop: 2
+  },
+  calendarModalOverlay: {
+    flex: 1,
+    justifyContent: 'flex-end'
+  },
+  calendarModalBackdrop: {
+    backgroundColor: 'rgba(15, 23, 42, 0.28)',
+    ...StyleSheet.absoluteFillObject
+  },
+  calendarModalSheet: {
+    backgroundColor: colors.background,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingBottom: 18,
+    paddingHorizontal: 12,
+    paddingTop: 8
+  },
+  calendarModalHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    minHeight: 50
+  },
+  calendarModalAction: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 44,
+    minWidth: 72
+  },
+  calendarModalTitle: {
+    color: colors.ink,
+    flex: 1,
+    fontSize: 17,
+    fontWeight: '500',
+    lineHeight: 22,
+    textAlign: 'center'
+  },
+  calendarModalCancelText: {
+    color: colors.mutedStrong,
+    fontSize: 16,
+    fontWeight: '400'
+  },
+  calendarModalDoneText: {
+    color: colors.primary,
+    fontSize: 16,
+    fontWeight: '500'
   },
   photoPicker: {
     alignItems: 'center',

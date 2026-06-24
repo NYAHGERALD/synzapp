@@ -22,6 +22,7 @@ interface CreateOrgAdminProfileInput {
   companyAddress: string;
   adminFirstName: string;
   adminLastName: string;
+  calendarYearStartDate: string;
   profilePhotoDataUrl?: string;
 }
 
@@ -52,6 +53,7 @@ export async function createOrgAdminProfile(
   const displayName = `${input.adminFirstName.trim()} ${input.adminLastName.trim()}`.trim();
   const companySlug = slugifyCompanyName(input.companyName);
   const claimsVersion = Date.now();
+  const calendarYearStart = parseCalendarYearStartDate(input.calendarYearStartDate);
 
   const existingIdentity = await firestore.collection('identityDirectory').doc(uid).get();
   if (existingIdentity.exists && existingIdentity.data()?.tenantId) {
@@ -110,6 +112,15 @@ export async function createOrgAdminProfile(
         selfRestoreEnabled: false,
         updatedAt: fieldValue.serverTimestamp(),
         updatedByUid: uid
+      },
+      calendarYear: {
+        startDate: calendarYearStart.startDate,
+        startDay: calendarYearStart.startDay,
+        startMonth: calendarYearStart.startMonth,
+        startYear: calendarYearStart.startYear,
+        updatedAt: fieldValue.serverTimestamp(),
+        updatedByUid: uid,
+        weekOneStartsOn: 'CALENDAR_YEAR_START'
       },
       companyLogoUrl: null,
       companyName: input.companyName.trim(),
@@ -299,6 +310,41 @@ function slugifyCompanyName(companyName: string): string {
     .slice(0, 80);
 
   return slug || `company-${randomUUID().slice(0, 8)}`;
+}
+
+function parseCalendarYearStartDate(value: string): {
+  startDate: string;
+  startDay: number;
+  startMonth: number;
+  startYear: number;
+} {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+
+  if (!match) {
+    throw validationError('Select the date your company calendar year starts.');
+  }
+
+  const startYear = Number(match[1]);
+  const startMonth = Number(match[2]);
+  const startDay = Number(match[3]);
+  const date = new Date(Date.UTC(startYear, startMonth - 1, startDay));
+
+  if (
+    date.getUTCFullYear() !== startYear ||
+    date.getUTCMonth() !== startMonth - 1 ||
+    date.getUTCDate() !== startDay ||
+    startYear < 1900 ||
+    startYear > 2100
+  ) {
+    throw validationError('Select a valid company calendar year start date.');
+  }
+
+  return {
+    startDate: `${String(startYear).padStart(4, '0')}-${String(startMonth).padStart(2, '0')}-${String(startDay).padStart(2, '0')}`,
+    startDay,
+    startMonth,
+    startYear
+  };
 }
 
 function validationError(message: string): Error {

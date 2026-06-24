@@ -89,6 +89,7 @@ const profileRouter = Router();
 const orgAdminProfileBodySchema = z.object({
   adminFirstName: z.string().trim().min(2).max(80),
   adminLastName: z.string().trim().min(2).max(80),
+  calendarYearStartDate: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/),
   companyAddress: z.string().trim().min(5).max(240),
   companyName: z.string().trim().min(2).max(120),
   profilePhotoDataUrl: z.string().max(1_500_000).optional()
@@ -1679,6 +1680,7 @@ profileRouter.post('/org-admin', verifyAppCheck, async (req, res, next) => {
     await writeAuditEvent({
       action: 'TENANT_CREATED',
       metadata: {
+        calendarYearStartDate: body.calendarYearStartDate,
         companyName: body.companyName,
         createdByRole: 'ORG_ADMIN',
         warnings: result.warnings

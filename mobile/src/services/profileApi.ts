@@ -84,10 +84,15 @@ interface CreateEmployeeProfileResponse {
 export async function createOrgAdminProfile(
   input: CreateOrgAdminProfileInput
 ): Promise<CreateOrgAdminProfileResponse> {
+  if (!input.calendarYearStartDate) {
+    throw new Error('Select the date your company calendar year starts.');
+  }
+
   const response = await fetch(`${getSynzappApiBaseUrl()}/api/profile/org-admin`, {
     body: JSON.stringify({
       adminFirstName: input.adminFirstName,
       adminLastName: input.adminLastName,
+      calendarYearStartDate: input.calendarYearStartDate,
       companyAddress: input.companyAddress,
       companyName: input.companyName,
       profilePhotoDataUrl: input.profilePhotoDataUrl
