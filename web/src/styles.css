@@ -494,12 +494,33 @@ h1 {
   grid-template-columns: auto 1fr auto;
   left: 0;
   min-height: 52px;
+  overflow: visible;
   padding: 0 clamp(28px, 4.4vw, 76px);
   position: fixed;
   right: 0;
   top: 0;
   width: 100vw;
   z-index: 10;
+}
+
+.dashboard-brand-text {
+  align-items: baseline;
+  display: flex;
+  gap: 12px;
+  min-width: 0;
+}
+
+.dashboard-company-name {
+  border-left: 1px solid rgba(15, 23, 42, 0.2);
+  color: #344157;
+  font-size: 14px;
+  font-weight: 680;
+  line-height: 1;
+  max-width: min(28vw, 360px);
+  overflow: hidden;
+  padding-left: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dashboard-nav {
@@ -537,6 +558,66 @@ h1 {
 
 .dashboard-signout {
   cursor: pointer;
+}
+
+.dashboard-account {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.dashboard-user-meta {
+  align-items: flex-end;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.dashboard-user-meta span {
+  color: #1b3652;
+  display: block;
+  font-size: 12px;
+  font-weight: 760;
+  line-height: 1.12;
+  max-width: 210px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboard-user-meta span + span {
+  color: #65758b;
+  font-size: 11px;
+  font-weight: 680;
+}
+
+.dashboard-menu-button {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.86);
+  border: 1px solid rgba(174, 189, 207, 0.72);
+  border-radius: 999px;
+  color: #1b3652;
+  cursor: pointer;
+  display: none;
+  height: 38px;
+  justify-content: center;
+  padding: 0;
+  transition: transform 180ms ease, box-shadow 180ms ease, background 180ms ease, color 180ms ease;
+  width: 38px;
+}
+
+.dashboard-menu-button:hover {
+  background: #ffffff;
+  box-shadow: 0 10px 24px rgba(38, 84, 124, 0.16);
+  color: #0f6da8;
+  transform: translateY(-1px);
+}
+
+.dashboard-mobile-nav {
+  display: none;
 }
 
 .dashboard-shell {
@@ -580,6 +661,14 @@ h1 {
   height: 100%;
   object-fit: cover;
   width: 100%;
+}
+
+.dashboard-nav-avatar {
+  border-radius: 999px;
+  flex: 0 0 auto;
+  font-size: 13px;
+  height: 38px;
+  width: 38px;
 }
 
 .profile-eyebrow,
@@ -821,9 +910,43 @@ h1 {
   }
 
   .dashboard-nav {
-    grid-column: 1 / -1;
-    order: 3;
-    padding-bottom: 8px;
+    display: none;
+  }
+
+  .dashboard-menu-button {
+    display: inline-flex;
+  }
+
+  .dashboard-mobile-nav {
+    background: rgba(255, 255, 255, 0.96);
+    border: 1px solid rgba(203, 213, 225, 0.86);
+    border-radius: 18px;
+    box-shadow: 0 24px 44px rgba(32, 64, 95, 0.16), 0 6px 18px rgba(15, 23, 42, 0.08);
+    display: none;
+    gap: 8px;
+    padding: 10px;
+    position: absolute;
+    right: 18px;
+    top: calc(100% + 8px);
+    width: min(240px, calc(100vw - 36px));
+  }
+
+  .dashboard-mobile-nav.is-open {
+    display: grid;
+  }
+
+  .dashboard-mobile-nav a {
+    align-items: center;
+    background: rgba(247, 250, 252, 0.95);
+    border: 1px solid rgba(222, 230, 240, 0.9);
+    border-radius: 13px;
+    color: #1b3652;
+    display: flex;
+    font-size: 13px;
+    font-weight: 780;
+    min-height: 42px;
+    padding: 0 14px;
+    text-decoration: none;
   }
 
   .dashboard-shell {
@@ -935,15 +1058,32 @@ h1 {
   }
 
   .dashboard-page {
-    padding: 104px 14px 24px;
+    padding: 76px 14px 24px;
   }
 
   .dashboard-topbar {
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     grid-template-columns: 1fr auto;
-    min-height: 82px;
+    min-height: 58px;
     padding: 8px 12px;
+  }
+
+  .dashboard-brand-text {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .dashboard-company-name {
+    border-left: 0;
+    font-size: 11px;
+    max-width: 42vw;
+    padding-left: 0;
+  }
+
+  .dashboard-user-meta {
+    display: none;
   }
 
   .dashboard-signout {
@@ -956,15 +1096,9 @@ h1 {
     margin: 0;
   }
 
-  .dashboard-nav {
-    gap: 7px;
-    padding-bottom: 0;
-  }
-
-  .dashboard-nav a {
-    font-size: 12px;
-    height: 28px;
-    padding: 0 12px;
+  .dashboard-nav-avatar {
+    height: 34px;
+    width: 34px;
   }
 
   .dashboard-profile-card,

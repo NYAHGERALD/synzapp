@@ -5,10 +5,12 @@ import {
   ChevronDown,
   ClipboardCheck,
   LogOut,
+  Menu,
   Network,
   SearchCheck,
   ShieldCheck,
-  UserRound
+  UserRound,
+  X
 } from 'lucide-react';
 import {
   getCurrentWebProfilePhotoObjectUrl,
@@ -348,28 +350,61 @@ function Dashboard({
   profilePhotoObjectUrl: string | null;
   session: BackendAuthSession;
 }) {
+  const [isMobileNavOpen, setIsMobileNavOpen] = React.useState(false);
   const displayName = profile?.displayName || session.user.displayName || session.user.phoneMasked;
   const role = profile?.roleName || formatRole(session.user.role);
   const companyName = profile?.companyName || 'Synzapp workspace';
   const departmentName = profile?.departmentName || 'Enterprise portal';
   const profilePhotoUrl = profilePhotoObjectUrl || session.user.profilePhotoUrl || null;
+  const renderModuleLinks = () => (
+    <>
+      <a href="#lsw" onClick={() => setIsMobileNavOpen(false)}>LSW</a>
+      <a href="#rca" onClick={() => setIsMobileNavOpen(false)}>RCA</a>
+      <a href="#rails" onClick={() => setIsMobileNavOpen(false)}>RAILS</a>
+    </>
+  );
 
   return (
     <main className="dashboard-page">
       <header className="dashboard-topbar" aria-label="Synzapp dashboard navigation">
         <div className="brand-lockup">
           <img alt="Synzapp" className="brand-logo" src="/assets/notification.png" />
-          <span className="brand-name">Synzapp</span>
+          <div className="dashboard-brand-text">
+            <span className="brand-name">Synzapp</span>
+            <span className="dashboard-company-name">{companyName}</span>
+          </div>
         </div>
         <nav className="dashboard-nav" aria-label="Workspace modules">
-          <a href="#lsw">LSW</a>
-          <a href="#rca">RCA</a>
-          <a href="#rails">RAILS</a>
+          {renderModuleLinks()}
         </nav>
-        <button className="dashboard-signout" onClick={onSignOut} type="button">
-          <LogOut aria-hidden="true" size={16} />
-          Sign out
-        </button>
+        <div className="dashboard-account">
+          <div className="dashboard-user-meta" aria-label="Signed in user role and department">
+            <span>{role}</span>
+            <span>{departmentName}</span>
+          </div>
+          <Avatar className="dashboard-nav-avatar" name={displayName} photoUrl={profilePhotoUrl} />
+          <button className="dashboard-signout" onClick={onSignOut} type="button">
+            <LogOut aria-hidden="true" size={16} />
+            Sign out
+          </button>
+          <button
+            aria-controls="dashboard-mobile-nav"
+            aria-expanded={isMobileNavOpen}
+            aria-label={isMobileNavOpen ? 'Close workspace navigation' : 'Open workspace navigation'}
+            className="dashboard-menu-button"
+            onClick={() => setIsMobileNavOpen((isOpen) => !isOpen)}
+            type="button"
+          >
+            {isMobileNavOpen ? <X aria-hidden="true" size={22} /> : <Menu aria-hidden="true" size={22} />}
+          </button>
+        </div>
+        <nav
+          className={`dashboard-mobile-nav ${isMobileNavOpen ? 'is-open' : ''}`}
+          id="dashboard-mobile-nav"
+          aria-label="Workspace modules"
+        >
+          {renderModuleLinks()}
+        </nav>
       </header>
 
       <section className="dashboard-shell" aria-label="Synzapp dashboard">
@@ -453,11 +488,19 @@ function DashboardModule({
   );
 }
 
-function Avatar({ name, photoUrl }: { name: string; photoUrl: string | null }) {
+function Avatar({
+  className = '',
+  name,
+  photoUrl
+}: {
+  className?: string;
+  name: string;
+  photoUrl: string | null;
+}) {
   const initials = getInitials(name);
 
   return (
-    <div className="dashboard-avatar">
+    <div className={`dashboard-avatar ${className}`.trim()}>
       {photoUrl ? (
         <img alt={name} src={photoUrl} />
       ) : (
