@@ -1450,158 +1450,6 @@ h1 {
   padding: 8px 14px;
 }
 
-.lsw-week-preview {
-  background: #ffffff;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
-  margin-bottom: 24px;
-  overflow: hidden;
-}
-
-.lsw-week-preview header {
-  align-items: center;
-  background: #f5f3ff;
-  border-bottom: 1px solid #e5e7eb;
-  display: flex;
-  justify-content: space-between;
-  padding: 18px 24px;
-}
-
-.lsw-week-preview header h2 {
-  align-items: center;
-  color: #111827;
-  display: flex;
-  font-size: 18px;
-  gap: 8px;
-  line-height: 1.2;
-  margin: 0;
-}
-
-.lsw-week-preview header p {
-  color: #4b5563;
-  font-size: 14px;
-  margin: 8px 0 0;
-}
-
-.lsw-week-preview header > span {
-  background: rgba(255, 255, 255, 0.74);
-  border: 1px solid rgba(196, 181, 253, 0.55);
-  border-radius: 999px;
-  color: #4c1d95;
-  font-size: 12px;
-  font-weight: 800;
-  padding: 6px 10px;
-}
-
-.lsw-week-preview-metrics {
-  display: grid;
-  gap: 16px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  padding: 24px;
-}
-
-.lsw-week-preview-card {
-  border-radius: 8px;
-  display: grid;
-  gap: 8px;
-  min-height: 88px;
-  padding: 18px;
-  place-items: center;
-  text-align: center;
-}
-
-.lsw-week-preview-card span {
-  font-size: 12px;
-  font-weight: 800;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.lsw-week-preview-card strong {
-  color: #064e3b;
-  font-size: 18px;
-}
-
-.lsw-week-preview-card.is-year-start {
-  background: #ecfdf5;
-}
-
-.lsw-week-preview-card.is-year-start span {
-  color: #059669;
-}
-
-.lsw-week-preview-card.is-current-week {
-  background: #eff6ff;
-}
-
-.lsw-week-preview-card.is-current-week span,
-.lsw-week-preview-card.is-current-week strong {
-  color: #1d4ed8;
-}
-
-.lsw-week-preview-card.is-current-week strong,
-.lsw-week-preview-card.is-total-weeks strong {
-  font-size: 30px;
-  line-height: 1;
-}
-
-.lsw-week-preview-card.is-total-weeks {
-  background: #faf5ff;
-}
-
-.lsw-week-preview-card.is-total-weeks span,
-.lsw-week-preview-card.is-total-weeks strong {
-  color: #7e22ce;
-}
-
-.lsw-week-preview-table-shell {
-  padding: 0 24px 24px;
-}
-
-.lsw-week-preview-table {
-  border: 1px solid #e5e7eb;
-  border-collapse: collapse;
-  border-radius: 8px;
-  overflow: hidden;
-  width: 100%;
-}
-
-.lsw-week-preview-table th {
-  background: #f9fafb;
-  color: #4b5563;
-  font-size: 12px;
-  font-weight: 800;
-  letter-spacing: 0.04em;
-  padding: 12px 16px;
-  text-align: left;
-  text-transform: uppercase;
-}
-
-.lsw-week-preview-table td {
-  border-top: 1px solid #e5e7eb;
-  color: #334155;
-  font-size: 14px;
-  padding: 12px 16px;
-}
-
-.lsw-week-preview-table td:first-child {
-  color: #059669;
-  font-weight: 800;
-}
-
-.lsw-week-preview-table tbody tr:last-child td {
-  background: #f8fafc;
-  color: #64748b;
-  font-style: italic;
-}
-
-.lsw-week-preview.is-loading .lsw-week-preview-card {
-  background: linear-gradient(90deg, #f1f5f9, #e2e8f0, #f1f5f9);
-  background-size: 200% 100%;
-  animation: lsw-loading-sheen 1.2s ease-in-out infinite;
-}
-
 .lsw-board-grid {
   display: grid;
   gap: 24px;
@@ -2176,16 +2024,6 @@ h1 {
   }
 }
 
-@keyframes lsw-loading-sheen {
-  0% {
-    background-position: 100% 0;
-  }
-
-  100% {
-    background-position: -100% 0;
-  }
-}
-
 @media (max-width: 1180px) {
   .dashboard-page {
     padding-top: 58px;
@@ -2240,19 +2078,9 @@ h1 {
     display: none;
   }
 
-  .lsw-week-preview header,
   .lsw-context-alert {
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .lsw-week-preview-metrics {
-    grid-template-columns: 1fr;
-    padding: 16px;
-  }
-
-  .lsw-week-preview-table-shell {
-    padding: 0 16px 16px;
   }
 
   .lsw-panel-header {

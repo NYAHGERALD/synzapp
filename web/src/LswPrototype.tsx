@@ -336,8 +336,6 @@ export function LswPrototype() {
           </div>
         ) : null}
 
-        {lswContext ? <WeekPreview context={lswContext} /> : <WeekPreviewSkeleton />}
-
         <div className="lsw-board-grid">
           <div className="lsw-left-column">
             <SectionPanel
@@ -466,84 +464,6 @@ function DateRangeLabel({ label, value }: { label: string; value: string }) {
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
-  );
-}
-
-function WeekPreview({ context }: { context: LswContext }) {
-  return (
-    <section className="lsw-week-preview" aria-label="Company calendar week preview">
-      <header>
-        <div>
-          <h2>
-            <span aria-hidden="true">👁️</span>
-            Week Preview
-          </h2>
-          <p>Weeks are calculated from the company calendar year start date.</p>
-        </div>
-        <span>{context.storageScope.weekKey}</span>
-      </header>
-
-      <div className="lsw-week-preview-metrics">
-        <div className="lsw-week-preview-card is-year-start">
-          <span>Year start date</span>
-          <strong>{context.calendar.startDateLabel}</strong>
-        </div>
-        <div className="lsw-week-preview-card is-current-week">
-          <span>Current week</span>
-          <strong>Week {context.week.currentWeek}</strong>
-        </div>
-        <div className="lsw-week-preview-card is-total-weeks">
-          <span>Total weeks / year</span>
-          <strong>{context.week.totalWeeksInYear}</strong>
-        </div>
-      </div>
-
-      <div className="lsw-week-preview-table-shell">
-        <table className="lsw-week-preview-table">
-          <thead>
-            <tr>
-              <th>Week</th>
-              <th>Start date</th>
-              <th>End date</th>
-            </tr>
-          </thead>
-          <tbody>
-            {context.week.previewRows.map((row) => (
-              <tr key={row.week}>
-                <td>Week {row.week}</td>
-                <td>{row.startDateLabel}</td>
-                <td>{row.endDateLabel}</td>
-              </tr>
-            ))}
-            <tr>
-              <td colSpan={3}>... and so on through the year</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-  );
-}
-
-function WeekPreviewSkeleton() {
-  return (
-    <section className="lsw-week-preview is-loading" aria-label="Loading company calendar week preview">
-      <header>
-        <div>
-          <h2>
-            <span aria-hidden="true">👁️</span>
-            Week Preview
-          </h2>
-          <p>Loading company calendar settings...</p>
-        </div>
-      </header>
-
-      <div className="lsw-week-preview-metrics">
-        <div className="lsw-week-preview-card" />
-        <div className="lsw-week-preview-card" />
-        <div className="lsw-week-preview-card" />
-      </div>
-    </section>
   );
 }
 
