@@ -1,15 +1,12 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import {
-  Building2,
   ChevronDown,
   ClipboardCheck,
   LogOut,
   Menu,
   Network,
   SearchCheck,
-  ShieldCheck,
-  UserRound,
   X
 } from 'lucide-react';
 import {
@@ -22,6 +19,7 @@ import {
   type WebCurrentUserProfile
 } from './auth';
 import { isFirebaseConfigured } from './firebase';
+import { LswPrototype } from './LswPrototype';
 import './styles.css';
 
 const features = [
@@ -408,83 +406,9 @@ function Dashboard({
       </header>
 
       <section className="dashboard-shell" aria-label="Synzapp dashboard">
-        <aside className="dashboard-profile-card" aria-label="Signed in user profile">
-          <Avatar name={displayName} photoUrl={profilePhotoUrl} />
-          <p className="profile-eyebrow">Signed in</p>
-          <h1>{displayName}</h1>
-          <p className="profile-role">{role}</p>
-
-          <div className="profile-detail-list">
-            <span>
-              <Building2 aria-hidden="true" size={16} />
-              {companyName}
-            </span>
-            <span>
-              <UserRound aria-hidden="true" size={16} />
-              {departmentName}
-            </span>
-            <span>
-              <ShieldCheck aria-hidden="true" size={16} />
-              {session.access === 'ACTIVE' ? 'Active secure session' : 'Profile setup required'}
-            </span>
-          </div>
-        </aside>
-
-        <div className="dashboard-main">
-          <div className="dashboard-hero">
-            <p className="dashboard-eyebrow">Enterprise Performance Suite</p>
-            <h2>Welcome to your Synzapp web portal.</h2>
-            <p>
-              Continue operational work across Leaders Standard Work, Root Cause Analysis,
-              and RAILS from one secure workspace.
-            </p>
-          </div>
-
-          <div className="dashboard-module-grid">
-            <DashboardModule
-              description="Plan, verify, and sustain leader routines with visible ownership."
-              icon={ClipboardCheck}
-              id="lsw"
-              title="LSW"
-            />
-            <DashboardModule
-              description="Investigate recurring issues and document corrective actions."
-              icon={SearchCheck}
-              id="rca"
-              title="RCA"
-            />
-            <DashboardModule
-              description="Track rapid actions and improvement loops across the organization."
-              icon={Network}
-              id="rails"
-              title="RAILS"
-            />
-          </div>
-        </div>
+        <LswPrototype />
       </section>
     </main>
-  );
-}
-
-function DashboardModule({
-  description,
-  icon: ModuleIcon,
-  id,
-  title
-}: {
-  description: string;
-  icon: typeof ClipboardCheck;
-  id: string;
-  title: string;
-}) {
-  return (
-    <a className="dashboard-module-card" href={`#${id}`}>
-      <div className="dashboard-module-icon">
-        <ModuleIcon aria-hidden="true" size={28} strokeWidth={1.6} />
-      </div>
-      <h3>{title}</h3>
-      <p>{description}</p>
-    </a>
   );
 }
 

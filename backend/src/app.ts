@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import { env } from './config/env.js';
 import { adminRouter } from './routes/adminRoutes.js';
 import { authRouter } from './routes/authRoutes.js';
+import { lswRouter } from './routes/lswRoutes.js';
 import { profileRouter } from './routes/profileRoutes.js';
 import { getHealthStatus } from './services/monitoringService.js';
 
@@ -31,6 +32,7 @@ export function createSynzappApp() {
 
   app.use('/api/auth', authRouter);
   app.use('/api/admin', adminRouter);
+  app.use('/api/lsw', lswRouter);
   app.use('/api/profile', profileRouter);
   app.use(errorHandler);
 
