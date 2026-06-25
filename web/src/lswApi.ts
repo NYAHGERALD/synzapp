@@ -27,6 +27,9 @@ export interface LswContext {
     tenantId: string;
     weekKey: string;
   };
+  settings: {
+    workDaysPerWeek: WorkDaysPerWeek;
+  };
   user: {
     displayName: string;
     role: string;
@@ -50,6 +53,9 @@ export interface LswContext {
   };
 }
 
+export type DayKey = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun';
+export type WorkDaysPerWeek = 5 | 6 | 7;
+
 export interface LswWeekPreviewRow {
   endDate: string;
   endDateLabel: string;
@@ -58,18 +64,35 @@ export interface LswWeekPreviewRow {
   week: number;
 }
 
+export interface LswDailyTask {
+  days: Record<DayKey, boolean>;
+  minutes: number;
+  sortOrder: number;
+  status: string;
+  task: string;
+  taskId: string;
+  time: string;
+}
+
+export interface LswDailyTasksResponse {
+  tasks: LswDailyTask[];
+  workDaysPerWeek: WorkDaysPerWeek;
+}
+
+export interface LswDailyTaskPatch {
+  days?: Partial<Record<DayKey, boolean>>;
+  minutes?: number;
+  sortOrder?: number;
+  task?: string;
+  time?: string;
+}
+
 interface LswContextOptions {
   week?: number;
   year?: number;
 }
 
 export async function getLswContext(options: LswContextOptions = {}): Promise<LswContext> {
-  const user = getSynzappFirebaseAuth().currentUser;
-
-  if (!user) {
-    throw new Error('You are not signed in.');
-  }
-
   const params = new URLSearchParams();
 
   if (typeof options.week === 'number') {
@@ -81,19 +104,104 @@ export async function getLswContext(options: LswContextOptions = {}): Promise<Ls
   }
 
   const queryString = params.toString();
+  const body = await requestLswJson<{ context?: LswContext }>(`/api/lsw/context${queryString ? `?${queryString}` : ''}`);
+
+  if (!body.context) {
+    throw new Error('The LSW workspace could not be loaded.');
+  }
+
+  return body.context;
+}
+
+export async function listLswDailyTasks(): Promise<LswDailyTasksResponse> {
+  const body = await requestLswJson<{ dailyTasks?: LswDailyTasksResponse }>('/api/lsw/daily-tasks');
+
+  if (!body.dailyTasks) {
+    throw new Error('Daily tasks could not be loaded.');
+  }
+
+  return body.dailyTasks;
+}
+
+export async function createLswDailyTask(input: LswDailyTaskPatch = {}): Promise<LswDailyTask> {
+  const body = await requestLswJson<{ task?: LswDailyTask }>('/api/lsw/daily-tasks', {
+    body: JSON.stringify(input),
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    method: 'POST'
+  });
+
+  if (!body.task) {
+    throw new Error('Daily task could not be created.');
+  }
+
+  return body.task;
+}
+
+export async function updateLswDailyTask(taskId: string, input: LswDailyTaskPatch): Promise<LswDailyTask> {
+  const body = await requestLswJson<{ task?: LswDailyTask }>(`/api/lsw/daily-tasks/${encodeURIComponent(taskId)}`, {
+    body: JSON.stringify(input),
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    method: 'PATCH'
+  });
+
+  if (!body.task) {
+    throw new Error('Daily task could not be updated.');
+  }
+
+  return body.task;
+}
+
+export async function deleteLswDailyTask(taskId: string): Promise<void> {
+  await requestLswJson<void>(`/api/lsw/daily-tasks/${encodeURIComponent(taskId)}`, {
+    method: 'DELETE'
+  });
+}
+
+export async function updateLswSettings(workDaysPerWeek: WorkDaysPerWeek): Promise<{ workDaysPerWeek: WorkDaysPerWeek }> {
+  const body = await requestLswJson<{ settings?: { workDaysPerWeek: WorkDaysPerWeek } }>('/api/lsw/settings', {
+    body: JSON.stringify({ workDaysPerWeek }),
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    method: 'PATCH'
+  });
+
+  if (!body.settings) {
+    throw new Error('LSW settings could not be updated.');
+  }
+
+  return body.settings;
+}
+
+async function requestLswJson<T>(
+  path: string,
+  options: RequestInit = {}
+): Promise<T> {
+  const user = getSynzappFirebaseAuth().currentUser;
+
+  if (!user) {
+    throw new Error('You are not signed in.');
+  }
+
   const idToken = await user.getIdToken();
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), 15_000);
   let response: Response;
 
   try {
-    response = await fetch(`${getSynzappApiBaseUrl()}/api/lsw/context${queryString ? `?${queryString}` : ''}`, {
+    response = await fetch(`${getSynzappApiBaseUrl()}${path}`, {
+      ...options,
       headers: {
         Accept: 'application/json',
         Authorization: `Bearer ${idToken}`,
+        ...options.headers,
         ...await getAppCheckHeader()
       },
-      method: 'GET',
+      method: options.method || 'GET',
       signal: controller.signal
     });
   } catch (error) {
@@ -110,13 +218,11 @@ export async function getLswContext(options: LswContextOptions = {}): Promise<Ls
     throw new Error(await getResponseErrorMessage(response, 'The LSW workspace could not be loaded.'));
   }
 
-  const body = await response.json() as { context?: LswContext };
-
-  if (!body.context) {
-    throw new Error('The LSW workspace could not be loaded.');
+  if (response.status === 204) {
+    return undefined as T;
   }
 
-  return body.context;
+  return response.json() as Promise<T>;
 }
 
 async function getResponseErrorMessage(response: Response, fallback: string): Promise<string> {

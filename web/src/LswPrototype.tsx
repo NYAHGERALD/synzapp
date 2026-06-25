@@ -1,17 +1,17 @@
 import React from 'react';
 import {
+  createLswDailyTask,
+  deleteLswDailyTask,
   getLswContext,
-  type LswContext
+  listLswDailyTasks,
+  updateLswDailyTask,
+  updateLswSettings,
+  type DayKey,
+  type LswContext,
+  type LswDailyTask,
+  type LswDailyTaskPatch,
+  type WorkDaysPerWeek
 } from './lswApi';
-
-type DayKey = 'mon' | 'tue' | 'wed' | 'thu' | 'fri';
-
-interface DailyTask {
-  days: Record<DayKey, boolean>;
-  minutes: number;
-  task: string;
-  time: string;
-}
 
 interface ProjectUpdate {
   text: string;
@@ -61,39 +61,14 @@ interface GoalItem {
   progress: number;
 }
 
-const visibleDays: Array<{ key: DayKey; label: string }> = [
+const allDays: Array<{ key: DayKey; label: string }> = [
   { key: 'mon', label: 'M' },
   { key: 'tue', label: 'T' },
   { key: 'wed', label: 'W' },
   { key: 'thu', label: 'T' },
-  { key: 'fri', label: 'F' }
-];
-
-const dailyTasks: DailyTask[] = [
-  {
-    days: { fri: false, mon: true, thu: true, tue: true, wed: true },
-    minutes: 15,
-    task: 'Review line readiness, staffing, and handoff notes',
-    time: '07:30'
-  },
-  {
-    days: { fri: false, mon: true, thu: true, tue: true, wed: true },
-    minutes: 30,
-    task: 'Gemba walk: safety, quality, people, delivery, and cost checks',
-    time: '08:15'
-  },
-  {
-    days: { fri: false, mon: true, thu: false, tue: true, wed: true },
-    minutes: 20,
-    task: 'Daily production review with supervisors',
-    time: '09:00'
-  },
-  {
-    days: { fri: false, mon: false, thu: true, tue: false, wed: true },
-    minutes: 10,
-    task: 'Verify open corrective actions and overdue follow-ups',
-    time: '13:30'
-  }
+  { key: 'fri', label: 'F' },
+  { key: 'sat', label: 'Sa' },
+  { key: 'sun', label: 'Su' }
 ];
 
 const projects: ProjectRow[] = [
@@ -185,11 +160,20 @@ export function LswPrototype() {
   const [lswContext, setLswContext] = React.useState<LswContext | null>(null);
   const [isLoadingContext, setIsLoadingContext] = React.useState(false);
   const [contextError, setContextError] = React.useState('');
-  const [workDaysPerWeek, setWorkDaysPerWeek] = React.useState(5);
+  const [dailyTasks, setDailyTasks] = React.useState<LswDailyTask[]>([]);
+  const [isLoadingDailyTasks, setIsLoadingDailyTasks] = React.useState(false);
+  const [dailyTasksError, setDailyTasksError] = React.useState('');
+  const [workDaysPerWeek, setWorkDaysPerWeek] = React.useState<WorkDaysPerWeek>(5);
   const requestIdRef = React.useRef(0);
+  const dailyTaskSaveTimersRef = React.useRef<Record<string, number>>({});
 
   React.useEffect(() => {
     void loadContext();
+    void loadDailyTasks();
+
+    return () => {
+      Object.values(dailyTaskSaveTimersRef.current).forEach((timerId) => window.clearTimeout(timerId));
+    };
   }, []);
 
   async function loadContext(options: { week?: number; year?: number } = {}) {
@@ -204,6 +188,7 @@ export function LswPrototype() {
 
       if (requestIdRef.current === requestId) {
         setLswContext(nextContext);
+        setWorkDaysPerWeek(nextContext.settings.workDaysPerWeek);
       }
     } catch (error) {
       if (requestIdRef.current === requestId) {
@@ -235,6 +220,109 @@ export function LswPrototype() {
     void loadContext();
   }
 
+  async function loadDailyTasks() {
+    setIsLoadingDailyTasks(true);
+    setDailyTasksError('');
+
+    try {
+      const response = await listLswDailyTasks();
+
+      setDailyTasks(response.tasks);
+      setWorkDaysPerWeek(response.workDaysPerWeek);
+    } catch (error) {
+      setDailyTasksError(getErrorMessage(error));
+    } finally {
+      setIsLoadingDailyTasks(false);
+    }
+  }
+
+  async function handleWorkDaysChange(event: React.ChangeEvent<HTMLSelectElement>) {
+    const nextWorkDays = Number(event.target.value) as WorkDaysPerWeek;
+
+    setWorkDaysPerWeek(nextWorkDays);
+    setDailyTasksError('');
+
+    try {
+      const settings = await updateLswSettings(nextWorkDays);
+
+      setWorkDaysPerWeek(settings.workDaysPerWeek);
+    } catch (error) {
+      setDailyTasksError(getErrorMessage(error));
+    }
+  }
+
+  async function handleAddDailyTask() {
+    setDailyTasksError('');
+
+    try {
+      const task = await createLswDailyTask();
+
+      setDailyTasks((currentTasks) => [...currentTasks, task].sort(sortDailyTasks));
+    } catch (error) {
+      setDailyTasksError(getErrorMessage(error));
+    }
+  }
+
+  async function handleDeleteDailyTask(taskId: string) {
+    const previousTasks = dailyTasks;
+
+    window.clearTimeout(dailyTaskSaveTimersRef.current[taskId]);
+    delete dailyTaskSaveTimersRef.current[taskId];
+    setDailyTasks((currentTasks) => currentTasks.filter((task) => task.taskId !== taskId));
+    setDailyTasksError('');
+
+    try {
+      await deleteLswDailyTask(taskId);
+    } catch (error) {
+      setDailyTasks(previousTasks);
+      setDailyTasksError(getErrorMessage(error));
+    }
+  }
+
+  function handleDailyTaskChange(
+    taskId: string,
+    patch: LswDailyTaskPatch,
+    options: { immediate?: boolean; skipSave?: boolean } = {}
+  ) {
+    setDailyTasks((currentTasks) => currentTasks.map((task) => (
+      task.taskId === taskId ? applyDailyTaskPatch(task, patch) : task
+    )));
+
+    if (options.skipSave) {
+      return;
+    }
+
+    queueDailyTaskSave(taskId, patch, options.immediate);
+  }
+
+  function queueDailyTaskSave(taskId: string, patch: LswDailyTaskPatch, immediate = false) {
+    const save = async () => {
+      try {
+        const savedTask = await updateLswDailyTask(taskId, patch);
+        const savedPatch = getSavedPatch(savedTask, patch);
+
+        setDailyTasks((currentTasks) => currentTasks.map((task) => (
+          task.taskId === taskId ? applyDailyTaskPatch(task, savedPatch) : task
+        )));
+        setDailyTasksError('');
+      } catch (error) {
+        setDailyTasksError(getErrorMessage(error));
+      }
+    };
+
+    window.clearTimeout(dailyTaskSaveTimersRef.current[taskId]);
+
+    if (immediate) {
+      void save();
+      return;
+    }
+
+    dailyTaskSaveTimersRef.current[taskId] = window.setTimeout(() => {
+      delete dailyTaskSaveTimersRef.current[taskId];
+      void save();
+    }, 700);
+  }
+
   const hasBlockingContextError = Boolean(contextError && !lswContext);
   const departmentId = lswContext?.department.departmentId || 'unassigned';
   const departmentName = lswContext?.department.name || (hasBlockingContextError ? 'Unavailable' : 'Loading department');
@@ -245,6 +333,8 @@ export function LswPrototype() {
       ? 'Week unavailable'
       : 'Week --';
   const pendingDateLabel = hasBlockingContextError ? 'Unavailable' : 'Loading';
+  const visibleDays = allDays.slice(0, workDaysPerWeek);
+  const todayDayKey = getDayKeyFromIso(lswContext?.week.todayIso);
 
   return (
     <div className="lsw-prototype" aria-busy={isLoadingContext} aria-label="Leaders Standard Work board preview">
@@ -345,7 +435,7 @@ export function LswPrototype() {
                   <span>Days/week:</span>
                   <select
                     aria-label="Work days per week"
-                    onChange={(event) => setWorkDaysPerWeek(Number(event.target.value))}
+                    onChange={(event) => void handleWorkDaysChange(event)}
                     value={workDaysPerWeek}
                   >
                     <option value={5}>5 (Mon-Fri)</option>
@@ -357,8 +447,16 @@ export function LswPrototype() {
               icon="📅"
               title="Daily & Weekly Standard Tasks/Meetings"
             >
-              <DailyTasksTable />
-              <PanelFooter label="Add Task" tone="emerald" />
+              <DailyTasksTable
+                errorMessage={dailyTasksError}
+                isLoading={isLoadingDailyTasks}
+                onAddTask={() => void handleAddDailyTask()}
+                onDeleteTask={(taskId) => void handleDeleteDailyTask(taskId)}
+                onTaskChange={handleDailyTaskChange}
+                tasks={dailyTasks}
+                todayDayKey={todayDayKey}
+                visibleDays={visibleDays}
+              />
             </SectionPanel>
 
             <BlackDivider />
@@ -467,10 +565,40 @@ function DateRangeLabel({ label, value }: { label: string; value: string }) {
   );
 }
 
-function DailyTasksTable() {
+function DailyTasksTable({
+  errorMessage,
+  isLoading,
+  onAddTask,
+  onDeleteTask,
+  onTaskChange,
+  tasks,
+  todayDayKey,
+  visibleDays
+}: {
+  errorMessage: string;
+  isLoading: boolean;
+  onAddTask: () => void;
+  onDeleteTask: (taskId: string) => void;
+  onTaskChange: (taskId: string, patch: LswDailyTaskPatch, options?: { immediate?: boolean; skipSave?: boolean }) => void;
+  tasks: LswDailyTask[];
+  todayDayKey: DayKey | null;
+  visibleDays: Array<{ key: DayKey; label: string }>;
+}) {
+  const columnCount = visibleDays.length + 5;
+
   return (
     <div className="lsw-table-scroll">
       <table className="lsw-table lsw-daily-table">
+        <colgroup>
+          <col className="lsw-drag-col" />
+          <col className="lsw-min-col" />
+          <col className="lsw-task-col" />
+          <col className="lsw-time-col" />
+          {visibleDays.map((day) => (
+            <col className="lsw-day-col" key={day.key} />
+          ))}
+          <col className="lsw-delete-col" />
+        </colgroup>
         <thead>
           <tr>
             <th className="lsw-drag-column" />
@@ -478,27 +606,110 @@ function DailyTasksTable() {
             <th>Task/Meeting</th>
             <th className="lsw-center">Time</th>
             {visibleDays.map((day) => (
-              <th className={day.key === 'wed' ? 'lsw-day-today' : ''} key={day.key}>{day.label}</th>
+              <th className={`lsw-day-heading ${day.key === todayDayKey ? 'lsw-day-today' : ''}`} key={day.key}>
+                {day.label}
+              </th>
             ))}
             <th />
           </tr>
         </thead>
         <tbody>
-          {dailyTasks.map((task) => (
-            <tr key={task.task}>
+          {isLoading && tasks.length === 0 ? (
+            <tr>
+              <td className="lsw-empty-row" colSpan={columnCount}>Loading daily tasks...</td>
+            </tr>
+          ) : null}
+
+          {errorMessage ? (
+            <tr>
+              <td className="lsw-error-row" colSpan={columnCount}>{errorMessage}</td>
+            </tr>
+          ) : null}
+
+          {!isLoading && tasks.length === 0 && !errorMessage ? (
+            <tr>
+              <td className="lsw-empty-row" colSpan={columnCount}>No daily or weekly tasks yet.</td>
+            </tr>
+          ) : null}
+
+          {tasks.map((task) => (
+            <tr key={task.taskId}>
               <td className="lsw-drag-column"><DragHandle /></td>
-              <td>{task.minutes}</td>
-              <td className="lsw-task-cell">{task.task}</td>
-              <td className="lsw-center">{task.time}</td>
+              <td>
+                <input
+                  aria-label="Task minutes"
+                  className="lsw-inline-input lsw-minutes-input"
+                  inputMode="numeric"
+                  min={0}
+                  max={1440}
+                  onChange={(event) => onTaskChange(task.taskId, {
+                    minutes: Number(event.target.value || 0)
+                  })}
+                  type="number"
+                  value={task.minutes}
+                />
+              </td>
+              <td className="lsw-task-cell">
+                <input
+                  aria-label="Task or meeting"
+                  className="lsw-inline-input lsw-task-input"
+                  onChange={(event) => onTaskChange(task.taskId, { task: event.target.value })}
+                  placeholder="Type task or meeting"
+                  type="text"
+                  value={task.task}
+                />
+              </td>
+              <td className="lsw-center">
+                <input
+                  aria-label="Task time"
+                  className="lsw-inline-input lsw-time-input"
+                  onChange={(event) => {
+                    const nextTime = event.target.value;
+
+                    onTaskChange(task.taskId, { time: nextTime }, {
+                      skipSave: !isValidTimeInput(nextTime)
+                    });
+                  }}
+                  step={60}
+                  type="time"
+                  value={task.time}
+                />
+              </td>
               {visibleDays.map((day) => (
                 <td className="lsw-check-cell" key={day.key}>
-                  <input checked={task.days[day.key]} readOnly type="checkbox" />
+                  <input
+                    aria-label={`${day.label} selected`}
+                    checked={task.days[day.key]}
+                    onChange={(event) => onTaskChange(task.taskId, {
+                      days: { [day.key]: event.target.checked }
+                    }, { immediate: true })}
+                    type="checkbox"
+                  />
                 </td>
               ))}
-              <td className="lsw-delete-cell"><XIcon /></td>
+              <td className="lsw-delete-cell">
+                <button
+                  aria-label="Delete task"
+                  className="lsw-delete-button"
+                  onClick={() => onDeleteTask(task.taskId)}
+                  type="button"
+                >
+                  <XIcon />
+                </button>
+              </td>
             </tr>
           ))}
         </tbody>
+        <tfoot>
+          <tr>
+            <td colSpan={columnCount}>
+              <button className="lsw-add-row lsw-add-row-emerald" disabled={isLoading} onClick={onAddTask} type="button">
+                <PlusMiniIcon />
+                Add Task
+              </button>
+            </td>
+          </tr>
+        </tfoot>
       </table>
     </div>
   );
@@ -724,6 +935,64 @@ function getErrorMessage(error: unknown): string {
   }
 
   return 'The LSW workspace could not be loaded.';
+}
+
+function applyDailyTaskPatch(task: LswDailyTask, patch: LswDailyTaskPatch): LswDailyTask {
+  return {
+    ...task,
+    ...patch,
+    days: patch.days ? { ...task.days, ...patch.days } : task.days,
+    minutes: patch.minutes ?? task.minutes,
+    sortOrder: patch.sortOrder ?? task.sortOrder,
+    task: patch.task ?? task.task,
+    time: patch.time ?? task.time
+  };
+}
+
+function getSavedPatch(savedTask: LswDailyTask, requestedPatch: LswDailyTaskPatch): LswDailyTaskPatch {
+  const savedPatch: LswDailyTaskPatch = {};
+
+  if (requestedPatch.days) {
+    savedPatch.days = savedTask.days;
+  }
+
+  if (requestedPatch.minutes !== undefined) {
+    savedPatch.minutes = savedTask.minutes;
+  }
+
+  if (requestedPatch.sortOrder !== undefined) {
+    savedPatch.sortOrder = savedTask.sortOrder;
+  }
+
+  if (requestedPatch.task !== undefined) {
+    savedPatch.task = savedTask.task;
+  }
+
+  if (requestedPatch.time !== undefined) {
+    savedPatch.time = savedTask.time;
+  }
+
+  return savedPatch;
+}
+
+function sortDailyTasks(first: LswDailyTask, second: LswDailyTask): number {
+  return first.sortOrder - second.sortOrder || first.task.localeCompare(second.task);
+}
+
+function getDayKeyFromIso(isoDate?: string): DayKey | null {
+  if (!isoDate) {
+    return null;
+  }
+
+  const date = new Date(`${isoDate}T00:00:00Z`);
+  const dayIndex = date.getUTCDay();
+  const dayKeysByIndex: DayKey[] = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+
+  return dayKeysByIndex[dayIndex] || null;
+}
+
+function isValidTimeInput(value: string): boolean {
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
 }
 
 function PanelFooter({ label, tone }: { label: string; tone: string }) {

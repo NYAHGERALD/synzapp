@@ -1579,29 +1579,39 @@ h1 {
 }
 
 .lsw-daily-table {
-  min-width: 820px;
+  min-width: 900px;
 }
 
-.lsw-daily-table th:nth-child(2),
-.lsw-daily-table td:nth-child(2) {
+.lsw-drag-col {
+  width: 34px;
+}
+
+.lsw-min-col {
   width: 64px;
 }
 
-.lsw-daily-table th:nth-child(4),
-.lsw-daily-table td:nth-child(4) {
-  width: 84px;
+.lsw-task-col {
+  min-width: 280px;
+  width: auto;
 }
 
-.lsw-daily-table th:nth-child(n + 5):nth-child(-n + 9),
-.lsw-daily-table td:nth-child(n + 5):nth-child(-n + 9) {
-  text-align: center;
+.lsw-time-col {
+  width: 104px;
+}
+
+.lsw-day-col {
   width: 48px;
+}
+
+.lsw-delete-col {
+  width: 34px;
 }
 
 .lsw-drag-column {
   color: #d1d5db;
+  padding-left: 10px !important;
+  padding-right: 4px !important;
   text-align: center;
-  width: 34px;
 }
 
 .lsw-action-column {
@@ -1618,9 +1628,85 @@ h1 {
   text-align: center;
 }
 
+.lsw-check-cell,
+.lsw-day-heading,
+.lsw-delete-cell {
+  padding-left: 6px !important;
+  padding-right: 6px !important;
+}
+
+.lsw-delete-cell {
+  color: #f87171;
+}
+
 .lsw-task-cell {
   color: #1f2937;
   font-weight: 600;
+}
+
+.lsw-inline-input {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  outline: none;
+  padding: 6px 8px;
+  transition: background 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
+  width: 100%;
+}
+
+.lsw-inline-input:focus {
+  background: #ffffff;
+  border-color: #93c5fd;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
+}
+
+.lsw-minutes-input,
+.lsw-time-input {
+  text-align: center;
+}
+
+.lsw-minutes-input {
+  padding-left: 4px;
+  padding-right: 4px;
+}
+
+.lsw-time-input {
+  min-width: 86px;
+}
+
+.lsw-delete-button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  color: #f87171;
+  cursor: pointer;
+  display: inline-flex;
+  height: 24px;
+  justify-content: center;
+  padding: 0;
+  transition: background 150ms ease, color 150ms ease;
+  width: 24px;
+}
+
+.lsw-delete-button:hover {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+.lsw-empty-row,
+.lsw-error-row {
+  color: #64748b !important;
+  font-weight: 600;
+  padding: 16px 20px !important;
+  text-align: center;
+}
+
+.lsw-error-row {
+  color: #b45309 !important;
 }
 
 .lsw-drag-handle {
@@ -1741,6 +1827,12 @@ h1 {
 .lsw-panel-footer {
   background: rgba(249, 250, 251, 0.9);
   border-top: 1px solid rgba(229, 231, 235, 0.5);
+  padding: 12px 20px;
+}
+
+.lsw-daily-table tfoot td {
+  background: rgba(249, 250, 251, 0.92);
+  border-top: 1px solid #e5e7eb;
   padding: 12px 20px;
 }
 
