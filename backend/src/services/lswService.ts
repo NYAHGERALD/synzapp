@@ -67,6 +67,21 @@ interface LswDailyTaskRecord {
   time?: string;
 }
 
+interface LswDailyTaskWeekStatusRecord {
+  companyId?: string;
+  days?: Partial<Record<DayKey, boolean>>;
+  dayStatuses?: Partial<Record<DayKey, Partial<LswDayStatusDetail>>>;
+  departmentId?: string | null;
+  departmentName?: string | null;
+  lswId?: string;
+  ownerUid?: string;
+  sectionKey?: string;
+  status?: string;
+  taskId?: string;
+  tenantId?: string;
+  weekKey?: string;
+}
+
 interface CalendarYearSettings {
   startDate: string;
   startDay: number;
@@ -81,6 +96,7 @@ interface LswContextInput {
 }
 
 export type DayKey = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun';
+export type LswDayStatus = 'not_completed' | 'completed_on_time' | 'completed_late';
 
 export interface LswContextResponse {
   calendar: {
@@ -141,25 +157,48 @@ export interface LswWeekPreviewRow {
 
 export interface LswDailyTask {
   days: Record<DayKey, boolean>;
+  dayStatusDetails: Record<DayKey, LswDayStatusDetail>;
+  dayStatuses: Record<DayKey, LswDayStatus>;
   minutes: number;
   sortOrder: number;
   status: string;
   task: string;
   taskId: string;
   time: string;
+  weekKey: string;
 }
 
 export interface LswDailyTasksResponse {
   tasks: LswDailyTask[];
+  weekKey: string;
   workDaysPerWeek: number;
 }
 
 export interface LswDailyTaskInput {
   days?: Partial<Record<DayKey, boolean>>;
+  dayStatusUpdates?: Partial<Record<DayKey, LswDayStatusUpdateInput>>;
   minutes?: number;
   sortOrder?: number;
   task?: string;
   time?: string;
+}
+
+export interface LswDayStatusDetail {
+  completedAtIso?: string;
+  dueAtIso?: string;
+  firstCompletedAtIso?: string;
+  firstCompletedOnTime: boolean;
+  lastChangedAtIso?: string;
+  status: LswDayStatus;
+  timeZone?: string;
+  uncheckedAtIso?: string;
+}
+
+export interface LswDayStatusUpdateInput {
+  completedAtIso?: string;
+  dueAtIso?: string;
+  status: LswDayStatus;
+  timeZone?: string;
 }
 
 export interface LswSettingsInput {
@@ -186,33 +225,30 @@ interface AuthorizedLswContext {
 
 const LSW_PROFILE_COLLECTION = 'lswProfiles';
 const LSW_DAILY_TASKS_COLLECTION = 'dailyWeeklyTasks';
+const LSW_DAILY_TASK_WEEK_STATUSES_COLLECTION = 'weekStatuses';
 const DAILY_TASK_SECTION_KEY = 'daily_weekly_standard_tasks';
 const DEFAULT_WORK_DAYS_PER_WEEK = 5;
 const ALL_DAY_KEYS: DayKey[] = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DEFAULT_DAILY_TASKS: LswDailyTaskInput[] = [
   {
-    days: { fri: false, mon: true, thu: true, tue: true, wed: true },
     minutes: 15,
     sortOrder: 1000,
     task: 'Review line readiness, staffing, and handoff notes',
     time: '07:30'
   },
   {
-    days: { fri: false, mon: true, thu: true, tue: true, wed: true },
     minutes: 30,
     sortOrder: 2000,
     task: 'Gemba walk: safety, quality, people, delivery, and cost checks',
     time: '08:15'
   },
   {
-    days: { fri: false, mon: true, thu: false, tue: true, wed: true },
     minutes: 20,
     sortOrder: 3000,
     task: 'Daily production review with supervisors',
     time: '09:00'
   },
   {
-    days: { fri: false, mon: false, thu: true, tue: false, wed: true },
     minutes: 10,
     sortOrder: 4000,
     task: 'Verify open corrective actions and overdue follow-ups',
@@ -245,7 +281,7 @@ export async function getLswContext(
     storageScope: {
       departmentId: context.department.departmentId,
       tenantId: context.tenantId,
-      weekKey: `${week.selectedYear}-W${String(week.selectedWeek).padStart(2, '0')}`
+      weekKey: formatWeekKey(week.selectedYear, week.selectedWeek)
     },
     settings: {
       workDaysPerWeek: context.lswProfile.workDaysPerWeek
@@ -260,8 +296,14 @@ export async function getLswContext(
   };
 }
 
-export async function listLswDailyTasks(decodedToken: DecodedIdToken): Promise<LswDailyTasksResponse> {
+export async function listLswDailyTasks(
+  decodedToken: DecodedIdToken,
+  input: LswContextInput = {}
+): Promise<LswDailyTasksResponse> {
   const context = await getAuthorizedLswContext(decodedToken);
+  const calendar = mapCalendarYearSettings(context.organization);
+  const week = calculateCalendarWeekContext(calendar, input);
+  const weekKey = formatWeekKey(week.selectedYear, week.selectedWeek);
 
   await seedDefaultDailyTasksIfEmpty(context);
 
@@ -269,25 +311,34 @@ export async function listLswDailyTasks(decodedToken: DecodedIdToken): Promise<L
     .collection(LSW_DAILY_TASKS_COLLECTION)
     .orderBy('sortOrder', 'asc')
     .get();
-  const tasks = snapshot.docs
-    .map((doc) => mapDailyTask(doc.id, doc.data() as LswDailyTaskRecord))
-    .filter((task) => task.status === 'ACTIVE');
+  const activeTaskDocs = snapshot.docs
+    .map((doc) => ({
+      record: doc.data() as LswDailyTaskRecord,
+      ref: doc.ref,
+      taskId: doc.id
+    }))
+    .filter(({ record }) => (record.status || 'ACTIVE') === 'ACTIVE');
+  const weeklyStatuses = await getDailyTaskWeekStatuses(context, activeTaskDocs, weekKey);
+  const tasks = activeTaskDocs.map(({ record, taskId }) => (
+    mapDailyTask(taskId, record, weeklyStatuses.get(taskId), weekKey)
+  ));
 
   return {
     tasks,
+    weekKey,
     workDaysPerWeek: context.lswProfile.workDaysPerWeek
   };
 }
 
 export async function createLswDailyTask(
   decodedToken: DecodedIdToken,
-  input: LswDailyTaskInput = {}
+  input: LswDailyTaskInput = {},
+  weekInput: LswContextInput = {}
 ): Promise<LswDailyTask> {
   const context = await getAuthorizedLswContext(decodedToken);
   const taskRef = context.lswProfileRef.collection(LSW_DAILY_TASKS_COLLECTION).doc();
   const sortOrder = input.sortOrder ?? await getNextDailyTaskSortOrder(context);
   const record = buildDailyTaskRecord(context, taskRef.id, {
-    days: input.days || getDefaultDaysForWorkDays(context.lswProfile.workDaysPerWeek),
     minutes: input.minutes ?? 0,
     sortOrder,
     task: input.task ?? '',
@@ -300,13 +351,31 @@ export async function createLswDailyTask(
     updatedAt: fieldValue.serverTimestamp()
   });
 
+  if (input.days || input.dayStatusUpdates) {
+    const weekKey = resolveWeekKey(context, weekInput);
+    const weeklyStatusDetails = await setDailyTaskWeekStatusDetails(
+      context,
+      taskRef,
+      taskRef.id,
+      weekKey,
+      getEmptyDayStatusDetails(),
+      input
+    );
+
+    return mapDailyTask(taskRef.id, record, {
+      dayStatuses: weeklyStatusDetails,
+      days: getDaysFromDayStatusDetails(weeklyStatusDetails)
+    }, weekKey);
+  }
+
   return mapDailyTask(taskRef.id, record);
 }
 
 export async function updateLswDailyTask(
   decodedToken: DecodedIdToken,
   taskId: string,
-  input: LswDailyTaskInput
+  input: LswDailyTaskInput,
+  weekInput: LswContextInput = {}
 ): Promise<LswDailyTask> {
   const context = await getAuthorizedLswContext(decodedToken);
   const taskRef = context.lswProfileRef.collection(LSW_DAILY_TASKS_COLLECTION).doc(taskId);
@@ -324,36 +393,60 @@ export async function updateLswDailyTask(
     throw notFoundError('This LSW task was not found.');
   }
 
-  const update: Record<string, unknown> = {
-    departmentId: context.department.departmentId,
-    departmentName: context.department.name,
-    updatedAt: fieldValue.serverTimestamp()
-  };
-
-  if (input.days) {
-    update.days = normalizeDays(input.days, normalizeDays(existingRecord.days));
-  }
+  let taskNeedsUpdate = false;
+  let weeklyStatusDetails = getEmptyDayStatusDetails();
+  const weekKey = resolveWeekKey(context, weekInput);
+  const existingWeeklyStatusDetails = await getDailyTaskWeekStatusDetails(context, taskRef, taskId, weekKey);
+  const update: Record<string, unknown> = {};
 
   if (input.minutes !== undefined) {
     update.minutes = normalizeMinutes(input.minutes);
+    taskNeedsUpdate = true;
   }
 
   if (input.sortOrder !== undefined) {
     update.sortOrder = normalizeSortOrder(input.sortOrder);
+    taskNeedsUpdate = true;
   }
 
   if (input.task !== undefined) {
     update.task = input.task.trim();
+    taskNeedsUpdate = true;
   }
 
   if (input.time !== undefined) {
     update.time = normalizeTaskTime(input.time);
+    taskNeedsUpdate = true;
   }
 
-  await taskRef.set(update, { merge: true });
-  const refreshedSnapshot = await taskRef.get();
+  if (input.days || input.dayStatusUpdates) {
+    weeklyStatusDetails = await setDailyTaskWeekStatusDetails(
+      context,
+      taskRef,
+      taskId,
+      weekKey,
+      existingWeeklyStatusDetails,
+      input
+    );
+  } else {
+    weeklyStatusDetails = existingWeeklyStatusDetails;
+  }
 
-  return mapDailyTask(taskId, refreshedSnapshot.data() as LswDailyTaskRecord);
+  if (taskNeedsUpdate) {
+    await taskRef.set({
+      ...update,
+      departmentId: context.department.departmentId,
+      departmentName: context.department.name,
+      updatedAt: fieldValue.serverTimestamp()
+    }, { merge: true });
+  }
+
+  const refreshedSnapshot = taskNeedsUpdate ? await taskRef.get() : snapshot;
+
+  return mapDailyTask(taskId, refreshedSnapshot.data() as LswDailyTaskRecord, {
+    dayStatuses: weeklyStatusDetails,
+    days: getDaysFromDayStatusDetails(weeklyStatusDetails)
+  }, weekKey);
 }
 
 export async function deleteLswDailyTask(
@@ -423,6 +516,28 @@ export function calculateCalendarWeekContext(
     weekEnding: formatIsoDate(weekRange.end),
     weekEndingLabel: formatShortDate(weekRange.end)
   };
+}
+
+export function applyLswDayStatusInputForTest(
+  existingDetails: Record<DayKey, LswDayStatusDetail>,
+  input: Pick<LswDailyTaskInput, 'days' | 'dayStatusUpdates'>
+): Record<DayKey, LswDayStatusDetail> {
+  return applyDayStatusInput(existingDetails, input);
+}
+
+export function getEmptyLswDayStatusDetailsForTest(): Record<DayKey, LswDayStatusDetail> {
+  return getEmptyDayStatusDetails();
+}
+
+function resolveWeekKey(context: AuthorizedLswContext, input: LswContextInput = {}): string {
+  const calendar = mapCalendarYearSettings(context.organization);
+  const week = calculateCalendarWeekContext(calendar, input);
+
+  return formatWeekKey(week.selectedYear, week.selectedWeek);
+}
+
+function formatWeekKey(year: number, week: number): string {
+  return `${year}-W${String(week).padStart(2, '0')}`;
 }
 
 async function getAuthorizedLswContext(decodedToken: DecodedIdToken): Promise<AuthorizedLswContext> {
@@ -580,6 +695,111 @@ async function getNextDailyTaskSortOrder(context: AuthorizedLswContext): Promise
   return latestSortOrder + 1000;
 }
 
+async function getDailyTaskWeekStatuses(
+  context: AuthorizedLswContext,
+  taskDocs: Array<{
+    ref: FirebaseFirestore.DocumentReference;
+    taskId: string;
+  }>,
+  weekKey: string
+): Promise<Map<string, LswDailyTaskWeekStatusRecord>> {
+  const entries = await Promise.all(taskDocs.map(async ({ ref, taskId }) => {
+    const snapshot = await ref
+      .collection(LSW_DAILY_TASK_WEEK_STATUSES_COLLECTION)
+      .doc(weekKey)
+      .get();
+
+    if (!snapshot.exists) {
+      return [taskId, null] as const;
+    }
+
+    const record = snapshot.data() as LswDailyTaskWeekStatusRecord;
+
+    assertWeekStatusBelongsToContext(record, context, taskId, weekKey);
+
+    return [taskId, record] as const;
+  }));
+  const statuses = new Map<string, LswDailyTaskWeekStatusRecord>();
+
+  entries.forEach(([taskId, record]) => {
+    if (record && (record.status || 'ACTIVE') === 'ACTIVE') {
+      statuses.set(taskId, record);
+    }
+  });
+
+  return statuses;
+}
+
+async function getDailyTaskWeekStatusDetails(
+  context: AuthorizedLswContext,
+  taskRef: FirebaseFirestore.DocumentReference,
+  taskId: string,
+  weekKey: string
+): Promise<Record<DayKey, LswDayStatusDetail>> {
+  const snapshot = await taskRef
+    .collection(LSW_DAILY_TASK_WEEK_STATUSES_COLLECTION)
+    .doc(weekKey)
+    .get();
+
+  if (!snapshot.exists) {
+    return getEmptyDayStatusDetails();
+  }
+
+  const record = snapshot.data() as LswDailyTaskWeekStatusRecord;
+
+  assertWeekStatusBelongsToContext(record, context, taskId, weekKey);
+
+  if (record.status && record.status !== 'ACTIVE') {
+    return getEmptyDayStatusDetails();
+  }
+
+  return normalizeDayStatusDetails(record.dayStatuses, record.days);
+}
+
+async function setDailyTaskWeekStatusDetails(
+  context: AuthorizedLswContext,
+  taskRef: FirebaseFirestore.DocumentReference,
+  taskId: string,
+  weekKey: string,
+  existingDetails: Record<DayKey, LswDayStatusDetail>,
+  input: Pick<LswDailyTaskInput, 'days' | 'dayStatusUpdates'>
+): Promise<Record<DayKey, LswDayStatusDetail>> {
+  const statusRef = taskRef
+    .collection(LSW_DAILY_TASK_WEEK_STATUSES_COLLECTION)
+    .doc(weekKey);
+  const snapshot = await statusRef.get();
+  const nextDetails = applyDayStatusInput(existingDetails, input);
+  const days = getDaysFromDayStatusDetails(nextDetails);
+
+  if (snapshot.exists) {
+    assertWeekStatusBelongsToContext(
+      snapshot.data() as LswDailyTaskWeekStatusRecord,
+      context,
+      taskId,
+      weekKey
+    );
+  }
+
+  await statusRef.set({
+    companyId: context.tenantId,
+    days,
+    dayStatuses: nextDetails,
+    departmentId: context.department.departmentId,
+    departmentName: context.department.name,
+    lswId: context.lswProfile.lswId,
+    ownerUid: context.uid,
+    sectionKey: DAILY_TASK_SECTION_KEY,
+    status: 'ACTIVE',
+    taskId,
+    tenantId: context.tenantId,
+    updatedAt: fieldValue.serverTimestamp(),
+    weekKey,
+    ...(snapshot.exists ? {} : { createdAt: fieldValue.serverTimestamp() })
+  }, { merge: true });
+
+  return nextDetails;
+}
+
 function buildDailyTaskRecord(
   context: AuthorizedLswContext,
   taskId: string,
@@ -587,7 +807,6 @@ function buildDailyTaskRecord(
 ): LswDailyTaskRecord {
   return {
     companyId: context.tenantId,
-    days: normalizeDays(input.days),
     departmentId: context.department.departmentId,
     departmentName: context.department.name,
     lswId: context.lswProfile.lswId,
@@ -603,15 +822,25 @@ function buildDailyTaskRecord(
   };
 }
 
-function mapDailyTask(taskId: string, record: LswDailyTaskRecord): LswDailyTask {
+function mapDailyTask(
+  taskId: string,
+  record: LswDailyTaskRecord,
+  weeklyStatus?: Pick<LswDailyTaskWeekStatusRecord, 'dayStatuses' | 'days'>,
+  weekKey = ''
+): LswDailyTask {
+  const dayStatusDetails = normalizeDayStatusDetails(weeklyStatus?.dayStatuses, weeklyStatus?.days);
+
   return {
-    days: normalizeDays(record.days),
+    days: getDaysFromDayStatusDetails(dayStatusDetails),
+    dayStatusDetails,
+    dayStatuses: getDayStatusesFromDayStatusDetails(dayStatusDetails),
     minutes: normalizeMinutes(record.minutes ?? 0),
     sortOrder: normalizeSortOrder(record.sortOrder ?? 0),
     status: record.status || 'ACTIVE',
     task: record.task || '',
     taskId: record.taskId || taskId,
-    time: isValidTaskTime(record.time) ? record.time || '08:00' : '08:00'
+    time: isValidTaskTime(record.time) ? record.time || '08:00' : '08:00',
+    weekKey
   };
 }
 
@@ -623,6 +852,24 @@ function assertTaskBelongsToContext(record: LswDailyTaskRecord, context: Authori
     record.lswId !== context.lswProfile.lswId
   ) {
     throw authorizationError('This LSW task is not available.');
+  }
+}
+
+function assertWeekStatusBelongsToContext(
+  record: LswDailyTaskWeekStatusRecord,
+  context: AuthorizedLswContext,
+  taskId: string,
+  weekKey: string
+): void {
+  if (
+    record.tenantId !== context.tenantId ||
+    record.companyId !== context.tenantId ||
+    record.ownerUid !== context.uid ||
+    record.lswId !== context.lswProfile.lswId ||
+    record.taskId !== taskId ||
+    record.weekKey !== weekKey
+  ) {
+    throw authorizationError('This LSW task status is not available.');
   }
 }
 
@@ -641,15 +888,205 @@ function normalizeDays(
   return normalized;
 }
 
-function getDefaultDaysForWorkDays(workDaysPerWeek: number): Record<DayKey, boolean> {
-  const normalized = getEmptyDays();
-  const visibleDayCount = normalizeWorkDaysPerWeek(workDaysPerWeek);
+function normalizeDayStatusDetails(
+  input?: Partial<Record<DayKey, Partial<LswDayStatusDetail>>>,
+  fallbackDays: Partial<Record<DayKey, boolean>> = getEmptyDays()
+): Record<DayKey, LswDayStatusDetail> {
+  const normalized = {} as Record<DayKey, LswDayStatusDetail>;
 
-  ALL_DAY_KEYS.slice(0, visibleDayCount).forEach((dayKey) => {
-    normalized[dayKey] = true;
-  });
+  for (const dayKey of ALL_DAY_KEYS) {
+    const rawDetail = input?.[dayKey];
+    const fallbackStatus: LswDayStatus = fallbackDays?.[dayKey]
+      ? 'completed_on_time'
+      : 'not_completed';
+    const status = normalizeDayStatus(rawDetail?.status, fallbackStatus);
+    const firstCompletedOnTime = rawDetail?.firstCompletedOnTime === true || status === 'completed_on_time';
+    const detail: LswDayStatusDetail = {
+      firstCompletedOnTime,
+      status
+    };
+
+    if (isNonEmptyString(rawDetail?.completedAtIso)) {
+      detail.completedAtIso = rawDetail.completedAtIso;
+    }
+
+    if (isNonEmptyString(rawDetail?.dueAtIso)) {
+      detail.dueAtIso = rawDetail.dueAtIso;
+    }
+
+    if (isNonEmptyString(rawDetail?.firstCompletedAtIso)) {
+      detail.firstCompletedAtIso = rawDetail.firstCompletedAtIso;
+    }
+
+    if (isNonEmptyString(rawDetail?.lastChangedAtIso)) {
+      detail.lastChangedAtIso = rawDetail.lastChangedAtIso;
+    }
+
+    if (isNonEmptyString(rawDetail?.timeZone)) {
+      detail.timeZone = rawDetail.timeZone.slice(0, 80);
+    }
+
+    if (isNonEmptyString(rawDetail?.uncheckedAtIso)) {
+      detail.uncheckedAtIso = rawDetail.uncheckedAtIso;
+    }
+
+    normalized[dayKey] = detail;
+  }
 
   return normalized;
+}
+
+function applyDayStatusInput(
+  existingDetails: Record<DayKey, LswDayStatusDetail>,
+  input: Pick<LswDailyTaskInput, 'days' | 'dayStatusUpdates'>
+): Record<DayKey, LswDayStatusDetail> {
+  const nextDetails = normalizeDayStatusDetails(existingDetails);
+  const daysToUpdate = new Set<DayKey>();
+
+  for (const dayKey of ALL_DAY_KEYS) {
+    if (typeof input.days?.[dayKey] === 'boolean' || input.dayStatusUpdates?.[dayKey]) {
+      daysToUpdate.add(dayKey);
+    }
+  }
+
+  daysToUpdate.forEach((dayKey) => {
+    const requestedStatus = getRequestedDayStatus(dayKey, input);
+
+    if (!requestedStatus) {
+      return;
+    }
+
+    nextDetails[dayKey] = applySingleDayStatusUpdate(
+      nextDetails[dayKey],
+      requestedStatus,
+      input.dayStatusUpdates?.[dayKey]
+    );
+  });
+
+  return nextDetails;
+}
+
+function applySingleDayStatusUpdate(
+  existingDetail: LswDayStatusDetail,
+  requestedStatus: LswDayStatus,
+  update?: LswDayStatusUpdateInput
+): LswDayStatusDetail {
+  const nowIso = new Date().toISOString();
+  const firstCompletedOnTimeAlready = existingDetail.firstCompletedOnTime === true;
+
+  if (requestedStatus === 'not_completed') {
+    const detail: LswDayStatusDetail = {
+      firstCompletedOnTime: firstCompletedOnTimeAlready,
+      lastChangedAtIso: nowIso,
+      status: 'not_completed',
+      uncheckedAtIso: nowIso
+    };
+
+    if (isNonEmptyString(existingDetail.firstCompletedAtIso)) {
+      detail.firstCompletedAtIso = existingDetail.firstCompletedAtIso;
+    }
+
+    const dueAtIso = getNonEmptyString(update?.dueAtIso) || getNonEmptyString(existingDetail.dueAtIso);
+    const timeZone = getNonEmptyString(update?.timeZone) || getNonEmptyString(existingDetail.timeZone);
+
+    if (dueAtIso) {
+      detail.dueAtIso = dueAtIso;
+    }
+
+    if (timeZone) {
+      detail.timeZone = timeZone.slice(0, 80);
+    }
+
+    return detail;
+  }
+
+  const completedAtIso = getNonEmptyString(update?.completedAtIso) || nowIso;
+  const finalStatus: LswDayStatus = firstCompletedOnTimeAlready || requestedStatus === 'completed_on_time'
+    ? 'completed_on_time'
+    : 'completed_late';
+  const detail: LswDayStatusDetail = {
+    completedAtIso,
+    firstCompletedAtIso: getNonEmptyString(existingDetail.firstCompletedAtIso) || completedAtIso,
+    firstCompletedOnTime: firstCompletedOnTimeAlready || finalStatus === 'completed_on_time',
+    lastChangedAtIso: nowIso,
+    status: finalStatus
+  };
+  const dueAtIso = getNonEmptyString(update?.dueAtIso) || getNonEmptyString(existingDetail.dueAtIso);
+  const timeZone = getNonEmptyString(update?.timeZone) || getNonEmptyString(existingDetail.timeZone);
+
+  if (dueAtIso) {
+    detail.dueAtIso = dueAtIso;
+  }
+
+  if (timeZone) {
+    detail.timeZone = timeZone.slice(0, 80);
+  }
+
+  return detail;
+}
+
+function getRequestedDayStatus(
+  dayKey: DayKey,
+  input: Pick<LswDailyTaskInput, 'days' | 'dayStatusUpdates'>
+): LswDayStatus | null {
+  const requestedStatus = input.dayStatusUpdates?.[dayKey]?.status;
+
+  if (requestedStatus) {
+    return normalizeDayStatus(requestedStatus, 'not_completed');
+  }
+
+  if (typeof input.days?.[dayKey] === 'boolean') {
+    return input.days[dayKey] ? 'completed_on_time' : 'not_completed';
+  }
+
+  return null;
+}
+
+function normalizeDayStatus(value: unknown, fallback: LswDayStatus): LswDayStatus {
+  return value === 'completed_on_time' || value === 'completed_late' || value === 'not_completed'
+    ? value
+    : fallback;
+}
+
+function getDaysFromDayStatusDetails(details: Record<DayKey, LswDayStatusDetail>): Record<DayKey, boolean> {
+  const days = {} as Record<DayKey, boolean>;
+
+  for (const dayKey of ALL_DAY_KEYS) {
+    days[dayKey] = details[dayKey].status !== 'not_completed';
+  }
+
+  return days;
+}
+
+function getDayStatusesFromDayStatusDetails(details: Record<DayKey, LswDayStatusDetail>): Record<DayKey, LswDayStatus> {
+  const statuses = {} as Record<DayKey, LswDayStatus>;
+
+  for (const dayKey of ALL_DAY_KEYS) {
+    statuses[dayKey] = details[dayKey].status;
+  }
+
+  return statuses;
+}
+
+function getEmptyDayStatusDetails(): Record<DayKey, LswDayStatusDetail> {
+  const details = {} as Record<DayKey, LswDayStatusDetail>;
+
+  for (const dayKey of ALL_DAY_KEYS) {
+    details[dayKey] = {
+      firstCompletedOnTime: false,
+      status: 'not_completed'
+    };
+  }
+
+  return details;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function getNonEmptyString(value: unknown): string | null {
+  return isNonEmptyString(value) ? value.trim() : null;
 }
 
 function getEmptyDays(): Record<DayKey, boolean> {

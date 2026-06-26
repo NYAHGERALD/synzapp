@@ -54,6 +54,7 @@ export interface LswContext {
 }
 
 export type DayKey = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun';
+export type LswDayStatus = 'not_completed' | 'completed_on_time' | 'completed_late';
 export type WorkDaysPerWeek = 5 | 6 | 7;
 
 export interface LswWeekPreviewRow {
@@ -66,25 +67,50 @@ export interface LswWeekPreviewRow {
 
 export interface LswDailyTask {
   days: Record<DayKey, boolean>;
+  dayStatusDetails: Record<DayKey, LswDayStatusDetail>;
+  dayStatuses: Record<DayKey, LswDayStatus>;
   minutes: number;
   sortOrder: number;
   status: string;
   task: string;
   taskId: string;
   time: string;
+  weekKey: string;
+}
+
+export interface LswDayStatusDetail {
+  completedAtIso?: string;
+  dueAtIso?: string;
+  firstCompletedAtIso?: string;
+  firstCompletedOnTime: boolean;
+  lastChangedAtIso?: string;
+  status: LswDayStatus;
+  timeZone?: string;
+  uncheckedAtIso?: string;
 }
 
 export interface LswDailyTasksResponse {
   tasks: LswDailyTask[];
+  weekKey: string;
   workDaysPerWeek: WorkDaysPerWeek;
 }
 
 export interface LswDailyTaskPatch {
   days?: Partial<Record<DayKey, boolean>>;
+  dayStatusDetails?: Partial<Record<DayKey, LswDayStatusDetail>>;
+  dayStatuses?: Partial<Record<DayKey, LswDayStatus>>;
+  dayStatusUpdates?: Partial<Record<DayKey, LswDayStatusUpdate>>;
   minutes?: number;
   sortOrder?: number;
   task?: string;
   time?: string;
+}
+
+export interface LswDayStatusUpdate {
+  completedAtIso?: string;
+  dueAtIso?: string;
+  status: LswDayStatus;
+  timeZone?: string;
 }
 
 interface LswContextOptions {
@@ -93,17 +119,7 @@ interface LswContextOptions {
 }
 
 export async function getLswContext(options: LswContextOptions = {}): Promise<LswContext> {
-  const params = new URLSearchParams();
-
-  if (typeof options.week === 'number') {
-    params.set('week', String(options.week));
-  }
-
-  if (typeof options.year === 'number') {
-    params.set('year', String(options.year));
-  }
-
-  const queryString = params.toString();
+  const queryString = getLswQueryString(options);
   const body = await requestLswJson<{ context?: LswContext }>(`/api/lsw/context${queryString ? `?${queryString}` : ''}`);
 
   if (!body.context) {
@@ -113,8 +129,9 @@ export async function getLswContext(options: LswContextOptions = {}): Promise<Ls
   return body.context;
 }
 
-export async function listLswDailyTasks(): Promise<LswDailyTasksResponse> {
-  const body = await requestLswJson<{ dailyTasks?: LswDailyTasksResponse }>('/api/lsw/daily-tasks');
+export async function listLswDailyTasks(options: LswContextOptions = {}): Promise<LswDailyTasksResponse> {
+  const queryString = getLswQueryString(options);
+  const body = await requestLswJson<{ dailyTasks?: LswDailyTasksResponse }>(`/api/lsw/daily-tasks${queryString ? `?${queryString}` : ''}`);
 
   if (!body.dailyTasks) {
     throw new Error('Daily tasks could not be loaded.');
@@ -123,8 +140,12 @@ export async function listLswDailyTasks(): Promise<LswDailyTasksResponse> {
   return body.dailyTasks;
 }
 
-export async function createLswDailyTask(input: LswDailyTaskPatch = {}): Promise<LswDailyTask> {
-  const body = await requestLswJson<{ task?: LswDailyTask }>('/api/lsw/daily-tasks', {
+export async function createLswDailyTask(
+  input: LswDailyTaskPatch = {},
+  options: LswContextOptions = {}
+): Promise<LswDailyTask> {
+  const queryString = getLswQueryString(options);
+  const body = await requestLswJson<{ task?: LswDailyTask }>(`/api/lsw/daily-tasks${queryString ? `?${queryString}` : ''}`, {
     body: JSON.stringify(input),
     headers: {
       'Content-Type': 'application/json'
@@ -139,8 +160,13 @@ export async function createLswDailyTask(input: LswDailyTaskPatch = {}): Promise
   return body.task;
 }
 
-export async function updateLswDailyTask(taskId: string, input: LswDailyTaskPatch): Promise<LswDailyTask> {
-  const body = await requestLswJson<{ task?: LswDailyTask }>(`/api/lsw/daily-tasks/${encodeURIComponent(taskId)}`, {
+export async function updateLswDailyTask(
+  taskId: string,
+  input: LswDailyTaskPatch,
+  options: LswContextOptions = {}
+): Promise<LswDailyTask> {
+  const queryString = getLswQueryString(options);
+  const body = await requestLswJson<{ task?: LswDailyTask }>(`/api/lsw/daily-tasks/${encodeURIComponent(taskId)}${queryString ? `?${queryString}` : ''}`, {
     body: JSON.stringify(input),
     headers: {
       'Content-Type': 'application/json'
@@ -175,6 +201,20 @@ export async function updateLswSettings(workDaysPerWeek: WorkDaysPerWeek): Promi
   }
 
   return body.settings;
+}
+
+function getLswQueryString(options: LswContextOptions): string {
+  const params = new URLSearchParams();
+
+  if (typeof options.week === 'number') {
+    params.set('week', String(options.week));
+  }
+
+  if (typeof options.year === 'number') {
+    params.set('year', String(options.year));
+  }
+
+  return params.toString();
 }
 
 async function requestLswJson<T>(

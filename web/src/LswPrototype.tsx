@@ -19,7 +19,7 @@ import {
   useSortable,
   verticalListSortingStrategy
 } from '@dnd-kit/sortable';
-import * as Checkbox from '@radix-ui/react-checkbox';
+import * as ContextMenu from '@radix-ui/react-context-menu';
 import * as Popover from '@radix-ui/react-popover';
 import {
   createLswDailyTask,
@@ -32,6 +32,7 @@ import {
   type LswContext,
   type LswDailyTask,
   type LswDailyTaskPatch,
+  type LswDayStatus,
   type WorkDaysPerWeek
 } from './lswApi';
 
@@ -187,11 +188,12 @@ export function LswPrototype() {
   const [dailyTasksError, setDailyTasksError] = React.useState('');
   const [workDaysPerWeek, setWorkDaysPerWeek] = React.useState<WorkDaysPerWeek>(5);
   const requestIdRef = React.useRef(0);
+  const dailyTasksRequestIdRef = React.useRef(0);
   const dailyTaskSaveTimersRef = React.useRef<Record<string, number>>({});
+  const selectedWeekScopeRef = React.useRef('');
 
   React.useEffect(() => {
     void loadContext();
-    void loadDailyTasks();
 
     return () => {
       Object.values(dailyTaskSaveTimersRef.current).forEach((timerId) => window.clearTimeout(timerId));
@@ -201,16 +203,31 @@ export function LswPrototype() {
   async function loadContext(options: { week?: number; year?: number } = {}) {
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
+    dailyTasksRequestIdRef.current += 1;
 
     setIsLoadingContext(true);
+    setIsLoadingDailyTasks(true);
     setContextError('');
 
     try {
       const nextContext = await getLswContext(options);
 
       if (requestIdRef.current === requestId) {
+        const nextWeekOptions = {
+          week: nextContext.week.selectedWeek,
+          year: nextContext.week.selectedYear
+        };
+
+        selectedWeekScopeRef.current = getWeekScopeKey(nextWeekOptions);
         setLswContext(nextContext);
         setWorkDaysPerWeek(nextContext.settings.workDaysPerWeek);
+        setDailyTasks((currentTasks) => currentTasks.map((task) => ({
+          ...task,
+          days: getEmptyTaskDays(),
+          dayStatusDetails: getEmptyTaskDayStatusDetails(),
+          dayStatuses: getEmptyTaskDayStatuses()
+        })));
+        void loadDailyTasks(nextWeekOptions);
       }
     } catch (error) {
       if (requestIdRef.current === requestId) {
@@ -242,19 +259,33 @@ export function LswPrototype() {
     void loadContext();
   }
 
-  async function loadDailyTasks() {
+  async function loadDailyTasks(options: { week?: number; year?: number } = {}) {
+    const requestId = dailyTasksRequestIdRef.current + 1;
+    const weekScopeKey = getWeekScopeKey(options);
+
+    dailyTasksRequestIdRef.current = requestId;
     setIsLoadingDailyTasks(true);
     setDailyTasksError('');
 
     try {
-      const response = await listLswDailyTasks();
+      const response = await listLswDailyTasks(options);
 
-      setDailyTasks(response.tasks);
-      setWorkDaysPerWeek(response.workDaysPerWeek);
+      if (
+        dailyTasksRequestIdRef.current === requestId &&
+        (!weekScopeKey || selectedWeekScopeRef.current === weekScopeKey) &&
+        (!weekScopeKey || response.weekKey === weekScopeKey)
+      ) {
+        setDailyTasks(response.tasks);
+        setWorkDaysPerWeek(response.workDaysPerWeek);
+      }
     } catch (error) {
-      setDailyTasksError(getErrorMessage(error));
+      if (dailyTasksRequestIdRef.current === requestId) {
+        setDailyTasksError(getErrorMessage(error));
+      }
     } finally {
-      setIsLoadingDailyTasks(false);
+      if (dailyTasksRequestIdRef.current === requestId) {
+        setIsLoadingDailyTasks(false);
+      }
     }
   }
 
@@ -277,9 +308,28 @@ export function LswPrototype() {
     setDailyTasksError('');
 
     try {
-      const task = await createLswDailyTask();
+      const currentLocalTime = getCurrentLocalTime();
+      const weekOptions = getSelectedWeekOptions();
+      const weekScopeKey = getWeekScopeKey(weekOptions);
+      const task = await createLswDailyTask({
+        days: getEmptyTaskDays(),
+        time: currentLocalTime
+      }, weekOptions);
 
-      setDailyTasks((currentTasks) => [...currentTasks, task].sort(sortDailyTasks));
+      if (weekScopeKey && (selectedWeekScopeRef.current !== weekScopeKey || task.weekKey !== weekScopeKey)) {
+        return;
+      }
+
+      const taskWithEmptyWeekStatus = {
+        ...task,
+        days: getEmptyTaskDays(),
+        dayStatusDetails: getEmptyTaskDayStatusDetails(),
+        dayStatuses: getEmptyTaskDayStatuses(),
+        time: currentLocalTime,
+        weekKey: weekScopeKey || task.weekKey
+      };
+
+      setDailyTasks((currentTasks) => [...currentTasks, taskWithEmptyWeekStatus].sort(sortDailyTasks));
     } catch (error) {
       setDailyTasksError(getErrorMessage(error));
     }
@@ -344,14 +394,35 @@ export function LswPrototype() {
       return;
     }
 
-    queueDailyTaskSave(taskId, patch, options.immediate);
+    queueDailyTaskSave(
+      taskId,
+      patch,
+      options.immediate,
+      patch.days || patch.dayStatusUpdates ? getSelectedWeekOptions() : undefined
+    );
   }
 
-  function queueDailyTaskSave(taskId: string, patch: LswDailyTaskPatch, immediate = false) {
+  function queueDailyTaskSave(
+    taskId: string,
+    patch: LswDailyTaskPatch,
+    immediate = false,
+    weekOptions?: { week?: number; year?: number }
+  ) {
+    const saveWeekScopeKey = weekOptions ? getWeekScopeKey(weekOptions) : '';
+
     const save = async () => {
       try {
-        const savedTask = await updateLswDailyTask(taskId, patch);
+        const savedTask = await updateLswDailyTask(taskId, patch, weekOptions);
         const savedPatch = getSavedPatch(savedTask, patch);
+        const isWeekScopedSave = Boolean(patch.days || patch.dayStatusUpdates);
+
+        if (isWeekScopedSave && saveWeekScopeKey && selectedWeekScopeRef.current !== saveWeekScopeKey) {
+          return;
+        }
+
+        if (isWeekScopedSave && saveWeekScopeKey && savedTask.weekKey !== saveWeekScopeKey) {
+          return;
+        }
 
         setDailyTasks((currentTasks) => currentTasks.map((task) => (
           task.taskId === taskId ? applyDailyTaskPatch(task, savedPatch) : task
@@ -373,6 +444,23 @@ export function LswPrototype() {
       delete dailyTaskSaveTimersRef.current[taskId];
       void save();
     }, 700);
+  }
+
+  function getSelectedWeekOptions(): { week?: number; year?: number } {
+    if (!lswContext) {
+      return {};
+    }
+
+    return {
+      week: lswContext.week.selectedWeek,
+      year: lswContext.week.selectedYear
+    };
+  }
+
+  function getWeekScopeKey(options: { week?: number; year?: number }): string {
+    return typeof options.week === 'number' && typeof options.year === 'number'
+      ? `${options.year}-W${String(options.week).padStart(2, '0')}`
+      : '';
   }
 
   const hasBlockingContextError = Boolean(contextError && !lswContext);
@@ -506,6 +594,7 @@ export function LswPrototype() {
                 onDeleteTask={(taskId) => void handleDeleteDailyTask(taskId)}
                 onReorderTasks={(activeTaskId, overTaskId) => void handleReorderDailyTasks(activeTaskId, overTaskId)}
                 onTaskChange={handleDailyTaskChange}
+                selectedWeekBeginning={lswContext?.week.weekBeginning}
                 tasks={dailyTasks}
                 todayDayKey={todayDayKey}
                 visibleDays={visibleDays}
@@ -625,6 +714,7 @@ function DailyTasksTable({
   onDeleteTask,
   onReorderTasks,
   onTaskChange,
+  selectedWeekBeginning,
   tasks,
   todayDayKey,
   visibleDays
@@ -635,11 +725,12 @@ function DailyTasksTable({
   onDeleteTask: (taskId: string) => void;
   onReorderTasks: (activeTaskId: string, overTaskId: string) => void;
   onTaskChange: (taskId: string, patch: LswDailyTaskPatch, options?: { immediate?: boolean; skipSave?: boolean }) => void;
+  selectedWeekBeginning?: string;
   tasks: LswDailyTask[];
   todayDayKey: DayKey | null;
   visibleDays: Array<{ key: DayKey; label: string }>;
 }) {
-  const columnCount = visibleDays.length + 5;
+  const columnCount = visibleDays.length + 4;
   const [activeTaskId, setActiveTaskId] = React.useState<string | null>(null);
   const [dropIndicatorTop, setDropIndicatorTop] = React.useState<number | null>(null);
   const [droppedTaskId, setDroppedTaskId] = React.useState<string | null>(null);
@@ -760,7 +851,6 @@ function DailyTasksTable({
             {visibleDays.map((day) => (
               <col className="lsw-day-col" key={day.key} />
             ))}
-            <col className="lsw-delete-col" />
           </colgroup>
           <thead>
             <tr>
@@ -773,7 +863,6 @@ function DailyTasksTable({
                   {day.label}
                 </th>
               ))}
-              <th />
             </tr>
           </thead>
           <SortableContext items={taskIds} strategy={verticalListSortingStrategy}>
@@ -804,6 +893,7 @@ function DailyTasksTable({
                   onDeleteTask={onDeleteTask}
                   onRowElement={setRowElement}
                   onTaskChange={onTaskChange}
+                  selectedWeekBeginning={selectedWeekBeginning}
                   task={task}
                   visibleDays={visibleDays}
                 />
@@ -832,6 +922,7 @@ function DailyTaskRow({
   onDeleteTask,
   onRowElement,
   onTaskChange,
+  selectedWeekBeginning,
   task,
   visibleDays
 }: {
@@ -840,6 +931,7 @@ function DailyTaskRow({
   onDeleteTask: (taskId: string) => void;
   onRowElement: (taskId: string, rowElement: HTMLTableRowElement | null) => void;
   onTaskChange: (taskId: string, patch: LswDailyTaskPatch, options?: { immediate?: boolean; skipSave?: boolean }) => void;
+  selectedWeekBeginning?: string;
   task: LswDailyTask;
   visibleDays: Array<{ key: DayKey; label: string }>;
 }) {
@@ -873,16 +965,31 @@ function DailyTaskRow({
   return (
     <tr className={rowClassName} data-task-row-id={task.taskId} ref={setSortableRowRef} style={style}>
       <td className="lsw-drag-column">
-        <button
-          aria-label={`Drag ${task.task || 'task'} to reorder`}
-          className="lsw-drag-button"
-          ref={setActivatorNodeRef}
-          type="button"
-          {...attributes}
-          {...listeners}
-        >
-          <DragHandle />
-        </button>
+        <ContextMenu.Root>
+          <ContextMenu.Trigger asChild>
+            <button
+              aria-label={`Drag ${task.task || 'task'} to reorder. Right click for row actions.`}
+              className="lsw-drag-button"
+              ref={setActivatorNodeRef}
+              type="button"
+              {...attributes}
+              {...listeners}
+            >
+              <DragHandle />
+            </button>
+          </ContextMenu.Trigger>
+          <ContextMenu.Portal>
+            <ContextMenu.Content className="lsw-row-action-menu" collisionPadding={12}>
+              <ContextMenu.Item
+                className="lsw-row-action-menu-item is-danger"
+                onSelect={() => onDeleteTask(task.taskId)}
+              >
+                <XIcon />
+                <span>Delete row</span>
+              </ContextMenu.Item>
+            </ContextMenu.Content>
+          </ContextMenu.Portal>
+        </ContextMenu.Root>
       </td>
       <td className="lsw-minutes-cell">
         <div className="lsw-cell-fill">
@@ -923,31 +1030,29 @@ function DailyTaskRow({
       {visibleDays.map((day) => (
         <td className="lsw-check-cell" key={day.key}>
           <div className="lsw-cell-fill">
-            <Checkbox.Root
-              aria-label={`${day.label} selected`}
-              className="lsw-task-checkbox"
-              checked={task.days[day.key]}
-              onCheckedChange={(checked) => onTaskChange(task.taskId, {
-                days: { [day.key]: checked === true }
-              }, { immediate: true })}
-            >
-              <Checkbox.Indicator className="lsw-task-checkbox-indicator">
-                <CheckIcon />
-              </Checkbox.Indicator>
-            </Checkbox.Root>
+            <DayStatusPicker
+              dayLabel={day.label}
+              nextStatus={getNextDayStatus(task, day.key, selectedWeekBeginning)}
+              onChange={(nextStatus) => {
+                const dueDate = getTaskDueDate(selectedWeekBeginning, day.key, task.time);
+
+                onTaskChange(task.taskId, {
+                  days: { [day.key]: nextStatus !== 'not_completed' },
+                  dayStatusUpdates: {
+                    [day.key]: {
+                      ...(nextStatus !== 'not_completed' ? { completedAtIso: new Date().toISOString() } : {}),
+                      ...(dueDate ? { dueAtIso: dueDate.toISOString() } : {}),
+                      status: nextStatus,
+                      timeZone: getBrowserTimeZone()
+                    }
+                  }
+                }, { immediate: true });
+              }}
+              value={getTaskDayStatus(task, day.key)}
+            />
           </div>
         </td>
       ))}
-      <td className="lsw-delete-cell">
-        <button
-          aria-label="Delete task"
-          className="lsw-delete-button"
-          onClick={() => onDeleteTask(task.taskId)}
-          type="button"
-        >
-          <XIcon />
-        </button>
-      </td>
     </tr>
   );
 }
@@ -1019,7 +1124,6 @@ function TimePicker({
     <Popover.Root>
       <Popover.Trigger asChild>
         <button aria-label={ariaLabel} className="lsw-time-picker-trigger" type="button">
-          <ClockMiniIcon />
           <span>{value}</span>
         </button>
       </Popover.Trigger>
@@ -1061,6 +1165,73 @@ function TimePicker({
             </section>
           </div>
           <Popover.Arrow className="lsw-time-picker-arrow" />
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
+  );
+}
+
+function DayStatusPicker({
+  dayLabel,
+  nextStatus,
+  onChange,
+  value
+}: {
+  dayLabel: string;
+  nextStatus: LswDayStatus;
+  onChange: (value: LswDayStatus) => void;
+  value: LswDayStatus;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [isAnimatingChange, setIsAnimatingChange] = React.useState(false);
+  const animationTimerRef = React.useRef<number | null>(null);
+
+  React.useEffect(() => () => {
+    if (animationTimerRef.current !== null) {
+      window.clearTimeout(animationTimerRef.current);
+    }
+  }, []);
+
+  function selectStatus(selectedStatus: LswDayStatus) {
+    onChange(selectedStatus);
+    setOpen(false);
+
+    if (animationTimerRef.current !== null) {
+      window.clearTimeout(animationTimerRef.current);
+    }
+
+    setIsAnimatingChange(false);
+    window.requestAnimationFrame(() => {
+      setIsAnimatingChange(true);
+      animationTimerRef.current = window.setTimeout(() => {
+        setIsAnimatingChange(false);
+        animationTimerRef.current = null;
+      }, 540);
+    });
+  }
+
+  return (
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger asChild>
+        <button
+          aria-label={`${dayLabel} status ${getDayStatusLabel(value)}`}
+          className={`lsw-day-status-trigger ${getDayStatusClassName(value)} ${isAnimatingChange ? 'is-changing' : ''}`}
+          type="button"
+        >
+          {value === 'not_completed' ? <XIcon /> : <CheckIcon />}
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content align="center" className="lsw-day-status-popover" collisionPadding={12} side="bottom" sideOffset={2}>
+          <button
+            aria-label={`Set ${dayLabel} status to ${getDayStatusLabel(nextStatus)}`}
+            className={`lsw-day-status-option ${getDayStatusClassName(nextStatus)}`}
+            onClick={() => selectStatus(nextStatus)}
+            type="button"
+          >
+            {nextStatus === 'not_completed' ? <XIcon /> : <CheckIcon />}
+          </button>
+          <Popover.Arrow className="lsw-day-status-arrow" height={7} width={14} />
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
@@ -1289,11 +1460,57 @@ function getErrorMessage(error: unknown): string {
   return 'The LSW workspace could not be loaded.';
 }
 
+function getEmptyTaskDays(): Record<DayKey, boolean> {
+  return {
+    fri: false,
+    mon: false,
+    sat: false,
+    sun: false,
+    thu: false,
+    tue: false,
+    wed: false
+  };
+}
+
+function getEmptyTaskDayStatuses(): Record<DayKey, LswDayStatus> {
+  return {
+    fri: 'not_completed',
+    mon: 'not_completed',
+    sat: 'not_completed',
+    sun: 'not_completed',
+    thu: 'not_completed',
+    tue: 'not_completed',
+    wed: 'not_completed'
+  };
+}
+
+function getEmptyTaskDayStatusDetails(): LswDailyTask['dayStatusDetails'] {
+  const details = {} as LswDailyTask['dayStatusDetails'];
+
+  allDays.forEach((day) => {
+    details[day.key] = {
+      firstCompletedOnTime: false,
+      status: 'not_completed'
+    };
+  });
+
+  return details;
+}
+
 function applyDailyTaskPatch(task: LswDailyTask, patch: LswDailyTaskPatch): LswDailyTask {
+  const dayStatusDetails = applyDayStatusPatch(task, patch);
+  const dayStatuses = {
+    ...task.dayStatuses,
+    ...patch.dayStatuses
+  };
+  const days = patch.days ? { ...task.days, ...patch.days } : task.days;
+
   return {
     ...task,
     ...patch,
-    days: patch.days ? { ...task.days, ...patch.days } : task.days,
+    days,
+    dayStatusDetails,
+    dayStatuses: getMergedDayStatuses(dayStatusDetails, dayStatuses),
     minutes: patch.minutes ?? task.minutes,
     sortOrder: patch.sortOrder ?? task.sortOrder,
     task: patch.task ?? task.task,
@@ -1304,8 +1521,10 @@ function applyDailyTaskPatch(task: LswDailyTask, patch: LswDailyTaskPatch): LswD
 function getSavedPatch(savedTask: LswDailyTask, requestedPatch: LswDailyTaskPatch): LswDailyTaskPatch {
   const savedPatch: LswDailyTaskPatch = {};
 
-  if (requestedPatch.days) {
+  if (requestedPatch.days || requestedPatch.dayStatusUpdates) {
     savedPatch.days = savedTask.days;
+    savedPatch.dayStatusDetails = savedTask.dayStatusDetails;
+    savedPatch.dayStatuses = savedTask.dayStatuses;
   }
 
   if (requestedPatch.minutes !== undefined) {
@@ -1325,6 +1544,158 @@ function getSavedPatch(savedTask: LswDailyTask, requestedPatch: LswDailyTaskPatc
   }
 
   return savedPatch;
+}
+
+function applyDayStatusPatch(task: LswDailyTask, patch: LswDailyTaskPatch): LswDailyTask['dayStatusDetails'] {
+  const nextDetails = {
+    ...task.dayStatusDetails,
+    ...patch.dayStatusDetails
+  };
+
+  if (!patch.dayStatusUpdates) {
+    return nextDetails;
+  }
+
+  allDays.forEach((day) => {
+    const update = patch.dayStatusUpdates?.[day.key];
+
+    if (!update) {
+      return;
+    }
+
+    const currentDetail = nextDetails[day.key] || {
+      firstCompletedOnTime: false,
+      status: 'not_completed' as LswDayStatus
+    };
+    const firstCompletedOnTime = currentDetail.firstCompletedOnTime || update.status === 'completed_on_time';
+    const nextDetail = {
+      ...currentDetail,
+      dueAtIso: update.dueAtIso || currentDetail.dueAtIso,
+      firstCompletedOnTime,
+      lastChangedAtIso: new Date().toISOString(),
+      status: update.status,
+      timeZone: update.timeZone || currentDetail.timeZone
+    };
+
+    if (update.status === 'not_completed') {
+      nextDetails[day.key] = {
+        dueAtIso: nextDetail.dueAtIso,
+        firstCompletedAtIso: currentDetail.firstCompletedAtIso,
+        firstCompletedOnTime: currentDetail.firstCompletedOnTime,
+        lastChangedAtIso: nextDetail.lastChangedAtIso,
+        status: 'not_completed',
+        timeZone: nextDetail.timeZone,
+        uncheckedAtIso: nextDetail.lastChangedAtIso
+      };
+      return;
+    }
+
+    nextDetails[day.key] = {
+      ...nextDetail,
+      completedAtIso: update.completedAtIso || new Date().toISOString(),
+      firstCompletedAtIso: currentDetail.firstCompletedAtIso || update.completedAtIso || new Date().toISOString()
+    };
+  });
+
+  return nextDetails;
+}
+
+function getMergedDayStatuses(
+  details: LswDailyTask['dayStatusDetails'],
+  fallback: Partial<Record<DayKey, LswDayStatus>>
+): Record<DayKey, LswDayStatus> {
+  const statuses = {} as Record<DayKey, LswDayStatus>;
+
+  allDays.forEach((day) => {
+    statuses[day.key] = details[day.key]?.status || fallback[day.key] || 'not_completed';
+  });
+
+  return statuses;
+}
+
+function getTaskDayStatus(task: LswDailyTask, dayKey: DayKey): LswDayStatus {
+  return task.dayStatuses?.[dayKey] || task.dayStatusDetails?.[dayKey]?.status || (task.days[dayKey] ? 'completed_on_time' : 'not_completed');
+}
+
+function getNextDayStatus(task: LswDailyTask, dayKey: DayKey, selectedWeekBeginning?: string): LswDayStatus {
+  const currentStatus = getTaskDayStatus(task, dayKey);
+
+  if (currentStatus !== 'not_completed') {
+    return 'not_completed';
+  }
+
+  if (task.dayStatusDetails?.[dayKey]?.firstCompletedOnTime) {
+    return 'completed_on_time';
+  }
+
+  const dueDate = getTaskDueDate(selectedWeekBeginning, dayKey, task.time);
+
+  if (dueDate && new Date().getTime() > dueDate.getTime()) {
+    return 'completed_late';
+  }
+
+  return 'completed_on_time';
+}
+
+const dayOffsets: Record<DayKey, number> = {
+  fri: 4,
+  mon: 0,
+  sat: 5,
+  sun: 6,
+  thu: 3,
+  tue: 1,
+  wed: 2
+};
+
+function getTaskDueDate(selectedWeekBeginning: string | undefined, dayKey: DayKey, time: string): Date | null {
+  const dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(selectedWeekBeginning || '');
+  const timeMatch = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(time);
+
+  if (!dateMatch || !timeMatch) {
+    return null;
+  }
+
+  const dueDate = new Date(
+    Number(dateMatch[1]),
+    Number(dateMatch[2]) - 1,
+    Number(dateMatch[3]),
+    Number(timeMatch[1]),
+    Number(timeMatch[2]),
+    0,
+    0
+  );
+
+  dueDate.setDate(dueDate.getDate() + dayOffsets[dayKey]);
+
+  return dueDate;
+}
+
+function getBrowserTimeZone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+}
+
+function getDayStatusClassName(status: LswDayStatus): string {
+  if (status === 'completed_on_time') {
+    return 'is-yes';
+  }
+
+  if (status === 'completed_late') {
+    return 'is-late';
+  }
+
+  return 'is-no';
+}
+
+function getDayStatusLabel(status: LswDayStatus): string {
+  if (status === 'completed_on_time') {
+    return 'completed on time';
+  }
+
+  if (status === 'completed_late') {
+    return 'completed late';
+  }
+
+  return 'not completed';
 }
 
 function sortDailyTasks(first: LswDailyTask, second: LswDailyTask): number {
@@ -1358,6 +1729,12 @@ function parseTimeParts(value: string): { hour: number; minute: number } {
 
 function padTwo(value: number): string {
   return value.toString().padStart(2, '0');
+}
+
+function getCurrentLocalTime(): string {
+  const now = new Date();
+
+  return `${padTwo(now.getHours())}:${padTwo(now.getMinutes())}`;
 }
 
 function PanelFooter({ label, tone }: { label: string; tone: string }) {
@@ -1432,14 +1809,6 @@ function PlusMiniIcon() {
   return (
     <svg aria-hidden="true" className="lsw-mini-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-    </svg>
-  );
-}
-
-function ClockMiniIcon() {
-  return (
-    <svg aria-hidden="true" className="lsw-mini-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6l4 2m5-2a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
     </svg>
   );
 }

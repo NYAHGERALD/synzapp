@@ -28,7 +28,27 @@ const daySelectionSchema = z.object({
   wed: z.boolean().optional()
 });
 
+const dayStatusValueSchema = z.enum(['not_completed', 'completed_on_time', 'completed_late']);
+
+const dayStatusUpdateSchema = z.object({
+  completedAtIso: z.string().datetime().optional(),
+  dueAtIso: z.string().datetime().optional(),
+  status: dayStatusValueSchema,
+  timeZone: z.string().trim().max(80).optional()
+});
+
+const dayStatusUpdatesSchema = z.object({
+  fri: dayStatusUpdateSchema.optional(),
+  mon: dayStatusUpdateSchema.optional(),
+  sat: dayStatusUpdateSchema.optional(),
+  sun: dayStatusUpdateSchema.optional(),
+  thu: dayStatusUpdateSchema.optional(),
+  tue: dayStatusUpdateSchema.optional(),
+  wed: dayStatusUpdateSchema.optional()
+});
+
 const dailyTaskBodySchema = z.object({
+  dayStatusUpdates: dayStatusUpdatesSchema.optional(),
   days: daySelectionSchema.optional(),
   minutes: z.number().int().min(0).max(1440).optional(),
   sortOrder: z.number().int().min(0).max(1_000_000_000).optional(),
@@ -69,7 +89,8 @@ lswRouter.patch('/settings', verifyAppCheck, async (req, res, next) => {
 lswRouter.get('/daily-tasks', verifyAppCheck, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
-    const dailyTasks = await listLswDailyTasks(decodedToken);
+    const query = lswContextQuerySchema.parse(req.query);
+    const dailyTasks = await listLswDailyTasks(decodedToken, query);
 
     res.json({ dailyTasks });
   } catch (error) {
@@ -81,7 +102,8 @@ lswRouter.post('/daily-tasks', verifyAppCheck, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
     const body = dailyTaskBodySchema.parse(req.body);
-    const task = await createLswDailyTask(decodedToken, body);
+    const query = lswContextQuerySchema.parse(req.query);
+    const task = await createLswDailyTask(decodedToken, body, query);
 
     res.status(201).json({ task });
   } catch (error) {
@@ -94,7 +116,8 @@ lswRouter.patch('/daily-tasks/:taskId', verifyAppCheck, async (req, res, next) =
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
     const taskId = taskIdParamSchema.parse(req.params.taskId);
     const body = dailyTaskBodySchema.parse(req.body);
-    const task = await updateLswDailyTask(decodedToken, taskId, body);
+    const query = lswContextQuerySchema.parse(req.query);
+    const task = await updateLswDailyTask(decodedToken, taskId, body, query);
 
     res.json({ task });
   } catch (error) {
