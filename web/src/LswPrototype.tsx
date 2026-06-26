@@ -1,5 +1,27 @@
 import React from 'react';
 import {
+  closestCenter,
+  DndContext,
+  KeyboardSensor,
+  MouseSensor,
+  type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
+  TouchSensor,
+  useSensor,
+  useSensors
+} from '@dnd-kit/core';
+import { restrictToVerticalAxis } from '@dnd-kit/modifiers';
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy
+} from '@dnd-kit/sortable';
+import * as Checkbox from '@radix-ui/react-checkbox';
+import * as Popover from '@radix-ui/react-popover';
+import {
   createLswDailyTask,
   deleteLswDailyTask,
   getLswContext,
@@ -279,6 +301,36 @@ export function LswPrototype() {
     }
   }
 
+  async function handleReorderDailyTasks(activeTaskId: string, overTaskId: string) {
+    const previousTasks = dailyTasks;
+    const oldIndex = dailyTasks.findIndex((task) => task.taskId === activeTaskId);
+    const newIndex = dailyTasks.findIndex((task) => task.taskId === overTaskId);
+
+    if (oldIndex < 0 || newIndex < 0 || oldIndex === newIndex) {
+      return;
+    }
+
+    const reorderedTasks = arrayMove(dailyTasks, oldIndex, newIndex).map((task, index) => ({
+      ...task,
+      sortOrder: (index + 1) * 1000
+    }));
+    const changedTasks = reorderedTasks.filter((task) => (
+      previousTasks.find((previousTask) => previousTask.taskId === task.taskId)?.sortOrder !== task.sortOrder
+    ));
+
+    setDailyTasks(reorderedTasks);
+    setDailyTasksError('');
+
+    try {
+      await Promise.all(changedTasks.map((task) => (
+        updateLswDailyTask(task.taskId, { sortOrder: task.sortOrder })
+      )));
+    } catch (error) {
+      setDailyTasks(previousTasks);
+      setDailyTasksError(getErrorMessage(error));
+    }
+  }
+
   function handleDailyTaskChange(
     taskId: string,
     patch: LswDailyTaskPatch,
@@ -452,6 +504,7 @@ export function LswPrototype() {
                 isLoading={isLoadingDailyTasks}
                 onAddTask={() => void handleAddDailyTask()}
                 onDeleteTask={(taskId) => void handleDeleteDailyTask(taskId)}
+                onReorderTasks={(activeTaskId, overTaskId) => void handleReorderDailyTasks(activeTaskId, overTaskId)}
                 onTaskChange={handleDailyTaskChange}
                 tasks={dailyTasks}
                 todayDayKey={todayDayKey}
@@ -570,6 +623,7 @@ function DailyTasksTable({
   isLoading,
   onAddTask,
   onDeleteTask,
+  onReorderTasks,
   onTaskChange,
   tasks,
   todayDayKey,
@@ -579,139 +633,437 @@ function DailyTasksTable({
   isLoading: boolean;
   onAddTask: () => void;
   onDeleteTask: (taskId: string) => void;
+  onReorderTasks: (activeTaskId: string, overTaskId: string) => void;
   onTaskChange: (taskId: string, patch: LswDailyTaskPatch, options?: { immediate?: boolean; skipSave?: boolean }) => void;
   tasks: LswDailyTask[];
   todayDayKey: DayKey | null;
   visibleDays: Array<{ key: DayKey; label: string }>;
 }) {
   const columnCount = visibleDays.length + 5;
+  const [activeTaskId, setActiveTaskId] = React.useState<string | null>(null);
+  const [dropIndicatorTop, setDropIndicatorTop] = React.useState<number | null>(null);
+  const [droppedTaskId, setDroppedTaskId] = React.useState<string | null>(null);
+  const tableScrollRef = React.useRef<HTMLDivElement | null>(null);
+  const rowElementsRef = React.useRef<Record<string, HTMLTableRowElement | null>>({});
+  const taskIds = React.useMemo(() => tasks.map((task) => task.taskId), [tasks]);
+  const sensors = useSensors(
+    useSensor(MouseSensor, {
+      activationConstraint: {
+        distance: 6
+      }
+    }),
+    useSensor(TouchSensor, {
+      activationConstraint: {
+        delay: 130,
+        tolerance: 6
+      }
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates
+    })
+  );
+
+  function setRowElement(taskId: string, rowElement: HTMLTableRowElement | null) {
+    rowElementsRef.current[taskId] = rowElement;
+  }
+
+  function updateDropIndicator(nextOverTaskId: string | null, placement: 'after' | 'before' | null) {
+    const containerElement = tableScrollRef.current;
+    const overRowElement = nextOverTaskId ? rowElementsRef.current[nextOverTaskId] : null;
+
+    if (!containerElement || !overRowElement || !placement) {
+      setDropIndicatorTop(null);
+      return;
+    }
+
+    const containerRect = containerElement.getBoundingClientRect();
+    const rowRect = overRowElement.getBoundingClientRect();
+    const nextTop = (placement === 'after' ? rowRect.bottom : rowRect.top) - containerRect.top + containerElement.scrollTop;
+
+    setDropIndicatorTop(nextTop);
+  }
+
+  function handleDragStart(event: DragStartEvent) {
+    const nextActiveTaskId = String(event.active.id);
+
+    setActiveTaskId(nextActiveTaskId);
+    setDroppedTaskId(null);
+  }
+
+  function handleDragOver(event: DragOverEvent) {
+    const activeId = String(event.active.id);
+    const nextOverTaskId = event.over ? String(event.over.id) : null;
+
+    if (!nextOverTaskId || nextOverTaskId === activeId) {
+      setDropIndicatorTop(null);
+      return;
+    }
+
+    const activeIndex = taskIds.indexOf(activeId);
+    const overIndex = taskIds.indexOf(nextOverTaskId);
+    const nextDropPlacement = activeIndex < overIndex ? 'after' : 'before';
+
+    updateDropIndicator(nextOverTaskId, nextDropPlacement);
+  }
+
+  function resetDragState() {
+    setActiveTaskId(null);
+    setDropIndicatorTop(null);
+  }
+
+  function handleDragEnd(event: DragEndEvent) {
+    const activeId = String(event.active.id);
+    const finalOverTaskId = event.over ? String(event.over.id) : null;
+
+    resetDragState();
+
+    if (!finalOverTaskId || finalOverTaskId === activeId) {
+      return;
+    }
+
+    setDroppedTaskId(activeId);
+    window.setTimeout(() => setDroppedTaskId((currentTaskId) => (
+      currentTaskId === activeId ? null : currentTaskId
+    )), 460);
+    onReorderTasks(activeId, finalOverTaskId);
+  }
+
+  function handleDragCancel() {
+    resetDragState();
+  }
 
   return (
-    <div className="lsw-table-scroll">
-      <table className="lsw-table lsw-daily-table">
-        <colgroup>
-          <col className="lsw-drag-col" />
-          <col className="lsw-min-col" />
-          <col className="lsw-task-col" />
-          <col className="lsw-time-col" />
-          {visibleDays.map((day) => (
-            <col className="lsw-day-col" key={day.key} />
-          ))}
-          <col className="lsw-delete-col" />
-        </colgroup>
-        <thead>
-          <tr>
-            <th className="lsw-drag-column" />
-            <th>Min</th>
-            <th>Task/Meeting</th>
-            <th className="lsw-center">Time</th>
+    <DndContext
+      autoScroll={false}
+      collisionDetection={closestCenter}
+      modifiers={[restrictToVerticalAxis]}
+      onDragCancel={handleDragCancel}
+      onDragEnd={handleDragEnd}
+      onDragOver={handleDragOver}
+      onDragStart={handleDragStart}
+      sensors={sensors}
+    >
+      <div className="lsw-table-scroll" ref={tableScrollRef}>
+        {activeTaskId && dropIndicatorTop !== null ? (
+          <div
+            aria-hidden="true"
+            className="lsw-row-drop-indicator"
+            style={{ top: `${dropIndicatorTop}px` }}
+          />
+        ) : null}
+        <table className="lsw-table lsw-daily-table">
+          <colgroup>
+            <col className="lsw-drag-col" />
+            <col className="lsw-min-col" />
+            <col className="lsw-task-col" />
+            <col className="lsw-time-col" />
             {visibleDays.map((day) => (
-              <th className={`lsw-day-heading ${day.key === todayDayKey ? 'lsw-day-today' : ''}`} key={day.key}>
-                {day.label}
-              </th>
+              <col className="lsw-day-col" key={day.key} />
             ))}
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          {isLoading && tasks.length === 0 ? (
+            <col className="lsw-delete-col" />
+          </colgroup>
+          <thead>
             <tr>
-              <td className="lsw-empty-row" colSpan={columnCount}>Loading daily tasks...</td>
-            </tr>
-          ) : null}
-
-          {errorMessage ? (
-            <tr>
-              <td className="lsw-error-row" colSpan={columnCount}>{errorMessage}</td>
-            </tr>
-          ) : null}
-
-          {!isLoading && tasks.length === 0 && !errorMessage ? (
-            <tr>
-              <td className="lsw-empty-row" colSpan={columnCount}>No daily or weekly tasks yet.</td>
-            </tr>
-          ) : null}
-
-          {tasks.map((task) => (
-            <tr key={task.taskId}>
-              <td className="lsw-drag-column"><DragHandle /></td>
-              <td>
-                <input
-                  aria-label="Task minutes"
-                  className="lsw-inline-input lsw-minutes-input"
-                  inputMode="numeric"
-                  min={0}
-                  max={1440}
-                  onChange={(event) => onTaskChange(task.taskId, {
-                    minutes: Number(event.target.value || 0)
-                  })}
-                  type="number"
-                  value={task.minutes}
-                />
-              </td>
-              <td className="lsw-task-cell">
-                <input
-                  aria-label="Task or meeting"
-                  className="lsw-inline-input lsw-task-input"
-                  onChange={(event) => onTaskChange(task.taskId, { task: event.target.value })}
-                  placeholder="Type task or meeting"
-                  type="text"
-                  value={task.task}
-                />
-              </td>
-              <td className="lsw-center">
-                <input
-                  aria-label="Task time"
-                  className="lsw-inline-input lsw-time-input"
-                  onChange={(event) => {
-                    const nextTime = event.target.value;
-
-                    onTaskChange(task.taskId, { time: nextTime }, {
-                      skipSave: !isValidTimeInput(nextTime)
-                    });
-                  }}
-                  step={60}
-                  type="time"
-                  value={task.time}
-                />
-              </td>
+              <th className="lsw-drag-column" />
+              <th>Min</th>
+              <th>Task/Meeting</th>
+              <th className="lsw-center">Time</th>
               {visibleDays.map((day) => (
-                <td className="lsw-check-cell" key={day.key}>
-                  <input
-                    aria-label={`${day.label} selected`}
-                    checked={task.days[day.key]}
-                    onChange={(event) => onTaskChange(task.taskId, {
-                      days: { [day.key]: event.target.checked }
-                    }, { immediate: true })}
-                    type="checkbox"
-                  />
-                </td>
+                <th className={`lsw-day-heading ${day.key === todayDayKey ? 'lsw-day-today' : ''}`} key={day.key}>
+                  {day.label}
+                </th>
               ))}
-              <td className="lsw-delete-cell">
-                <button
-                  aria-label="Delete task"
-                  className="lsw-delete-button"
-                  onClick={() => onDeleteTask(task.taskId)}
-                  type="button"
-                >
-                  <XIcon />
+              <th />
+            </tr>
+          </thead>
+          <SortableContext items={taskIds} strategy={verticalListSortingStrategy}>
+            <tbody>
+              {isLoading && tasks.length === 0 ? (
+                <tr>
+                  <td className="lsw-empty-row" colSpan={columnCount}>Loading daily tasks...</td>
+                </tr>
+              ) : null}
+
+              {errorMessage ? (
+                <tr>
+                  <td className="lsw-error-row" colSpan={columnCount}>{errorMessage}</td>
+                </tr>
+              ) : null}
+
+              {!isLoading && tasks.length === 0 && !errorMessage ? (
+                <tr>
+                  <td className="lsw-empty-row" colSpan={columnCount}>No daily or weekly tasks yet.</td>
+                </tr>
+              ) : null}
+
+              {tasks.map((task) => (
+                <DailyTaskRow
+                  activeTaskId={activeTaskId}
+                  isDropped={droppedTaskId === task.taskId}
+                  key={task.taskId}
+                  onDeleteTask={onDeleteTask}
+                  onRowElement={setRowElement}
+                  onTaskChange={onTaskChange}
+                  task={task}
+                  visibleDays={visibleDays}
+                />
+              ))}
+            </tbody>
+          </SortableContext>
+          <tfoot>
+            <tr>
+              <td colSpan={columnCount}>
+                <button className="lsw-add-row lsw-add-row-emerald" disabled={isLoading} onClick={onAddTask} type="button">
+                  <PlusMiniIcon />
+                  Add Task
                 </button>
               </td>
             </tr>
-          ))}
-        </tbody>
-        <tfoot>
-          <tr>
-            <td colSpan={columnCount}>
-              <button className="lsw-add-row lsw-add-row-emerald" disabled={isLoading} onClick={onAddTask} type="button">
-                <PlusMiniIcon />
-                Add Task
-              </button>
-            </td>
-          </tr>
-        </tfoot>
-      </table>
-    </div>
+          </tfoot>
+        </table>
+      </div>
+    </DndContext>
+  );
+}
+
+function DailyTaskRow({
+  activeTaskId,
+  isDropped,
+  onDeleteTask,
+  onRowElement,
+  onTaskChange,
+  task,
+  visibleDays
+}: {
+  activeTaskId: string | null;
+  isDropped: boolean;
+  onDeleteTask: (taskId: string) => void;
+  onRowElement: (taskId: string, rowElement: HTMLTableRowElement | null) => void;
+  onTaskChange: (taskId: string, patch: LswDailyTaskPatch, options?: { immediate?: boolean; skipSave?: boolean }) => void;
+  task: LswDailyTask;
+  visibleDays: Array<{ key: DayKey; label: string }>;
+}) {
+  const {
+    attributes,
+    isDragging,
+    listeners,
+    setActivatorNodeRef,
+    setNodeRef,
+    transform,
+    transition
+  } = useSortable({
+    id: task.taskId
+  });
+  const translateY = transform ? Math.round(transform.y) : 0;
+  const style: React.CSSProperties = {
+    transform: transform ? `translate3d(0, ${translateY}px, 0)` : undefined,
+    transition
+  };
+  const rowClassName = [
+    'lsw-sortable-row',
+    isDragging ? 'is-dragging' : '',
+    activeTaskId && activeTaskId !== task.taskId ? 'is-sorting-peer' : '',
+    isDropped ? 'is-dropped' : ''
+  ].filter(Boolean).join(' ');
+  const setSortableRowRef = React.useCallback((rowElement: HTMLTableRowElement | null) => {
+    setNodeRef(rowElement);
+    onRowElement(task.taskId, rowElement);
+  }, [onRowElement, setNodeRef, task.taskId]);
+
+  return (
+    <tr className={rowClassName} data-task-row-id={task.taskId} ref={setSortableRowRef} style={style}>
+      <td className="lsw-drag-column">
+        <button
+          aria-label={`Drag ${task.task || 'task'} to reorder`}
+          className="lsw-drag-button"
+          ref={setActivatorNodeRef}
+          type="button"
+          {...attributes}
+          {...listeners}
+        >
+          <DragHandle />
+        </button>
+      </td>
+      <td className="lsw-minutes-cell">
+        <div className="lsw-cell-fill">
+          <input
+            aria-label="Task minutes"
+            className="lsw-inline-input lsw-minutes-input"
+            inputMode="numeric"
+            maxLength={4}
+            onChange={(event) => {
+              const digitsOnly = event.target.value.replace(/\D/g, '');
+              const nextMinutes = Math.min(Number(digitsOnly || 0), 1440);
+
+              onTaskChange(task.taskId, { minutes: nextMinutes });
+            }}
+            pattern="[0-9]*"
+            type="text"
+            value={String(task.minutes)}
+          />
+        </div>
+      </td>
+      <td className="lsw-task-cell">
+        <TaskMeetingTextarea
+          aria-label="Task or meeting"
+          onChange={(nextTask) => onTaskChange(task.taskId, { task: nextTask })}
+          placeholder="Type task or meeting"
+          value={task.task}
+        />
+      </td>
+      <td className="lsw-center lsw-time-cell">
+        <div className="lsw-cell-fill">
+          <TimePicker
+            aria-label="Task time"
+            onChange={(nextTime) => onTaskChange(task.taskId, { time: nextTime }, { immediate: true })}
+            value={task.time}
+          />
+        </div>
+      </td>
+      {visibleDays.map((day) => (
+        <td className="lsw-check-cell" key={day.key}>
+          <div className="lsw-cell-fill">
+            <Checkbox.Root
+              aria-label={`${day.label} selected`}
+              className="lsw-task-checkbox"
+              checked={task.days[day.key]}
+              onCheckedChange={(checked) => onTaskChange(task.taskId, {
+                days: { [day.key]: checked === true }
+              }, { immediate: true })}
+            >
+              <Checkbox.Indicator className="lsw-task-checkbox-indicator">
+                <CheckIcon />
+              </Checkbox.Indicator>
+            </Checkbox.Root>
+          </div>
+        </td>
+      ))}
+      <td className="lsw-delete-cell">
+        <button
+          aria-label="Delete task"
+          className="lsw-delete-button"
+          onClick={() => onDeleteTask(task.taskId)}
+          type="button"
+        >
+          <XIcon />
+        </button>
+      </td>
+    </tr>
+  );
+}
+
+function TaskMeetingTextarea({
+  'aria-label': ariaLabel,
+  onChange,
+  placeholder,
+  value
+}: {
+  'aria-label': string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  value: string;
+}) {
+  const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
+
+  React.useLayoutEffect(() => {
+    const textarea = textareaRef.current;
+
+    if (!textarea) {
+      return;
+    }
+
+    textarea.style.height = '0px';
+
+    const rowHeight = textarea.closest('tr')?.getBoundingClientRect().height ?? 0;
+    const cellHeight = textarea.parentElement?.getBoundingClientRect().height ?? 0;
+    const nextHeight = Math.max(textarea.scrollHeight, Math.ceil(rowHeight), Math.ceil(cellHeight));
+
+    textarea.style.height = `${nextHeight}px`;
+  }, [value]);
+
+  return (
+    <textarea
+      aria-label={ariaLabel}
+      className="lsw-inline-input lsw-task-input"
+      onChange={(event) => onChange(event.target.value)}
+      placeholder={placeholder}
+      ref={textareaRef}
+      rows={1}
+      value={value}
+    />
+  );
+}
+
+function TimePicker({
+  'aria-label': ariaLabel,
+  onChange,
+  value
+}: {
+  'aria-label': string;
+  onChange: (value: string) => void;
+  value: string;
+}) {
+  const time = parseTimeParts(value);
+  const minuteOptions = React.useMemo(() => {
+    const baseOptions = Array.from({ length: 12 }, (_, index) => index * 5);
+    return baseOptions.includes(time.minute)
+      ? baseOptions
+      : [...baseOptions, time.minute].sort((first, second) => first - second);
+  }, [time.minute]);
+
+  function updateTime(nextHour: number, nextMinute: number) {
+    onChange(`${padTwo(nextHour)}:${padTwo(nextMinute)}`);
+  }
+
+  return (
+    <Popover.Root>
+      <Popover.Trigger asChild>
+        <button aria-label={ariaLabel} className="lsw-time-picker-trigger" type="button">
+          <ClockMiniIcon />
+          <span>{value}</span>
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content align="center" className="lsw-time-picker-popover" sideOffset={8}>
+          <div className="lsw-time-picker-title">24-hour time</div>
+          <div className="lsw-time-picker-grid">
+            <section className="lsw-time-picker-section">
+              <span>Hour</span>
+              <div className="lsw-time-picker-options lsw-time-picker-hours">
+                {Array.from({ length: 24 }, (_, hour) => (
+                  <button
+                    className="lsw-time-option"
+                    data-selected={hour === time.hour}
+                    key={hour}
+                    onClick={() => updateTime(hour, time.minute)}
+                    type="button"
+                  >
+                    {padTwo(hour)}
+                  </button>
+                ))}
+              </div>
+            </section>
+            <section className="lsw-time-picker-section">
+              <span>Minute</span>
+              <div className="lsw-time-picker-options">
+                {minuteOptions.map((minute) => (
+                  <button
+                    className="lsw-time-option"
+                    data-selected={minute === time.minute}
+                    key={minute}
+                    onClick={() => updateTime(time.hour, minute)}
+                    type="button"
+                  >
+                    {padTwo(minute)}
+                  </button>
+                ))}
+              </div>
+            </section>
+          </div>
+          <Popover.Arrow className="lsw-time-picker-arrow" />
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
   );
 }
 
@@ -991,8 +1343,21 @@ function getDayKeyFromIso(isoDate?: string): DayKey | null {
   return dayKeysByIndex[dayIndex] || null;
 }
 
-function isValidTimeInput(value: string): boolean {
-  return /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
+function parseTimeParts(value: string): { hour: number; minute: number } {
+  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(value);
+
+  if (!match) {
+    return { hour: 8, minute: 0 };
+  }
+
+  return {
+    hour: Number(match[1]),
+    minute: Number(match[2])
+  };
+}
+
+function padTwo(value: number): string {
+  return value.toString().padStart(2, '0');
 }
 
 function PanelFooter({ label, tone }: { label: string; tone: string }) {
@@ -1067,6 +1432,14 @@ function PlusMiniIcon() {
   return (
     <svg aria-hidden="true" className="lsw-mini-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+    </svg>
+  );
+}
+
+function ClockMiniIcon() {
+  return (
+    <svg aria-hidden="true" className="lsw-mini-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6l4 2m5-2a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
     </svg>
   );
 }

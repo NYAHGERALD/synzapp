@@ -1534,6 +1534,7 @@ h1 {
 
 .lsw-table-scroll {
   overflow-x: auto;
+  position: relative;
 }
 
 .lsw-table {
@@ -1571,6 +1572,10 @@ h1 {
   background: #f9fafb;
 }
 
+.lsw-daily-table tbody td {
+  height: 1px;
+}
+
 .lsw-table input[type="checkbox"] {
   accent-color: #059669;
   cursor: pointer;
@@ -1579,19 +1584,19 @@ h1 {
 }
 
 .lsw-daily-table {
-  min-width: 900px;
+  min-width: 780px;
 }
 
 .lsw-drag-col {
-  width: 34px;
+  width: 28px;
 }
 
 .lsw-min-col {
-  width: 64px;
+  width: 68px;
 }
 
 .lsw-task-col {
-  min-width: 280px;
+  min-width: 360px;
   width: auto;
 }
 
@@ -1600,18 +1605,133 @@ h1 {
 }
 
 .lsw-day-col {
-  width: 48px;
+  width: 34px;
 }
 
 .lsw-delete-col {
-  width: 34px;
+  width: 30px;
 }
 
 .lsw-drag-column {
   color: #d1d5db;
-  padding-left: 10px !important;
-  padding-right: 4px !important;
+  padding: 0 !important;
   text-align: center;
+}
+
+.lsw-sortable-row {
+  position: relative;
+  transform-origin: center;
+}
+
+.lsw-sortable-row td {
+  transition:
+    background 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.lsw-sortable-row.is-sorting-peer td {
+  transition:
+    background 160ms ease,
+    box-shadow 160ms ease,
+    transform 220ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.lsw-sortable-row.is-dragging {
+  opacity: 0.9;
+  position: relative;
+  z-index: 20;
+}
+
+.lsw-sortable-row.is-dragging td {
+  background: #f8fafc;
+  box-shadow: inset 0 0 0 1px rgba(16, 185, 129, 0.3);
+}
+
+.lsw-sortable-row.is-dropped td {
+  animation: lsw-row-drop-bounce 420ms cubic-bezier(0.2, 1.4, 0.38, 1);
+}
+
+.lsw-row-drop-indicator {
+  background: #10b981;
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px rgba(5, 150, 105, 0.25), 0 6px 16px rgba(16, 185, 129, 0.28);
+  height: 4px;
+  left: 0;
+  pointer-events: none;
+  position: absolute;
+  right: 0;
+  transform: translateY(-2px);
+  z-index: 35;
+}
+
+.lsw-row-drop-indicator::before {
+  background: #10b981;
+  border-radius: 999px;
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.16);
+  content: "";
+  height: 10px;
+  left: 11px;
+  position: absolute;
+  top: -3px;
+  width: 10px;
+}
+
+.lsw-drag-button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: #cbd5e1;
+  cursor: grab;
+  display: flex;
+  height: 100%;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0;
+  touch-action: none;
+  transition:
+    background 150ms ease,
+    color 150ms ease;
+  width: 100%;
+}
+
+.lsw-drag-button:hover,
+.lsw-drag-button:focus-visible {
+  background: #ecfdf5;
+  color: #059669;
+  outline: none;
+}
+
+.lsw-drag-button:active {
+  cursor: grabbing;
+}
+
+.lsw-drag-button .lsw-drag-handle {
+  transition:
+    color 150ms ease,
+    transform 150ms ease;
+}
+
+.lsw-drag-button:hover .lsw-drag-handle,
+.lsw-drag-button:focus-visible .lsw-drag-handle {
+  transform: scale(1.08);
+}
+
+@keyframes lsw-row-drop-bounce {
+  0% {
+    transform: translateY(-2px) scale(0.997);
+  }
+
+  45% {
+    transform: translateY(1px) scale(1.004);
+  }
+
+  72% {
+    transform: translateY(-1px) scale(0.999);
+  }
+
+  100% {
+    transform: translateY(0) scale(1);
+  }
 }
 
 .lsw-action-column {
@@ -1628,11 +1748,24 @@ h1 {
   text-align: center;
 }
 
+.lsw-minutes-cell {
+  padding: 0 !important;
+  text-align: center;
+}
+
 .lsw-check-cell,
 .lsw-day-heading,
 .lsw-delete-cell {
-  padding-left: 6px !important;
-  padding-right: 6px !important;
+  padding-left: 2px !important;
+  padding-right: 2px !important;
+}
+
+.lsw-check-cell {
+  padding: 0 !important;
+}
+
+.lsw-time-cell {
+  padding: 0 !important;
 }
 
 .lsw-delete-cell {
@@ -1642,6 +1775,18 @@ h1 {
 .lsw-task-cell {
   color: #1f2937;
   font-weight: 600;
+  padding: 0 !important;
+  vertical-align: top !important;
+}
+
+.lsw-cell-fill {
+  align-items: center;
+  box-sizing: border-box;
+  display: flex;
+  height: 100%;
+  justify-content: center;
+  min-height: 34px;
+  width: 100%;
 }
 
 .lsw-inline-input {
@@ -1663,18 +1808,223 @@ h1 {
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
 }
 
+.lsw-task-input {
+  border-radius: 0;
+  box-sizing: border-box;
+  display: block;
+  line-height: 1.35;
+  min-height: 34px;
+  overflow: hidden;
+  resize: none;
+  white-space: pre-wrap;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
 .lsw-minutes-input,
 .lsw-time-input {
   text-align: center;
 }
 
 .lsw-minutes-input {
-  padding-left: 4px;
-  padding-right: 4px;
+  background: #ffffff;
+  border-radius: 0;
+  box-sizing: border-box;
+  color: #334155;
+  font-variant-numeric: tabular-nums;
+  height: 100%;
+  min-height: 34px;
+  min-width: 0;
+  padding-left: 5px;
+  padding-right: 5px;
 }
 
 .lsw-time-input {
   min-width: 86px;
+}
+
+.lsw-time-picker-trigger {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid transparent;
+  border-radius: 0;
+  box-sizing: border-box;
+  color: #334155;
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  gap: 5px;
+  height: 100%;
+  justify-content: center;
+  min-height: 34px;
+  min-width: 0;
+  padding: 0 8px;
+  transition:
+    background 150ms ease,
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    color 150ms ease;
+  width: 100%;
+}
+
+.lsw-time-picker-trigger .lsw-mini-icon {
+  color: #64748b;
+  height: 14px;
+  width: 14px;
+}
+
+.lsw-time-picker-trigger:hover,
+.lsw-time-picker-trigger[data-state="open"] {
+  background: #f8fafc;
+  border-color: #99f6e4;
+  box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.12);
+  color: #0f766e;
+}
+
+.lsw-time-picker-trigger:focus-visible {
+  border-color: #14b8a6;
+  box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.18);
+  outline: none;
+}
+
+.lsw-time-picker-popover {
+  background: #ffffff;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 14px;
+  box-shadow: 0 22px 50px rgba(15, 23, 42, 0.2);
+  padding: 12px;
+  width: 270px;
+  z-index: 80;
+}
+
+.lsw-time-picker-title {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 800;
+  padding: 2px 2px 10px;
+  text-align: center;
+}
+
+.lsw-time-picker-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 1fr 82px;
+}
+
+.lsw-time-picker-section > span {
+  color: #64748b;
+  display: block;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  margin-bottom: 6px;
+  text-transform: uppercase;
+}
+
+.lsw-time-picker-options {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  max-height: 180px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.lsw-time-picker-hours {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.lsw-time-option {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  color: #334155;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+  height: 30px;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    transform 120ms ease;
+}
+
+.lsw-time-option:hover {
+  background: #ecfeff;
+  border-color: #5eead4;
+  color: #0f766e;
+}
+
+.lsw-time-option:active {
+  transform: scale(0.96);
+}
+
+.lsw-time-option:focus-visible {
+  outline: 2px solid rgba(20, 184, 166, 0.35);
+  outline-offset: 1px;
+}
+
+.lsw-time-option[data-selected="true"] {
+  background: #0f766e;
+  border-color: #0f766e;
+  color: #ffffff;
+}
+
+.lsw-time-picker-arrow {
+  fill: #ffffff;
+}
+
+.lsw-task-checkbox {
+  align-items: center;
+  background: #ffffff;
+  border: 1.5px solid #9ca3af;
+  border-radius: 5px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  color: #ffffff;
+  cursor: pointer;
+  display: inline-flex;
+  height: 18px;
+  justify-content: center;
+  padding: 0;
+  transition:
+    background 150ms ease,
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    transform 120ms ease;
+  width: 18px;
+}
+
+.lsw-task-checkbox:hover {
+  border-color: #059669;
+  box-shadow: 0 0 0 3px rgba(5, 150, 105, 0.1);
+}
+
+.lsw-task-checkbox:active {
+  transform: scale(0.94);
+}
+
+.lsw-task-checkbox:focus-visible {
+  box-shadow: 0 0 0 3px rgba(5, 150, 105, 0.2);
+  outline: none;
+}
+
+.lsw-task-checkbox[data-state="checked"] {
+  background: #059669;
+  border-color: #059669;
+}
+
+.lsw-task-checkbox-indicator {
+  align-items: center;
+  display: inline-flex;
+  justify-content: center;
+}
+
+.lsw-task-checkbox svg {
+  height: 13px;
+  width: 13px;
 }
 
 .lsw-delete-button {
@@ -1687,14 +2037,34 @@ h1 {
   display: inline-flex;
   height: 24px;
   justify-content: center;
+  opacity: 0;
   padding: 0;
-  transition: background 150ms ease, color 150ms ease;
+  pointer-events: none;
+  transition:
+    background 150ms ease,
+    color 150ms ease,
+    opacity 140ms ease,
+    transform 140ms ease;
   width: 24px;
+}
+
+.lsw-daily-table tbody tr:hover .lsw-delete-button,
+.lsw-daily-table tbody tr:focus-within .lsw-delete-button {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .lsw-delete-button:hover {
   background: #fee2e2;
   color: #dc2626;
+  transform: scale(1.06);
+}
+
+.lsw-delete-button:focus-visible {
+  box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.2);
+  opacity: 1;
+  outline: none;
+  pointer-events: auto;
 }
 
 .lsw-empty-row,
@@ -1710,7 +2080,7 @@ h1 {
 }
 
 .lsw-drag-handle {
-  color: #d1d5db;
+  color: currentColor;
   cursor: grab;
   height: 16px;
   width: 16px;
