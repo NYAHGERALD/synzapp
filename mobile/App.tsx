@@ -1,19 +1,19 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
   Platform,
   SafeAreaView,
   ScrollView,
   StyleSheet,
-  Text,
-  View
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AdminChatScreen } from './src/screens/AdminChatScreen';
-import { AppOnboardingScreen } from './src/screens/AppOnboardingScreen';
+import {
+  AppOnboardingScreen,
+  SecureLoginPreparationScreen
+} from './src/screens/AppOnboardingScreen';
 import { EmployeeOnboardingScreen } from './src/screens/EmployeeOnboardingScreen';
 import { OrgAdminCodeScreen } from './src/screens/OrgAdminCodeScreen';
 import { OrgAdminOnboardingScreen } from './src/screens/OrgAdminOnboardingScreen';
@@ -199,6 +199,8 @@ function SynzappApp() {
 
         {isOnboardingComplete === false ? (
           <AppOnboardingScreen onComplete={handleAppOnboardingComplete} />
+        ) : isOnboardingComplete === null || isRestoringSession ? (
+          <SecureLoginPreparationScreen />
         ) : (
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
@@ -212,13 +214,6 @@ function SynzappApp() {
             />
           ) : (
             <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-              {isRestoringSession ? (
-                <View style={styles.restoring}>
-                  <ActivityIndicator color={theme.colors.primary} />
-                  <Text style={styles.restoringText}>Opening Synzapp...</Text>
-                </View>
-              ) : null}
-
               {!isRestoringSession && restoreError ? (
                 <DismissibleError
                   message={restoreError}
@@ -312,16 +307,5 @@ function createStyles(colors: AppColors) {
     flexGrow: 1,
     justifyContent: 'center'
   },
-  restoring: {
-    alignItems: 'center',
-    gap: 14,
-    justifyContent: 'center',
-    minHeight: 520
-  },
-  restoringText: {
-    color: colors.muted,
-    fontSize: 16,
-    fontWeight: '400'
-  }
   });
 }
