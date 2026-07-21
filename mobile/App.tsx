@@ -13,6 +13,7 @@ import {
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AdminChatScreen } from './src/screens/AdminChatScreen';
+import { AppOnboardingScreen } from './src/screens/AppOnboardingScreen';
 import { EmployeeOnboardingScreen } from './src/screens/EmployeeOnboardingScreen';
 import { OrgAdminCodeScreen } from './src/screens/OrgAdminCodeScreen';
 import { OrgAdminOnboardingScreen } from './src/screens/OrgAdminOnboardingScreen';
@@ -24,6 +25,10 @@ import {
   ACCESS_DENIED_MESSAGE,
   isAccessDeniedError
 } from './src/services/backendAuth';
+import {
+  hasCompletedAppOnboarding,
+  markAppOnboardingComplete
+} from './src/services/appOnboarding';
 import { clearRegisteredDeviceIdentityCache } from './src/services/deviceIdentity';
 import { signOutOrgAdmin, subscribeToOrgAdminAuthState } from './src/services/phoneAuth';
 import {
@@ -50,10 +55,37 @@ function SynzappApp() {
   const [step, setStep] = useState<AuthStep>('phone');
   const [phoneSession, setPhoneSession] = useState<FirebasePhoneSession | null>(null);
   const [verifiedAdmin, setVerifiedAdmin] = useState<VerifiedOrgAdmin | null>(null);
+  const [isOnboardingComplete, setIsOnboardingComplete] = useState<boolean | null>(null);
   const [isRestoringSession, setIsRestoringSession] = useState(true);
   const [restoreError, setRestoreError] = useState<string | null>(null);
 
   useEffect(() => {
+    let isMounted = true;
+
+    hasCompletedAppOnboarding()
+      .then((hasCompleted) => {
+        if (isMounted) {
+          setIsOnboardingComplete(hasCompleted);
+          setIsRestoringSession(hasCompleted);
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setIsOnboardingComplete(false);
+          setIsRestoringSession(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isOnboardingComplete !== true) {
+      return undefined;
+    }
+
     return subscribeToOrgAdminAuthState(
       (nextVerifiedAdmin) => {
         setIsRestoringSession(false);
@@ -86,7 +118,13 @@ function SynzappApp() {
         setStep('phone');
       }
     );
-  }, []);
+  }, [isOnboardingComplete]);
+
+  async function handleAppOnboardingComplete() {
+    await markAppOnboardingComplete();
+    setIsOnboardingComplete(true);
+    setIsRestoringSession(true);
+  }
 
   function handleCodeSent(nextPhoneSession: FirebasePhoneSession) {
     setPhoneSession(nextPhoneSession);
@@ -159,6 +197,9 @@ function SynzappApp() {
       <SafeAreaView style={styles.safeArea}>
         <StatusBar style={theme.isDark ? 'light' : 'dark'} />
 
+        {isOnboardingComplete === false ? (
+          <AppOnboardingScreen onComplete={handleAppOnboardingComplete} />
+        ) : (
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           style={styles.keyboardView}
@@ -227,6 +268,7 @@ function SynzappApp() {
             </ScrollView>
           )}
         </KeyboardAvoidingView>
+        )}
       </SafeAreaView>
     </SafeAreaProvider>
   );
