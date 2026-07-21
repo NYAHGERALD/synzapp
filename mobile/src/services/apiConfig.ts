@@ -2,6 +2,7 @@ import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 
 const SYNZAPP_HOSTED_API_URL = 'https://synzapp-backend.onrender.com';
+const LOCAL_API_FLAG_VALUES = new Set(['1', 'true', 'yes', 'local']);
 
 interface ExpoHostConfig {
   debuggerHost?: string;
@@ -28,6 +29,10 @@ export function getSynzappApiBaseUrl(): string {
     return configuredUrl.replace(/\/$/, '');
   }
 
+  if (!shouldUseLocalDevelopmentApi()) {
+    return SYNZAPP_HOSTED_API_URL;
+  }
+
   const constants = Constants as ExpoHostConfig;
   const hostUri = constants.expoConfig?.hostUri ||
     constants.manifest2?.extra?.expoClient?.hostUri ||
@@ -47,6 +52,16 @@ export function getSynzappApiBaseUrl(): string {
   }
 
   return SYNZAPP_HOSTED_API_URL;
+}
+
+function shouldUseLocalDevelopmentApi(): boolean {
+  if (!__DEV__) {
+    return false;
+  }
+
+  const flag = process.env.EXPO_PUBLIC_SYNZAPP_USE_LOCAL_API?.trim().toLowerCase();
+
+  return Boolean(flag && LOCAL_API_FLAG_VALUES.has(flag));
 }
 
 function getHostFromExpoUri(hostUri: string | undefined): string {

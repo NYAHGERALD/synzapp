@@ -306,7 +306,7 @@ async function deactivateDuplicatePushTokensForUser(
   };
 
   await Promise.all(staleTokenDocs.flatMap((doc) => {
-    const staleDeviceId = doc.id;
+    const staleDeviceId = getPushTokenRecordDeviceId(doc);
 
     return [
       doc.ref.set(update, { merge: true }),
