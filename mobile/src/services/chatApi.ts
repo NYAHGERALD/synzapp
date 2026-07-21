@@ -354,6 +354,37 @@ export async function createGroupChat(input: {
   return normalizeChatContact(body.contact);
 }
 
+export async function updateGroupChatPhoto(input: {
+  groupId: string;
+  idToken: string;
+  profilePhotoDataUrl: string;
+}): Promise<ChatContact> {
+  const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
+  const response = await fetch(
+    `${getSynzappApiBaseUrl()}/api/profile/chat/groups/${encodeURIComponent(input.groupId)}/photo`,
+    {
+      body: JSON.stringify({
+        profilePhotoDataUrl: input.profilePhotoDataUrl
+      }),
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${input.idToken}`,
+        'Content-Type': 'application/json',
+        ...deviceHeaders
+      },
+      method: 'PUT'
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  const body = await response.json() as { contact: ChatContact };
+
+  return normalizeChatContact(body.contact);
+}
+
 export async function updateChatPreference(input: {
   chatType?: 'DIRECT' | 'GROUP';
   clear?: boolean;

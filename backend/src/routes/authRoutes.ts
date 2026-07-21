@@ -170,15 +170,10 @@ authRouter.get('/web-profile/photo', verifyAppCheck, async (req, res, next) => {
     const profilePhoto = await getCurrentUserProfilePhoto(decodedToken);
     const etag = `"${profilePhoto.cacheKey}"`;
 
-    res.setHeader('Cache-Control', 'private, max-age=86400, stale-while-revalidate=604800');
+    res.setHeader('Cache-Control', 'no-store, private');
     res.setHeader('Content-Type', profilePhoto.contentType);
     res.setHeader('ETag', etag);
     res.setHeader('X-Content-Type-Options', 'nosniff');
-
-    if (req.header('If-None-Match') === etag) {
-      res.status(304).end();
-      return;
-    }
 
     profilePhoto.file
       .createReadStream()

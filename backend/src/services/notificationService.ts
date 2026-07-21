@@ -118,6 +118,18 @@ interface SendCallEndedPushNotificationsInput {
   tenantId: string;
 }
 
+interface SendRailsPushNotificationInput {
+  actorUid: string;
+  body: string;
+  itemId?: string | null;
+  metadata?: Record<string, string>;
+  notificationId: string;
+  recipientUids: string[];
+  tenantId: string;
+  title: string;
+  type: string;
+}
+
 interface ExpoPushMessage {
   badge?: number;
   body?: string;
@@ -199,7 +211,12 @@ export async function registerCurrentUserPushToken(
     tenantId: activeDevice.tenantId,
     uid: decodedToken.uid
   };
-  const userPushTokenRef = getUserPushTokenRef(activeDevice.tenantId, decodedToken.uid, activeDevice.deviceId);
+  const userPushTokenRef = getUserPushTokenRef(
+    activeDevice.tenantId,
+    decodedToken.uid,
+    activeDevice.deviceId,
+    input.provider
+  );
   const tenantDeviceRef = firestore
     .collection('organizations')
     .doc(activeDevice.tenantId)
@@ -216,6 +233,7 @@ export async function registerCurrentUserPushToken(
     activeDevice.tenantId,
     decodedToken.uid,
     activeDevice.deviceId,
+    input.provider,
     safeToken
   );
 
@@ -259,6 +277,7 @@ async function deactivateDuplicatePushTokensForUser(
   tenantId: string,
   uid: string,
   currentDeviceId: string,
+  currentProvider: PushProvider,
   token: string
 ): Promise<void> {
   const userRef = firestore
@@ -271,7 +290,8 @@ async function deactivateDuplicatePushTokensForUser(
     .where('token', '==', token)
     .where('status', '==', 'ACTIVE')
     .get();
-  const staleTokenDocs = snapshot.docs.filter((doc) => doc.id !== currentDeviceId);
+  const currentTokenDocumentId = getPushTokenDocumentId(currentDeviceId, currentProvider);
+  const staleTokenDocs = snapshot.docs.filter((doc) => doc.id !== currentTokenDocumentId);
 
   if (!staleTokenDocs.length) {
     return;
@@ -280,6 +300,7 @@ async function deactivateDuplicatePushTokensForUser(
   const update = {
     deactivatedAt: fieldValue.serverTimestamp(),
     replacedByDeviceId: currentDeviceId,
+    replacedByPushTokenDocumentId: currentTokenDocumentId,
     status: 'INACTIVE',
     updatedAt: fieldValue.serverTimestamp()
   };
@@ -322,6 +343,16 @@ export async function deactivateCurrentUserPushToken(
   deviceId: string
 ): Promise<void> {
   const activeDevice = await verifyActiveRegisteredDevice(decodedToken, deviceId);
+  const userRef = firestore
+    .collection('organizations')
+    .doc(activeDevice.tenantId)
+    .collection('users')
+    .doc(decodedToken.uid);
+  const pushTokenSnapshot = await userRef
+    .collection('pushTokens')
+    .where('deviceId', '==', activeDevice.deviceId)
+    .where('status', '==', 'ACTIVE')
+    .get();
   const update = {
     deactivatedAt: fieldValue.serverTimestamp(),
     status: 'INACTIVE',
@@ -329,8 +360,7 @@ export async function deactivateCurrentUserPushToken(
   };
 
   await Promise.all([
-    getUserPushTokenRef(activeDevice.tenantId, decodedToken.uid, activeDevice.deviceId)
-      .set(update, { merge: true }),
+    ...pushTokenSnapshot.docs.map((doc) => doc.ref.set(update, { merge: true })),
     firestore
       .collection('organizations')
       .doc(activeDevice.tenantId)
@@ -419,7 +449,7 @@ export async function sendChatMessagePushNotification(
   const deliverablePushTokens = pushTokensSnapshot.docs
     .map((doc) => ({
       ...(doc.data() as PushTokenRecord),
-      deviceId: doc.id
+      deviceId: getPushTokenRecordDeviceId(doc)
     }))
     .filter((record) => isDeliverablePushToken(record));
   const pushTokens = filterPushTokensForEncryptedEnvelope(deliverablePushTokens, input);
@@ -579,6 +609,134 @@ export async function sendChatMessagePushNotification(
   }, { merge: true });
 }
 
+export async function sendRailsPushNotification(input: SendRailsPushNotificationInput): Promise<void> {
+  const organizationRef = firestore.collection('organizations').doc(input.tenantId);
+  const eventRef = organizationRef.collection('notificationEvents').doc(input.notificationId);
+  const recipientUids = Array.from(new Set(input.recipientUids
+    .map((recipientUid) => recipientUid.trim())
+    .filter((recipientUid) => recipientUid && recipientUid !== input.actorUid)));
+
+  await eventRef.set({
+    actorUid: input.actorUid,
+    channel: 'rails',
+    createdAt: fieldValue.serverTimestamp(),
+    itemId: input.itemId || null,
+    notificationId: input.notificationId,
+    recipientUids,
+    status: recipientUids.length ? 'QUEUED' : 'NO_RECIPIENTS',
+    tenantId: input.tenantId,
+    title: input.title,
+    type: input.type
+  }, { merge: true });
+
+  if (!recipientUids.length) {
+    return;
+  }
+
+  const allTicketResults: PushDeliveryTicket[] = [];
+  let totalTokenCount = 0;
+
+  await Promise.all(recipientUids.map(async (recipientUid) => {
+    const pushTokensSnapshot = await organizationRef
+      .collection('users')
+      .doc(recipientUid)
+      .collection('pushTokens')
+      .where('status', '==', 'ACTIVE')
+      .get();
+    const pushTokens = pushTokensSnapshot.docs
+      .map((doc) => ({
+        ...(doc.data() as PushTokenRecord),
+        deviceId: getPushTokenRecordDeviceId(doc)
+      }))
+      .filter((record) => isDeliverablePushToken(record))
+      .filter((record) => record.provider !== 'apnsVoip');
+    const expoTargets: Array<{ message: ExpoPushMessage; record: PushTokenRecord & { deviceId: string } }> = [];
+    const fcmTargets: Array<{ message: Message; record: PushTokenRecord & { deviceId: string } }> = [];
+
+    totalTokenCount += pushTokens.length;
+
+    for (const record of pushTokens) {
+      const data = stripUndefinedStringValues({
+        itemId: input.itemId || '',
+        notificationId: input.notificationId,
+        recipientUid,
+        title: input.title,
+        type: input.type,
+        ...(input.metadata || {})
+      });
+
+      if (record.provider === 'fcm') {
+        fcmTargets.push({
+          message: {
+            android: { priority: 'high' },
+            data,
+            notification: {
+              body: input.body,
+              title: input.title
+            },
+            token: record.token || ''
+          },
+          record
+        });
+      } else if (record.provider === 'expo') {
+        expoTargets.push({
+          message: {
+            body: input.body,
+            channelId: 'rails-updates',
+            data,
+            priority: 'high',
+            sound: 'default',
+            title: input.title,
+            to: record.token || ''
+          },
+          record
+        });
+      }
+    }
+
+    for (let index = 0; index < expoTargets.length; index += EXPO_PUSH_BATCH_SIZE) {
+      const targetBatch = expoTargets.slice(index, index + EXPO_PUSH_BATCH_SIZE);
+      const tickets = await sendExpoPushBatch(targetBatch.map((target) => target.message));
+      const annotatedTickets = annotatePushTickets(tickets, targetBatch.map((target) => target.record));
+
+      allTicketResults.push(...annotatedTickets);
+      await deactivateInvalidPushTokens(input.tenantId, recipientUid, annotatedTickets);
+    }
+
+    for (let index = 0; index < fcmTargets.length; index += FCM_PUSH_BATCH_SIZE) {
+      const targetBatch = fcmTargets.slice(index, index + FCM_PUSH_BATCH_SIZE);
+      const tickets = await sendFcmPushBatch(targetBatch.map((target) => target.message));
+      const annotatedTickets = annotatePushTickets(tickets, targetBatch.map((target) => target.record));
+
+      allTicketResults.push(...annotatedTickets);
+      await deactivateInvalidPushTokens(input.tenantId, recipientUid, annotatedTickets);
+    }
+  }));
+
+  const errorCount = allTicketResults.filter((ticket) => ticket.status === 'error').length;
+  const sentCount = allTicketResults.filter((ticket) => ticket.status === 'ok').length;
+
+  await eventRef.set({
+    completedAt: fieldValue.serverTimestamp(),
+    errorCount,
+    sentCount,
+    status: totalTokenCount
+      ? errorCount && sentCount ? 'PARTIAL' : errorCount ? 'FAILED' : 'SENT'
+      : 'NO_ACTIVE_TOKENS',
+    tickets: allTicketResults.map((ticket) => ({
+      details: ticket.details || null,
+      deviceId: ticket.deviceId,
+      id: ticket.id || null,
+      message: ticket.message || null,
+      platform: ticket.platform || null,
+      provider: ticket.provider || null,
+      status: ticket.status || 'error'
+    })),
+    tokenCount: totalTokenCount,
+    updatedAt: fieldValue.serverTimestamp()
+  }, { merge: true });
+}
+
 export async function sendGroupChatMessagePushNotifications(
   input: SendGroupChatMessagePushNotificationsInput
 ): Promise<void> {
@@ -626,7 +784,7 @@ async function sendCallInvitePushNotificationToRecipient(
   const pushTokens = pushTokensSnapshot.docs
     .map((doc) => ({
       ...(doc.data() as PushTokenRecord),
-      deviceId: doc.id
+      deviceId: getPushTokenRecordDeviceId(doc)
     }))
     .filter((record) => isDeliverablePushToken(record));
 
@@ -788,7 +946,7 @@ async function sendCallEndedPushNotificationToRecipient(
   const pushTokens = pushTokensSnapshot.docs
     .map((doc) => ({
       ...(doc.data() as PushTokenRecord),
-      deviceId: doc.id
+      deviceId: getPushTokenRecordDeviceId(doc)
     }))
     .filter((record) => isDeliverablePushToken(record));
 
@@ -1239,20 +1397,23 @@ async function deactivateInvalidPushTokens(
   uid: string,
   tickets: PushDeliveryTicket[]
 ): Promise<void> {
-  const invalidDeviceIds = tickets
-    .map((ticket) => (
-      ticket.status === 'error' && ticket.details?.error === 'DeviceNotRegistered'
-        ? ticket.deviceId || ''
-        : ''
-    ))
-    .filter(Boolean);
+  const invalidTargets = tickets
+    .filter((ticket) => ticket.status === 'error' && ticket.details?.error === 'DeviceNotRegistered')
+    .map((ticket) => ({
+      deviceId: ticket.deviceId || '',
+      provider: ticket.provider
+    }))
+    .filter((target): target is { deviceId: string; provider: PushProvider } => (
+      Boolean(target.deviceId) &&
+      (target.provider === 'apnsVoip' || target.provider === 'expo' || target.provider === 'fcm')
+    ));
 
-  if (!invalidDeviceIds.length) {
+  if (!invalidTargets.length) {
     return;
   }
 
-  await Promise.all(invalidDeviceIds.map((deviceId) =>
-    getUserPushTokenRef(tenantId, uid, deviceId).set({
+  await Promise.all(invalidTargets.map((target) =>
+    getUserPushTokenRef(tenantId, uid, target.deviceId, target.provider).set({
       deactivatedAt: fieldValue.serverTimestamp(),
       deactivationReason: 'DeviceNotRegistered',
       status: 'INACTIVE',
@@ -1275,6 +1436,14 @@ function isDeliverablePushToken(record: PushTokenRecord): boolean {
   }
 
   return record.provider === 'fcm' && isValidFcmToken(record.token);
+}
+
+function stripUndefinedStringValues(value: Record<string, string | undefined>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, entryValue]) => entryValue !== undefined)
+      .map(([key, entryValue]) => [key, String(entryValue)])
+  );
 }
 
 function isValidApnsVoipToken(token: string): boolean {
@@ -1388,14 +1557,26 @@ function getFcmTicketError(code: string | undefined): string {
   return code || 'UnknownError';
 }
 
-function getUserPushTokenRef(tenantId: string, uid: string, deviceId: string) {
+function getUserPushTokenRef(tenantId: string, uid: string, deviceId: string, provider: PushProvider) {
   return firestore
     .collection('organizations')
     .doc(tenantId)
     .collection('users')
     .doc(uid)
     .collection('pushTokens')
-    .doc(deviceId);
+    .doc(getPushTokenDocumentId(deviceId, provider));
+}
+
+function getPushTokenDocumentId(deviceId: string, provider: PushProvider): string {
+  return `${deviceId}:${provider}`;
+}
+
+function getPushTokenRecordDeviceId(doc: FirebaseFirestore.QueryDocumentSnapshot): string {
+  const data = doc.data() as PushTokenRecord;
+
+  return typeof data.deviceId === 'string' && data.deviceId.trim()
+    ? data.deviceId.trim()
+    : doc.id;
 }
 
 function getChatNotificationSettingsRef(tenantId: string, uid: string, contactId: string) {

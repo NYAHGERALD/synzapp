@@ -1,9 +1,15 @@
 import Constants from 'expo-constants';
+import { Platform } from 'react-native';
 
 const SYNZAPP_HOSTED_API_URL = 'https://synzapp-backend.onrender.com';
 
 interface ExpoHostConfig {
+  debuggerHost?: string;
   expoConfig?: {
+    hostUri?: string;
+  };
+  manifest?: {
+    debuggerHost?: string;
     hostUri?: string;
   };
   manifest2?: {
@@ -23,14 +29,38 @@ export function getSynzappApiBaseUrl(): string {
   }
 
   const constants = Constants as ExpoHostConfig;
-  const hostUri = constants.expoConfig?.hostUri || constants.manifest2?.extra?.expoClient?.hostUri;
-  const host = hostUri?.split(':')[0];
+  const hostUri = constants.expoConfig?.hostUri ||
+    constants.manifest2?.extra?.expoClient?.hostUri ||
+    constants.manifest?.hostUri ||
+    constants.manifest?.debuggerHost ||
+    constants.debuggerHost;
+  const host = getHostFromExpoUri(hostUri);
 
   if (host) {
     return `http://${host}:4100`;
   }
 
+  if (__DEV__) {
+    return Platform.OS === 'android'
+      ? 'http://10.0.2.2:4100'
+      : 'http://localhost:4100';
+  }
+
   return SYNZAPP_HOSTED_API_URL;
+}
+
+function getHostFromExpoUri(hostUri: string | undefined): string {
+  if (!hostUri) {
+    return '';
+  }
+
+  const normalizedHostUri = hostUri.includes('://') ? hostUri : `http://${hostUri}`;
+
+  try {
+    return new URL(normalizedHostUri).hostname;
+  } catch {
+    return hostUri.split(':')[0] || '';
+  }
 }
 
 export function normalizeSynzappApiUrl(pathOrUrl: string | null): string | null {

@@ -39,6 +39,17 @@ service firebase.storage {
       allow read, write: if false;
     }
 
+    match /organizations/{tenantId}/rcaIncidents/{incidentId}/evidence/{fileName} {
+      allow read: if isActiveTenant(tenantId);
+      allow create: if isActiveTenant(tenantId) &&
+        request.resource.size < 50 * 1024 * 1024;
+      allow update, delete: if false;
+    }
+
+    match /organizations/{tenantId}/railsItems/{railsItemId}/evidence/{fileName} {
+      allow read, write: if false;
+    }
+
     match /{path=**} {
       allow read, write: if false;
     }

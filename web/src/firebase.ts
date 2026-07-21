@@ -1,6 +1,6 @@
 import { initializeApp, type FirebaseApp } from 'firebase/app';
 import { initializeAppCheck, ReCaptchaEnterpriseProvider, getToken, type AppCheck } from 'firebase/app-check';
-import { getAuth, type Auth } from 'firebase/auth';
+import { browserLocalPersistence, getAuth, setPersistence, type Auth } from 'firebase/auth';
 import {
   getFirebaseAppCheckSiteKey,
   getFirebaseWebConfig
@@ -8,6 +8,7 @@ import {
 
 let firebaseApp: FirebaseApp | null = null;
 let firebaseAuth: Auth | null = null;
+let firebaseAuthPersistencePromise: Promise<void> | null = null;
 let firebaseAppCheck: AppCheck | null = null;
 
 export function isFirebaseConfigured(): boolean {
@@ -21,8 +22,14 @@ export function getSynzappFirebaseAuth(): Auth {
 
   const app = getSynzappFirebaseApp();
   firebaseAuth = getAuth(app);
+  firebaseAuthPersistencePromise = setPersistence(firebaseAuth, browserLocalPersistence);
 
   return firebaseAuth;
+}
+
+export async function ensureSynzappAuthPersistence(): Promise<void> {
+  getSynzappFirebaseAuth();
+  await firebaseAuthPersistencePromise;
 }
 
 export async function getAppCheckHeader(): Promise<Record<string, string>> {

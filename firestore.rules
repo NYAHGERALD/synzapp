@@ -12,6 +12,14 @@ service cloud.firestore {
         request.auth.token.status == 'ACTIVE';
     }
 
+    function isTenant(tenantId) {
+      return isActiveTenant(tenantId);
+    }
+
+    function hasTenantPayload(tenantId) {
+      return request.resource.data.tenantId == tenantId;
+    }
+
     function hasPermission(permission) {
       return signedIn() &&
         request.auth.token.permissions is list &&
@@ -36,6 +44,11 @@ service cloud.firestore {
         exists(tenantUserPath(tenantId, request.auth.uid)) &&
         requesterProfile(tenantId).tenantId == tenantId &&
         requesterProfile(tenantId).status == 'ACTIVE';
+    }
+
+    function isRcaSessionOpen(tenantId, incidentId, sessionId) {
+      return exists(/databases/$(database)/documents/organizations/$(tenantId)/rcaIncidents/$(incidentId)/rcaSessions/$(sessionId)) &&
+        get(/databases/$(database)/documents/organizations/$(tenantId)/rcaIncidents/$(incidentId)/rcaSessions/$(sessionId)).data.status != 'CLOSED';
     }
 
     function isDepartmentAdminFor(tenantId, departmentId, permission) {
@@ -174,6 +187,96 @@ service cloud.firestore {
 
       match /actionPlans/{actionPlanId} {
         allow read, write: if false;
+      }
+
+      match /railsItems/{railsItemId} {
+        allow read, write: if false;
+
+        match /activity/{activityId} {
+          allow read, write: if false;
+        }
+      }
+
+      match /railsAuditEvents/{eventId} {
+        allow read, write: if false;
+      }
+
+      match /railsNotificationQueue/{notificationId} {
+        allow read, write: if false;
+      }
+
+      match /notificationEvents/{eventId} {
+        allow read, write: if false;
+      }
+
+      match /rcaIncidents/{incidentId} {
+        allow get, list: if requesterProfileIsActive(tenantId) &&
+          resource.data.tenantId == tenantId;
+        allow create: if requesterProfileIsActive(tenantId) &&
+          hasTenantPayload(tenantId);
+        allow update: if requesterProfileIsActive(tenantId) &&
+          resource.data.tenantId == tenantId &&
+          hasTenantPayload(tenantId) &&
+          resource.data.status != 'CLOSED';
+        allow delete: if false;
+
+        match /rcaSessions/{sessionId} {
+          allow get, list: if requesterProfileIsActive(tenantId) &&
+            resource.data.tenantId == tenantId;
+          allow create: if requesterProfileIsActive(tenantId) &&
+            hasTenantPayload(tenantId) &&
+            request.resource.data.incidentId == incidentId;
+          allow update: if requesterProfileIsActive(tenantId) &&
+            resource.data.tenantId == tenantId &&
+            hasTenantPayload(tenantId) &&
+            resource.data.status != 'CLOSED';
+          allow delete: if false;
+
+          match /nodes/{nodeId} {
+            allow get, list: if requesterProfileIsActive(tenantId) &&
+              resource.data.tenantId == tenantId;
+            allow create: if requesterProfileIsActive(tenantId) &&
+              hasTenantPayload(tenantId) &&
+              isRcaSessionOpen(tenantId, incidentId, sessionId);
+            allow update: if requesterProfileIsActive(tenantId) &&
+              resource.data.tenantId == tenantId &&
+              hasTenantPayload(tenantId) &&
+              isRcaSessionOpen(tenantId, incidentId, sessionId);
+            allow delete: if false;
+          }
+
+          match /presence/{presenceId} {
+            allow get, list: if requesterProfileIsActive(tenantId);
+            allow create, update: if requesterProfileIsActive(tenantId) &&
+              hasTenantPayload(tenantId) &&
+              request.resource.data.uid == request.auth.uid &&
+              isRcaSessionOpen(tenantId, incidentId, sessionId);
+            allow delete: if requesterProfileIsActive(tenantId) &&
+              resource.data.tenantId == tenantId &&
+              resource.data.uid == request.auth.uid;
+          }
+
+          match /capaActions/{capaId} {
+            allow get, list: if requesterProfileIsActive(tenantId) &&
+              resource.data.tenantId == tenantId;
+            allow create, update: if requesterProfileIsActive(tenantId) &&
+              hasTenantPayload(tenantId) &&
+              isRcaSessionOpen(tenantId, incidentId, sessionId);
+            allow delete: if false;
+          }
+
+          match /auditSignatures/{signatureId} {
+            allow get, list: if requesterProfileIsActive(tenantId) &&
+              resource.data.tenantId == tenantId;
+            allow create, update, delete: if false;
+          }
+        }
+
+        match /evidenceLogs/{evidenceId} {
+          allow get, list: if requesterProfileIsActive(tenantId) &&
+            resource.data.tenantId == tenantId;
+          allow create, update, delete: if false;
+        }
       }
 
       match /auditLogs/{auditLogId} {

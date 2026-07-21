@@ -76,13 +76,14 @@ function normalizeVoipCallEvent(event: unknown): SynzappVoipCallEvent | null {
 
   const payload = event as Partial<SynzappVoipCallEvent>;
 
-  if (payload.type !== 'incoming' && payload.type !== 'answer' && payload.type !== 'end') {
+  if (payload.type !== 'incoming' && payload.type !== 'answer' && payload.type !== 'end' && payload.type !== 'failed') {
     return null;
   }
 
   return {
     call: normalizeVoipCallRecord(payload.call),
     callId: typeof payload.callId === 'string' ? payload.callId : payload.call?.callId,
+    errorMessage: typeof payload.errorMessage === 'string' ? payload.errorMessage : undefined,
     nativeDisplayed: payload.nativeDisplayed === true,
     type: payload.type
   };

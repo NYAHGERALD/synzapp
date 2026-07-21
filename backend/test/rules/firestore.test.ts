@@ -9,8 +9,10 @@ import {
   RulesTestEnvironment
 } from '@firebase/rules-unit-testing';
 import {
+  collection,
   doc,
   getDoc,
+  getDocs,
   setDoc
 } from 'firebase/firestore';
 
@@ -81,6 +83,40 @@ describe('Firestore emulator tenant rules', () => {
       tenantId: 'tenant_a'
     }));
   });
+
+  it('denies direct client access to backend-owned RAILS system records', async () => {
+    const db = employeeContext('user_a', 'tenant_a').firestore();
+
+    await assertFails(getDoc(doc(db, 'organizations/tenant_a/railsItems/rails_1')));
+    await assertFails(getDocs(collection(db, 'organizations/tenant_a/railsItems/rails_1/activity')));
+    await assertFails(getDoc(doc(db, 'organizations/tenant_a/railsAuditEvents/rails_evt_1')));
+    await assertFails(getDoc(doc(db, 'organizations/tenant_a/railsNotificationQueue/rails_note_1')));
+    await assertFails(getDoc(doc(db, 'organizations/tenant_a/notificationEvents/rails_note_1')));
+  });
+
+  it('denies direct client writes to backend-owned RAILS system records', async () => {
+    const db = employeeContext('user_a', 'tenant_a').firestore();
+
+    await assertFails(setDoc(doc(db, 'organizations/tenant_a/railsItems/rails_2'), {
+      status: 'Closed',
+      tenantId: 'tenant_a',
+      title: 'Client write attempt'
+    }));
+    await assertFails(setDoc(doc(db, 'organizations/tenant_a/railsItems/rails_1/activity/rails_evt_2'), {
+      summary: 'Tamper attempt',
+      tenantId: 'tenant_a',
+      type: 'RAILS_UPDATED'
+    }));
+    await assertFails(setDoc(doc(db, 'organizations/tenant_a/railsAuditEvents/rails_evt_2'), {
+      summary: 'Tamper attempt',
+      tenantId: 'tenant_a',
+      type: 'RAILS_UPDATED'
+    }));
+    await assertFails(setDoc(doc(db, 'organizations/tenant_a/railsNotificationQueue/rails_note_2'), {
+      message: 'Tamper attempt',
+      tenantId: 'tenant_a'
+    }));
+  });
 });
 
 function employeeContext(uid: string, tenantId: string) {
@@ -129,6 +165,40 @@ async function seedFirestore() {
       recipientUid: 'user_b',
       senderUid: 'user_a',
       tenantId: 'tenant_a'
+    });
+    await setDoc(doc(db, 'organizations/tenant_a/railsItems/rails_1'), {
+      ownerUid: 'user_a',
+      status: 'In Progress',
+      tenantId: 'tenant_a',
+      title: 'Fire under the oven'
+    });
+    await setDoc(doc(db, 'organizations/tenant_a/railsItems/rails_1/activity/rails_evt_1'), {
+      actorUid: 'user_a',
+      itemId: 'rails_1',
+      summary: 'Created RAILS loop.',
+      tenantId: 'tenant_a',
+      type: 'RAILS_CREATED'
+    });
+    await setDoc(doc(db, 'organizations/tenant_a/railsAuditEvents/rails_evt_1'), {
+      actorUid: 'user_a',
+      itemId: 'rails_1',
+      summary: 'Created RAILS loop.',
+      tenantId: 'tenant_a',
+      type: 'RAILS_CREATED'
+    });
+    await setDoc(doc(db, 'organizations/tenant_a/railsNotificationQueue/rails_note_1'), {
+      itemId: 'rails_1',
+      message: 'RAILS update',
+      recipientUids: ['user_a'],
+      tenantId: 'tenant_a',
+      type: 'RAILS_LOOP_ASSIGNED'
+    });
+    await setDoc(doc(db, 'organizations/tenant_a/notificationEvents/rails_note_1'), {
+      channel: 'rails',
+      notificationId: 'rails_note_1',
+      recipientUids: ['user_a'],
+      tenantId: 'tenant_a',
+      type: 'RAILS_LOOP_ASSIGNED'
     });
   });
 }

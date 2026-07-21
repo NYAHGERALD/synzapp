@@ -1,6 +1,7 @@
 import { RecaptchaVerifier, signInWithPhoneNumber, type ConfirmationResult } from 'firebase/auth';
 import { getSynzappApiBaseUrl } from './config';
 import {
+  ensureSynzappAuthPersistence,
   getAppCheckHeader,
   getSynzappFirebaseAuth
 } from './firebase';
@@ -55,6 +56,8 @@ export interface PhoneLoginSession {
 let recaptchaVerifier: RecaptchaVerifier | null = null;
 
 export async function sendPhoneLoginCode(phoneNumber: string): Promise<PhoneLoginSession> {
+  await ensureSynzappAuthPersistence();
+
   const auth = getSynzappFirebaseAuth();
   const safePhoneNumber = phoneNumber.trim();
 
@@ -125,7 +128,8 @@ export async function getCurrentWebProfilePhotoObjectUrl(): Promise<string | nul
   }
 
   const idToken = await user.getIdToken();
-  const response = await fetch(`${getSynzappApiBaseUrl()}/api/auth/web-profile/photo`, {
+  const response = await fetch(`${getSynzappApiBaseUrl()}/api/auth/web-profile/photo?uid=${encodeURIComponent(user.uid)}`, {
+    cache: 'no-store',
     headers: {
       Accept: 'image/*',
       Authorization: `Bearer ${idToken}`,

@@ -82,6 +82,12 @@
       "./plugins/withSynzappAndroidNotificationPreview",
       "expo-document-picker",
       [
+        "expo-calendar",
+        {
+          "calendarPermission": "Synzapp uses calendar access when you choose to add scheduled workplace calls to your device calendar."
+        }
+      ],
+      [
         "expo-image-picker",
         {
           "cameraPermission": "Synzapp uses the camera when you choose to take a profile photo or send a chat photo.",

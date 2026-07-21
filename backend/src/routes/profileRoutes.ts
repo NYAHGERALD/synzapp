@@ -42,6 +42,7 @@ import {
   createGroupChat,
   exitGroupChat,
   getGroupChatContact,
+  getGroupChatPhoto,
   getGroupChatMemberProfilePhoto,
   getGroupChatMessageReactions,
   getGroupEncryptionContext,
@@ -51,6 +52,7 @@ import {
   listCurrentUserGroupChatContacts,
   listEncryptedGroupEnvelopesForDevice,
   sendEncryptedGroupEnvelope,
+  updateGroupChatPhoto,
   updateGroupChatPreferenceForCurrentUser,
   updateGroupChatMessageReaction
 } from '../services/groupChatService.js';
@@ -542,6 +544,67 @@ profileRouter.post('/chat/groups', verifyAppCheck, async (req, res, next) => {
     await writeAuditEvent({
       action: 'GROUP_CHAT_CREATED',
       reason: error instanceof Error ? error.message : 'Group chat creation failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
+profileRouter.get('/chat/groups/:groupId/photo', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const groupId = Array.isArray(req.params.groupId)
+      ? req.params.groupId[0] || ''
+      : req.params.groupId || '';
+    const profilePhoto = await getGroupChatPhoto(decodedToken, groupId);
+    const etag = `"${profilePhoto.cacheKey}"`;
+
+    res.setHeader('Cache-Control', 'no-store, private');
+    res.setHeader('Content-Type', profilePhoto.contentType);
+    res.setHeader('ETag', etag);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+
+    profilePhoto.file
+      .createReadStream()
+      .on('error', next)
+      .pipe(res);
+  } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.put('/chat/groups/:groupId/photo', verifyAppCheck, async (req, res, next) => {
+  const groupId = Array.isArray(req.params.groupId)
+    ? req.params.groupId[0] || ''
+    : req.params.groupId || '';
+
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const body = profilePhotoBodySchema.parse(req.body);
+    const contact = await updateGroupChatPhoto(decodedToken, groupId, body.profilePhotoDataUrl);
+
+    await writeAuditEvent({
+      action: 'GROUP_CHAT_PHOTO_UPDATED',
+      metadata: {
+        groupId: contact.contactId,
+        name: contact.displayName
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: contact.tenantId,
+      uid: decodedToken.uid
+    });
+
+    res.json({ contact });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'GROUP_CHAT_PHOTO_UPDATED',
+      metadata: { groupId },
+      reason: error instanceof Error ? error.message : 'Group photo update failed',
       req,
       status: 'FAILED'
     }).catch(() => undefined);

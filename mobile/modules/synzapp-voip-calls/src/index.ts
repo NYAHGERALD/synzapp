@@ -16,8 +16,9 @@ export interface SynzappVoipCallRecord {
 export interface SynzappVoipCallEvent {
   call?: SynzappVoipCallRecord;
   callId?: string;
+  errorMessage?: string;
   nativeDisplayed?: boolean;
-  type: 'answer' | 'end' | 'incoming';
+  type: 'answer' | 'end' | 'failed' | 'incoming';
 }
 
 export interface SynzappVoipCallsModule {

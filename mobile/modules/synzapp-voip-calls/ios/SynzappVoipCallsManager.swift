@@ -227,6 +227,13 @@ final class SynzappVoipCallsManager: NSObject, CXProviderDelegate, PKPushRegistr
             "type": "incoming"
           ])
         } else {
+          self.enqueueCallEvent([
+            "call": call,
+            "callId": callId,
+            "errorMessage": error?.localizedDescription ?? "CallKit rejected the incoming Synzapp call.",
+            "nativeDisplayed": false,
+            "type": "failed"
+          ])
           self.removeCall(uuid: uuid)
         }
 

@@ -37,6 +37,10 @@ import type {
 const GROUP_HIDDEN_MESSAGE_LIMIT = 5000;
 const GROUP_HISTORY_KEY_GRANT_DEVICE_LIMIT = 100;
 const GROUP_HISTORY_KEY_GRANT_ENVELOPE_LIMIT = 100;
+const GROUP_PHOTO_STORAGE_SAVE_MAX_ATTEMPTS = 3;
+const GROUP_PHOTO_STORAGE_SAVE_RETRY_BASE_MS = 350;
+
+type StorageSaveOptions = NonNullable<Parameters<ReturnType<typeof storageBucket.file>['save']>[1]>;
 
 export interface CreateGroupChatInput {
   memberIds: string[];
@@ -129,6 +133,17 @@ export interface GroupChatMemberProfilePhoto {
   file: ReturnType<typeof storageBucket.file>;
 }
 
+export interface GroupChatPhoto {
+  cacheKey: string;
+  contentType: string;
+  file: ReturnType<typeof storageBucket.file>;
+}
+
+interface UploadedGroupPhoto {
+  contentType: string;
+  storagePath: string;
+}
+
 export interface EncryptedGroupEnvelopeForDevice {
   algorithm: string;
   ciphertext: string;
@@ -177,7 +192,10 @@ interface GroupChatContext {
   groupId: string;
   groupRef: DocumentReference;
   memberIds: string[];
+  role: SynzappRole;
   tenantId: string;
+  uid: string;
+  user: TenantUserRecord;
 }
 
 interface TenantGroupRecord {
@@ -195,6 +213,9 @@ interface TenantGroupRecord {
   messageReactions?: GroupChatMessageReactionRecord;
   messagePermissionMode?: 'ADMINS' | 'ALL_MEMBERS';
   name?: string;
+  profilePhotoContentType?: string | null;
+  profilePhotoStoragePath?: string | null;
+  profilePhotoVersion?: number | null;
   scope?: 'COMPANY' | 'DEPARTMENT';
   status?: string;
   systemManaged?: boolean;
@@ -373,6 +394,9 @@ export async function createGroupChat(
       memberPolicy: 'EXPLICIT',
       messagePermissionMode,
       name,
+      profilePhotoContentType: null,
+      profilePhotoStoragePath: null,
+      profilePhotoVersion: null,
       scope: 'COMPANY',
       status: 'ACTIVE',
       systemManaged: false,
@@ -1440,6 +1464,65 @@ export async function getGroupChatMemberProfilePhoto(
   };
 }
 
+export async function getGroupChatPhoto(
+  decodedToken: DecodedIdToken,
+  groupId: string
+): Promise<GroupChatPhoto> {
+  const context = await getGroupChatContext(decodedToken, groupId);
+  const storagePath = context.group.profilePhotoStoragePath;
+
+  if (!storagePath) {
+    throw notFoundError('Group photo not found.');
+  }
+
+  const file = storageBucket.file(storagePath);
+
+  try {
+    const [exists] = await file.exists();
+
+    if (!exists) {
+      throw notFoundError('Group photo not found.');
+    }
+  } catch (error) {
+    if (isMissingStorageBucketError(error)) {
+      throw notFoundError('Group photo storage is not ready yet.');
+    }
+
+    throw error;
+  }
+
+  return {
+    cacheKey: buildGroupProfilePhotoCacheKey(context.groupId, context.group.profilePhotoVersion),
+    contentType: context.group.profilePhotoContentType || 'image/jpeg',
+    file
+  };
+}
+
+export async function updateGroupChatPhoto(
+  decodedToken: DecodedIdToken,
+  groupId: string,
+  profilePhotoDataUrl: string
+): Promise<GroupChatContact> {
+  const context = await getGroupChatContext(decodedToken, groupId);
+
+  if (!canCurrentUserUpdateGroupPhoto(context)) {
+    throw authorizationError('You do not have permission to change this group photo.');
+  }
+
+  const uploadedPhoto = await uploadGroupPhoto(context.tenantId, context.groupId, profilePhotoDataUrl);
+  const profilePhotoVersion = Date.now();
+
+  await context.groupRef.set({
+    profilePhotoContentType: uploadedPhoto.contentType,
+    profilePhotoStoragePath: uploadedPhoto.storagePath,
+    profilePhotoVersion,
+    updatedAt: fieldValue.serverTimestamp(),
+    updatedBy: decodedToken.uid
+  }, { merge: true });
+
+  return getGroupChatContact(decodedToken, context.groupId);
+}
+
 async function getActiveUserContext(decodedToken: DecodedIdToken) {
   const session = await buildAuthSession(decodedToken);
   const { role, status, tenantId } = session.user;
@@ -1498,7 +1581,10 @@ async function getGroupChatContext(decodedToken: DecodedIdToken, groupId: string
     groupId: safeGroupId,
     groupRef,
     memberIds,
-    tenantId: context.tenantId
+    role: context.role,
+    tenantId: context.tenantId,
+    uid: context.uid,
+    user: context.user
   };
 }
 
@@ -1572,6 +1658,27 @@ function canAddMemberToGroup(
   }
 
   return group.createdBy === context.uid;
+}
+
+function canCurrentUserUpdateGroupPhoto(context: GroupChatContext): boolean {
+  if (isDepartmentManagedGroup(context.group)) {
+    const groupDepartmentId = context.group.autoMembershipDepartmentId || context.group.departmentId || null;
+
+    return context.role === 'ORG_ADMIN' ||
+      (
+        context.role === 'DEPT_ADMIN' &&
+        Boolean(groupDepartmentId) &&
+        context.user.departmentId === groupDepartmentId
+      );
+  }
+
+  return context.memberIds.includes(context.uid);
+}
+
+function isDepartmentManagedGroup(group: TenantGroupRecord): boolean {
+  return group.isDepartmentDefault === true ||
+    group.memberPolicy === 'DEPARTMENT_PLUS_EXPLICIT' ||
+    Boolean(group.autoMembershipDepartmentId);
 }
 
 function canCurrentUserExitGroupChat(group: TenantGroupRecord): boolean {
@@ -1920,8 +2027,10 @@ function buildGroupChatContact(
     memberPolicy: group.memberPolicy || 'EXPLICIT',
     messagePermissionMode: group.messagePermissionMode || 'ALL_MEMBERS',
     preview: '',
-    profilePhotoCacheKey: null,
-    profilePhotoUrl: null,
+    profilePhotoCacheKey: group.profilePhotoStoragePath
+      ? buildGroupProfilePhotoCacheKey(groupId, group.profilePhotoVersion)
+      : null,
+    profilePhotoUrl: getGroupProfilePhotoUrl(groupId, group.profilePhotoStoragePath, group.profilePhotoVersion),
     role: 'EMPLOYEE',
     roleName: memberIds.length === 1 ? 'Group chat - 1 member' : `Group chat - ${memberIds.length} members`,
     spammedAt: effectivePreference.spammedAtMs ? new Date(effectivePreference.spammedAtMs).toISOString() : null,
@@ -2243,6 +2352,13 @@ function buildGroupMemberProfilePhotoCacheKey(
   return `group-member-photo-${groupId}-${uid}-${version || 1}`;
 }
 
+function buildGroupProfilePhotoCacheKey(
+  groupId: string,
+  version?: number | null
+): string {
+  return `group-photo-${groupId}-${version || 1}`;
+}
+
 function getGroupMemberProfilePhotoUrl(
   groupId: string,
   uid: string,
@@ -2256,10 +2372,105 @@ function getGroupMemberProfilePhotoUrl(
   return `/api/profile/chat/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(uid)}/photo?v=${encodeURIComponent(String(version || 1))}`;
 }
 
+function getGroupProfilePhotoUrl(
+  groupId: string,
+  storagePath?: string | null,
+  version?: number | null
+): string | null {
+  if (!storagePath) {
+    return null;
+  }
+
+  return `/api/profile/chat/groups/${encodeURIComponent(groupId)}/photo?v=${encodeURIComponent(String(version || 1))}`;
+}
+
+async function uploadGroupPhoto(
+  tenantId: string,
+  groupId: string,
+  dataUrl: string
+): Promise<UploadedGroupPhoto> {
+  const match = /^data:(image\/(?:jpeg|jpg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
+
+  if (!match) {
+    throw validationError('Group photo must be a JPEG, PNG, or WebP image.');
+  }
+
+  const contentType = match[1] === 'image/jpg' ? 'image/jpeg' : match[1];
+  const bytes = Buffer.from(match[2], 'base64');
+
+  if (bytes.length > 1 * 1024 * 1024) {
+    throw validationError('Group photo must be smaller than 1 MB.');
+  }
+
+  const extension = contentType === 'image/png'
+    ? 'png'
+    : contentType === 'image/webp'
+      ? 'webp'
+      : 'jpg';
+  const storagePath = `organizations/${tenantId}/groups/${groupId}/profile/group-photo.${extension}`;
+  const saveOptions: StorageSaveOptions = {
+    contentType,
+    metadata: {
+      cacheControl: 'private, max-age=3600',
+      metadata: {
+        groupId,
+        tenantId
+      }
+    },
+    resumable: false
+  };
+
+  try {
+    await saveGroupPhotoWithRetry(storagePath, bytes, saveOptions);
+  } catch (error) {
+    logGroupPhotoStorageFailure(error);
+
+    if (isMissingStorageBucketError(error)) {
+      throw validationError('Group photo storage is not ready yet. Please try again later.');
+    }
+
+    if (isGroupPhotoStorageUnavailableError(error)) {
+      throw validationError('Group photo could not be saved right now. Please try again later.');
+    }
+
+    throw error;
+  }
+
+  return {
+    contentType,
+    storagePath
+  };
+}
+
+async function saveGroupPhotoWithRetry(
+  storagePath: string,
+  bytes: Buffer,
+  options: StorageSaveOptions
+): Promise<void> {
+  for (let attempt = 1; attempt <= GROUP_PHOTO_STORAGE_SAVE_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      await storageBucket.file(storagePath).save(bytes, options);
+      return;
+    } catch (error) {
+      if (attempt >= GROUP_PHOTO_STORAGE_SAVE_MAX_ATTEMPTS || !isRetryableGroupPhotoStorageError(error)) {
+        throw error;
+      }
+
+      const delayMs = GROUP_PHOTO_STORAGE_SAVE_RETRY_BASE_MS * attempt * attempt;
+      console.warn('Group photo storage save retrying', {
+        bucket: storageBucket.name,
+        attempt,
+        maxAttempts: GROUP_PHOTO_STORAGE_SAVE_MAX_ATTEMPTS,
+        code: getStorageErrorCode(error) ?? null,
+        message: sanitizeStorageErrorMessage(getErrorMessage(error))
+      });
+      await delay(delayMs);
+    }
+  }
+}
+
 function isMissingStorageBucketError(error: unknown): boolean {
-  const code = typeof error === 'object' && error !== null && 'code' in error
-    ? (error as { code?: number | string }).code
-    : undefined;
+  const code = getStorageErrorCode(error);
   const message = getErrorMessage(error);
 
   return (
@@ -2268,6 +2479,59 @@ function isMissingStorageBucketError(error: unknown): boolean {
     message.includes('bucket does not exist') ||
     message.includes('could not load the default credentials')
   );
+}
+
+function isGroupPhotoStorageUnavailableError(error: unknown): boolean {
+  const code = getStorageErrorCode(error);
+  const message = getErrorMessage(error);
+
+  return code === 403 ||
+    code === 429 ||
+    code === 500 ||
+    code === 502 ||
+    code === 503 ||
+    /access denied|forbidden|permission|credential|oauth|token|fetch failed|socket hang up|econnreset|etimedout|timeout|temporarily unavailable/i.test(message);
+}
+
+function isRetryableGroupPhotoStorageError(error: unknown): boolean {
+  const code = getStorageErrorCode(error);
+  const message = getErrorMessage(error);
+
+  return code === 429 ||
+    code === 500 ||
+    code === 502 ||
+    code === 503 ||
+    code === 504 ||
+    code === 'ERR_STREAM_PREMATURE_CLOSE' ||
+    code === 'ECONNRESET' ||
+    code === 'ETIMEDOUT' ||
+    /premature close|invalid response body while trying to fetch|fetch failed|socket hang up|econnreset|etimedout|timeout|temporarily unavailable/i.test(message);
+}
+
+function logGroupPhotoStorageFailure(error: unknown): void {
+  console.warn('Group photo storage save failed', {
+    bucket: storageBucket.name,
+    code: getStorageErrorCode(error) ?? null,
+    message: sanitizeStorageErrorMessage(getErrorMessage(error))
+  });
+}
+
+function getStorageErrorCode(error: unknown): number | string | undefined {
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    return (error as { code?: number | string }).code;
+  }
+
+  return undefined;
+}
+
+function sanitizeStorageErrorMessage(message: string): string {
+  return message.replace(/\s+/g, ' ').slice(0, 400);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function getErrorMessage(error: unknown): string {

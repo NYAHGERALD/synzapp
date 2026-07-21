@@ -4,16 +4,22 @@ export type SynzappCallMode = 'voice' | 'video';
 export type SynzappCallChatType = 'DIRECT' | 'GROUP';
 export type SynzappCallEndReason = 'busy' | 'declined' | 'ended' | 'failed' | 'missed';
 export type SynzappCallSignalKind = 'answer' | 'iceCandidate' | 'offer';
+export type SynzappCallSessionStatus = 'answered' | 'busy' | 'declined' | 'ended' | 'failed' | 'missed' | 'ringing';
 
 export interface SynzappCallRecord {
+  answeredAt?: string;
+  answeredByUid?: string;
   callId: string;
   callerName: string;
   callerUid: string;
   chatType: SynzappCallChatType;
   contactId: string;
   createdAt: string;
+  endedAt?: string;
+  endedByUid?: string;
   mode: SynzappCallMode;
   participantUids: string[];
+  status?: SynzappCallSessionStatus;
   tenantId: string;
   title: string;
 }
@@ -152,16 +158,21 @@ function sendCallSocketMessage(socket: WebSocket, message: Record<string, unknow
 
 function normalizeCallRecord(call: SynzappCallRecord): SynzappCallRecord {
   return {
+    answeredAt: typeof call.answeredAt === 'string' ? call.answeredAt : undefined,
+    answeredByUid: typeof call.answeredByUid === 'string' ? call.answeredByUid : undefined,
     callId: typeof call.callId === 'string' ? call.callId : '',
     callerName: typeof call.callerName === 'string' ? call.callerName : 'Synzapp user',
     callerUid: typeof call.callerUid === 'string' ? call.callerUid : '',
     chatType: call.chatType === 'GROUP' ? 'GROUP' : 'DIRECT',
     contactId: typeof call.contactId === 'string' ? call.contactId : '',
     createdAt: typeof call.createdAt === 'string' ? call.createdAt : new Date().toISOString(),
+    endedAt: typeof call.endedAt === 'string' ? call.endedAt : undefined,
+    endedByUid: typeof call.endedByUid === 'string' ? call.endedByUid : undefined,
     mode: call.mode === 'video' ? 'video' : 'voice',
     participantUids: Array.isArray(call.participantUids)
       ? call.participantUids.filter((uid): uid is string => typeof uid === 'string' && Boolean(uid.trim()))
       : [],
+    status: isCallSessionStatus(call.status) ? call.status : undefined,
     tenantId: typeof call.tenantId === 'string' ? call.tenantId : '',
     title: typeof call.title === 'string' ? call.title : 'Synzapp call'
   };
@@ -177,4 +188,14 @@ function isCallEndReason(value: unknown): value is SynzappCallEndReason {
     value === 'ended' ||
     value === 'failed' ||
     value === 'missed';
+}
+
+function isCallSessionStatus(value: unknown): value is SynzappCallSessionStatus {
+  return value === 'answered' ||
+    value === 'busy' ||
+    value === 'declined' ||
+    value === 'ended' ||
+    value === 'failed' ||
+    value === 'missed' ||
+    value === 'ringing';
 }

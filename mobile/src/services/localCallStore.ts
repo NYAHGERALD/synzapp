@@ -29,6 +29,8 @@ export interface SynzappCallHistoryEntry {
 }
 
 export interface SynzappScheduledCall {
+  calendarAddedAt?: string | null;
+  calendarEventId?: string | null;
   callType: SynzappCallHistoryMode;
   contactIds: string[];
   createdAt: string;

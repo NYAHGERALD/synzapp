@@ -1,5 +1,6 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BlurView } from 'expo-blur';
+import * as Calendar from 'expo-calendar';
 import * as Clipboard from 'expo-clipboard';
 import * as Contacts from 'expo-contacts';
 import type { FirebaseAuthTypes } from '@react-native-firebase/auth';
@@ -51,6 +52,7 @@ import { DismissibleError } from '../components/DismissibleError';
 import {
   ApprovedEmployee,
   CompanyProfile,
+  CompanyKeyResultsConfig,
   confirmOrganizationDeletion,
   createDepartment,
   createRole,
@@ -58,7 +60,11 @@ import {
   DepartmentAdminPermission,
   EmployeeLifecycleAction,
   getCompanyProfile,
+  getCompanyKeyResults,
   inviteEmployeeContacts,
+  KeyResultGroup,
+  KeyResultMetric,
+  KeyResultUnit,
   listCurrentUserGroups,
   listDepartmentAdminPermissionCatalog,
   listApprovedEmployees,
@@ -72,6 +78,7 @@ import {
   revokeTenantDevice,
   updateCompanyLogo,
   updateCompanyProfile,
+  updateCompanyKeyResults,
   updateEmployeeDepartmentAdminAssignment,
   updateEmployeeDepartmentAdminPermissions,
   updateEmployeeLifecycle,
@@ -142,6 +149,7 @@ import {
   unsubscribeRealtimeConversation,
   updateChatArchiveSettings,
   sendChatMessage,
+  updateGroupChatPhoto,
   updateChatPreference,
   updateChatMessageReaction,
   updateChatNotificationSettings,
@@ -363,7 +371,13 @@ type GroupCallOption = 'schedule' | 'selectPeople' | 'sendLink' | 'video' | 'voi
 type SynzappCallDirection = 'incoming' | 'outgoing';
 type SynzappCallStatus = 'calling' | 'connecting' | 'connected' | 'ended' | 'ringing';
 type InviteMode = 'single' | 'batch' | 'manual';
-type SettingsScreen = 'list' | 'directory' | 'security' | 'chat-backup' | 'my-devices' | 'company-profile' | 'dept-admin-permissions' | 'groups' | 'role-permissions';
+type SettingsScreen = 'list' | 'directory' | 'security' | 'chat-backup' | 'my-devices' | 'company-profile' | 'key-results' | 'dept-admin-permissions' | 'groups' | 'role-permissions';
+interface SettingsListEntry {
+  icon: FeatherIconName;
+  onPress?: () => void;
+  subtitle: string;
+  title: string;
+}
 type UserPermission =
   | 'tenant.update'
   | 'users.invite'
@@ -385,6 +399,9 @@ const CHAT_ROW_RIGHT_ACTION_WIDTH = 216;
 const CHAT_ROW_SWIPE_TRIGGER = 28;
 const SPAM_ROW_ACTION_WIDTH = 118;
 const AI_HISTORY_ROW_ACTION_WIDTH = 118;
+const KEY_RESULT_ROW_ACTION_WIDTH = 124;
+const KEY_RESULT_ROW_SWIPE_TRIGGER = 18;
+const KEY_RESULT_UNIT_MODAL_HORIZONTAL_PADDING = 18;
 const CHAT_SMALL_FILE_AUTO_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024;
 const VOICE_NOTE_MIN_DURATION_MS = 700;
 const VOICE_NOTE_RECORDING_OPTIONS = RecordingPresets.LOW_QUALITY;
@@ -409,6 +426,49 @@ const DEFAULT_CHAT_BACKUP_POLICY: ChatBackupPolicy = {
   updatedAt: null,
   updatedByUid: null
 };
+const defaultKeyResultsConfig: CompanyKeyResultsConfig = {
+  groups: [],
+  units: [
+    { icon: 'hash', label: 'Number', sortOrder: 1000, status: 'ACTIVE', suffix: '', unitId: 'unit_number' },
+    { icon: 'bar-chart-2', label: 'Million', sortOrder: 2000, status: 'ACTIVE', suffix: 'Million', unitId: 'unit_million' },
+    { icon: 'calendar', label: 'Per Month', sortOrder: 3000, status: 'ACTIVE', suffix: '/Month', unitId: 'unit_per_month' },
+    { icon: 'clock', label: 'Per Day', sortOrder: 4000, status: 'ACTIVE', suffix: '/Day', unitId: 'unit_per_day' },
+    { icon: 'calendar', label: 'Per Year', sortOrder: 5000, status: 'ACTIVE', suffix: '/Year', unitId: 'unit_per_year' }
+  ],
+  updatedAt: null,
+  updatedByUid: null
+};
+const preferredKeyResultUnitIcons: FeatherIconName[] = [
+  'hash',
+  'dollar-sign',
+  'bar-chart-2',
+  'trending-up',
+  'activity',
+  'percent',
+  'target',
+  'calendar',
+  'clock',
+  'users',
+  'briefcase',
+  'shopping-cart',
+  'truck',
+  'package',
+  'box',
+  'award',
+  'pie-chart',
+  'layers',
+  'zap',
+  'check-circle',
+  'arrow-up-right',
+  'globe'
+];
+const keyResultUnitIconOptions: Array<{ icon: FeatherIconName; label: string }> = Array.from(new Set<FeatherIconName>([
+  ...preferredKeyResultUnitIcons,
+  ...(Object.keys(Feather.glyphMap) as FeatherIconName[])
+])).map((icon) => ({
+  icon,
+  label: formatKeyResultIconLabel(icon)
+}));
 const emptyClearChatSummary: ClearChatSummary = {
   mediaFileCount: 0,
   mediaSizeBytes: 0,
@@ -581,8 +641,11 @@ interface NativeOptionPickerState {
 
 interface ScheduleCallDraft {
   callType: SynzappCallMode;
+  calendarAddedAt?: string | null;
+  calendarEventId?: string | null;
   description: string;
   endsAt: Date;
+  id: string;
   includeEndTime: boolean;
   reminderMinutes: number;
   requireApproval: boolean;
@@ -600,6 +663,7 @@ interface ActiveSynzappCall {
   call: SynzappCallRecord;
   direction: SynzappCallDirection;
   isMuted: boolean;
+  isNativePresented?: boolean;
   isSpeakerOn: boolean;
   isVideoEnabled: boolean;
   localStreamUrl: string | null;
@@ -720,6 +784,12 @@ const archiveUnarchiveBehaviorOptions: Array<ArchiveSettingsOption<ArchiveUnarch
   { label: 'Unarchive on mention', value: 'MENTION' },
   { label: 'Unarchive on direct reply', value: 'DIRECT_REPLY' }
 ];
+const mainNavigationLinks = [
+  'RAILS',
+  'RECORD MEETING',
+  'LEADERS STANDARD WORK',
+  'FILES'
+] as const;
 const androidButtonRipple = { borderless: false, color: 'rgba(15, 118, 110, 0.14)' } as const;
 const androidIconRipple = { borderless: true, color: 'rgba(15, 118, 110, 0.14)' } as const;
 
@@ -759,15 +829,20 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const [callFavoriteContactIds, setCallFavoriteContactIds] = useState<string[]>([]);
   const [scheduledCalls, setScheduledCalls] = useState<SynzappScheduledCall[]>([]);
   const [isCallOptionsOpen, setIsCallOptionsOpen] = useState(false);
+  const [isMainNavigationOpen, setIsMainNavigationOpen] = useState(false);
   const [isNewCallModalOpen, setIsNewCallModalOpen] = useState(false);
   const [isCallKeypadOpen, setIsCallKeypadOpen] = useState(false);
   const [isCallFavoritesModalOpen, setIsCallFavoritesModalOpen] = useState(false);
   const [isScheduleCallModalOpen, setIsScheduleCallModalOpen] = useState(false);
+  const [isScheduleCallSendModalOpen, setIsScheduleCallSendModalOpen] = useState(false);
+  const [isAddingScheduleToCalendar, setIsAddingScheduleToCalendar] = useState(false);
   const [isScheduledCallsModalOpen, setIsScheduledCallsModalOpen] = useState(false);
   const [isCallEditMode, setIsCallEditMode] = useState(false);
   const [callKeypadDigits, setCallKeypadDigits] = useState('');
   const [newCallSearch, setNewCallSearch] = useState('');
   const [callFavoritesSearch, setCallFavoritesSearch] = useState('');
+  const [scheduleCallRecipientSearch, setScheduleCallRecipientSearch] = useState('');
+  const [scheduleCallRecipientIds, setScheduleCallRecipientIds] = useState<Record<string, boolean>>({});
   const [scheduleCallDraft, setScheduleCallDraft] = useState<ScheduleCallDraft>(() => createScheduleCallDraft(null));
   const [isSpamScreenOpen, setIsSpamScreenOpen] = useState(false);
   const [spamActionTarget, setSpamActionTarget] = useState<ChatItem | null>(null);
@@ -869,6 +944,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const [isSavingAddToGroups, setIsSavingAddToGroups] = useState(false);
   const [isSavingGroupAddMembers, setIsSavingGroupAddMembers] = useState(false);
   const [isExitingGroupChat, setIsExitingGroupChat] = useState(false);
+  const [isUpdatingGroupPhoto, setIsUpdatingGroupPhoto] = useState(false);
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [isLoadingBatchContacts, setIsLoadingBatchContacts] = useState(false);
   const [isPickingInviteContact, setIsPickingInviteContact] = useState(false);
@@ -882,10 +958,12 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const [isLoadingSecurity, setIsLoadingSecurity] = useState(false);
   const [isLoadingMyDevices, setIsLoadingMyDevices] = useState(false);
   const [isLoadingCompanyProfile, setIsLoadingCompanyProfile] = useState(false);
+  const [isLoadingKeyResults, setIsLoadingKeyResults] = useState(false);
   const [isLoadingChatBackupPolicy, setIsLoadingChatBackupPolicy] = useState(false);
   const [isSavingChatBackupPolicy, setIsSavingChatBackupPolicy] = useState(false);
   const [isSavingCompanyProfile, setIsSavingCompanyProfile] = useState(false);
   const [isSavingCompanyLogo, setIsSavingCompanyLogo] = useState(false);
+  const [isSavingKeyResults, setIsSavingKeyResults] = useState(false);
   const [isSavingDepartmentAdminPermissions, setIsSavingDepartmentAdminPermissions] = useState(false);
   const [isSavingGroup, setIsSavingGroup] = useState(false);
   const [isSavingRolePermissions, setIsSavingRolePermissions] = useState(false);
@@ -908,6 +986,15 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const [companyCalendarYearStartDateDraft, setCompanyCalendarYearStartDateDraft] = useState<string | null>(null);
   const [companyCalendarYearPickerDate, setCompanyCalendarYearPickerDate] = useState<Date>(new Date());
   const [isCompanyCalendarYearPickerOpen, setIsCompanyCalendarYearPickerOpen] = useState(false);
+  const [companyKeyResults, setCompanyKeyResults] = useState<CompanyKeyResultsConfig>(defaultKeyResultsConfig);
+  const [keyResultGroupNameDraft, setKeyResultGroupNameDraft] = useState('');
+  const [keyResultUnitLabelDraft, setKeyResultUnitLabelDraft] = useState('');
+  const [keyResultUnitSuffixDraft, setKeyResultUnitSuffixDraft] = useState('');
+  const [keyResultUnitIconDraft, setKeyResultUnitIconDraft] = useState<FeatherIconName>('hash');
+  const [keyResultMetricDrafts, setKeyResultMetricDrafts] = useState<Record<string, { key: string; unitId: string; value: string }>>({});
+  const [isKeyResultUnitModalOpen, setIsKeyResultUnitModalOpen] = useState(false);
+  const [isKeyResultsOptionsMenuOpen, setIsKeyResultsOptionsMenuOpen] = useState(false);
+  const [isKeyResultsContentScrollEnabled, setIsKeyResultsContentScrollEnabled] = useState(true);
   const [organizationDeletionModal, setOrganizationDeletionModal] = useState<OrganizationDeletionModalState | null>(null);
   const [organizationDeletionConfirmation, setOrganizationDeletionConfirmation] = useState<FirebaseAuthTypes.ConfirmationResult | null>(null);
   const [isRequestingOrganizationDeletion, setIsRequestingOrganizationDeletion] = useState(false);
@@ -938,6 +1025,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const callRealtimeReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const callRealtimeSocketRef = useRef<WebSocket | null>(null);
   const activeSynzappCallRef = useRef<ActiveSynzappCall | null>(null);
+  const appStateRef = useRef(AppState.currentState);
   const callLocalStreamRef = useRef<any>(null);
   const callPeerConnectionsRef = useRef<Record<string, any>>({});
   const callOfferStartedIdsRef = useRef<Set<string>>(new Set());
@@ -967,6 +1055,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const directChatContacts = chatContacts.filter((contact) => (contact.chatType || 'DIRECT') !== 'GROUP');
   const groupChatContacts = chatContacts.filter((contact) => contact.chatType === 'GROUP');
   const registeredCallContacts = directChatContacts.filter((contact) => contact.status !== 'INVITED' && contact.status !== 'DELETED');
+  const scheduleCallRecipientContacts = chatContacts.filter(isScheduleCallRecipientContact);
   const currentUserDialIdentity = getCurrentUserDialIdentity(userProfile, verifiedAdmin.phoneNumber);
   const activeVisibleConversationChatItems = chatItems.filter(shouldShowActiveChatInList);
   const spamConversationChatItems = chatItems.filter(shouldShowTrashChatInList);
@@ -1016,6 +1105,9 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         ...(registeredDeviceId ? { 'X-Synzapp-Device-Id': registeredDeviceId } : {})
       }
     : undefined;
+  const handleKeyResultsSwipeActive = useCallback((isActive: boolean) => {
+    setIsKeyResultsContentScrollEnabled(!isActive);
+  }, []);
   const filteredChatItems = filterChatItems(
     applyChatListFilter(
       activeConversationChatItems,
@@ -1152,6 +1244,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextState) => {
+      appStateRef.current = nextState;
       if (nextState === 'active') {
         void loadUserProfile(false);
         if (realtimeSocketRef.current) {
@@ -1532,6 +1625,24 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   }, [activeTab, canManageCompanyProfile, settingsScreen]);
 
   useEffect(() => {
+    if (activeTab !== 'Settings' || settingsScreen !== 'key-results' || !canManageCompanyProfile) {
+      return;
+    }
+
+    void loadKeyResults();
+  }, [activeTab, canManageCompanyProfile, settingsScreen]);
+
+  useEffect(() => {
+    if (activeTab === 'Settings' && settingsScreen === 'key-results') {
+      return;
+    }
+
+    setIsKeyResultUnitModalOpen(false);
+    setIsKeyResultsOptionsMenuOpen(false);
+    setIsKeyResultsContentScrollEnabled(true);
+  }, [activeTab, settingsScreen]);
+
+  useEffect(() => {
     if (activeTab !== 'Settings' || settingsScreen !== 'dept-admin-permissions' || !canManageUsers) {
       return;
     }
@@ -1629,6 +1740,10 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     }
 
     if (settingsScreen === 'company-profile' && !canManageCompanyProfile) {
+      setSettingsScreen('list');
+    }
+
+    if (settingsScreen === 'key-results' && !canManageCompanyProfile) {
       setSettingsScreen('list');
     }
 
@@ -2248,6 +2363,28 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       }
     } finally {
       setIsLoadingCompanyProfile(false);
+    }
+  }
+
+  async function loadKeyResults(showError = true) {
+    if (!canManageCompanyProfile) {
+      return;
+    }
+
+    setIsLoadingKeyResults(true);
+
+    try {
+      const idToken = await getIdToken();
+      const keyResults = await getCompanyKeyResults(idToken);
+
+      setCompanyKeyResults(normalizeKeyResultsForDraft(keyResults));
+      setKeyResultMetricDrafts({});
+    } catch (nextError) {
+      if (showError) {
+        setError(getErrorMessage(nextError, 'Unable to load key results.'));
+      }
+    } finally {
+      setIsLoadingKeyResults(false);
     }
   }
 
@@ -3318,7 +3455,9 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     }
 
     if (event.type === 'incomingCall') {
-      await handleIncomingSynzappCall(event.call);
+      await handleIncomingSynzappCall(event.call, {
+        skipNativeIncomingDisplay: true
+      });
       return;
     }
 
@@ -3369,6 +3508,8 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         : [data.callerUid, currentUid],
       tenantId: data.tenantId || getActiveTenantId(),
       title: data.title || data.callerName || 'Synzapp call'
+    }, {
+      skipNativeIncomingDisplay: true
     });
   }
 
@@ -3380,8 +3521,14 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
 
       void connectCallRealtimeSocket();
       await handleIncomingSynzappCall(event.call, {
+        nativeDisplayed: event.nativeDisplayed === true,
         skipNativeIncomingDisplay: event.nativeDisplayed === true
       });
+      return;
+    }
+
+    if (event.type === 'failed') {
+      console.warn('Synzapp iOS native call presentation failed:', event.errorMessage || event.callId || 'Unknown CallKit error.');
       return;
     }
 
@@ -3581,7 +3728,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
 
   async function handleIncomingSynzappCall(
     call: SynzappCallRecord,
-    options: { skipNativeIncomingDisplay?: boolean } = {}
+    options: { nativeDisplayed?: boolean; skipNativeIncomingDisplay?: boolean } = {}
   ) {
     const existingCall = activeSynzappCallRef.current;
 
@@ -3603,6 +3750,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       call,
       direction: 'incoming',
       isMuted: false,
+      isNativePresented: options.nativeDisplayed === true,
       isSpeakerOn: call.mode === 'video',
       isVideoEnabled: call.mode === 'video',
       localStreamUrl: null,
@@ -3612,10 +3760,14 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
 
     updateActiveSynzappCall(() => incomingCall);
     await recordSynzappCallHistory(call, 'ringing', 'incoming', { unseen: true });
-    await ensureSynzappCallKeepReady().catch(() => undefined);
-    startIncomingCallAudio(call.mode);
-    startSynzappIncomingRingTimeout(call.callId);
-    if (!options.skipNativeIncomingDisplay) {
+    const isAppActive = appStateRef.current === 'active';
+
+    if (!options.nativeDisplayed && isAppActive) {
+      await ensureSynzappCallKeepReady().catch(() => undefined);
+      startIncomingCallAudio(call.mode);
+      startSynzappIncomingRingTimeout(call.callId);
+    }
+    if (!options.skipNativeIncomingDisplay && !isAppActive) {
       showNativeIncomingSynzappCall(call);
     }
   }
@@ -3632,6 +3784,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
             call,
             direction: call.callerUid === currentUid ? 'outgoing' : 'incoming',
             isMuted: false,
+            isNativePresented: false,
             isSpeakerOn: call.mode === 'video',
             isVideoEnabled: call.mode === 'video',
             localStreamUrl: null,
@@ -3932,6 +4085,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       call: optimisticCall,
       direction: 'outgoing',
       isMuted: false,
+      isNativePresented: false,
       isSpeakerOn: mode === 'video',
       isVideoEnabled: mode === 'video',
       localStreamUrl: null,
@@ -4301,6 +4455,19 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     setIsNewChatModalOpen(true);
   }
 
+  function handleOpenMainNavigation() {
+    setIsMainNavigationOpen(true);
+  }
+
+  function handleCloseMainNavigation() {
+    setIsMainNavigationOpen(false);
+  }
+
+  function handleSelectMainNavigationLink(label: typeof mainNavigationLinks[number]) {
+    setIsMainNavigationOpen(false);
+    Alert.alert(label, `${label} will be available in Synzapp soon.`);
+  }
+
   function handleOpenNewCallModal() {
     setNewCallSearch('');
     setIsNewCallModalOpen(true);
@@ -4337,6 +4504,9 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
 
   function handleOpenScheduleCallModal() {
     setScheduleCallDraft(createScheduleCallDraft(userProfile?.displayName || null));
+    setScheduleCallRecipientIds({});
+    setScheduleCallRecipientSearch('');
+    setIsScheduleCallSendModalOpen(false);
     setIsScheduleCallModalOpen(true);
   }
 
@@ -4419,22 +4589,61 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     }));
   }
 
+  function handleCloseScheduleCallFlow() {
+    setIsScheduleCallModalOpen(false);
+    setIsScheduleCallSendModalOpen(false);
+    setScheduleCallRecipientIds({});
+    setScheduleCallRecipientSearch('');
+  }
+
+  function handleNextScheduleCall() {
+    const validationError = getScheduleCallValidationError(scheduleCallDraft);
+
+    if (validationError) {
+      Alert.alert('Schedule call', validationError);
+      return;
+    }
+
+    setIsScheduleCallModalOpen(false);
+    setIsScheduleCallSendModalOpen(true);
+  }
+
+  function handleToggleScheduleCallRecipient(contactId: string) {
+    setScheduleCallRecipientIds((currentIds) => ({
+      ...currentIds,
+      [contactId]: !currentIds[contactId]
+    }));
+  }
+
   function handleSaveScheduledCall() {
+    const validationError = getScheduleCallValidationError(scheduleCallDraft);
+    const selectedContactIds = Object.keys(scheduleCallRecipientIds).filter((contactId) =>
+      Boolean(scheduleCallRecipientIds[contactId])
+    );
     const title = scheduleCallDraft.title.trim();
 
-    if (!title) {
-      Alert.alert('Call title needed', 'Add a short title before saving this scheduled call.');
+    if (validationError) {
+      Alert.alert('Schedule call', validationError);
+      setIsScheduleCallSendModalOpen(false);
+      setIsScheduleCallModalOpen(true);
+      return;
+    }
+
+    if (!selectedContactIds.length && !scheduleCallDraft.calendarAddedAt) {
+      Alert.alert('Choose where to send it', 'Select at least one company contact or add this scheduled call to your calendar.');
       return;
     }
 
     const now = new Date().toISOString();
     const scheduledCall: SynzappScheduledCall = {
+      calendarAddedAt: scheduleCallDraft.calendarAddedAt || null,
+      calendarEventId: scheduleCallDraft.calendarEventId || null,
       callType: scheduleCallDraft.callType,
-      contactIds: [],
+      contactIds: selectedContactIds,
       createdAt: now,
       description: scheduleCallDraft.description.trim(),
       endsAt: scheduleCallDraft.includeEndTime ? scheduleCallDraft.endsAt.toISOString() : null,
-      id: `scheduled-call-${Date.now()}`,
+      id: scheduleCallDraft.id,
       includeEndTime: scheduleCallDraft.includeEndTime,
       reminderMinutes: scheduleCallDraft.reminderMinutes,
       requireApproval: scheduleCallDraft.requireApproval,
@@ -4443,8 +4652,60 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     };
 
     void persistScheduledCalls([scheduledCall, ...scheduledCallsRef.current]);
-    setIsScheduleCallModalOpen(false);
+    handleCloseScheduleCallFlow();
     Alert.alert('Scheduled call saved', 'You can find it under Scheduled calls.');
+  }
+
+  async function handleAddScheduleCallToCalendar() {
+    const validationError = getScheduleCallValidationError(scheduleCallDraft);
+
+    if (validationError) {
+      Alert.alert('Schedule call', validationError);
+      return;
+    }
+
+    if (isAddingScheduleToCalendar) {
+      return;
+    }
+
+    setIsAddingScheduleToCalendar(true);
+
+    try {
+      const isCalendarAvailable = await Calendar.isAvailableAsync();
+
+      if (!isCalendarAvailable) {
+        Alert.alert('Calendar unavailable', 'This device does not currently support adding Synzapp calls to a calendar.');
+        return;
+      }
+
+      const permissions = await Calendar.requestCalendarPermissionsAsync();
+
+      if (permissions.status !== 'granted') {
+        Alert.alert('Calendar permission needed', 'Allow calendar access to add this scheduled call to your device calendar.');
+        return;
+      }
+
+      const selectedRecipients = scheduleCallRecipientContacts.filter((contact) =>
+        Boolean(scheduleCallRecipientIds[contact.contactId])
+      );
+      const result = await Calendar.createEventInCalendarAsync(
+        buildScheduleCallCalendarEventData(scheduleCallDraft, selectedRecipients),
+        { startNewActivityTask: false }
+      );
+
+      if (result.action === 'saved' || result.action === 'done') {
+        setScheduleCallDraft((currentDraft) => ({
+          ...currentDraft,
+          calendarAddedAt: new Date().toISOString(),
+          calendarEventId: result.id || currentDraft.calendarEventId || null
+        }));
+        Alert.alert('Added to calendar', 'The scheduled Synzapp call was handed to your device calendar.');
+      }
+    } catch (nextError) {
+      Alert.alert('Calendar unavailable', getErrorMessage(nextError, 'Unable to add this call to your calendar right now.'));
+    } finally {
+      setIsAddingScheduleToCalendar(false);
+    }
   }
 
   function handleCloseNewChatModal() {
@@ -5863,6 +6124,53 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       }
     } catch (nextError) {
       Alert.alert('Group photo unavailable', getErrorMessage(nextError, 'Unable to add this group photo.'));
+    }
+  }
+
+  async function handleChangeGroupPhoto() {
+    const chat = selectedChatRef.current;
+
+    if (!chat || chat.chatType !== 'GROUP' || isUpdatingGroupPhoto) {
+      return;
+    }
+
+    if (!canCurrentUserChangeGroupPhoto(chat, userProfile)) {
+      Alert.alert(
+        'Group photo',
+        'Only organization admins and the department admin can change a department group photo.'
+      );
+      return;
+    }
+
+    try {
+      const pickedPhoto = await pickNativeProfilePhoto({
+        message: 'Change this group photo using your camera or photo library.',
+        title: 'Group photo'
+      });
+
+      if (!pickedPhoto) {
+        return;
+      }
+
+      if (!pickedPhoto.dataUrl) {
+        throw new Error('Unable to prepare this group photo. Please choose another image.');
+      }
+
+      setIsUpdatingGroupPhoto(true);
+      const idToken = await getIdToken();
+      const updatedContact = await updateGroupChatPhoto({
+        groupId: chat.contactId,
+        idToken,
+        profilePhotoDataUrl: pickedPhoto.dataUrl
+      });
+      const cachedContact = await cacheChatContactPhoto(updatedContact, idToken);
+
+      setProfilePhotoAuthToken(idToken);
+      applyVisibleChatContactUpdate(cachedContact, true);
+    } catch (nextError) {
+      Alert.alert('Group photo', getErrorMessage(nextError, 'Unable to update this group photo.'));
+    } finally {
+      setIsUpdatingGroupPhoto(false);
     }
   }
 
@@ -7562,6 +7870,19 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     void loadCompanyProfile();
   }
 
+  function handleOpenKeyResultsSettings() {
+    if (!canManageCompanyProfile) {
+      return;
+    }
+
+    setError(null);
+    setIsKeyResultUnitModalOpen(false);
+    setIsKeyResultsOptionsMenuOpen(false);
+    setIsKeyResultsContentScrollEnabled(true);
+    setSettingsScreen('key-results');
+    void loadKeyResults();
+  }
+
   function handleOpenSecuritySettings() {
     if (!canManageSecurity) {
       return;
@@ -7611,6 +7932,304 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       setError(getErrorMessage(nextError, 'Unable to update company profile.'));
     } finally {
       setIsSavingCompanyProfile(false);
+    }
+  }
+
+  async function handleSaveKeyResults() {
+    if (isSavingKeyResults || !canManageCompanyProfile) {
+      return;
+    }
+
+    setError(null);
+    setIsSavingKeyResults(true);
+
+    try {
+      const idToken = await getIdToken();
+      const keyResults = await updateCompanyKeyResults({
+        idToken,
+        keyResults: normalizeKeyResultsForDraft(companyKeyResults)
+      });
+
+      setCompanyKeyResults(normalizeKeyResultsForDraft(keyResults));
+      Alert.alert('Key results saved', 'Your company key results setup has been saved.');
+    } catch (nextError) {
+      setError(getErrorMessage(nextError, 'Unable to save key results.'));
+    } finally {
+      setIsSavingKeyResults(false);
+    }
+  }
+
+  async function persistKeyResultsDelete(
+    nextConfig: CompanyKeyResultsConfig,
+    previousConfig: CompanyKeyResultsConfig,
+    failureMessage: string,
+    previousDrafts?: Record<string, { key: string; unitId: string; value: string }>
+  ) {
+    setError(null);
+    setIsSavingKeyResults(true);
+
+    try {
+      const idToken = await getIdToken();
+      const keyResults = await updateCompanyKeyResults({
+        idToken,
+        keyResults: normalizeKeyResultsForDraft(nextConfig)
+      });
+
+      setCompanyKeyResults(normalizeKeyResultsForDraft(keyResults));
+    } catch (nextError) {
+      setCompanyKeyResults(previousConfig);
+
+      if (previousDrafts) {
+        setKeyResultMetricDrafts(previousDrafts);
+      }
+
+      setError(getErrorMessage(nextError, failureMessage));
+    } finally {
+      setIsSavingKeyResults(false);
+    }
+  }
+
+  function handleAddKeyResultUnit() {
+    const label = keyResultUnitLabelDraft.trim();
+
+    if (!label) {
+      setError('Enter a unit name.');
+      return;
+    }
+
+    const unit: KeyResultUnit = {
+      icon: keyResultUnitIconDraft,
+      label,
+      sortOrder: (companyKeyResults.units.length + 1) * 1000,
+      status: 'ACTIVE',
+      suffix: keyResultUnitSuffixDraft.trim(),
+      unitId: createKeyResultLocalId('unit')
+    };
+
+    setCompanyKeyResults((current) => ({
+      ...current,
+      units: [...current.units, unit]
+    }));
+    setKeyResultUnitLabelDraft('');
+    setKeyResultUnitSuffixDraft('');
+    setKeyResultUnitIconDraft('hash');
+    setError(null);
+  }
+
+  function handleDeleteKeyResultUnit(unitId: string) {
+    if (isSavingKeyResults) {
+      return;
+    }
+
+    const previousConfig = normalizeKeyResultsForDraft(companyKeyResults);
+    const previousDrafts = keyResultMetricDrafts;
+    const fallbackUnitId = previousConfig.units.find((unit) => unit.unitId !== unitId)?.unitId || 'unit_number';
+    const nextConfig: CompanyKeyResultsConfig = {
+      ...previousConfig,
+      groups: previousConfig.groups.map((group) => ({
+        ...group,
+        metrics: group.metrics.map((metric) => (
+          metric.unitId === unitId ? { ...metric, unitId: fallbackUnitId } : metric
+        ))
+      })),
+      units: previousConfig.units.filter((unit) => unit.unitId !== unitId)
+    };
+
+    setCompanyKeyResults(nextConfig);
+    setKeyResultMetricDrafts((current) => Object.fromEntries(
+      Object.entries(current).map(([groupId, draft]) => [
+        groupId,
+        draft.unitId === unitId ? { ...draft, unitId: fallbackUnitId } : draft
+      ])
+    ));
+    void persistKeyResultsDelete(nextConfig, previousConfig, 'Unable to delete this value unit.', previousDrafts);
+  }
+
+  function handleAddKeyResultGroup() {
+    const name = keyResultGroupNameDraft.trim();
+
+    if (!name) {
+      setError('Enter a key result group name.');
+      return;
+    }
+
+    const groupId = createKeyResultLocalId('group');
+    const fallbackUnitId = companyKeyResults.units[0]?.unitId || 'unit_number';
+
+    setCompanyKeyResults((current) => ({
+      ...current,
+      groups: [
+        ...current.groups,
+        {
+          groupId,
+          metrics: [],
+          name,
+          sortOrder: (current.groups.length + 1) * 1000,
+          status: 'ACTIVE'
+        }
+      ]
+    }));
+    setKeyResultMetricDrafts((current) => ({
+      ...current,
+      [groupId]: { key: '', unitId: fallbackUnitId, value: '' }
+    }));
+    setKeyResultGroupNameDraft('');
+    setError(null);
+  }
+
+  function handleUpdateKeyResultGroup(groupId: string, patch: Partial<KeyResultGroup>) {
+    setCompanyKeyResults((current) => ({
+      ...current,
+      groups: current.groups.map((group) => (
+        group.groupId === groupId ? { ...group, ...patch } : group
+      ))
+    }));
+  }
+
+  function handleDeleteKeyResultGroup(groupId: string) {
+    if (isSavingKeyResults) {
+      return;
+    }
+
+    const previousConfig = normalizeKeyResultsForDraft(companyKeyResults);
+    const previousDrafts = keyResultMetricDrafts;
+    const nextConfig: CompanyKeyResultsConfig = {
+      ...previousConfig,
+      groups: previousConfig.groups.filter((group) => group.groupId !== groupId)
+    };
+    const nextDrafts = { ...previousDrafts };
+    delete nextDrafts[groupId];
+
+    setCompanyKeyResults(nextConfig);
+    setKeyResultMetricDrafts(nextDrafts);
+    void persistKeyResultsDelete(nextConfig, previousConfig, 'Unable to delete this key result name.', previousDrafts);
+  }
+
+  function handleAddKeyResultMetric(groupId: string) {
+    const draft = keyResultMetricDrafts[groupId] || {
+      key: '',
+      unitId: companyKeyResults.units[0]?.unitId || 'unit_number',
+      value: ''
+    };
+    const key = draft.key.trim();
+    const value = draft.value.trim();
+
+    if (!key || !value) {
+      setError('Enter both the key name and value.');
+      return;
+    }
+
+    setCompanyKeyResults((current) => ({
+      ...current,
+      groups: current.groups.map((group) => (
+        group.groupId === groupId
+          ? {
+              ...group,
+              metrics: [
+                ...group.metrics,
+                {
+                  key,
+                  metricId: createKeyResultLocalId('metric'),
+                  sortOrder: (group.metrics.length + 1) * 1000,
+                  status: 'ACTIVE',
+                  unitId: draft.unitId,
+                  value
+                }
+              ]
+            }
+          : group
+      ))
+    }));
+    setKeyResultMetricDrafts((current) => ({
+      ...current,
+      [groupId]: {
+        key: '',
+        unitId: draft.unitId,
+        value: ''
+      }
+    }));
+    setError(null);
+  }
+
+  function handleUpdateKeyResultMetric(groupId: string, metricId: string, patch: Partial<KeyResultMetric>) {
+    setCompanyKeyResults((current) => ({
+      ...current,
+      groups: current.groups.map((group) => (
+        group.groupId === groupId
+          ? {
+              ...group,
+              metrics: group.metrics.map((metric) => (
+                metric.metricId === metricId ? { ...metric, ...patch } : metric
+              ))
+            }
+          : group
+      ))
+    }));
+  }
+
+  function handleDeleteKeyResultMetric(groupId: string, metricId: string) {
+    if (isSavingKeyResults) {
+      return;
+    }
+
+    const previousConfig = normalizeKeyResultsForDraft(companyKeyResults);
+    const nextConfig: CompanyKeyResultsConfig = {
+      ...previousConfig,
+      groups: previousConfig.groups.map((group) => (
+        group.groupId === groupId
+          ? {
+              ...group,
+              metrics: group.metrics.filter((metric) => metric.metricId !== metricId)
+            }
+          : group
+      ))
+    };
+
+    setCompanyKeyResults(nextConfig);
+    void persistKeyResultsDelete(nextConfig, previousConfig, 'Unable to delete this key result item.');
+  }
+
+  function handleUpdateKeyResultMetricDraft(
+    groupId: string,
+    patch: Partial<{ key: string; unitId: string; value: string }>
+  ) {
+    const fallbackDraft = {
+      key: '',
+      unitId: companyKeyResults.units[0]?.unitId || 'unit_number',
+      value: ''
+    };
+
+    setKeyResultMetricDrafts((current) => ({
+      ...current,
+      [groupId]: {
+        ...fallbackDraft,
+        ...current[groupId],
+        ...patch
+      }
+    }));
+  }
+
+  async function handleSelectKeyResultUnitForDraft(groupId: string) {
+    const selectedUnit = await selectScreenOption(
+      'Select unit',
+      companyKeyResults.units,
+      (unit) => `${unit.label}${unit.suffix ? ` (${unit.suffix})` : ''}`
+    );
+
+    if (selectedUnit) {
+      handleUpdateKeyResultMetricDraft(groupId, { unitId: selectedUnit.unitId });
+    }
+  }
+
+  async function handleSelectKeyResultUnitForMetric(groupId: string, metricId: string) {
+    const selectedUnit = await selectScreenOption(
+      'Select unit',
+      companyKeyResults.units,
+      (unit) => `${unit.label}${unit.suffix ? ` (${unit.suffix})` : ''}`
+    );
+
+    if (selectedUnit) {
+      handleUpdateKeyResultMetric(groupId, metricId, { unitId: selectedUnit.unitId });
     }
   }
 
@@ -8992,7 +9611,9 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     <View style={[
       styles.screen,
       {
-        backgroundColor: appTheme.colors.screen,
+        backgroundColor: activeTab === 'Settings' && settingsScreen === 'list'
+          ? appTheme.colors.surface
+          : appTheme.colors.screen,
         paddingBottom: isConversationSurfaceOpen ? 0 : 98,
         paddingTop: isConversationSurfaceOpen ? messageTopPadding : headerTopPadding
       }
@@ -9032,6 +9653,25 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         <BackHeader onBack={() => setSettingsScreen('list')} />
       ) : activeTab === 'Settings' && settingsScreen === 'company-profile' ? (
         <BackHeader onBack={() => setSettingsScreen('list')} />
+      ) : activeTab === 'Settings' && settingsScreen === 'key-results' ? (
+        <BackHeader
+          onBack={() => {
+            setIsKeyResultsOptionsMenuOpen(false);
+            setSettingsScreen('list');
+          }}
+          rightAccessory={
+            <KeyResultsHeaderOptions
+              isKeyboardVisible={isScreenKeyboardVisible}
+              isOpen={isKeyResultsOptionsMenuOpen}
+              onDismissKeyboard={() => Keyboard.dismiss()}
+              onOpenUnits={() => {
+                setIsKeyResultsOptionsMenuOpen(false);
+                setIsKeyResultUnitModalOpen(true);
+              }}
+              onToggle={() => setIsKeyResultsOptionsMenuOpen((isOpen) => !isOpen)}
+            />
+          }
+        />
       ) : activeTab === 'Settings' && settingsScreen === 'dept-admin-permissions' ? (
         <BackHeader onBack={() => setSettingsScreen('list')} />
       ) : activeTab === 'Settings' && settingsScreen === 'groups' ? (
@@ -9070,12 +9710,13 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
 	            ? handleOpenSettingsOptions
 	            : activeTab === 'Employees'
 	              ? handleOpenEmployeeOptions
-	              : activeTab === 'Calls'
-	                ? handleToggleCallOptions
-	                : undefined}
-	          onOpenNewCall={handleOpenNewCallModal}
-	          onOpenNewChat={handleOpenNewChatModal}
-	        />
+		              : activeTab === 'Calls'
+		                ? handleToggleCallOptions
+		                : undefined}
+		          onOpenMainNavigation={activeTab === 'Chats' ? handleOpenMainNavigation : undefined}
+		          onOpenNewCall={handleOpenNewCallModal}
+		          onOpenNewChat={handleOpenNewChatModal}
+		        />
       )}
 
       {!selectedChat &&
@@ -9089,17 +9730,19 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
               ? 'Role permissions'
             : activeTab === 'Settings' && settingsScreen === 'company-profile'
               ? 'Company profile'
-              : activeTab === 'Settings' && settingsScreen === 'dept-admin-permissions'
-                ? 'Department admin permissions'
-                : activeTab === 'Settings' && settingsScreen === 'groups'
-                  ? 'Groups'
-                  : activeTab === 'Settings' && settingsScreen === 'security'
-                    ? 'Organization security'
-                    : activeTab === 'Settings' && settingsScreen === 'my-devices'
-                      ? 'My devices'
-                      : activeTab === 'Settings' && settingsScreen === 'chat-backup'
-                        ? 'Encrypted backup'
-                        : activeTab}
+              : activeTab === 'Settings' && settingsScreen === 'key-results'
+                ? 'Key results'
+                : activeTab === 'Settings' && settingsScreen === 'dept-admin-permissions'
+                  ? 'Department admin permissions'
+                  : activeTab === 'Settings' && settingsScreen === 'groups'
+                    ? 'Groups'
+                    : activeTab === 'Settings' && settingsScreen === 'security'
+                      ? 'Organization security'
+                      : activeTab === 'Settings' && settingsScreen === 'my-devices'
+                        ? 'My devices'
+                        : activeTab === 'Settings' && settingsScreen === 'chat-backup'
+                          ? 'Encrypted backup'
+                          : activeTab}
         </Text>
       ) : null}
 
@@ -9194,6 +9837,12 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           contentContainerStyle={[styles.tabContent, { paddingBottom: tabContentBottomPadding }]}
           keyboardDismissMode={getKeyboardDismissMode()}
           keyboardShouldPersistTaps="handled"
+          onScrollBeginDrag={() => {
+            setIsKeyResultsOptionsMenuOpen(false);
+          }}
+          scrollEnabled={activeTab === 'Settings' && settingsScreen === 'key-results'
+            ? isKeyResultsContentScrollEnabled
+            : true}
           showsVerticalScrollIndicator={false}
           style={styles.tabScroll}
         >
@@ -9327,6 +9976,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
               onOpenDepartmentAdminPermissions={handleOpenDepartmentAdminPermissions}
               onOpenDepartmentsAndRoles={handleOpenDirectorySettings}
               onOpenGroups={handleOpenGroupsSettings}
+              onOpenKeyResults={handleOpenKeyResultsSettings}
               onOpenMyDevices={handleOpenMyDevicesSettings}
               onOpenOfflineAi={() => setIsOfflineAiModalOpen(true)}
               onOpenRolePermissions={handleOpenRolePermissions}
@@ -9374,6 +10024,45 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
               }}
               profile={companyProfile}
               profilePhotoHeaders={profilePhotoHeaders}
+            />
+          ) : null}
+
+          {activeTab === 'Settings' && settingsScreen === 'key-results' ? (
+            <KeyResultsSettings
+              config={companyKeyResults}
+              groupNameDraft={keyResultGroupNameDraft}
+              isLoading={isLoadingKeyResults}
+              isSaving={isSavingKeyResults}
+              isKeyboardVisible={isScreenKeyboardVisible}
+              isUnitModalOpen={isKeyResultUnitModalOpen}
+              metricDrafts={keyResultMetricDrafts}
+              onAddGroup={handleAddKeyResultGroup}
+              onAddMetric={handleAddKeyResultMetric}
+              onAddUnit={handleAddKeyResultUnit}
+              onCloseUnitModal={() => setIsKeyResultUnitModalOpen(false)}
+              onDeleteGroup={handleDeleteKeyResultGroup}
+              onDeleteMetric={handleDeleteKeyResultMetric}
+              onDeleteUnit={handleDeleteKeyResultUnit}
+              onGroupNameDraftChange={setKeyResultGroupNameDraft}
+              onSave={() => {
+                void handleSaveKeyResults();
+              }}
+              onSwipeActive={handleKeyResultsSwipeActive}
+              onSelectDraftUnit={(groupId) => {
+                void handleSelectKeyResultUnitForDraft(groupId);
+              }}
+              onSelectMetricUnit={(groupId, metricId) => {
+                void handleSelectKeyResultUnitForMetric(groupId, metricId);
+              }}
+              onUpdateGroup={handleUpdateKeyResultGroup}
+              onUpdateMetric={handleUpdateKeyResultMetric}
+              onUpdateMetricDraft={handleUpdateKeyResultMetricDraft}
+              onUnitIconDraftChange={setKeyResultUnitIconDraft}
+              onUnitLabelDraftChange={setKeyResultUnitLabelDraft}
+              onUnitSuffixDraftChange={setKeyResultUnitSuffixDraft}
+              unitIconDraft={keyResultUnitIconDraft}
+              unitLabelDraft={keyResultUnitLabelDraft}
+              unitSuffixDraft={keyResultUnitSuffixDraft}
             />
           ) : null}
 
@@ -9516,7 +10205,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       ) : null}
 
       <SynzappCallOverlay
-        callState={activeSynzappCall}
+        callState={shouldRenderSynzappCallOverlay(activeSynzappCall) ? activeSynzappCall : null}
         onAnswer={() => {
           void handleAnswerIncomingSynzappCall();
         }}
@@ -9607,11 +10296,18 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           void handleOpenContactFromNewChat(contact);
         }}
         onSearchChange={setNewChatSearch}
-        profilePhotoHeaders={profilePhotoHeaders}
-        search={newChatSearch}
+	        profilePhotoHeaders={profilePhotoHeaders}
+	        search={newChatSearch}
+	      />
+
+      <MainNavigationModal
+        isOpen={isMainNavigationOpen}
+        links={mainNavigationLinks}
+        onClose={handleCloseMainNavigation}
+        onSelect={handleSelectMainNavigationLink}
       />
 
-      <AddMembersModal
+	      <AddMembersModal
         contacts={directChatContacts}
         isOpen={isAddMembersModalOpen}
         onBack={handleReturnToNewChatModal}
@@ -9781,12 +10477,17 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
 
       <GroupInfoModal
         chat={selectedChat}
+        canChangePhoto={canCurrentUserChangeGroupPhoto(selectedChat, userProfile)}
         companyName={companyDisplayName}
         currentUid={currentUid}
         directContacts={directChatContacts}
         groupCount={groups.length}
         isOpen={isGroupInfoModalOpen}
+        isUpdatingPhoto={isUpdatingGroupPhoto}
         notificationSettings={activeChatNotificationSettings}
+        onChangePhoto={() => {
+          void handleChangeGroupPhoto();
+        }}
         onClose={handleCloseGroupInfo}
         onExitGroup={handleExitGroupChat}
         onOpenAddMembers={handleOpenGroupAddMembersModal}
@@ -9894,9 +10595,30 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       <ScheduleCallModal
         draft={scheduleCallDraft}
         isOpen={isScheduleCallModalOpen}
-        onClose={() => setIsScheduleCallModalOpen(false)}
-        onSave={handleSaveScheduledCall}
+        onClose={handleCloseScheduleCallFlow}
+        onNext={handleNextScheduleCall}
         onUpdateDraft={handleUpdateScheduleCallDraft}
+      />
+
+      <ScheduleCallSendModal
+        contacts={scheduleCallRecipientContacts}
+        draft={scheduleCallDraft}
+        isAddingToCalendar={isAddingScheduleToCalendar}
+        isOpen={isScheduleCallSendModalOpen}
+        onAddToCalendar={() => {
+          void handleAddScheduleCallToCalendar();
+        }}
+        onBack={() => {
+          setIsScheduleCallSendModalOpen(false);
+          setIsScheduleCallModalOpen(true);
+        }}
+        onChangeSearch={setScheduleCallRecipientSearch}
+        onClose={handleCloseScheduleCallFlow}
+        onSave={handleSaveScheduledCall}
+        onToggleRecipient={handleToggleScheduleCallRecipient}
+        profilePhotoHeaders={profilePhotoHeaders}
+        search={scheduleCallRecipientSearch}
+        selectedRecipientIds={scheduleCallRecipientIds}
       />
 
       <ScheduledCallsModal
@@ -10310,11 +11032,13 @@ function OrganizationDeletionModal({
 
 function HeaderActions({
   activeTab,
+  onOpenMainNavigation,
   onOpenOptions,
   onOpenNewCall,
   onOpenNewChat
 }: {
   activeTab: FooterTab;
+  onOpenMainNavigation?: () => void;
   onOpenOptions?: () => void;
   onOpenNewCall?: () => void;
   onOpenNewChat: () => void;
@@ -10324,7 +11048,19 @@ function HeaderActions({
 
   return (
     <View style={styles.topActions}>
-      <View style={styles.topActionsLeftSpacer} />
+      {activeTab === 'Chats' && onOpenMainNavigation ? (
+        <Pressable
+          android_ripple={androidIconRipple}
+          accessibilityLabel="Open main navigation"
+          accessibilityRole="button"
+          onPress={onOpenMainNavigation}
+          style={({ pressed }) => [styles.mainNavigationButton, pressed && styles.pressed]}
+        >
+          <Ionicons color={appTheme.colors.primary} name="menu-outline" size={38} />
+        </Pressable>
+      ) : (
+        <View style={styles.topActionsLeftSpacer} />
+      )}
 
       {activeTab === 'Chats' || activeTab === 'Calls' || showOptionsButton ? (
         <View style={[
@@ -10398,6 +11134,87 @@ function HeaderActions({
         </View>
       ) : null}
     </View>
+  );
+}
+
+function MainNavigationModal({
+  isOpen,
+  links,
+  onClose,
+  onSelect
+}: {
+  isOpen: boolean;
+  links: readonly (typeof mainNavigationLinks[number])[];
+  onClose: () => void;
+  onSelect: (label: typeof mainNavigationLinks[number]) => void;
+}) {
+  const appTheme = useAppTheme();
+  const insets = useSafeAreaInsets();
+  const modalTopPadding = getFullScreenModalTopPadding(insets.top);
+
+  return (
+    <Modal
+      allowSwipeDismissal={Platform.OS === 'ios'}
+      animationType="slide"
+      onRequestClose={onClose}
+      presentationStyle={getNativeFullHeightModalPresentationStyle()}
+      transparent={false}
+      visible={isOpen}
+    >
+      <View style={[
+        styles.mainNavigationScreen,
+        {
+          backgroundColor: appTheme.colors.screen,
+          paddingBottom: Math.max(insets.bottom, 18),
+          paddingTop: modalTopPadding
+        }
+      ]}>
+        <View style={styles.mainNavigationHeader}>
+          <Pressable
+            accessibilityLabel="Close main navigation"
+            accessibilityRole="button"
+            android_ripple={androidIconRipple}
+            onPress={onClose}
+            style={({ pressed }) => [
+              styles.mainNavigationHeaderButton,
+              { backgroundColor: appTheme.colors.surface },
+              pressed && styles.pressed
+            ]}
+          >
+            <Ionicons color={appTheme.colors.ink} name="close" size={25} />
+          </Pressable>
+          <Text numberOfLines={1} style={[styles.mainNavigationTitle, { color: appTheme.colors.ink }]}>
+            Synzapp
+          </Text>
+          <View style={styles.mainNavigationHeaderSpacer} />
+        </View>
+
+        <View style={styles.mainNavigationContent}>
+          {links.map((link, index) => (
+            <Pressable
+              accessibilityLabel={`Open ${link}`}
+              accessibilityRole="button"
+              android_ripple={androidButtonRipple}
+              key={link}
+              onPress={() => onSelect(link)}
+              style={({ pressed }) => [
+                styles.mainNavigationLink,
+                {
+                  borderBottomColor: appTheme.isDark ? '#3A3A3A' : '#D6DCE5',
+                  borderBottomWidth: index === links.length - 1 ? 0 : 1
+                },
+                pressed && styles.pressed
+              ]}
+            >
+              <Text numberOfLines={1} style={[styles.mainNavigationLinkText, { color: appTheme.colors.ink }]}>
+                {link}
+              </Text>
+              <Feather color={appTheme.colors.muted} name="chevron-right" size={22} />
+            </Pressable>
+          ))}
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -15881,7 +16698,89 @@ function DirectoryHeader({
   );
 }
 
-function BackHeader({ onBack }: { onBack: () => void }) {
+function KeyResultsHeaderOptions({
+  isKeyboardVisible,
+  isOpen,
+  onOpenUnits,
+  onDismissKeyboard,
+  onToggle
+}: {
+  isKeyboardVisible: boolean;
+  isOpen: boolean;
+  onOpenUnits: () => void;
+  onDismissKeyboard: () => void;
+  onToggle: () => void;
+}) {
+  const appTheme = useAppTheme();
+
+  return (
+    <View style={styles.keyResultsHeaderOptionsWrap}>
+      {isKeyboardVisible ? (
+        <Pressable
+          accessibilityLabel="Hide keyboard"
+          accessibilityRole="button"
+          onPress={onDismissKeyboard}
+          style={({ pressed }) => [
+            styles.keyResultsHeaderOptionButton,
+            {
+              backgroundColor: appTheme.colors.surface,
+              borderColor: appTheme.colors.divider
+            },
+            pressed && styles.pressed
+          ]}
+        >
+          <Feather name="chevron-down" color={appTheme.colors.primary} size={20} />
+        </Pressable>
+      ) : null}
+      <Pressable
+        accessibilityLabel="Open key result options"
+        accessibilityRole="button"
+        onPress={onToggle}
+        style={({ pressed }) => [
+          styles.keyResultsHeaderOptionButton,
+          {
+            backgroundColor: appTheme.colors.surface,
+            borderColor: appTheme.colors.divider
+          },
+          pressed && styles.pressed
+        ]}
+      >
+        <Feather name="more-horizontal" color={appTheme.colors.primary} size={20} />
+      </Pressable>
+
+      {isOpen ? (
+        <View style={[
+          styles.keyResultsOptionsMenu,
+          {
+            backgroundColor: appTheme.colors.surfaceElevated,
+            borderColor: appTheme.colors.divider
+          }
+        ]}>
+          <Pressable
+            accessibilityLabel="Open units"
+            accessibilityRole="button"
+            onPress={onOpenUnits}
+            style={({ pressed }) => [
+              styles.keyResultsOptionsMenuItem,
+              pressed && styles.pressed
+            ]}
+          >
+            <Feather name="sliders" color={appTheme.colors.primary} size={16} />
+            <Text style={[styles.keyResultsOptionsMenuText, { color: appTheme.colors.ink }]}>Units</Text>
+          </Pressable>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function BackHeader({
+  onBack,
+  rightAccessory
+}: {
+  onBack: () => void;
+  rightAccessory?: React.ReactNode;
+}) {
   return (
     <View style={styles.topActions}>
       <Pressable
@@ -15893,6 +16792,7 @@ function BackHeader({ onBack }: { onBack: () => void }) {
       >
         <Text style={styles.backButtonText}>‹</Text>
       </Pressable>
+      {rightAccessory || <View style={styles.topActionsLeftSpacer} />}
     </View>
   );
 }
@@ -16905,13 +17805,13 @@ function ScheduleCallModal({
   draft,
   isOpen,
   onClose,
-  onSave,
+  onNext,
   onUpdateDraft
 }: {
   draft: ScheduleCallDraft;
   isOpen: boolean;
   onClose: () => void;
-  onSave: () => void;
+  onNext: () => void;
   onUpdateDraft: (patch: Partial<ScheduleCallDraft>) => void;
 }) {
   const appTheme = useAppTheme();
@@ -16951,16 +17851,16 @@ function ScheduleCallModal({
           </Pressable>
           <Text numberOfLines={1} style={[styles.callModalHeaderTitle, { color: appTheme.colors.ink }]}>Schedule call</Text>
           <Pressable
-            accessibilityLabel="Save scheduled call"
+            accessibilityLabel="Continue scheduled call"
             accessibilityRole="button"
-            onPress={onSave}
+            onPress={onNext}
             style={({ pressed }) => [
               styles.callModalNextButton,
               { backgroundColor: appTheme.colors.surfaceElevated },
               pressed && styles.pressed
             ]}
           >
-            <Text style={[styles.callModalNextText, { color: appTheme.colors.ink }]}>Save</Text>
+            <Text style={[styles.callModalNextText, { color: appTheme.colors.ink }]}>Next</Text>
           </Pressable>
         </View>
 
@@ -17028,6 +17928,178 @@ function ScheduleCallModal({
           />
         </View>
       </ScrollView>
+    </Modal>
+  );
+}
+
+function ScheduleCallSendModal({
+  contacts,
+  draft,
+  isAddingToCalendar,
+  isOpen,
+  onAddToCalendar,
+  onBack,
+  onChangeSearch,
+  onClose,
+  onSave,
+  onToggleRecipient,
+  profilePhotoHeaders,
+  search,
+  selectedRecipientIds
+}: {
+  contacts: ChatContact[];
+  draft: ScheduleCallDraft;
+  isAddingToCalendar: boolean;
+  isOpen: boolean;
+  onAddToCalendar: () => void;
+  onBack: () => void;
+  onChangeSearch: (value: string) => void;
+  onClose: () => void;
+  onSave: () => void;
+  onToggleRecipient: (contactId: string) => void;
+  profilePhotoHeaders?: Record<string, string>;
+  search: string;
+  selectedRecipientIds: Record<string, boolean>;
+}) {
+  const appTheme = useAppTheme();
+  const insets = useSafeAreaInsets();
+  const modalTopPadding = getFullScreenModalTopPadding(insets.top);
+  const visibleContacts = filterCallContacts(contacts, search);
+  const selectedCount = Object.values(selectedRecipientIds).filter(Boolean).length;
+  const hasSearch = Boolean(search.trim());
+  const primaryContacts = hasSearch ? visibleContacts : visibleContacts.slice(0, 6);
+  const primaryContactIds = new Set(primaryContacts.map((contact) => contact.contactId));
+  const secondaryContacts = hasSearch
+    ? []
+    : visibleContacts.filter((contact) => !primaryContactIds.has(contact.contactId));
+
+  return (
+    <Modal
+      allowSwipeDismissal={Platform.OS === 'ios'}
+      animationType="slide"
+      onRequestClose={onClose}
+      presentationStyle={getNativeFullHeightModalPresentationStyle()}
+      transparent={false}
+      visible={isOpen}
+    >
+      <View style={[
+        styles.callModalScreen,
+        {
+          backgroundColor: appTheme.colors.screen,
+          paddingTop: modalTopPadding
+        }
+      ]}>
+        <View style={styles.callModalHeader}>
+          <Pressable
+            accessibilityLabel="Back to schedule call details"
+            accessibilityRole="button"
+            onPress={onBack}
+            style={({ pressed }) => [styles.newChatHeaderIconButton, pressed && styles.pressed]}
+          >
+            <Feather color={appTheme.colors.ink} name="chevron-left" size={24} />
+          </Pressable>
+          <View style={styles.newChatCenteredTitleWrap}>
+            <Text numberOfLines={1} style={[styles.callModalHeaderTitle, { color: appTheme.colors.ink }]}>Send to</Text>
+            <Text numberOfLines={1} style={[styles.callModalHeaderSubtitle, { color: appTheme.colors.muted }]}>
+              {selectedCount}/{contacts.length}
+            </Text>
+          </View>
+          <Pressable
+            accessibilityLabel="Save scheduled call"
+            accessibilityRole="button"
+            onPress={onSave}
+            style={({ pressed }) => [
+              styles.callModalNextButton,
+              { backgroundColor: appTheme.colors.surfaceElevated },
+              pressed && styles.pressed
+            ]}
+          >
+            <Text style={[styles.callModalNextText, { color: appTheme.colors.ink }]}>Save</Text>
+          </Pressable>
+        </View>
+
+        <ChatSearchBar
+          onChangeText={onChangeSearch}
+          placeholder="Search name or number"
+          value={search}
+        />
+
+        <ScrollView
+          keyboardDismissMode={getKeyboardDismissMode()}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+          style={styles.callModalList}
+        >
+          <Pressable
+            accessibilityLabel="Add scheduled call to calendar"
+            accessibilityRole="button"
+            disabled={isAddingToCalendar}
+            onPress={onAddToCalendar}
+            style={({ pressed }) => [
+              styles.scheduleSendCalendarRow,
+              {
+                backgroundColor: appTheme.colors.surfaceElevated,
+                borderColor: appTheme.colors.border
+              },
+              pressed && !isAddingToCalendar && styles.pressed,
+              isAddingToCalendar && styles.disabled
+            ]}
+          >
+            <View style={[styles.scheduleSendCalendarIcon, { backgroundColor: appTheme.colors.primarySoft }]}>
+              <Feather color={appTheme.colors.primary} name="calendar" size={18} />
+            </View>
+            <View style={styles.chatText}>
+              <Text numberOfLines={1} style={[styles.scheduleSendCalendarTitle, { color: appTheme.colors.ink }]}>
+                Add to calendar
+              </Text>
+              <Text numberOfLines={1} style={[styles.scheduleSendCalendarSubtitle, { color: appTheme.colors.muted }]}>
+                {draft.calendarAddedAt ? 'Added to this device calendar' : 'Open the native event editor'}
+              </Text>
+            </View>
+            {isAddingToCalendar ? (
+              <ActivityIndicator color={appTheme.colors.primary} size="small" />
+            ) : draft.calendarAddedAt ? (
+              <Feather color={appTheme.colors.success} name="check-circle" size={20} />
+            ) : (
+              <Feather color={appTheme.colors.muted} name="chevron-right" size={20} />
+            )}
+          </Pressable>
+
+          <Text style={[styles.callModalSectionLabel, { color: appTheme.colors.muted }]}>
+            {hasSearch ? 'Search results' : 'Frequently contacted'}
+          </Text>
+          {primaryContacts.map((contact) => (
+            <CallContactRow
+              contact={contact}
+              isSelected={Boolean(selectedRecipientIds[contact.contactId])}
+              key={contact.contactId}
+              onPress={() => onToggleRecipient(contact.contactId)}
+              profilePhotoHeaders={profilePhotoHeaders}
+              trailing="radio"
+            />
+          ))}
+
+          {secondaryContacts.length ? (
+            <Text style={[styles.callModalSectionLabel, { color: appTheme.colors.muted }]}>Recent chats</Text>
+          ) : null}
+          {secondaryContacts.map((contact) => (
+            <CallContactRow
+              contact={contact}
+              isSelected={Boolean(selectedRecipientIds[contact.contactId])}
+              key={contact.contactId}
+              onPress={() => onToggleRecipient(contact.contactId)}
+              profilePhotoHeaders={profilePhotoHeaders}
+              trailing="radio"
+            />
+          ))}
+
+          {!visibleContacts.length ? (
+            <Text style={[styles.batchEmpty, { color: appTheme.colors.muted }]}>
+              {search.trim() ? 'No company contacts found' : 'No available company contacts yet'}
+            </Text>
+          ) : null}
+        </ScrollView>
+      </View>
     </Modal>
   );
 }
@@ -19674,12 +20746,15 @@ function ContactCommonGroupRow({
 
 function GroupInfoModal({
   chat,
+  canChangePhoto,
   companyName,
   currentUid,
   directContacts,
   groupCount,
   isOpen,
+  isUpdatingPhoto,
   notificationSettings,
+  onChangePhoto,
   onClose,
   onExitGroup,
   onOpenAddMembers,
@@ -19695,12 +20770,15 @@ function GroupInfoModal({
   starredCount
 }: {
   chat: ChatItem | null;
+  canChangePhoto: boolean;
   companyName: string;
   currentUid: string;
   directContacts: ChatContact[];
   groupCount: number;
   isOpen: boolean;
+  isUpdatingPhoto: boolean;
   notificationSettings: ChatNotificationSettings | null;
+  onChangePhoto: () => void;
   onClose: () => void;
   onExitGroup: () => void;
   onOpenAddMembers: () => void;
@@ -19771,12 +20849,42 @@ function GroupInfoModal({
           showsVerticalScrollIndicator={false}
         >
           <View style={styles.groupInfoHero}>
-            <ProfileAvatar
-              headers={profilePhotoHeaders}
-              name={chat.title}
-              size={92}
-              uri={chat.profilePhotoUrl}
-            />
+            {canChangePhoto ? (
+              <Pressable
+                accessibilityLabel="Change group photo"
+                accessibilityRole="button"
+                disabled={isUpdatingPhoto}
+                onPress={onChangePhoto}
+                style={({ pressed }) => [
+                  styles.groupInfoAvatarButton,
+                  pressed && styles.pressed
+                ]}
+              >
+                <ProfileAvatar
+                  headers={profilePhotoHeaders}
+                  name={chat.title}
+                  size={92}
+                  uri={chat.profilePhotoUrl}
+                />
+                <View style={[
+                  styles.groupInfoAvatarBadge,
+                  { backgroundColor: appTheme.colors.primary }
+                ]}>
+                  {isUpdatingPhoto ? (
+                    <ActivityIndicator color="#FFFFFF" size="small" />
+                  ) : (
+                    <Feather color="#FFFFFF" name="camera" size={16} />
+                  )}
+                </View>
+              </Pressable>
+            ) : (
+              <ProfileAvatar
+                headers={profilePhotoHeaders}
+                name={chat.title}
+                size={92}
+                uri={chat.profilePhotoUrl}
+              />
+            )}
             <Text numberOfLines={3} style={[styles.groupInfoTitle, { color: appTheme.colors.ink }]}>{chat.title}</Text>
             <Text numberOfLines={1} style={[styles.groupInfoCompany, { color: appTheme.colors.muted }]}>
               Group in "{companyName}"
@@ -20945,6 +22053,7 @@ function SettingsList({
   onOpenDepartmentAdminPermissions,
   onOpenDepartmentsAndRoles,
   onOpenGroups,
+  onOpenKeyResults,
   onOpenMyDevices,
   onOpenOfflineAi,
   onOpenRolePermissions,
@@ -20963,6 +22072,7 @@ function SettingsList({
   onOpenDepartmentAdminPermissions: () => void;
   onOpenDepartmentsAndRoles: () => void;
   onOpenGroups: () => void;
+  onOpenKeyResults: () => void;
   onOpenMyDevices: () => void;
   onOpenOfflineAi: () => void;
   onOpenRolePermissions: () => void;
@@ -20970,70 +22080,104 @@ function SettingsList({
   offlineAiState: OfflineAiModelState | null;
   themePreference: AppThemePreference;
 }) {
+  const preferenceItems: SettingsListEntry[] = [
+    {
+      icon: 'sliders',
+      onPress: onOpenAppearance,
+      subtitle: getThemePreferenceLabel(themePreference),
+      title: 'Appearance'
+    }
+  ];
+  const administrationItems: SettingsListEntry[] = [
+    ...(canManageDirectory
+      ? [
+          {
+            icon: 'briefcase' as FeatherIconName,
+            onPress: onOpenDepartmentsAndRoles,
+            subtitle: 'Departments, roles',
+            title: 'Departments and roles'
+          },
+          {
+            icon: 'shield' as FeatherIconName,
+            onPress: onOpenRolePermissions,
+            subtitle: 'Role-based access',
+            title: 'Role permissions'
+          }
+        ]
+      : []),
+    ...(canManageCompanyProfile
+      ? [
+          {
+            icon: 'home' as FeatherIconName,
+            onPress: onOpenCompanyProfile,
+            subtitle: 'Company details',
+            title: 'Company profile'
+          },
+          {
+            icon: 'bar-chart-2' as FeatherIconName,
+            onPress: onOpenKeyResults,
+            subtitle: 'Company LSW metrics',
+            title: 'Key results'
+          }
+        ]
+      : []),
+    ...(canManageUsers
+      ? [
+          {
+            icon: 'user-check' as FeatherIconName,
+            onPress: onOpenDepartmentAdminPermissions,
+            subtitle: 'Scoped Department Admin access',
+            title: 'Department admin permissions'
+          }
+        ]
+      : []),
+    ...(canManageGroups
+      ? [
+          {
+            icon: 'users' as FeatherIconName,
+            onPress: onOpenGroups,
+            subtitle: 'Company and department groups',
+            title: 'Groups'
+          }
+        ]
+      : []),
+    ...(canManageSecurity
+      ? [
+          {
+            icon: 'lock' as FeatherIconName,
+            onPress: onOpenSecurity,
+            subtitle: 'Tenant devices and access controls',
+            title: 'Organization security'
+          }
+        ]
+      : [])
+  ];
+  const deviceItems: SettingsListEntry[] = [
+    {
+      icon: 'smartphone',
+      onPress: onOpenMyDevices,
+      subtitle: 'Registered devices for your account',
+      title: 'My devices'
+    },
+    {
+      icon: 'database',
+      onPress: onOpenChatBackup,
+      subtitle: 'Encrypted chat history',
+      title: 'Chat backup'
+    },
+    {
+      icon: 'cpu',
+      onPress: onOpenOfflineAi,
+      subtitle: getSettingsOfflineAiSubtitle(offlineAiState),
+      title: 'Synzapp AI'
+    }
+  ];
+
   return (
     <View style={styles.settingsList}>
-      <SettingsListItem
-        onPress={onOpenAppearance}
-        subtitle={getThemePreferenceLabel(themePreference)}
-        title="Appearance"
-      />
-      {canManageDirectory ? (
-        <SettingsListItem
-          onPress={onOpenDepartmentsAndRoles}
-          subtitle="Departments, roles"
-          title="Departments and roles"
-        />
-      ) : null}
-      {canManageDirectory ? (
-        <SettingsListItem
-          onPress={onOpenRolePermissions}
-          subtitle="Role-based access"
-          title="Role permissions"
-        />
-      ) : null}
-      {canManageCompanyProfile ? (
-        <SettingsListItem
-          onPress={onOpenCompanyProfile}
-          subtitle="Company details"
-          title="Company profile"
-        />
-      ) : null}
-      {canManageUsers ? (
-        <SettingsListItem
-          onPress={onOpenDepartmentAdminPermissions}
-          subtitle="Scoped Department Admin access"
-          title="Department admin permissions"
-        />
-      ) : null}
-      {canManageGroups ? (
-        <SettingsListItem
-          onPress={onOpenGroups}
-          subtitle="Company and department groups"
-          title="Groups"
-        />
-      ) : null}
-      {canManageSecurity ? (
-        <SettingsListItem
-          onPress={onOpenSecurity}
-          subtitle="Tenant devices and access controls"
-          title="Organization security"
-        />
-      ) : null}
-      <SettingsListItem
-        onPress={onOpenMyDevices}
-        subtitle="Registered devices for your account"
-        title="My devices"
-      />
-      <SettingsListItem
-        onPress={onOpenChatBackup}
-        subtitle="Encrypted chat history"
-        title="Chat backup"
-      />
-      <SettingsListItem
-        onPress={onOpenOfflineAi}
-        subtitle={getSettingsOfflineAiSubtitle(offlineAiState)}
-        title="Synzapp AI"
-      />
+      <SettingsListCard items={preferenceItems} />
+      {administrationItems.length ? <SettingsListCard items={administrationItems} /> : null}
+      <SettingsListCard items={deviceItems} />
     </View>
   );
 }
@@ -21054,6 +22198,33 @@ function getSettingsOfflineAiSubtitle(state: OfflineAiModelState | null): string
   }
 
   return `Install secure offline AI - ${formatOfflineAiBytes(synzappOfflineAiModel.sizeBytes)}`;
+}
+
+function SettingsListCard({ items }: { items: SettingsListEntry[] }) {
+  const appTheme = useAppTheme();
+
+  return (
+    <View style={styles.settingsListCardShadow}>
+      <View style={[
+        styles.settingsListCard,
+        {
+          backgroundColor: appTheme.isDark ? appTheme.colors.surfaceElevated : '#FFFFFF',
+          borderColor: appTheme.colors.divider
+        }
+      ]}>
+        {items.map((item, index) => (
+          <SettingsListItem
+            icon={item.icon}
+            isLast={index === items.length - 1}
+            key={item.title}
+            onPress={item.onPress}
+            subtitle={item.subtitle}
+            title={item.title}
+          />
+        ))}
+      </View>
+    </View>
+  );
 }
 
 function ChatBackupSettings({
@@ -21301,10 +22472,14 @@ function DeviceRow({
 }
 
 function SettingsListItem({
+  icon,
+  isLast = false,
   onPress,
   subtitle,
   title
 }: {
+  icon?: FeatherIconName;
+  isLast?: boolean;
   onPress?: () => void;
   subtitle: string;
   title: string;
@@ -21319,18 +22494,20 @@ function SettingsListItem({
       style={({ pressed }) => [
         styles.settingsListItem,
         {
-          backgroundColor: appTheme.colors.screen,
-          borderBottomColor: appTheme.colors.divider
+          backgroundColor: appTheme.isDark ? appTheme.colors.surfaceElevated : '#FFFFFF',
+          borderBottomColor: isLast ? 'transparent' : appTheme.colors.divider
         },
         pressed && onPress && styles.pressed
       ]}
     >
-      <View style={[styles.settingsListIcon, { backgroundColor: appTheme.colors.primarySoft }]}>
-        <Text style={[styles.settingsListIconText, { color: appTheme.colors.primary }]}>{title.slice(0, 1)}</Text>
+      <View style={styles.settingsListIcon}>
+        {icon ? (
+          <Feather color={appTheme.colors.ink} name={icon} size={21} />
+        ) : null}
       </View>
       <View style={styles.chatText}>
         <Text style={[styles.chatTitle, { color: appTheme.colors.ink }]}>{title}</Text>
-        <Text style={[styles.chatPreview, { color: appTheme.colors.muted }]}>{subtitle}</Text>
+        <Text numberOfLines={1} style={[styles.chatPreview, { color: appTheme.colors.muted }]}>{subtitle}</Text>
       </View>
       {onPress ? (
         <Text style={[styles.chevronText, { color: appTheme.colors.muted }]}>›</Text>
@@ -21690,6 +22867,657 @@ function GroupsTab({
             {group.memberCount === 1 ? '1 member' : `${group.memberCount} members`}
           </Text>
         </Pressable>
+      ))}
+    </View>
+  );
+}
+
+function KeyResultsSettings({
+  config,
+  groupNameDraft,
+  isKeyboardVisible,
+  isLoading,
+  isSaving,
+  isUnitModalOpen,
+  metricDrafts,
+  onAddGroup,
+  onAddMetric,
+  onAddUnit,
+  onCloseUnitModal,
+  onDeleteGroup,
+  onDeleteMetric,
+  onDeleteUnit,
+  onGroupNameDraftChange,
+  onSave,
+  onSwipeActive,
+  onSelectDraftUnit,
+  onSelectMetricUnit,
+  onUnitIconDraftChange,
+  onUnitLabelDraftChange,
+  onUnitSuffixDraftChange,
+  onUpdateGroup,
+  onUpdateMetric,
+  onUpdateMetricDraft,
+  unitIconDraft,
+  unitLabelDraft,
+  unitSuffixDraft
+}: {
+  config: CompanyKeyResultsConfig;
+  groupNameDraft: string;
+  isKeyboardVisible: boolean;
+  isLoading: boolean;
+  isSaving: boolean;
+  isUnitModalOpen: boolean;
+  metricDrafts: Record<string, { key: string; unitId: string; value: string }>;
+  onAddGroup: () => void;
+  onAddMetric: (groupId: string) => void;
+  onAddUnit: () => void;
+  onCloseUnitModal: () => void;
+  onDeleteGroup: (groupId: string) => void;
+  onDeleteMetric: (groupId: string, metricId: string) => void;
+  onDeleteUnit: (unitId: string) => void;
+  onGroupNameDraftChange: (value: string) => void;
+  onSave: () => void;
+  onSwipeActive?: (isActive: boolean) => void;
+  onSelectDraftUnit: (groupId: string) => void;
+  onSelectMetricUnit: (groupId: string, metricId: string) => void;
+  onUnitIconDraftChange: (value: FeatherIconName) => void;
+  onUnitLabelDraftChange: (value: string) => void;
+  onUnitSuffixDraftChange: (value: string) => void;
+  onUpdateGroup: (groupId: string, patch: Partial<KeyResultGroup>) => void;
+  onUpdateMetric: (groupId: string, metricId: string, patch: Partial<KeyResultMetric>) => void;
+  onUpdateMetricDraft: (groupId: string, patch: Partial<{ key: string; unitId: string; value: string }>) => void;
+  unitIconDraft: FeatherIconName;
+  unitLabelDraft: string;
+  unitSuffixDraft: string;
+}) {
+  const appTheme = useAppTheme();
+  const fallbackUnitId = config.units[0]?.unitId || 'unit_number';
+
+  if (isLoading && config.groups.length === 0) {
+    return (
+      <View style={styles.loadingRow}>
+        <ActivityIndicator color={appTheme.colors.primary} />
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.keyResultsScreenShell}>
+      <View style={styles.keyResultsSettingsContent}>
+        <View style={styles.keyResultsAdminSection}>
+          <Text style={[styles.keyResultsAdminTitle, { color: appTheme.colors.ink }]}>Names</Text>
+          <View style={styles.keyResultsUnitDraftRow}>
+            <TextInput
+              autoCapitalize="characters"
+              autoCorrect={false}
+              onChangeText={onGroupNameDraftChange}
+              placeholder="MEGAMEX, DON MIGUEL..."
+              placeholderTextColor={appTheme.colors.muted}
+              style={[styles.keyResultsInlineInput, { color: appTheme.colors.ink }]}
+              value={groupNameDraft}
+            />
+            <Pressable accessibilityRole="button" onPress={onAddGroup} style={styles.keyResultsAddInlineButton}>
+              <Feather name="plus" color="#FFFFFF" size={18} />
+            </Pressable>
+          </View>
+        </View>
+
+        {config.groups.map((group) => {
+          const draft = metricDrafts[group.groupId] || { key: '', unitId: fallbackUnitId, value: '' };
+          const draftUnit = getKeyResultUnit(config.units, draft.unitId);
+
+          return (
+            <KeyResultSwipeDeleteRow
+              captureMove={false}
+              deleteAccessibilityLabel={`Delete ${group.name || 'key result name'}`}
+              key={group.groupId}
+              onDelete={() => onDeleteGroup(group.groupId)}
+              onSwipeActive={onSwipeActive}
+              resetKey={`group-${group.groupId}`}
+            >
+              <View style={styles.keyResultsGroupEditor}>
+                <View style={[styles.keyResultsGroupHeader, { borderBottomColor: appTheme.colors.divider }]}>
+                  <TextInput
+                    autoCapitalize="characters"
+                    autoCorrect={false}
+                    onChangeText={(value) => onUpdateGroup(group.groupId, { name: value })}
+                    placeholder="Group name"
+                    placeholderTextColor={appTheme.colors.muted}
+                    style={[styles.keyResultsGroupInput, { color: appTheme.colors.ink }]}
+                    value={group.name}
+                  />
+                </View>
+
+                {group.metrics.map((metric) => {
+                  const metricUnit = getKeyResultUnit(config.units, metric.unitId);
+
+                  return (
+                    <KeyResultSwipeDeleteRow
+                      deleteAccessibilityLabel={`Delete ${metric.key || 'key result'}`}
+                      key={metric.metricId}
+                      onDelete={() => onDeleteMetric(group.groupId, metric.metricId)}
+                      onSwipeActive={onSwipeActive}
+                      resetKey={metric.metricId}
+                    >
+                      <View style={[styles.keyResultsMetricEditorRow, { borderBottomColor: appTheme.colors.divider }]}>
+                        <TextInput
+                          autoCapitalize="words"
+                          autoCorrect={false}
+                          onChangeText={(value) => onUpdateMetric(group.groupId, metric.metricId, { key: value })}
+                          placeholder="Key name"
+                          placeholderTextColor={appTheme.colors.muted}
+                          style={[styles.keyResultsMetricInput, { color: appTheme.colors.ink }]}
+                          value={metric.key}
+                        />
+                        <TextInput
+                          autoCapitalize="none"
+                          autoCorrect={false}
+                          onChangeText={(value) => onUpdateMetric(group.groupId, metric.metricId, { value })}
+                          placeholder="Value"
+                          placeholderTextColor={appTheme.colors.muted}
+                          style={[styles.keyResultsValueInput, { color: appTheme.colors.ink }]}
+                          value={metric.value}
+                        />
+                        <Pressable accessibilityRole="button" onPress={() => onSelectMetricUnit(group.groupId, metric.metricId)} style={styles.keyResultsUnitSelect}>
+                          <Feather name={getSafeKeyResultIcon(metricUnit?.icon)} color={appTheme.colors.primary} size={14} />
+                          <Text numberOfLines={1} style={[styles.keyResultsUnitSelectText, { color: appTheme.colors.primary }]}>
+                            {metricUnit?.label || 'Unit'}
+                          </Text>
+                        </Pressable>
+                      </View>
+                    </KeyResultSwipeDeleteRow>
+                  );
+                })}
+
+                <View style={styles.keyResultsMetricDraftRow}>
+                  <TextInput
+                    autoCapitalize="words"
+                    autoCorrect={false}
+                    onChangeText={(value) => onUpdateMetricDraft(group.groupId, { key: value })}
+                    placeholder="Key name"
+                    placeholderTextColor={appTheme.colors.muted}
+                    style={[styles.keyResultsMetricInput, { color: appTheme.colors.ink }]}
+                    value={draft.key}
+                  />
+                  <TextInput
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    onChangeText={(value) => onUpdateMetricDraft(group.groupId, { value })}
+                    placeholder="Value"
+                    placeholderTextColor={appTheme.colors.muted}
+                    style={[styles.keyResultsValueInput, { color: appTheme.colors.ink }]}
+                    value={draft.value}
+                  />
+                  <Pressable accessibilityRole="button" onPress={() => onSelectDraftUnit(group.groupId)} style={styles.keyResultsUnitSelect}>
+                    <Feather name={getSafeKeyResultIcon(draftUnit?.icon)} color={appTheme.colors.primary} size={14} />
+                    <Text numberOfLines={1} style={[styles.keyResultsUnitSelectText, { color: appTheme.colors.primary }]}>
+                      {draftUnit?.label || 'Unit'}
+                    </Text>
+                  </Pressable>
+                  <Pressable accessibilityRole="button" onPress={() => onAddMetric(group.groupId)} style={styles.keyResultsAddInlineButton}>
+                    <Feather name="plus" color="#FFFFFF" size={18} />
+                  </Pressable>
+                </View>
+              </View>
+            </KeyResultSwipeDeleteRow>
+          );
+        })}
+
+        <KeyResultsPreview
+          config={config}
+          onDeleteMetric={onDeleteMetric}
+          onSwipeActive={onSwipeActive}
+        />
+
+        <Pressable
+          accessibilityRole="button"
+          disabled={isSaving}
+          onPress={onSave}
+          style={({ pressed }) => [
+            styles.settingsSaveButton,
+            pressed && !isSaving && styles.pressed,
+            isSaving && styles.disabled
+          ]}
+        >
+          <Text style={styles.settingsSaveButtonText}>{isSaving ? 'Saving...' : 'Save key results'}</Text>
+        </Pressable>
+      </View>
+
+      <KeyResultUnitSettingsModal
+        config={config}
+        isKeyboardVisible={isKeyboardVisible}
+        isOpen={isUnitModalOpen}
+        onAddUnit={onAddUnit}
+        onClose={onCloseUnitModal}
+        onDeleteUnit={onDeleteUnit}
+        onUnitIconDraftChange={onUnitIconDraftChange}
+        onUnitLabelDraftChange={onUnitLabelDraftChange}
+        onUnitSuffixDraftChange={onUnitSuffixDraftChange}
+        unitIconDraft={unitIconDraft}
+        unitLabelDraft={unitLabelDraft}
+        unitSuffixDraft={unitSuffixDraft}
+      />
+    </View>
+  );
+}
+
+function KeyResultUnitSettingsModal({
+  config,
+  isKeyboardVisible,
+  isOpen,
+  onAddUnit,
+  onClose,
+  onDeleteUnit,
+  onUnitIconDraftChange,
+  onUnitLabelDraftChange,
+  onUnitSuffixDraftChange,
+  unitIconDraft,
+  unitLabelDraft,
+  unitSuffixDraft
+}: {
+  config: CompanyKeyResultsConfig;
+  isKeyboardVisible: boolean;
+  isOpen: boolean;
+  onAddUnit: () => void;
+  onClose: () => void;
+  onDeleteUnit: (unitId: string) => void;
+  onUnitIconDraftChange: (value: FeatherIconName) => void;
+  onUnitLabelDraftChange: (value: string) => void;
+  onUnitSuffixDraftChange: (value: string) => void;
+  unitIconDraft: FeatherIconName;
+  unitLabelDraft: string;
+  unitSuffixDraft: string;
+}) {
+  const appTheme = useAppTheme();
+  const insets = useSafeAreaInsets();
+  const modalTopPadding = getFullScreenModalTopPadding(insets.top);
+  const [isUnitScrollEnabled, setIsUnitScrollEnabled] = useState(true);
+  const handleUnitSwipeActive = useCallback((isActive: boolean) => {
+    setIsUnitScrollEnabled(!isActive);
+  }, []);
+
+  return (
+    <Modal
+      allowSwipeDismissal={Platform.OS === 'ios'}
+      animationType="slide"
+      onRequestClose={onClose}
+      presentationStyle={getNativeFullHeightModalPresentationStyle()}
+      transparent={false}
+      visible={isOpen}
+    >
+      <View style={[
+        styles.keyResultsUnitModalScreen,
+        {
+          backgroundColor: appTheme.colors.screen,
+          paddingBottom: Math.max(insets.bottom, 16),
+          paddingTop: modalTopPadding
+        }
+      ]}>
+        <View style={styles.callModalHeader}>
+          <Pressable
+            accessibilityLabel="Back to key result names"
+            accessibilityRole="button"
+            onPress={onClose}
+            style={({ pressed }) => [styles.newChatHeaderIconButton, pressed && styles.pressed]}
+          >
+            <Text style={[styles.backButtonText, { color: appTheme.colors.primary }]}>‹</Text>
+          </Pressable>
+          <View style={styles.newChatCenteredTitleWrap}>
+            <Text numberOfLines={1} style={[styles.callModalHeaderTitle, { color: appTheme.colors.ink }]}>Value units</Text>
+            <Text numberOfLines={1} style={[styles.callModalHeaderSubtitle, { color: appTheme.colors.muted }]}>
+              {config.units.length === 1 ? '1 unit' : `${config.units.length} units`}
+            </Text>
+          </View>
+          {isKeyboardVisible ? (
+            <Pressable
+              accessibilityLabel="Hide keyboard"
+              accessibilityRole="button"
+              onPress={() => Keyboard.dismiss()}
+              style={({ pressed }) => [styles.newChatHeaderIconButton, pressed && styles.pressed]}
+            >
+              <Feather name="chevron-down" color={appTheme.colors.primary} size={22} />
+            </Pressable>
+          ) : (
+            <View style={styles.newChatHeaderSpacer} />
+          )}
+        </View>
+
+        <ScrollView
+          contentContainerStyle={styles.keyResultsUnitModalContent}
+          directionalLockEnabled
+          keyboardShouldPersistTaps="handled"
+          scrollEnabled={isUnitScrollEnabled}
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={styles.keyResultsAdminSection}>
+            <View style={styles.keyResultsUnitDraftRow}>
+              <TextInput
+                autoCapitalize="words"
+                autoCorrect={false}
+                onChangeText={onUnitLabelDraftChange}
+                placeholder="Unit name"
+                placeholderTextColor={appTheme.colors.muted}
+                style={[styles.keyResultsInlineInput, { color: appTheme.colors.ink }]}
+                value={unitLabelDraft}
+              />
+              <TextInput
+                autoCapitalize="none"
+                autoCorrect={false}
+                onChangeText={onUnitSuffixDraftChange}
+                placeholder="Suffix"
+                placeholderTextColor={appTheme.colors.muted}
+                style={[styles.keyResultsInlineInput, { color: appTheme.colors.ink }]}
+                value={unitSuffixDraft}
+              />
+            </View>
+
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.keyResultsIconPicker}>
+              {keyResultUnitIconOptions.map((option) => {
+                const isSelected = unitIconDraft === option.icon;
+
+                return (
+                  <Pressable
+                    accessibilityRole="button"
+                    key={option.icon}
+                    onPress={() => onUnitIconDraftChange(option.icon)}
+                    style={({ pressed }) => [
+                      styles.keyResultsIconChoice,
+                      {
+                        backgroundColor: isSelected ? appTheme.colors.primarySoft : appTheme.colors.screen,
+                        borderColor: isSelected ? appTheme.colors.primary : appTheme.colors.divider
+                      },
+                      pressed && styles.pressed
+                    ]}
+                  >
+                    <Feather name={option.icon} color={isSelected ? appTheme.colors.primary : appTheme.colors.mutedStrong} size={18} />
+                    <Text style={[styles.keyResultsIconChoiceText, { color: isSelected ? appTheme.colors.primary : appTheme.colors.muted }]}>
+                      {option.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+
+            <Pressable accessibilityRole="button" onPress={onAddUnit} style={({ pressed }) => [styles.keyResultsSmallButton, pressed && styles.pressed]}>
+              <Text style={styles.keyResultsSmallButtonText}>Add unit</Text>
+            </Pressable>
+          </View>
+
+          <View style={styles.keyResultsUnitList}>
+            {config.units.map((unit) => (
+              <KeyResultUnitRow
+                canDelete
+                key={unit.unitId}
+                onDelete={() => onDeleteUnit(unit.unitId)}
+                onSwipeActive={handleUnitSwipeActive}
+                unit={unit}
+              />
+            ))}
+          </View>
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+}
+
+function KeyResultUnitRow({
+  canDelete,
+  onDelete,
+  onSwipeActive,
+  unit
+}: {
+  canDelete: boolean;
+  onDelete: () => void;
+  onSwipeActive?: (isActive: boolean) => void;
+  unit: KeyResultUnit;
+}) {
+  const appTheme = useAppTheme();
+  const { width } = useWindowDimensions();
+  const rowScrollRef = useRef<ScrollView>(null);
+  const rowWidth = Math.max(
+    260,
+    width - (KEY_RESULT_UNIT_MODAL_HORIZONTAL_PADDING * 2)
+  );
+  const unitRow = (
+    <View style={[styles.keyResultsUnitRow, { borderBottomColor: appTheme.colors.divider }]}>
+      <View style={[styles.keyResultsUnitIcon, { backgroundColor: appTheme.colors.primarySoft }]}>
+        <Feather name={getSafeKeyResultIcon(unit.icon)} color={appTheme.colors.primary} size={16} />
+      </View>
+      <View style={styles.chatText}>
+        <Text style={[styles.chatTitle, { color: appTheme.colors.ink }]}>{unit.label}</Text>
+        <Text style={[styles.chatPreview, { color: appTheme.colors.muted }]}>{unit.suffix || 'No suffix'}</Text>
+      </View>
+    </View>
+  );
+
+  if (!canDelete) {
+    return unitRow;
+  }
+
+  return (
+    <ScrollView
+      bounces={false}
+      decelerationRate="fast"
+      horizontal
+      keyboardShouldPersistTaps="handled"
+      onMomentumScrollEnd={() => onSwipeActive?.(false)}
+      onScrollBeginDrag={() => onSwipeActive?.(true)}
+      onScrollEndDrag={() => onSwipeActive?.(false)}
+      overScrollMode="never"
+      ref={rowScrollRef}
+      scrollEventThrottle={16}
+      showsHorizontalScrollIndicator={false}
+      snapToEnd={false}
+      snapToInterval={KEY_RESULT_ROW_ACTION_WIDTH}
+      style={[styles.keyResultsNativeSwipeShell, { backgroundColor: appTheme.colors.screen }]}
+    >
+      <View style={[
+        styles.keyResultsNativeSwipeContent,
+        {
+          backgroundColor: appTheme.colors.screen,
+          width: rowWidth
+        }
+      ]}>
+        {unitRow}
+      </View>
+      <Pressable
+        accessibilityLabel={`Delete ${unit.label}`}
+        accessibilityRole="button"
+        onPress={() => {
+          onSwipeActive?.(false);
+          rowScrollRef.current?.scrollTo({ animated: true, x: 0, y: 0 });
+          onDelete();
+        }}
+        style={({ pressed }) => [
+          styles.keyResultsSwipeAction,
+          pressed && styles.pressed
+        ]}
+      >
+        <Feather color="#FFFFFF" name="trash-2" size={19} />
+        <Text numberOfLines={1} style={[styles.chatSwipeActionText, styles.keyResultsSwipeActionText]}>Delete</Text>
+      </Pressable>
+    </ScrollView>
+  );
+}
+
+function KeyResultSwipeDeleteRow({
+  canDelete = true,
+  captureMove = true,
+  children,
+  deleteAccessibilityLabel,
+  onDelete,
+  onSwipeActive,
+  resetKey
+}: {
+  canDelete?: boolean;
+  captureMove?: boolean;
+  children: React.ReactNode;
+  deleteAccessibilityLabel: string;
+  onDelete: () => void;
+  onSwipeActive?: (isActive: boolean) => void;
+  resetKey: string;
+}) {
+  const appTheme = useAppTheme();
+  const translateX = useRef(new Animated.Value(0)).current;
+  const offsetRef = useRef(0);
+
+  const closeSwipe = () => {
+    offsetRef.current = 0;
+    Animated.spring(translateX, {
+      damping: 20,
+      mass: 0.75,
+      stiffness: 170,
+      toValue: 0,
+      useNativeDriver: true
+    }).start();
+  };
+
+  const snapSwipe = () => {
+    offsetRef.current = -KEY_RESULT_ROW_ACTION_WIDTH;
+    Animated.spring(translateX, {
+      damping: 20,
+      mass: 0.75,
+      stiffness: 170,
+      toValue: -KEY_RESULT_ROW_ACTION_WIDTH,
+      useNativeDriver: true
+    }).start();
+  };
+
+  const panResponder = useMemo(() => PanResponder.create({
+    onMoveShouldSetPanResponder: (_event, gestureState) =>
+      canDelete &&
+      Math.abs(gestureState.dx) > 4 &&
+      Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.08,
+    onMoveShouldSetPanResponderCapture: (_event, gestureState) =>
+      canDelete &&
+      captureMove &&
+      Math.abs(gestureState.dx) > 6 &&
+      Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.08,
+    onPanResponderGrant: () => {
+      onSwipeActive?.(true);
+      translateX.stopAnimation((value) => {
+        offsetRef.current = value;
+      });
+    },
+    onPanResponderMove: (_event, gestureState) => {
+      if (!canDelete) {
+        return;
+      }
+
+      const nextValue = Math.max(
+        -KEY_RESULT_ROW_ACTION_WIDTH,
+        Math.min(0, offsetRef.current + gestureState.dx)
+      );
+
+      translateX.setValue(nextValue);
+    },
+    onPanResponderRelease: (_event, gestureState) => {
+      onSwipeActive?.(false);
+
+      if (!canDelete) {
+        closeSwipe();
+        return;
+      }
+
+      const intendedDelete = gestureState.dx <= -KEY_RESULT_ROW_SWIPE_TRIGGER || gestureState.vx <= -0.18;
+
+      if (intendedDelete) {
+        snapSwipe();
+        return;
+      }
+
+      closeSwipe();
+    },
+    onPanResponderTerminate: () => {
+      onSwipeActive?.(false);
+      closeSwipe();
+    },
+    onPanResponderTerminationRequest: () => false,
+    onStartShouldSetPanResponder: () => false,
+    onStartShouldSetPanResponderCapture: () => canDelete && offsetRef.current !== 0
+  }), [canDelete, captureMove, onSwipeActive, translateX]);
+
+  useEffect(() => {
+    closeSwipe();
+  }, [canDelete, resetKey]);
+
+  if (!canDelete) {
+    return <View style={styles.keyResultsSwipeStatic}>{children}</View>;
+  }
+
+  return (
+    <View style={[styles.keyResultsSwipeShell, { backgroundColor: appTheme.colors.screen }]}>
+      <View style={styles.keyResultsSwipeRightActions}>
+        <Pressable
+          accessibilityLabel={deleteAccessibilityLabel}
+          accessibilityRole="button"
+          onPress={() => {
+            onSwipeActive?.(false);
+            closeSwipe();
+            onDelete();
+          }}
+          style={({ pressed }) => [
+            styles.keyResultsSwipeAction,
+            pressed && styles.pressed
+          ]}
+        >
+          <Feather color="#FFFFFF" name="trash-2" size={19} />
+          <Text numberOfLines={1} style={[styles.chatSwipeActionText, styles.keyResultsSwipeActionText]}>Delete</Text>
+        </Pressable>
+      </View>
+
+      <Animated.View
+        style={[
+          styles.keyResultsSwipeContent,
+          { backgroundColor: appTheme.colors.screen },
+          { transform: [{ translateX }] }
+        ]}
+        {...panResponder.panHandlers}
+      >
+        {children}
+      </Animated.View>
+    </View>
+  );
+}
+
+function KeyResultsPreview({
+  config,
+  onDeleteMetric,
+  onSwipeActive
+}: {
+  config: CompanyKeyResultsConfig;
+  onDeleteMetric: (groupId: string, metricId: string) => void;
+  onSwipeActive?: (isActive: boolean) => void;
+}) {
+  const appTheme = useAppTheme();
+
+  return (
+    <View style={styles.keyResultsPreview}>
+      <Text style={[styles.keyResultsAdminTitle, { color: appTheme.colors.ink }]}>Preview</Text>
+      {config.groups.length === 0 ? (
+        <Text style={[styles.keyResultsAdminHint, { color: appTheme.colors.muted }]}>Create a name to preview key results.</Text>
+      ) : null}
+      {config.groups.map((group) => (
+        <View key={group.groupId} style={styles.keyResultsPreviewGroup}>
+          <Text style={styles.keyResultsPreviewGroupTitle}>{group.name || 'Unnamed'}</Text>
+          {group.metrics.map((metric) => (
+            <KeyResultSwipeDeleteRow
+              deleteAccessibilityLabel={`Delete ${metric.key || 'key result'}`}
+              key={metric.metricId}
+              onDelete={() => onDeleteMetric(group.groupId, metric.metricId)}
+              onSwipeActive={onSwipeActive}
+              resetKey={`preview-${metric.metricId}`}
+            >
+              <View style={styles.keyResultsPreviewMetric}>
+                <Text style={[styles.keyResultsPreviewMetricKey, { color: appTheme.colors.mutedStrong }]}>{metric.key}</Text>
+                <Text style={[styles.keyResultsPreviewMetricValue, { color: appTheme.colors.ink }]}>
+                  {formatKeyResultMetricValue(metric, config.units)}
+                </Text>
+              </View>
+            </KeyResultSwipeDeleteRow>
+          ))}
+        </View>
       ))}
     </View>
   );
@@ -22446,12 +24274,36 @@ function findRegisteredCallContactForDialInput(contacts: ChatContact[], dialInpu
   const dialDigits = normalizedDialInput.replace(/\D/g, '');
 
   return contacts.find((contact) =>
-    getCallContactPhoneCandidates(contact).some((candidate) => {
-      const candidateDigits = candidate.replace(/\D/g, '');
-
-      return candidate === normalizedDialInput || candidateDigits === dialDigits;
-    })
+    getCallContactPhoneCandidates(contact).some((candidate) =>
+      isMatchingDialPhoneCandidate(candidate, normalizedDialInput, dialDigits)
+    )
   ) || null;
+}
+
+function isMatchingDialPhoneCandidate(
+  candidate: string,
+  normalizedDialInput: string,
+  dialDigits: string
+): boolean {
+  const candidateDigits = candidate.replace(/\D/g, '');
+
+  if (!candidateDigits || candidateDigits.length < 7) {
+    return false;
+  }
+
+  if (candidateDigits === dialDigits) {
+    return true;
+  }
+
+  const normalizedCandidate = normalizeCallDialInput(candidate);
+
+  return Boolean(
+    normalizedCandidate &&
+    (
+      normalizedCandidate === normalizedDialInput ||
+      normalizedCandidate.replace(/\D/g, '') === dialDigits
+    )
+  );
 }
 
 function getCurrentUserDialIdentity(
@@ -22566,9 +24418,12 @@ function createScheduleCallDraft(profileName: string | null): ScheduleCallDraft 
   const ownerName = profileName?.trim();
 
   return {
+    calendarAddedAt: null,
+    calendarEventId: null,
     callType: 'video',
     description: '',
     endsAt,
+    id: `scheduled-call-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     includeEndTime: true,
     reminderMinutes: 15,
     requireApproval: false,
@@ -22588,6 +24443,92 @@ function normalizeScheduleCallDraft(draft: ScheduleCallDraft): ScheduleCallDraft
     endsAt,
     startsAt
   };
+}
+
+function getScheduleCallValidationError(draft: ScheduleCallDraft): string | null {
+  const title = draft.title.trim();
+  const startsAt = new Date(draft.startsAt);
+  const now = new Date();
+  const oneYearFromNow = new Date(now);
+  oneYearFromNow.setFullYear(oneYearFromNow.getFullYear() + 1);
+
+  if (!title) {
+    return 'Add a short title before continuing.';
+  }
+
+  if (Number.isNaN(startsAt.getTime())) {
+    return 'Choose a valid start time for this call.';
+  }
+
+  if (startsAt.getTime() < now.getTime() - 60 * 1000) {
+    return 'Choose a future start time for this call.';
+  }
+
+  if (startsAt.getTime() > oneYearFromNow.getTime()) {
+    return 'Scheduled calls can be created up to one year in advance.';
+  }
+
+  return null;
+}
+
+function buildScheduleCallCalendarEventData(
+  draft: ScheduleCallDraft,
+  recipients: ChatContact[]
+): Omit<Partial<Calendar.Event>, 'id'> {
+  const title = draft.title.trim() || 'Synzapp call';
+  const startsAt = new Date(draft.startsAt);
+  const endsAt = draft.includeEndTime
+    ? new Date(draft.endsAt)
+    : new Date(startsAt.getTime() + 30 * 60 * 1000);
+  const safeEndsAt = endsAt.getTime() > startsAt.getTime()
+    ? endsAt
+    : new Date(startsAt.getTime() + 30 * 60 * 1000);
+  const timeZone = getDeviceTimeZone();
+  const notes = buildScheduleCallCalendarNotes(draft, recipients);
+
+  return {
+    alarms: draft.reminderMinutes > 0
+      ? [{ method: Calendar.AlarmMethod.DEFAULT, relativeOffset: -draft.reminderMinutes }]
+      : [],
+    endDate: safeEndsAt,
+    endTimeZone: timeZone,
+    notes,
+    startDate: startsAt,
+    timeZone,
+    title
+  };
+}
+
+function buildScheduleCallCalendarNotes(draft: ScheduleCallDraft, recipients: ChatContact[]): string {
+  const details = [
+    'Synzapp scheduled workplace call.',
+    `Call type: ${draft.callType === 'video' ? 'Video' : 'Voice'}`,
+    draft.requireApproval ? 'Approval is required to join.' : 'Approved participants can join from Synzapp.',
+    recipients.length ? `Recipients: ${recipients.map((contact) => contact.displayName).join(', ')}` : '',
+    draft.description.trim()
+  ].filter(Boolean);
+
+  return details.join('\n\n');
+}
+
+function getDeviceTimeZone(): string | undefined {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isScheduleCallRecipientContact(contact: ChatContact): boolean {
+  if (contact.isSpam || contact.spammedAt || contact.status === 'DELETED') {
+    return false;
+  }
+
+  if (contact.chatType === 'GROUP') {
+    return contact.status !== 'DELETED';
+  }
+
+  return contact.status !== 'INVITED' && contact.status !== 'DELETED';
 }
 
 function roundDateToNextHalfHour(date: Date): Date {
@@ -23199,6 +25140,64 @@ function SpamChatStatusModal({
       </View>
     </Modal>
   );
+}
+
+function normalizeKeyResultsForDraft(config: CompanyKeyResultsConfig): CompanyKeyResultsConfig {
+  const units = Array.isArray(config.units) ? config.units : defaultKeyResultsConfig.units;
+
+  return {
+    groups: (config.groups || []).map((group, groupIndex) => ({
+      ...group,
+      metrics: (group.metrics || []).map((metric, metricIndex) => ({
+        ...metric,
+        sortOrder: metric.sortOrder || ((metricIndex + 1) * 1000),
+        status: metric.status || 'ACTIVE',
+        unitId: units.some((unit) => unit.unitId === metric.unitId) ? metric.unitId : units[0]?.unitId || 'unit_number'
+      })),
+      sortOrder: group.sortOrder || ((groupIndex + 1) * 1000),
+      status: group.status || 'ACTIVE'
+    })),
+    units: units.map((unit, index) => ({
+      ...unit,
+      icon: unit.icon || 'hash',
+      sortOrder: unit.sortOrder || ((index + 1) * 1000),
+      status: unit.status || 'ACTIVE',
+      suffix: unit.suffix || ''
+    })),
+    updatedAt: config.updatedAt || null,
+    updatedByUid: config.updatedByUid || null
+  };
+}
+
+function createKeyResultLocalId(prefix: string): string {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function getKeyResultUnit(units: KeyResultUnit[], unitId: string | undefined): KeyResultUnit | null {
+  return units.find((unit) => unit.unitId === unitId) || units[0] || null;
+}
+
+function formatKeyResultMetricValue(metric: KeyResultMetric, units: KeyResultUnit[]): string {
+  const unit = getKeyResultUnit(units, metric.unitId);
+  const suffix = unit?.suffix?.trim() || '';
+
+  if (!suffix) {
+    return metric.value;
+  }
+
+  return suffix.startsWith('/') ? `${metric.value}${suffix}` : `${metric.value} ${suffix}`;
+}
+
+function formatKeyResultIconLabel(icon: string): string {
+  return icon.split('-').map((part) => (
+    part ? `${part.charAt(0).toUpperCase()}${part.slice(1)}` : ''
+  )).join(' ');
+}
+
+function getSafeKeyResultIcon(icon: string | undefined): FeatherIconName {
+  return keyResultUnitIconOptions.some((option) => option.icon === icon)
+    ? icon as FeatherIconName
+    : 'hash';
 }
 
 function ChatMoreActionRow({
@@ -24159,6 +26158,19 @@ function getSynzappCallStatusLabel(callState: ActiveSynzappCall): string {
   }
 
   return 'Ending call...';
+}
+
+function shouldRenderSynzappCallOverlay(callState: ActiveSynzappCall | null): boolean {
+  if (!callState) {
+    return false;
+  }
+
+  return !(
+    Platform.OS === 'ios' &&
+    callState.direction === 'incoming' &&
+    callState.status === 'ringing' &&
+    callState.isNativePresented
+  );
 }
 
 function createRtcSessionDescription(runtime: WebRtcRuntime, payload: unknown): unknown {
@@ -25541,6 +27553,24 @@ function canExitGroupChat(chat: ChatItem): boolean {
     chat.memberPolicy !== 'DEPARTMENT_PLUS_EXPLICIT';
 }
 
+function canCurrentUserChangeGroupPhoto(
+  chat: ChatItem | null,
+  profile: CurrentUserProfile | null
+): boolean {
+  if (!chat || chat.chatType !== 'GROUP' || !profile) {
+    return false;
+  }
+
+  const isDepartmentGroup = chat.isDepartmentDefault === true ||
+    chat.memberPolicy === 'DEPARTMENT_PLUS_EXPLICIT';
+
+  if (isDepartmentGroup) {
+    return profile.role === 'ORG_ADMIN' || profile.role === 'DEPT_ADMIN';
+  }
+
+  return true;
+}
+
 function getGroupInfoMemberSubtitle(
   member: ChatGroupMember,
   directContact: ChatContact | undefined,
@@ -26303,6 +28333,7 @@ function getChatContactListFingerprint(contact: ChatContact): string {
       }))
       .sort((first, second) => first.uid.localeCompare(second.uid)),
     messagePermissionMode: contact.messagePermissionMode || null,
+    phoneFormatted: contact.phoneFormatted || null,
     phoneMasked: contact.phoneMasked || null,
     preview: contact.preview,
     profilePhotoCacheKey: contact.profilePhotoCacheKey || null,
@@ -27108,11 +29139,66 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flexDirection: 'row',
     justifyContent: 'space-between',
-    minHeight: 38
+    minHeight: 38,
+    position: 'relative',
+    zIndex: 70
   },
   topActionsLeftSpacer: {
     height: 44,
     width: 44
+  },
+  mainNavigationButton: {
+    alignItems: 'center',
+    height: 48,
+    justifyContent: 'center',
+    marginLeft: -3,
+    width: 48
+  },
+  mainNavigationScreen: {
+    flex: 1,
+    paddingHorizontal: 16
+  },
+  mainNavigationHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    minHeight: 54
+  },
+  mainNavigationHeaderButton: {
+    alignItems: 'center',
+    borderRadius: 22,
+    height: 44,
+    justifyContent: 'center',
+    width: 44
+  },
+  mainNavigationHeaderSpacer: {
+    height: 44,
+    width: 44
+  },
+  mainNavigationTitle: {
+    flex: 1,
+    fontSize: 20,
+    fontWeight: '500',
+    lineHeight: 25,
+    paddingHorizontal: 12,
+    textAlign: 'center'
+  },
+  mainNavigationContent: {
+    flex: 1,
+    paddingTop: 22
+  },
+  mainNavigationLink: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    minHeight: 64,
+    paddingHorizontal: 4,
+    paddingVertical: 14
+  },
+  mainNavigationLinkText: {
+    flex: 1,
+    fontSize: 21,
+    fontWeight: '400',
+    letterSpacing: 0,
+    lineHeight: 27
   },
   spamHeader: {
     alignItems: 'center',
@@ -27704,6 +29790,36 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     lineHeight: 17,
     paddingHorizontal: 12
+  },
+  scheduleSendCalendarRow: {
+    alignItems: 'center',
+    borderRadius: 18,
+    borderWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 12,
+    marginHorizontal: 4,
+    marginTop: 14,
+    minHeight: 58,
+    paddingHorizontal: 14,
+    paddingVertical: 10
+  },
+  scheduleSendCalendarIcon: {
+    alignItems: 'center',
+    borderRadius: 18,
+    height: 36,
+    justifyContent: 'center',
+    width: 36
+  },
+  scheduleSendCalendarTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    lineHeight: 21
+  },
+  scheduleSendCalendarSubtitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    lineHeight: 16,
+    marginTop: 2
   },
   scheduledCallRow: {
     alignItems: 'center',
@@ -32127,6 +34243,24 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 2
   },
+  groupInfoAvatarButton: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 104,
+    minWidth: 104
+  },
+  groupInfoAvatarBadge: {
+    alignItems: 'center',
+    borderColor: '#FFFFFF',
+    borderRadius: 17,
+    borderWidth: 2,
+    bottom: 6,
+    height: 34,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: 4,
+    width: 34
+  },
   groupInfoTitle: {
     color: '#0B141A',
     fontSize: 24,
@@ -32473,7 +34607,8 @@ const styles = StyleSheet.create({
     lineHeight: 21
   },
   settingsList: {
-    paddingTop: 4
+    gap: 14,
+    paddingTop: 6
   },
   offlineAiOverlay: {
     alignItems: 'center',
@@ -32822,6 +34957,312 @@ const styles = StyleSheet.create({
   backupSettings: {
     paddingTop: 4
   },
+  keyResultsSettingsContent: {
+    gap: 14,
+    paddingBottom: 24,
+    paddingTop: 10
+  },
+  keyResultsScreenShell: {
+    position: 'relative'
+  },
+  keyResultsHeaderOptionsWrap: {
+    alignItems: 'flex-end',
+    flexDirection: 'row',
+    gap: 8,
+    position: 'relative',
+    justifyContent: 'flex-end',
+    minWidth: 44,
+    zIndex: 80
+  },
+  keyResultsHeaderOptionButton: {
+    alignItems: 'center',
+    borderRadius: 18,
+    borderWidth: 1,
+    elevation: 7,
+    height: 36,
+    justifyContent: 'center',
+    shadowColor: '#0F172A',
+    shadowOffset: { height: 5, width: 0 },
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    width: 36,
+    zIndex: 82
+  },
+  keyResultsUnitModalScreen: {
+    flex: 1
+  },
+  keyResultsUnitModalContent: {
+    gap: 14,
+    paddingBottom: 24,
+    paddingHorizontal: 18,
+    paddingTop: 12
+  },
+  keyResultsAdminSection: {
+    gap: 8
+  },
+  keyResultsAdminTitle: {
+    fontSize: 16,
+    fontWeight: '500',
+    lineHeight: 21
+  },
+  keyResultsAdminHint: {
+    fontSize: 13,
+    fontWeight: '400',
+    lineHeight: 18
+  },
+  keyResultsOptionsMenu: {
+    borderRadius: 12,
+    borderWidth: 1,
+    elevation: 8,
+    minWidth: 132,
+    overflow: 'hidden',
+    position: 'absolute',
+    right: 0,
+    shadowColor: '#0F172A',
+    shadowOffset: { height: 8, width: 0 },
+    shadowOpacity: 0.14,
+    shadowRadius: 16,
+    top: 42,
+    zIndex: 83
+  },
+  keyResultsOptionsMenuItem: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    minHeight: 42,
+    paddingHorizontal: 12
+  },
+  keyResultsOptionsMenuText: {
+    fontSize: 14,
+    fontWeight: '400',
+    lineHeight: 18
+  },
+  keyResultsUnitDraftRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8
+  },
+  keyResultsInlineInput: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#DDE5EF',
+    borderRadius: 8,
+    borderWidth: 1,
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '400',
+    minHeight: 42,
+    paddingHorizontal: 10
+  },
+  keyResultsIconPicker: {
+    flexGrow: 0
+  },
+  keyResultsIconChoice: {
+    alignItems: 'center',
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 6,
+    marginRight: 8,
+    minHeight: 38,
+    paddingHorizontal: 10
+  },
+  keyResultsIconChoiceText: {
+    fontSize: 12,
+    fontWeight: '400',
+    lineHeight: 16
+  },
+  keyResultsSmallButton: {
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    backgroundColor: colors.primary,
+    borderRadius: 8,
+    minHeight: 36,
+    paddingHorizontal: 12
+  },
+  keyResultsSmallButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '400',
+    lineHeight: 36
+  },
+  keyResultsUnitList: {
+    gap: 2
+  },
+  keyResultsSwipeShell: {
+    overflow: 'hidden',
+    position: 'relative',
+    width: '100%'
+  },
+  keyResultsSwipeStatic: {
+    overflow: 'hidden'
+  },
+  keyResultsNativeSwipeShell: {
+    overflow: 'hidden',
+    width: '100%'
+  },
+  keyResultsNativeSwipeContent: {
+    overflow: 'hidden'
+  },
+  keyResultsSwipeRightActions: {
+    bottom: 0,
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    width: KEY_RESULT_ROW_ACTION_WIDTH
+  },
+  keyResultsSwipeAction: {
+    alignItems: 'center',
+    backgroundColor: '#DC2626',
+    flexDirection: 'row',
+    gap: 6,
+    justifyContent: 'center',
+    minHeight: 54,
+    width: KEY_RESULT_ROW_ACTION_WIDTH
+  },
+  keyResultsSwipeActionText: {
+    lineHeight: 16,
+    marginTop: 0,
+    maxWidth: KEY_RESULT_ROW_ACTION_WIDTH - 36
+  },
+  keyResultsSwipeContent: {
+    overflow: 'hidden',
+    width: '100%'
+  },
+  keyResultsUnitRow: {
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    flexDirection: 'row',
+    gap: 10,
+    minHeight: 54,
+    paddingVertical: 8
+  },
+  keyResultsUnitIcon: {
+    alignItems: 'center',
+    borderRadius: 17,
+    height: 34,
+    justifyContent: 'center',
+    width: 34
+  },
+  keyResultsIconButton: {
+    alignItems: 'center',
+    height: 34,
+    justifyContent: 'center',
+    width: 34
+  },
+  keyResultsAddInlineButton: {
+    alignItems: 'center',
+    backgroundColor: colors.primary,
+    borderRadius: 8,
+    height: 42,
+    justifyContent: 'center',
+    width: 42
+  },
+  keyResultsGroupEditor: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#DDE5EF',
+    borderRadius: 8,
+    borderWidth: 1,
+    padding: 10
+  },
+  keyResultsGroupHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 8
+  },
+  keyResultsGroupInput: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '400',
+    minHeight: 38,
+    paddingHorizontal: 2
+  },
+  keyResultsMetricEditorRow: {
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    flexDirection: 'row',
+    gap: 6,
+    minHeight: 46,
+    paddingVertical: 5
+  },
+  keyResultsMetricDraftRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 6,
+    minHeight: 46,
+    paddingTop: 8
+  },
+  keyResultsMetricInput: {
+    flex: 1.15,
+    fontSize: 13,
+    fontWeight: '400',
+    minHeight: 38,
+    paddingHorizontal: 2
+  },
+  keyResultsValueInput: {
+    flex: 0.72,
+    fontSize: 13,
+    fontWeight: '400',
+    minHeight: 38,
+    paddingHorizontal: 2,
+    textAlign: 'right'
+  },
+  keyResultsUnitSelect: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderRadius: 8,
+    flexDirection: 'row',
+    gap: 4,
+    justifyContent: 'center',
+    minHeight: 34,
+    paddingHorizontal: 8,
+    width: 86
+  },
+  keyResultsUnitSelectText: {
+    flexShrink: 1,
+    fontSize: 11,
+    fontWeight: '400',
+    lineHeight: 14
+  },
+  keyResultsPreview: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 8,
+    gap: 12,
+    padding: 12
+  },
+  keyResultsPreviewGroup: {
+    gap: 8
+  },
+  keyResultsPreviewGroupTitle: {
+    color: '#0284C7',
+    fontSize: 12,
+    fontWeight: '500',
+    letterSpacing: 0.4,
+    lineHeight: 16,
+    textTransform: 'uppercase'
+  },
+  keyResultsPreviewMetric: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 12,
+    justifyContent: 'space-between',
+    minHeight: 38,
+    paddingVertical: 4
+  },
+  keyResultsPreviewMetricKey: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '400',
+    lineHeight: 19
+  },
+  keyResultsPreviewMetricValue: {
+    fontSize: 14,
+    fontWeight: '500',
+    lineHeight: 19,
+    textAlign: 'right'
+  },
   companyProfileForm: {
     gap: 12,
     paddingTop: 4
@@ -32931,19 +35372,31 @@ const styles = StyleSheet.create({
   settingsListItem: {
     alignItems: 'center',
     borderBottomColor: '#E5E7EB',
-    borderBottomWidth: 1,
+    borderBottomWidth: StyleSheet.hairlineWidth,
     flexDirection: 'row',
-    gap: 11,
-    minHeight: 62,
-    paddingVertical: 8
+    gap: 12,
+    minHeight: 58,
+    paddingHorizontal: 14,
+    paddingVertical: 9
+  },
+  settingsListCard: {
+    borderRadius: 18,
+    borderWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden'
+  },
+  settingsListCardShadow: {
+    borderRadius: 18,
+    elevation: 2,
+    shadowColor: '#0F172A',
+    shadowOffset: { height: 2, width: 0 },
+    shadowOpacity: 0.08,
+    shadowRadius: 7
   },
   settingsListIcon: {
     alignItems: 'center',
-    backgroundColor: colors.primarySoft,
-    borderRadius: 20,
-    height: 40,
+    height: 32,
     justifyContent: 'center',
-    width: 40
+    width: 28
   },
   settingsListIconText: {
     color: colors.primary,

@@ -73,7 +73,6 @@ export function attachChatRealtimeServer(server: Server): void {
     const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
 
     if (url.pathname !== '/realtime/chat') {
-      socket.destroy();
       return;
     }
 

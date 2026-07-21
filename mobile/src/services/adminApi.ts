@@ -105,6 +105,39 @@ export interface CompanyProfile {
   updatedAt: string | null;
 }
 
+export interface KeyResultUnit {
+  icon: string;
+  label: string;
+  sortOrder: number;
+  status: string;
+  suffix: string;
+  unitId: string;
+}
+
+export interface KeyResultMetric {
+  key: string;
+  metricId: string;
+  sortOrder: number;
+  status: string;
+  unitId: string;
+  value: string;
+}
+
+export interface KeyResultGroup {
+  groupId: string;
+  metrics: KeyResultMetric[];
+  name: string;
+  sortOrder: number;
+  status: string;
+}
+
+export interface CompanyKeyResultsConfig {
+  groups: KeyResultGroup[];
+  units: KeyResultUnit[];
+  updatedAt: string | null;
+  updatedByUid: string | null;
+}
+
 export interface OrganizationDeletionChallenge {
   challengeId: string;
   companyName: string;
@@ -290,6 +323,26 @@ export async function updateCompanyLogo(input: {
   const body = await response.json() as { companyProfile: CompanyProfile };
 
   return normalizeCompanyProfile(body.companyProfile);
+}
+
+export async function getCompanyKeyResults(idToken: string): Promise<CompanyKeyResultsConfig> {
+  const response = await adminFetch('/api/admin/key-results', idToken);
+  const body = await response.json() as { keyResults: CompanyKeyResultsConfig };
+
+  return normalizeCompanyKeyResults(body.keyResults);
+}
+
+export async function updateCompanyKeyResults(input: {
+  idToken: string;
+  keyResults: Pick<CompanyKeyResultsConfig, 'groups' | 'units'>;
+}): Promise<CompanyKeyResultsConfig> {
+  const response = await adminFetch('/api/admin/key-results', input.idToken, {
+    body: JSON.stringify(input.keyResults),
+    method: 'PATCH'
+  });
+  const body = await response.json() as { keyResults: CompanyKeyResultsConfig };
+
+  return normalizeCompanyKeyResults(body.keyResults);
 }
 
 export async function requestOrganizationDeletionChallenge(
@@ -491,10 +544,10 @@ async function getResponseErrorMessage(response: Response): Promise<string> {
       return body.error;
     }
   } catch {
-    return 'Unable to complete request. Please try again.';
+    return `Unable to complete request (${response.status}). Please try again.`;
   }
 
-  return 'Unable to complete request. Please try again.';
+  return `Unable to complete request (${response.status}). Please try again.`;
 }
 
 function normalizeApprovedEmployee(employee: ApprovedEmployee): ApprovedEmployee {
@@ -515,6 +568,19 @@ function normalizeCompanyProfile(profile: CompanyProfile): CompanyProfile {
     calendarYearStartYear: Number.isInteger(profile.calendarYearStartYear) ? profile.calendarYearStartYear : new Date().getFullYear(),
     calendarYearWeekOneStartsOn: profile.calendarYearWeekOneStartsOn || 'CALENDAR_YEAR_START',
     companyLogoUrl: normalizeSynzappApiUrl(profile.companyLogoUrl)
+  };
+}
+
+function normalizeCompanyKeyResults(config: CompanyKeyResultsConfig): CompanyKeyResultsConfig {
+  return {
+    groups: (config.groups || []).map((group) => ({
+      ...group,
+      metrics: group.metrics || [],
+      status: group.status || 'ACTIVE'
+    })),
+    units: config.units || [],
+    updatedAt: config.updatedAt || null,
+    updatedByUid: config.updatedByUid || null
   };
 }
 

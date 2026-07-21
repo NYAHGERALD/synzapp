@@ -60,6 +60,14 @@ describe('Storage emulator tenant rules', () => {
       new Uint8Array([1, 2, 3])
     ));
   });
+
+  it('blocks direct client access to backend-owned RAILS evidence files', async () => {
+    const storage = employeeContext('user_a', 'tenant_a').storage();
+    const railsEvidenceRef = ref(storage, 'organizations/tenant_a/railsItems/rails_1/evidence/ev_1-proof.png');
+
+    await assertFails(getBytes(railsEvidenceRef));
+    await assertFails(uploadBytes(railsEvidenceRef, new Uint8Array([4, 5, 6])));
+  });
 });
 
 function employeeContext(uid: string, tenantId: string) {
@@ -89,6 +97,10 @@ async function seedStorage() {
     );
     await uploadBytes(
       ref(storage, 'organizations/tenant_a/users/user_b/chat-backups/latest.synzappbackup'),
+      new Uint8Array([1, 2, 3])
+    );
+    await uploadBytes(
+      ref(storage, 'organizations/tenant_a/railsItems/rails_1/evidence/ev_1-proof.png'),
       new Uint8Array([1, 2, 3])
     );
   });

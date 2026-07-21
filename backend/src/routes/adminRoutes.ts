@@ -32,6 +32,10 @@ import {
   updateCompanyProfile
 } from '../services/companyProfileService.js';
 import {
+  getCompanyKeyResultsForAdmin,
+  updateCompanyKeyResults
+} from '../services/keyResultsService.js';
+import {
   deleteOrganizationForTenantOwner,
   requestOrganizationDeletionChallenge
 } from '../services/organizationDeletionService.js';
@@ -130,6 +134,37 @@ const companyProfileBodySchema = z.object({
 
 const companyLogoBodySchema = z.object({
   companyLogoDataUrl: z.string().min(32).max(1_500_000)
+});
+
+const keyResultUnitSchema = z.object({
+  icon: z.string().trim().min(1).max(48),
+  label: z.string().trim().min(1).max(80),
+  sortOrder: z.number().int().min(0).max(1_000_000_000).optional(),
+  status: z.string().trim().max(24).optional(),
+  suffix: z.string().trim().max(32).optional(),
+  unitId: z.string().trim().regex(/^[A-Za-z0-9_-]{4,128}$/)
+});
+
+const keyResultMetricSchema = z.object({
+  key: z.string().trim().max(160),
+  metricId: z.string().trim().regex(/^[A-Za-z0-9_-]{4,128}$/),
+  sortOrder: z.number().int().min(0).max(1_000_000_000).optional(),
+  status: z.string().trim().max(24).optional(),
+  unitId: z.string().trim().regex(/^[A-Za-z0-9_-]{4,128}$/),
+  value: z.string().trim().max(80)
+});
+
+const keyResultGroupSchema = z.object({
+  groupId: z.string().trim().regex(/^[A-Za-z0-9_-]{4,128}$/),
+  metrics: z.array(keyResultMetricSchema).max(60).optional(),
+  name: z.string().trim().max(120),
+  sortOrder: z.number().int().min(0).max(1_000_000_000).optional(),
+  status: z.string().trim().max(24).optional()
+});
+
+const keyResultsBodySchema = z.object({
+  groups: z.array(keyResultGroupSchema).max(40).optional(),
+  units: z.array(keyResultUnitSchema).max(40).optional()
 });
 
 const organizationDeletionBodySchema = z.object({
@@ -232,6 +267,50 @@ adminRouter.post('/company-profile/logo', verifyAppCheck, async (req, res, next)
     await writeAuditEvent({
       action: 'COMPANY_LOGO_UPDATED',
       reason: error instanceof Error ? error.message : 'Company logo update failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
+adminRouter.get('/key-results', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const keyResults = await getCompanyKeyResultsForAdmin(decodedToken);
+
+    res.json({ keyResults });
+  } catch (error) {
+    next(error);
+  }
+});
+
+adminRouter.patch('/key-results', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const body = keyResultsBodySchema.parse(req.body);
+    const keyResults = await updateCompanyKeyResults(decodedToken, body);
+
+    await writeAuditEvent({
+      action: 'COMPANY_KEY_RESULTS_UPDATED',
+      metadata: {
+        groupCount: keyResults.groups.length,
+        unitCount: keyResults.units.length
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: decodedToken.tenantId as string | undefined,
+      uid: decodedToken.uid
+    });
+
+    res.json({ keyResults });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'COMPANY_KEY_RESULTS_UPDATED',
+      reason: error instanceof Error ? error.message : 'Company key results update failed',
       req,
       status: 'FAILED'
     }).catch(() => undefined);

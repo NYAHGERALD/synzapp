@@ -170,7 +170,7 @@ class SynzappFirebaseMessagingService : ExpoFirebaseMessagingService() {
       val existingChannel = notificationManager.getNotificationChannel(CALLS_CHANNEL_ID)
 
       if (existingChannel == null) {
-        val channel = NotificationChannel(CALLS_CHANNEL_ID, "Synzapp calls", NotificationManager.IMPORTANCE_HIGH)
+        val channel = NotificationChannel(CALLS_CHANNEL_ID, "Synzapp calls", NotificationManager.IMPORTANCE_MAX)
         channel.enableVibration(true)
         channel.lockscreenVisibility = NotificationCompat.VISIBILITY_PUBLIC
         channel.setSound(ringtoneUri, audioAttributes)
