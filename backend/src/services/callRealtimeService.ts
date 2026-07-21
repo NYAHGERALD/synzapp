@@ -14,6 +14,7 @@ type CallChatType = 'DIRECT' | 'GROUP';
 type CallMode = 'voice' | 'video';
 type CallSignalKind = 'answer' | 'iceCandidate' | 'offer';
 type CallEndReason = 'busy' | 'declined' | 'ended' | 'failed' | 'missed';
+type CallSessionStatus = 'answered' | 'busy' | 'declined' | 'ended' | 'failed' | 'missed' | 'ringing';
 
 interface AuthenticateCallMessage {
   deviceId?: string;
@@ -58,19 +59,26 @@ type CallRealtimeClientMessage =
   | StartCallMessage;
 
 interface ActiveCallRecord {
+  answeredAt?: string;
+  answeredByUid?: string;
   callId: string;
   callerName: string;
   callerUid: string;
   chatType: CallChatType;
   contactId: string;
   createdAt: string;
+  endedAt?: string;
+  endedByUid?: string;
   mode: CallMode;
   participantUids: string[];
+  status: CallSessionStatus;
   tenantId: string;
   title: string;
 }
 
+const CALL_RING_TIMEOUT_MS = 45_000;
 const activeCalls = new Map<string, ActiveCallRecord>();
+const callTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 const connectionsByUid = new Map<string, Set<CallRealtimeConnection>>();
 
 export function attachCallRealtimeServer(server: Server): void {
@@ -252,11 +260,13 @@ class CallRealtimeConnection {
       createdAt: new Date().toISOString(),
       mode,
       participantUids: [this.uid, ...callContext.targetUids],
+      status: 'ringing',
       tenantId: this.tenantId,
       title: message.title?.trim() || callContext.title
     };
 
     activeCalls.set(callId, call);
+    scheduleMissedCallTimeout(call);
     this.sendJson({
       call,
       type: 'callStarted'
@@ -323,7 +333,13 @@ class CallRealtimeConnection {
     const call = activeCalls.get(normalizeCallId(message.callId));
     const targetUid = typeof message.targetUid === 'string' ? message.targetUid.trim() : '';
 
-    if (!call || !targetUid || !call.participantUids.includes(this.uid) || !call.participantUids.includes(targetUid)) {
+    if (
+      !call ||
+      !targetUid ||
+      isFinalCallStatus(call.status) ||
+      !call.participantUids.includes(this.uid) ||
+      !call.participantUids.includes(targetUid)
+    ) {
       return;
     }
 
@@ -347,14 +363,24 @@ class CallRealtimeConnection {
       return;
     }
 
-    call.participantUids.forEach((participantUid) => {
-      if (participantUid !== this.uid) {
-        sendToUser(participantUid, {
-          callId: call.callId,
-          participantUid: this.uid,
-          type: 'callAnswered'
-        });
-      }
+    if (call.status !== 'ringing') {
+      this.sendJson({
+        callId: call.callId,
+        participantUid: call.answeredByUid || this.uid,
+        type: 'callAnswered'
+      });
+      return;
+    }
+
+    call.status = 'answered';
+    call.answeredAt = new Date().toISOString();
+    call.answeredByUid = this.uid;
+    clearCallTimeout(call.callId);
+
+    broadcastToCall(call, {
+      callId: call.callId,
+      participantUid: this.uid,
+      type: 'callAnswered'
     });
   }
 
@@ -369,27 +395,7 @@ class CallRealtimeConnection {
       return;
     }
 
-    const reason = normalizeCallEndReason(message.reason);
-    call.participantUids.forEach((participantUid) => {
-      if (participantUid !== this.uid) {
-        sendToUser(participantUid, {
-          callId: call.callId,
-          endedByUid: this.uid,
-          reason,
-          type: 'callEnded'
-        });
-      }
-    });
-    void sendCallEndedPushNotifications({
-      callId: call.callId,
-      endedByUid: this.uid,
-      reason,
-      recipientUids: call.participantUids,
-      tenantId: call.tenantId
-    }).catch((error) => {
-      console.warn('Unable to send Synzapp call ended push notifications', error);
-    });
-    activeCalls.delete(call.callId);
+    finalizeCall(call, normalizeCallEndReason(message.reason), this.uid);
   }
 
   private sendError(message: string): void {
@@ -428,6 +434,71 @@ function sendToUser(uid: string, payload: Record<string, unknown>): void {
   const connections = connectionsByUid.get(uid);
 
   connections?.forEach((connection) => connection.sendJson(payload));
+}
+
+function broadcastToCall(call: ActiveCallRecord, payload: Record<string, unknown>): void {
+  call.participantUids.forEach((participantUid) => {
+    sendToUser(participantUid, payload);
+  });
+}
+
+function scheduleMissedCallTimeout(call: ActiveCallRecord): void {
+  clearCallTimeout(call.callId);
+  callTimeouts.set(call.callId, setTimeout(() => {
+    const currentCall = activeCalls.get(call.callId);
+
+    if (!currentCall || currentCall.status !== 'ringing') {
+      return;
+    }
+
+    finalizeCall(currentCall, 'missed', 'system');
+  }, CALL_RING_TIMEOUT_MS));
+}
+
+function clearCallTimeout(callId: string): void {
+  const timeout = callTimeouts.get(callId);
+
+  if (!timeout) {
+    return;
+  }
+
+  clearTimeout(timeout);
+  callTimeouts.delete(callId);
+}
+
+function finalizeCall(call: ActiveCallRecord, reason: CallEndReason, endedByUid: string): void {
+  if (isFinalCallStatus(call.status)) {
+    return;
+  }
+
+  call.status = reason;
+  call.endedAt = new Date().toISOString();
+  call.endedByUid = endedByUid;
+  clearCallTimeout(call.callId);
+  broadcastToCall(call, {
+    callId: call.callId,
+    endedByUid,
+    reason,
+    type: 'callEnded'
+  });
+  void sendCallEndedPushNotifications({
+    callId: call.callId,
+    endedByUid,
+    reason,
+    recipientUids: call.participantUids,
+    tenantId: call.tenantId
+  }).catch((error) => {
+    console.warn('Unable to send Synzapp call ended push notifications', error);
+  });
+  activeCalls.delete(call.callId);
+}
+
+function isFinalCallStatus(status: CallSessionStatus): boolean {
+  return status === 'busy' ||
+    status === 'declined' ||
+    status === 'ended' ||
+    status === 'failed' ||
+    status === 'missed';
 }
 
 function normalizeCallId(value?: string): string {
