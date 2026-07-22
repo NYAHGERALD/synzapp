@@ -1,17 +1,16 @@
-import { ActionSheetIOS, Alert, Platform } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 import * as VideoThumbnails from 'expo-video-thumbnails';
-import { CHAT_MEDIA_LIMITS, type LocalChatMediaInput } from './chatMediaApi';
-
-type ChatCameraSource = 'library' | 'photo' | 'video';
+import {
+  CHAT_MEDIA_LIMITS,
+  type ChatMediaQualityMode,
+  type LocalChatMediaInput
+} from './chatMediaApi';
 
 const CHAT_IMAGE_MAX_WIDTH = 1280;
 const CHAT_IMAGE_QUALITY = 0.7;
-const CHAT_VIDEO_MIN_COMPRESS_MB = 3;
-const CHAT_VIDEO_MAX_DIMENSION = 960;
 const CHAT_LIBRARY_SELECTION_LIMIT = 10;
 const CHAT_IMAGE_RETRY_WIDTHS = [1280, 1080, 960, 720];
 const CHAT_MEDIA_THUMBNAIL_WIDTHS = [360, 280, 220];
@@ -25,41 +24,33 @@ interface PreparedMediaThumbnail {
 }
 
 export async function pickNativeChatCameraMedia(
-  onProgress?: (progress: number) => void
+  onProgress?: (progress: number) => void,
+  qualityMode: ChatMediaQualityMode = 'standard'
 ): Promise<LocalChatMediaInput[] | null> {
-  if (Platform.OS === 'ios') {
-    return pickNativeChatLibraryMedia(onProgress);
-  }
-
-  const source = await selectCameraMediaSource();
-
-  if (!source) {
-    return null;
-  }
-
-  const result = source === 'photo'
-    ? await launchCamera(ImagePicker.MediaTypeOptions.Images)
-    : source === 'video'
-      ? await launchCamera(ImagePicker.MediaTypeOptions.Videos)
-      : await launchLibrary();
+  const result = await launchCamera(ImagePicker.MediaTypeOptions.All).catch((error) => {
+    throw normalizePhotoLibraryError(error);
+  });
 
   if (result.canceled || !result.assets[0]) {
     return null;
   }
 
-  return prepareCameraMediaAssets(result.assets.slice(0, CHAT_LIBRARY_SELECTION_LIMIT), onProgress);
+  return prepareCameraMediaAssets(result.assets.slice(0, CHAT_LIBRARY_SELECTION_LIMIT), onProgress, qualityMode);
 }
 
 export async function pickNativeChatLibraryMedia(
-  onProgress?: (progress: number) => void
+  onProgress?: (progress: number) => void,
+  qualityMode: ChatMediaQualityMode = 'standard'
 ): Promise<LocalChatMediaInput[] | null> {
-  const result = await launchLibrary();
+  const result = await launchLibrary().catch((error) => {
+    throw normalizePhotoLibraryError(error);
+  });
 
   if (result.canceled || !result.assets[0]) {
     return null;
   }
 
-  return prepareCameraMediaAssets(result.assets.slice(0, CHAT_LIBRARY_SELECTION_LIMIT), onProgress);
+  return prepareCameraMediaAssets(result.assets.slice(0, CHAT_LIBRARY_SELECTION_LIMIT), onProgress, qualityMode);
 }
 
 export async function pickNativeChatFile(): Promise<LocalChatMediaInput | null> {
@@ -85,11 +76,17 @@ export async function pickNativeChatFile(): Promise<LocalChatMediaInput | null> 
   };
 }
 
-async function prepareImageMedia(asset: ImagePicker.ImagePickerAsset): Promise<LocalChatMediaInput> {
+async function prepareImageMedia(
+  asset: ImagePicker.ImagePickerAsset,
+  qualityMode: ChatMediaQualityMode
+): Promise<LocalChatMediaInput> {
   const originalImageMedia = await buildOriginalImageMediaIfSendable(asset);
 
-  if (originalImageMedia) {
-    return originalImageMedia;
+  if (qualityMode === 'hd' && originalImageMedia) {
+    return {
+      ...originalImageMedia,
+      qualityMode
+    };
   }
 
   const sourceWidth = asset.width || CHAT_IMAGE_MAX_WIDTH;
@@ -115,6 +112,12 @@ async function prepareImageMedia(asset: ImagePicker.ImagePickerAsset): Promise<L
         fileName: getAssetFileName(asset, 'photo.jpg'),
         height: optimized.height,
         kind: 'image',
+        originalContentType: originalImageMedia?.contentType || getAssetImageContentType(asset) || undefined,
+        originalHeight: asset.height || originalImageMedia?.height,
+        originalSizeBytes: originalImageMedia?.sizeBytes,
+        originalUri: originalImageMedia?.uri || asset.uri,
+        originalWidth: asset.width || originalImageMedia?.width,
+        qualityMode: 'standard',
         sizeBytes: await getFileSize(optimized.uri),
         uri: optimized.uri,
         width: optimized.width
@@ -125,19 +128,20 @@ async function prepareImageMedia(asset: ImagePicker.ImagePickerAsset): Promise<L
     }
   }
 
-  return buildOriginalImageMediaFallback(asset, lastError);
+  return buildOriginalImageMediaFallback(asset, lastError, qualityMode);
 }
 
 async function prepareCameraMediaAssets(
   assets: ImagePicker.ImagePickerAsset[],
-  onProgress?: (progress: number) => void
+  onProgress?: (progress: number) => void,
+  qualityMode: ChatMediaQualityMode = 'standard'
 ): Promise<LocalChatMediaInput[]> {
   const preparedMedia: LocalChatMediaInput[] = [];
 
   for (let index = 0; index < assets.length; index += 1) {
     const asset = assets[index];
 
-    preparedMedia.push(await prepareCameraMediaAsset(asset, onProgress));
+    preparedMedia.push(await prepareCameraMediaAsset(asset, onProgress, qualityMode));
     onProgress?.((index + 1) / Math.max(assets.length, 1));
     await waitForImageManipulatorRecovery();
   }
@@ -147,86 +151,60 @@ async function prepareCameraMediaAssets(
 
 async function prepareCameraMediaAsset(
   asset: ImagePicker.ImagePickerAsset,
-  onProgress?: (progress: number) => void
+  onProgress?: (progress: number) => void,
+  qualityMode: ChatMediaQualityMode = 'standard'
 ): Promise<LocalChatMediaInput> {
   const assetType = asset.type === 'video' ? 'video' : 'image';
 
   if (assetType === 'video') {
-    return prepareVideoMedia(asset, onProgress);
+    return prepareVideoMedia(asset, onProgress, qualityMode);
   }
 
-  return prepareImageMedia(asset);
+  return prepareImageMedia(asset, qualityMode);
 }
 
 async function prepareVideoMedia(
   asset: ImagePicker.ImagePickerAsset,
-  onProgress?: (progress: number) => void
+  onProgress?: (progress: number) => void,
+  qualityMode: ChatMediaQualityMode = 'standard'
 ): Promise<LocalChatMediaInput> {
   const originalContentType = getAssetVideoContentType(asset);
-  const compressedUri = await compressVideo(asset.uri, originalContentType === 'video/mp4', onProgress);
-  const sizeBytes = await getFileSize(compressedUri);
-  const isCompressedOutput = compressedUri !== asset.uri;
+  const originalSizeBytes = asset.fileSize || await getFileSize(asset.uri);
 
-  if (sizeBytes <= 0) {
-    throw new Error('Unable to prepare this video. Please choose another video.');
+  if (originalSizeBytes > CHAT_MEDIA_LIMITS.video) {
+    throw new Error(`This video is ${formatPickerByteCount(originalSizeBytes)}. Synzapp currently allows videos up to ${formatPickerByteCount(CHAT_MEDIA_LIMITS.video)}.`);
   }
+
+  onProgress?.(0.1);
+  const sizeBytes = originalSizeBytes || 1;
 
   if (sizeBytes > CHAT_MEDIA_LIMITS.video) {
-    throw new Error('Video is too large after compression. Please choose a shorter video.');
+    throw new Error(`This video is ${formatPickerByteCount(sizeBytes)}. Synzapp currently allows videos up to ${formatPickerByteCount(CHAT_MEDIA_LIMITS.video)}.`);
   }
 
+  onProgress?.(0.45);
   return await attachMediaThumbnail({
-    contentType: isCompressedOutput ? 'video/mp4' : originalContentType,
+    contentType: originalContentType,
     durationMs: asset.duration || undefined,
-    fileName: isCompressedOutput ? getVideoFileName(asset) : getAssetFileName(asset, 'video.mp4'),
+    fileName: getAssetFileName(asset, 'video.mp4'),
     height: asset.height || undefined,
     kind: 'video',
+    originalContentType,
+    originalHeight: asset.height || undefined,
+    originalSizeBytes: originalSizeBytes > 0 ? originalSizeBytes : undefined,
+    originalUri: asset.uri,
+    originalWidth: asset.width || undefined,
+    qualityMode,
     sizeBytes,
-    uri: compressedUri,
+    uri: asset.uri,
     width: asset.width || undefined
-  }, compressedUri);
-}
-
-async function compressVideo(
-  uri: string,
-  allowOriginalFallback: boolean,
-  onProgress?: (progress: number) => void
-): Promise<string> {
-  const originalSizeBytes = await getFileSize(uri);
-
-  try {
-    const compressor = await import('react-native-compressor');
-
-    return await compressor.Video.compress(
-      uri,
-      {
-        compressionMethod: 'auto',
-        maxSize: CHAT_VIDEO_MAX_DIMENSION,
-        minimumFileSizeForCompress: CHAT_VIDEO_MIN_COMPRESS_MB
-      },
-      (progress: number) => onProgress?.(Math.min(Math.max(progress, 0), 1))
-    );
-  } catch (error) {
-    if (
-      allowOriginalFallback &&
-      !isVideoCompressorUnavailableError(error) &&
-      originalSizeBytes > 0 &&
-      originalSizeBytes <= CHAT_MEDIA_LIMITS.video
-    ) {
-      return uri;
-    }
-
-    if (isVideoCompressorUnavailableError(error)) {
-      throw new Error('Video compression is not available in this build. Please install the latest Synzapp development build.');
-    }
-
-    throw new Error('Unable to compress this video. Please choose a shorter video or try again.');
-  }
+  }, asset.uri);
 }
 
 async function buildOriginalImageMediaFallback(
   asset: ImagePicker.ImagePickerAsset,
-  lastError: unknown
+  lastError: unknown,
+  qualityMode: ChatMediaQualityMode
 ): Promise<LocalChatMediaInput> {
   const contentType = getAssetImageContentType(asset);
   const sizeBytes = await getFileSize(asset.uri);
@@ -237,6 +215,12 @@ async function buildOriginalImageMediaFallback(
       fileName: getAssetFileName(asset, contentType === 'image/png' ? 'photo.png' : 'photo.jpg'),
       height: asset.height || undefined,
       kind: 'image',
+      originalContentType: contentType,
+      originalHeight: asset.height || undefined,
+      originalSizeBytes: sizeBytes,
+      originalUri: asset.uri,
+      originalWidth: asset.width || undefined,
+      qualityMode,
       sizeBytes,
       uri: asset.uri,
       width: asset.width || undefined
@@ -270,6 +254,12 @@ async function buildOriginalImageMediaIfSendable(
     fileName: getAssetFileName(asset, contentType === 'image/png' ? 'photo.png' : 'photo.jpg'),
     height: asset.height || undefined,
     kind: 'image',
+    originalContentType: contentType,
+    originalHeight: asset.height || undefined,
+    originalSizeBytes: sizeBytes,
+    originalUri: asset.uri,
+    originalWidth: asset.width || undefined,
+    qualityMode: 'hd',
     sizeBytes,
     uri: asset.uri,
     width: asset.width || undefined
@@ -336,16 +326,23 @@ async function generateImageThumbnail(sourceUri: string): Promise<PreparedMediaT
 }
 
 async function generateVideoThumbnail(sourceUri: string): Promise<PreparedMediaThumbnail | null> {
-  try {
-    const poster = await VideoThumbnails.getThumbnailAsync(sourceUri, {
-      quality: 0.62,
-      time: 900
-    });
+  for (const time of [500, 900, 1500, 0]) {
+    try {
+      const poster = await VideoThumbnails.getThumbnailAsync(sourceUri, {
+        quality: 0.68,
+        time
+      });
+      const thumbnail = await generateImageThumbnail(poster.uri);
 
-    return await generateImageThumbnail(poster.uri);
-  } catch {
-    return null;
+      if (thumbnail) {
+        return thumbnail;
+      }
+    } catch {
+      await waitForImageManipulatorRecovery();
+    }
   }
+
+  return null;
 }
 
 function getAssetImageContentType(asset: ImagePicker.ImagePickerAsset): string | null {
@@ -480,105 +477,49 @@ async function launchLibrary() {
     allowsMultipleSelection: true,
     mediaTypes: ImagePicker.MediaTypeOptions.All,
     orderedSelection: true,
-    preferredAssetRepresentationMode: ImagePicker.UIImagePickerPreferredAssetRepresentationMode.Compatible,
+    preferredAssetRepresentationMode: ImagePicker.UIImagePickerPreferredAssetRepresentationMode.Current,
     quality: CHAT_IMAGE_QUALITY,
     selectionLimit: CHAT_LIBRARY_SELECTION_LIMIT,
     videoMaxDuration: 180
   });
 }
 
-function selectCameraMediaSource(): Promise<ChatCameraSource | null> {
-  return new Promise((resolve) => {
-    let resolved = false;
-    const done = (source: ChatCameraSource | null) => {
-      if (resolved) {
-        return;
-      }
+function normalizePhotoLibraryError(error: unknown): Error {
+  if (isPhotoLibraryExportError(error)) {
+    return new Error('iOS could not export this video from Photos. If it is stored in iCloud, open the video in Photos first so it downloads to this device, then try again. If it is a very large video, send a shorter clip or lower-quality copy.');
+  }
 
-      resolved = true;
-      resolve(source);
-    };
+  return error instanceof Error
+    ? error
+    : new Error('Unable to open the photo library. Please try again.');
+}
 
-    if (Platform.OS === 'ios') {
-      ActionSheetIOS.showActionSheetWithOptions(
-        {
-          cancelButtonIndex: 3,
-          options: ['Take photo', 'Record video', 'Choose from library', 'Cancel'],
-          title: 'Send media'
-        },
-        (buttonIndex) => {
-          if (buttonIndex === 0) {
-            done('photo');
-            return;
-          }
+function isPhotoLibraryExportError(error: unknown): boolean {
+  const message = error instanceof Error
+    ? error.message
+    : typeof error === 'string'
+      ? error
+      : '';
 
-          if (buttonIndex === 1) {
-            done('video');
-            return;
-          }
+  return /PHPhotosErrorDomain|PhotosError|error\s*3164|NSItemProvider|Cannot\s+load|couldn'?t\s+be\s+completed/i.test(message);
+}
 
-          if (buttonIndex === 2) {
-            done('library');
-            return;
-          }
+function formatPickerByteCount(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return '0 MB';
+  }
 
-          done(null);
-        }
-      );
-      return;
-    }
+  const mb = bytes / (1024 * 1024);
 
-    Alert.alert(
-      'Send media',
-      'Take a photo, record a video, or choose from your library.',
-      [
-        {
-          onPress: () => done('photo'),
-          text: 'Take photo'
-        },
-        {
-          onPress: () => done('video'),
-          text: 'Record video'
-        },
-        {
-          onPress: () => done('library'),
-          text: 'Library'
-        },
-        {
-          onPress: () => done(null),
-          style: 'cancel',
-          text: 'Cancel'
-        }
-      ],
-      {
-        cancelable: true,
-        onDismiss: () => done(null)
-      }
-    );
-  });
+  return `${mb >= 10 ? Math.round(mb) : Math.round(mb * 10) / 10} MB`;
 }
 
 async function getFileSize(uri: string): Promise<number> {
-  const info = await FileSystem.getInfoAsync(uri);
+  const info = await FileSystem.getInfoAsync(uri).catch(() => null);
 
-  return info.exists && typeof info.size === 'number' ? info.size : 0;
+  return info?.exists && typeof info.size === 'number' ? info.size : 0;
 }
 
 function getAssetFileName(asset: ImagePicker.ImagePickerAsset, fallback: string): string {
   return (asset.fileName || fallback).replace(/[^\w .()+-]/g, '_').slice(0, 120) || fallback;
-}
-
-function getVideoFileName(asset: ImagePicker.ImagePickerAsset): string {
-  const rawFileName = getAssetFileName(asset, 'video.mp4');
-  const baseName = rawFileName.replace(/\.[A-Za-z0-9]+$/, '').trim() || 'video';
-
-  return `${baseName.slice(0, 112)}.mp4`;
-}
-
-function isVideoCompressorUnavailableError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-
-  return /cannot find module|native module|turbo.?module|not available|undefined is not an object|video.*compress/i.test(error.message);
 }

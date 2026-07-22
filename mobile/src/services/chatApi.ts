@@ -189,6 +189,7 @@ export interface ChatMessageReaction {
 export type ChatMessageReactionMap = Record<string, ChatMessageReaction[]>;
 
 export type ChatMediaKind = 'audio' | 'file' | 'image' | 'video';
+export type ChatMediaQualityMode = 'hd' | 'standard';
 export type ChatMediaTransferStatus = 'available' | 'downloading' | 'failed' | 'queued' | 'uploading';
 
 export interface ChatMediaAttachment {
@@ -202,6 +203,7 @@ export interface ChatMediaAttachment {
   localUri?: string;
   mediaId?: string;
   nonce?: string;
+  qualityMode?: ChatMediaQualityMode;
   sizeBytes: number;
   thumbnailContentType?: string;
   thumbnailDataUrl?: string;
@@ -1610,6 +1612,7 @@ function normalizeChatMediaAttachment(
   const mediaId = typeof media.mediaId === 'string' ? media.mediaId.trim() : '';
   const key = typeof media.key === 'string' ? media.key.trim() : '';
   const nonce = typeof media.nonce === 'string' ? media.nonce.trim() : '';
+  const qualityMode = media.qualityMode === 'hd' ? 'hd' : media.qualityMode === 'standard' ? 'standard' : undefined;
   const contentType = typeof media.contentType === 'string' && media.contentType.trim()
     ? media.contentType.trim().toLowerCase()
     : kind === 'image'
@@ -1644,6 +1647,7 @@ function normalizeChatMediaAttachment(
     localUri: localUri || (dataUrl || undefined),
     mediaId: mediaId || undefined,
     nonce: nonce || undefined,
+    qualityMode,
     sizeBytes: Number.isFinite(media.sizeBytes) ? Math.max(Math.round(media.sizeBytes || 0), 0) : 0,
     thumbnailContentType: thumbnailDataUrl
       ? thumbnailContentType || getDataUrlContentType(thumbnailDataUrl) || 'image/jpeg'

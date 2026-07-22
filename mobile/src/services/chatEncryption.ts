@@ -520,6 +520,7 @@ function normalizeMediaAttachment(media?: Partial<ChatMediaAttachment> | null): 
   const nonce = typeof media.nonce === 'string' ? media.nonce.trim() : '';
   const contentType = typeof media.contentType === 'string' ? media.contentType.trim().toLowerCase() : '';
   const fileName = typeof media.fileName === 'string' ? media.fileName.trim().slice(0, 180) : '';
+  const qualityMode = media.qualityMode === 'hd' ? 'hd' : media.qualityMode === 'standard' ? 'standard' : undefined;
   const thumbnailDataUrl = typeof media.thumbnailDataUrl === 'string' ? media.thumbnailDataUrl.trim() : '';
   const thumbnailContentType = typeof media.thumbnailContentType === 'string'
     ? media.thumbnailContentType.trim().toLowerCase()
@@ -539,6 +540,7 @@ function normalizeMediaAttachment(media?: Partial<ChatMediaAttachment> | null): 
     kind,
     mediaId,
     nonce,
+    qualityMode,
     sizeBytes: Number.isFinite(media.sizeBytes) ? Math.max(Math.round(media.sizeBytes || 0), 0) : 0,
     thumbnailContentType: thumbnailDataUrl
       ? thumbnailContentType || getDataUrlContentType(thumbnailDataUrl) || 'image/jpeg'

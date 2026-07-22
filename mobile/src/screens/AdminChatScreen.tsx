@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEvent } from 'expo';
 import { BlurView } from 'expo-blur';
 import * as Calendar from 'expo-calendar';
 import * as Clipboard from 'expo-clipboard';
@@ -34,6 +35,7 @@ import {
   Platform,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   StatusBar as RNStatusBar,
   Text,
@@ -45,6 +47,7 @@ import DateTimePicker, {
   DateTimePickerAndroid,
   type DateTimePickerEvent
 } from '@react-native-community/datetimepicker';
+import NetInfo, { type NetInfoState } from '@react-native-community/netinfo';
 import Feather from '@expo/vector-icons/Feather';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import EmojiPicker, { type EmojiType } from 'rn-emoji-keyboard';
@@ -212,10 +215,12 @@ import { getCachedProfilePhotoUri } from '../services/profilePhotoCache';
 import { openChatAttachmentFile } from '../services/chatAttachmentOpener';
 import {
   pickNativeChatCameraMedia,
-  pickNativeChatFile
+  pickNativeChatFile,
+  pickNativeChatLibraryMedia
 } from '../services/chatAttachmentPicker';
 import {
   cacheLocalChatMedia,
+  type ChatMediaQualityMode,
   CHAT_MEDIA_LIMITS,
   downloadAndDecryptChatMedia,
   LocalChatMediaInput,
@@ -337,9 +342,17 @@ interface MediaReviewItem {
   media: LocalChatMediaInput;
 }
 
+interface ChatMediaNetworkPolicy {
+  canAutoDownloadFiles: boolean;
+  canAutoDownloadImages: boolean;
+  isConnectionExpensive: boolean;
+  networkLabel: string;
+}
+
 interface MediaViewerState {
   activeIndex: number;
   items: ChatMediaAttachment[];
+  sourceMessage: ChatMessage;
   title: string;
 }
 
@@ -404,6 +417,7 @@ const KEY_RESULT_ROW_ACTION_WIDTH = 124;
 const KEY_RESULT_ROW_SWIPE_TRIGGER = 18;
 const KEY_RESULT_UNIT_MODAL_HORIZONTAL_PADDING = 18;
 const CHAT_SMALL_FILE_AUTO_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024;
+const CHAT_CELLULAR_IMAGE_AUTO_DOWNLOAD_MAX_BYTES = 1.5 * 1024 * 1024;
 const VOICE_NOTE_MIN_DURATION_MS = 700;
 const VOICE_NOTE_RECORDING_OPTIONS = RecordingPresets.LOW_QUALITY;
 const CHAT_AUDIO_PLAYBACK_MODE: AudioMode = {
@@ -910,9 +924,14 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const [mediaReviewItems, setMediaReviewItems] = useState<MediaReviewItem[]>([]);
   const [mediaReviewActiveIndex, setMediaReviewActiveIndex] = useState(0);
   const [mediaReviewCaption, setMediaReviewCaption] = useState('');
+  const [mediaReviewQualityMode, setMediaReviewQualityMode] = useState<ChatMediaQualityMode>('standard');
   const [isSendingMediaReview, setIsSendingMediaReview] = useState(false);
+  const [chatMediaNetworkPolicy, setChatMediaNetworkPolicy] = useState<ChatMediaNetworkPolicy>(() =>
+    buildChatMediaNetworkPolicy(null)
+  );
   const [audioAttachmentPreview, setAudioAttachmentPreview] = useState<AudioAttachmentPreviewState | null>(null);
   const [mediaViewer, setMediaViewer] = useState<MediaViewerState | null>(null);
+  const [preparingVideoKey, setPreparingVideoKey] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [messageActionTarget, setMessageActionTarget] = useState<ChatMessage | null>(null);
   const [replyTarget, setReplyTarget] = useState<ChatMessage | null>(null);
@@ -1014,6 +1033,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const pendingSyncContactIdsRef = useRef<Set<string>>(new Set());
   const activePushHydrationContactIdsRef = useRef<Set<string>>(new Set());
   const activeMediaDownloadPromisesRef = useRef<Map<string, Promise<string | null>>>(new Map());
+  const chatMediaNetworkPolicyRef = useRef<ChatMediaNetworkPolicy>(chatMediaNetworkPolicy);
   const organizationDeletionProgressAnim = useRef(new Animated.Value(0)).current;
   const hasPromptedOfflineAiInstallRef = useRef(false);
   const chatContactsRef = useRef<ChatContact[]>([]);
@@ -1449,6 +1469,10 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   }, [messages]);
 
   useEffect(() => {
+    chatMediaNetworkPolicyRef.current = chatMediaNetworkPolicy;
+  }, [chatMediaNetworkPolicy]);
+
+  useEffect(() => {
     activeSynzappCallRef.current = activeSynzappCall;
   }, [activeSynzappCall]);
 
@@ -1486,7 +1510,19 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     }
 
     queueMediaDownloadsForMessages(selectedChat.contactId, messages, selectedChat.chatType);
-  }, [messages, selectedChat?.chatType, selectedChat?.contactId]);
+  }, [chatMediaNetworkPolicy, messages, selectedChat?.chatType, selectedChat?.contactId]);
+
+  useEffect(() => {
+    const unsubscribe = NetInfo.addEventListener((state) => {
+      setChatMediaNetworkPolicy(buildChatMediaNetworkPolicy(state));
+    });
+
+    void NetInfo.fetch()
+      .then((state) => setChatMediaNetworkPolicy(buildChatMediaNetworkPolicy(state)))
+      .catch(() => undefined);
+
+    return unsubscribe;
+  }, []);
 
   useEffect(() => () => {
     if (backupSyncTimerRef.current) {
@@ -6816,7 +6852,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           !media.mediaId ||
           !media.key ||
           !media.nonce ||
-          shouldSkipAutomaticMediaDownload(media) ||
+          shouldSkipAutomaticMediaDownload(media, chatMediaNetworkPolicyRef.current) ||
           media.localUri ||
           media.transferStatus === 'downloading' ||
           media.transferStatus === 'failed'
@@ -6904,15 +6940,46 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         return;
       }
 
-      const cachedMediaItems = await Promise.all(localMediaItems.map(cacheLocalChatMedia));
-
       setError(null);
-      setMediaReviewItems(cachedMediaItems.map((localMedia, index) => ({
+      setMediaReviewItems(localMediaItems.map((localMedia, index) => ({
         id: `media_review_${Date.now()}_${index}_${localMedia.fileName}`,
         media: localMedia
       })));
       setMediaReviewActiveIndex(0);
       setMediaReviewCaption('');
+      setMediaReviewQualityMode('standard');
+    } catch (nextError) {
+      Alert.alert('Media not sent', getErrorMessage(nextError, 'Unable to prepare this media.'));
+    }
+  }
+
+  async function handlePickChatMediaLibrary() {
+    if (!selectedChat || activeTrashSegmentIdRef.current) {
+      return;
+    }
+
+    const activeChat = selectedChat;
+
+    if (!activeChat.hasActiveDevice) {
+      setError(getChatDeviceNotReadyMessage(activeChat));
+      return;
+    }
+
+    try {
+      const localMediaItems = await pickNativeChatLibraryMedia();
+
+      if (!localMediaItems?.length) {
+        return;
+      }
+
+      setError(null);
+      setMediaReviewItems(localMediaItems.map((localMedia, index) => ({
+        id: `media_review_${Date.now()}_${index}_${localMedia.fileName}`,
+        media: localMedia
+      })));
+      setMediaReviewActiveIndex(0);
+      setMediaReviewCaption('');
+      setMediaReviewQualityMode('standard');
     } catch (nextError) {
       Alert.alert('Media not sent', getErrorMessage(nextError, 'Unable to prepare this media.'));
     }
@@ -6926,6 +6993,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     setMediaReviewItems([]);
     setMediaReviewActiveIndex(0);
     setMediaReviewCaption('');
+    setMediaReviewQualityMode('standard');
   }
 
   function handleSelectMediaReviewIndex(index: number) {
@@ -6970,6 +7038,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     setMediaReviewItems([]);
     setMediaReviewActiveIndex(0);
     setMediaReviewCaption('');
+    setMediaReviewQualityMode('standard');
     setIsSendingMediaReview(false);
     setError(null);
 
@@ -6978,7 +7047,9 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         activeChat,
         clearDraft: false,
         media: null,
-        mediaItems: itemsToSend.map((item) => buildLocalChatMediaAttachment(item.media)),
+        mediaItems: itemsToSend.map((item) => buildLocalChatMediaAttachment(
+          applyMediaReviewQualityMode(item.media, mediaReviewQualityMode)
+        )),
         replyReference,
         text: caption
       });
@@ -6991,7 +7062,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       void queueAndSendChatPayload({
         activeChat,
         clearDraft: false,
-        media: buildLocalChatMediaAttachment(item.media),
+        media: buildLocalChatMediaAttachment(applyMediaReviewQualityMode(item.media, mediaReviewQualityMode)),
         mediaItems: [],
         replyReference,
         text: caption
@@ -7441,6 +7512,9 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       return;
     }
 
+    const videoPreparationKey = getMediaPreparationKey(message.messageId, selectedMedia, activeIndex);
+    setPreparingVideoKey(videoPreparationKey);
+
     try {
       let localUri = getMediaLocalUri(selectedMedia);
 
@@ -7484,10 +7558,43 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       setMediaViewer({
         activeIndex: Math.max(0, Math.min(viewerIndex, preparedItems.length - 1)),
         items: preparedItems,
+        sourceMessage: message,
         title: activeChat?.title || 'Video'
       });
     } catch (nextError) {
       Alert.alert('Video unavailable', getErrorMessage(nextError, 'Unable to open this video.'));
+    } finally {
+      setPreparingVideoKey((currentKey) => currentKey === videoPreparationKey ? null : currentKey);
+    }
+  }
+
+  async function handleShareMediaAttachment(media: ChatMediaAttachment, message?: ChatMessage): Promise<void> {
+    if (!media) {
+      return;
+    }
+
+    try {
+      let shareUri = getMediaLocalUri(media);
+
+      if (!shareUri && selectedChatRef.current && media.mediaId && media.key && media.nonce) {
+        shareUri = await downloadMediaForMessage(
+          selectedChatRef.current.contactId,
+          selectedChatRef.current.chatType,
+          message?.messageId || media.mediaId,
+          media
+        ) || '';
+      }
+
+      if (!shareUri) {
+        throw new Error('This media is not available on this device yet.');
+      }
+
+      await Share.share({
+        message: media.fileName || 'Synzapp media',
+        url: shareUri
+      });
+    } catch (nextError) {
+      Alert.alert('Share unavailable', getErrorMessage(nextError, 'Unable to share this media.'));
     }
   }
 
@@ -7511,6 +7618,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     setMediaViewer({
       activeIndex: Math.max(0, Math.min(viewerIndex, mediaItems.length - 1)),
       items: mediaItems,
+      sourceMessage: message,
       title: selectedChatRef.current?.title || 'Media'
     });
   }
@@ -9787,6 +9895,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         <MessageHeader
           chat={selectedChat}
           onlineCount={activeGroupOnlineCount}
+          messageCount={uniqueChatMessages(messages).length}
           onBack={handleCloseChat}
           onOpenContactInfo={handleOpenContactInfo}
           onOpenGroupCallOptions={handleOpenGroupCallOptions}
@@ -9939,12 +10048,16 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           onCloseSearch={handleCloseConversationSearch}
           onOpenMedia={handleOpenMessageAttachment}
           onPrepareAttachment={handlePrepareAttachment}
+          preparingVideoKey={preparingVideoKey}
           onMessageReply={handleReplyToMessage}
           onPickFile={() => {
             void handlePickChatFile();
           }}
           onPickMedia={() => {
             void handlePickChatMedia();
+          }}
+          onPickMediaLibrary={() => {
+            void handlePickChatMediaLibrary();
           }}
           onToggleForwardMessage={handleToggleForwardMessage}
           onSend={() => {
@@ -10415,14 +10528,38 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         items={mediaReviewItems}
         onCancel={handleCancelMediaReview}
         onCaptionChange={handleUpdateMediaReviewCaption}
+        onQualityModeChange={setMediaReviewQualityMode}
         onRemoveItem={handleRemoveMediaReviewItem}
         onSelectIndex={handleSelectMediaReviewIndex}
         onSend={handleSendMediaReview}
+        qualityMode={mediaReviewQualityMode}
       />
 
       <MediaViewerModal
-        state={mediaViewer}
         onClose={() => setMediaViewer(null)}
+        onDelete={(message) => {
+          setMediaViewer(null);
+          handleDeleteMessageForMe(message);
+        }}
+        onForward={(message) => {
+          setMediaViewer(null);
+          handleForwardMessage(message);
+        }}
+        onInfo={(message) => {
+          setMediaViewer(null);
+          handleShowMessageInfo(message);
+        }}
+        onReply={(message) => {
+          setMediaViewer(null);
+          handleReplyToMessage(message);
+        }}
+        onShare={handleShareMediaAttachment}
+        onStar={(message) => {
+          setMediaViewer(null);
+          handleToggleMessageStar(message);
+        }}
+        starred={mediaViewer ? Boolean(starredMessageIds[mediaViewer.sourceMessage.messageId]) : false}
+        state={mediaViewer}
       />
 
       <AudioAttachmentPreviewModal
@@ -13050,6 +13187,7 @@ function SynzappCallVideoSurface({
 
 function MessageHeader({
   chat,
+  messageCount,
   onlineCount,
   onBack,
   onOpenContactInfo,
@@ -13061,6 +13199,7 @@ function MessageHeader({
   profilePhotoHeaders
 }: {
   chat: ChatItem;
+  messageCount: number;
   onlineCount: number;
   onBack: () => void;
   onOpenContactInfo: () => void;
@@ -13072,6 +13211,7 @@ function MessageHeader({
   profilePhotoHeaders?: Record<string, string>;
 }) {
   const isGroupChat = chat.chatType === 'GROUP';
+  const messageCountLabel = formatCompactCount(messageCount);
   const presenceText = chat.chatType === 'GROUP'
     ? formatGroupOnlineCount(onlineCount)
     : chat.isOnline
@@ -13088,6 +13228,15 @@ function MessageHeader({
         style={({ pressed }) => [styles.messageBackButton, pressed && styles.pressed]}
       >
         <Text style={styles.messageBackText}>‹</Text>
+        {messageCount > 0 ? (
+          <Text
+            accessibilityLabel={`${messageCount} messages in this chat`}
+            numberOfLines={1}
+            style={styles.messageBackCountText}
+          >
+            {messageCountLabel}
+          </Text>
+        ) : null}
       </Pressable>
 
       <Pressable
@@ -13228,9 +13377,11 @@ function MediaReviewModal({
   items,
   onCancel,
   onCaptionChange,
+  onQualityModeChange,
   onRemoveItem,
   onSelectIndex,
-  onSend
+  onSend,
+  qualityMode
 }: {
   activeIndex: number;
   caption: string;
@@ -13239,9 +13390,11 @@ function MediaReviewModal({
   items: MediaReviewItem[];
   onCancel: () => void;
   onCaptionChange: (value: string) => void;
+  onQualityModeChange: (value: ChatMediaQualityMode) => void;
   onRemoveItem: (index: number) => void;
   onSelectIndex: (index: number) => void;
   onSend: () => void;
+  qualityMode: ChatMediaQualityMode;
 }) {
   const appTheme = useAppTheme();
   const insets = useSafeAreaInsets();
@@ -13303,6 +13456,24 @@ function MediaReviewModal({
 
           <View style={styles.mediaReviewTools}>
             <Pressable
+              accessibilityLabel={qualityMode === 'hd' ? 'Send media in standard quality' : 'Send media in HD quality'}
+              accessibilityRole="switch"
+              accessibilityState={{ checked: qualityMode === 'hd' }}
+              onPress={() => onQualityModeChange(qualityMode === 'hd' ? 'standard' : 'hd')}
+              style={({ pressed }) => [
+                styles.mediaReviewQualityPill,
+                qualityMode === 'hd' && styles.mediaReviewQualityPillActive,
+                pressed && styles.pressed
+              ]}
+            >
+              <Text style={[
+                styles.mediaReviewQualityText,
+                qualityMode === 'hd' && styles.mediaReviewQualityTextActive
+              ]}>
+                {qualityMode === 'hd' ? 'HD' : 'Standard'}
+              </Text>
+            </Pressable>
+            <Pressable
               accessibilityLabel="Add caption text"
               accessibilityRole="button"
               onPress={() => captionInputRef.current?.focus()}
@@ -13332,30 +13503,39 @@ function MediaReviewModal({
             horizontal
             showsHorizontalScrollIndicator={false}
           >
-            {items.map((item, index) => (
-              <Pressable
-                accessibilityLabel={`Preview item ${index + 1}`}
-                accessibilityRole="button"
-                key={item.id}
-                onPress={() => onSelectIndex(index)}
-                style={[
-                  styles.mediaReviewThumbnail,
-                  index === activeIndex && styles.mediaReviewThumbnailActive
-                ]}
-              >
-                {item.media.kind === 'image' ? (
+            {items.map((item, index) => {
+              const previewUri = getLocalChatMediaPreviewUri(item.media);
+
+              return (
+                <Pressable
+                  accessibilityLabel={`Preview item ${index + 1}`}
+                  accessibilityRole="button"
+                  key={item.id}
+                  onPress={() => onSelectIndex(index)}
+                  style={[
+                    styles.mediaReviewThumbnail,
+                    index === activeIndex && styles.mediaReviewThumbnailActive
+                  ]}
+                >
+                  {previewUri ? (
                   <Image
                     resizeMode="cover"
-                    source={{ uri: item.media.uri }}
+                    source={{ uri: previewUri }}
                     style={styles.mediaReviewThumbnailImage}
                   />
-                ) : (
-                  <View style={styles.mediaReviewThumbnailVideo}>
-                    <Feather color="#FFFFFF" name="play" size={14} />
-                  </View>
-                )}
-              </Pressable>
-            ))}
+                  ) : (
+                    <View style={styles.mediaReviewThumbnailVideo}>
+                      <Feather color="#FFFFFF" name="play" size={14} />
+                    </View>
+                  )}
+                  {item.media.kind === 'video' ? (
+                    <View style={styles.mediaReviewThumbnailPlayBadge}>
+                      <Feather color="#FFFFFF" name="play" size={9} />
+                    </View>
+                  ) : null}
+                </Pressable>
+              );
+            })}
           </ScrollView>
         </View>
 
@@ -13371,21 +13551,24 @@ function MediaReviewModal({
           showsHorizontalScrollIndicator={false}
           style={styles.mediaReviewPager}
         >
-          {items.map((item, index) => (
-            <View
-              key={item.id}
-              style={[
-                styles.mediaReviewSlide,
-                {
-                  height: previewHeight,
-                  width
-                }
-              ]}
-            >
-              {item.media.kind === 'image' ? (
+          {items.map((item, index) => {
+            const previewUri = getLocalChatMediaPreviewUri(item.media);
+
+            return (
+              <View
+                key={item.id}
+                style={[
+                  styles.mediaReviewSlide,
+                  {
+                    height: previewHeight,
+                    width
+                  }
+                ]}
+              >
+              {previewUri ? (
                 <Image
                   resizeMode="contain"
-                  source={{ uri: item.media.uri }}
+                  source={{ uri: previewUri }}
                   style={styles.mediaReviewPreviewImage}
                 />
               ) : (
@@ -13396,6 +13579,13 @@ function MediaReviewModal({
                   </Text>
                 </View>
               )}
+              {item.media.kind === 'video' && previewUri ? (
+                <View style={styles.mediaReviewVideoPosterOverlay}>
+                  <Text style={styles.mediaReviewVideoMeta}>
+                    Video • {formatMediaDuration(item.media.durationMs)} • {formatByteCount(item.media.sizeBytes)}
+                  </Text>
+                </View>
+              ) : null}
 
               {items.length > 1 ? (
                 <Pressable
@@ -13412,7 +13602,8 @@ function MediaReviewModal({
                 </Pressable>
               ) : null}
             </View>
-          ))}
+            );
+          })}
         </ScrollView>
 
         <View style={[
@@ -13471,9 +13662,23 @@ function MediaReviewModal({
 
 function MediaViewerModal({
   onClose,
+  onDelete,
+  onForward,
+  onInfo,
+  onReply,
+  onShare,
+  onStar,
+  starred,
   state
 }: {
   onClose: () => void;
+  onDelete: (message: ChatMessage) => void;
+  onForward: (message: ChatMessage) => void;
+  onInfo: (message: ChatMessage) => void;
+  onReply: (message: ChatMessage) => void;
+  onShare: (media: ChatMediaAttachment, message: ChatMessage) => void | Promise<void>;
+  onStar: (message: ChatMessage) => void;
+  starred: boolean;
   state: MediaViewerState | null;
 }) {
   const insets = useSafeAreaInsets();
@@ -13501,7 +13706,8 @@ function MediaViewerModal({
   }
 
   const activeMedia = state.items[activeIndex] || state.items[0];
-  const viewerHeight = Math.max(260, height - insets.top - insets.bottom - 128);
+  const viewerHeight = Math.max(260, height - insets.top - insets.bottom - 178);
+  const sourceMessage = state.sourceMessage;
 
   return (
     <Modal
@@ -13522,14 +13728,30 @@ function MediaViewerModal({
             onPress={onClose}
             style={({ pressed }) => [styles.mediaViewerCloseButton, pressed && styles.pressed]}
           >
-            <Ionicons color="#FFFFFF" name="close" size={24} />
+            <Ionicons color="#0F172A" name="chevron-back" size={26} />
           </Pressable>
           <View style={styles.mediaViewerTitleWrap}>
             <Text numberOfLines={1} style={styles.mediaViewerTitle}>{state.title}</Text>
             <Text numberOfLines={1} style={styles.mediaViewerSubtitle}>
-              {activeIndex + 1} of {state.items.length}
+              {formatMessageDateTime(sourceMessage.sentAt)}
             </Text>
           </View>
+          <Pressable
+            accessibilityLabel="Edit video"
+            accessibilityRole="button"
+            onPress={() => Alert.alert('Edit media', 'Video trimming and markup will open from this control when media editing is enabled for videos.')}
+            style={({ pressed }) => [styles.mediaViewerTopActionButton, pressed && styles.pressed]}
+          >
+            <Feather color="#0F172A" name="edit-2" size={18} />
+          </Pressable>
+          <Pressable
+            accessibilityLabel="Media information"
+            accessibilityRole="button"
+            onPress={() => onInfo(sourceMessage)}
+            style={({ pressed }) => [styles.mediaViewerTopActionButton, pressed && styles.pressed]}
+          >
+            <Feather color="#0F172A" name="more-horizontal" size={20} />
+          </Pressable>
         </View>
 
         <ScrollView
@@ -13562,6 +13784,7 @@ function MediaViewerModal({
                 {media.kind === 'video' && localUri ? (
                   <MediaViewerVideoSlide
                     fileName={media.fileName}
+                    media={media}
                     posterUri={previewUri}
                     uri={localUri}
                   />
@@ -13651,10 +13874,13 @@ function MediaViewerModal({
             })}
           </ScrollView>
           {activeMedia ? (
-            <Text numberOfLines={1} style={styles.mediaViewerMeta}>
-              {activeMedia.kind === 'video' ? `${formatMediaDuration(activeMedia.durationMs)} • ` : ''}
-              {formatByteCount(activeMedia.sizeBytes)}
-            </Text>
+            <View style={styles.mediaViewerActionRow}>
+              <MediaViewerActionButton icon="share" label="Share" onPress={() => onShare(activeMedia, sourceMessage)} />
+              <MediaViewerActionButton icon="corner-up-right" label="Forward" onPress={() => onForward(sourceMessage)} />
+              <MediaViewerActionButton icon="corner-up-left" label="Reply" onPress={() => onReply(sourceMessage)} />
+              <MediaViewerActionButton icon="star" label={starred ? 'Unstar' : 'Star'} onPress={() => onStar(sourceMessage)} />
+              <MediaViewerActionButton destructive icon="trash-2" label="Delete" onPress={() => onDelete(sourceMessage)} />
+            </View>
           ) : null}
         </View>
       </View>
@@ -13664,13 +13890,19 @@ function MediaViewerModal({
 
 function MediaViewerVideoSlide({
   fileName,
+  media,
   posterUri,
   uri
 }: {
   fileName: string;
+  media: ChatMediaAttachment;
   posterUri: string;
   uri: string;
 }) {
+  const [trackWidth, setTrackWidth] = useState(0);
+  const [speedIndex, setSpeedIndex] = useState(0);
+  const videoViewRef = useRef<VideoView | null>(null);
+  const speeds = [1, 1.5, 2];
   const player = useVideoPlayer({
     metadata: {
       artwork: posterUri || undefined,
@@ -13679,17 +13911,204 @@ function MediaViewerVideoSlide({
     uri
   }, (nextPlayer) => {
     nextPlayer.loop = false;
+    nextPlayer.timeUpdateEventInterval = 0.25;
     nextPlayer.play();
   });
+  const playingEvent = useEvent(player, 'playingChange', { isPlaying: player.playing });
+  const timeEvent = useEvent(player, 'timeUpdate', {
+    bufferedPosition: 0,
+    currentLiveTimestamp: null,
+    currentOffsetFromLive: null,
+    currentTime: player.currentTime
+  });
+  const sourceEvent = useEvent(player, 'sourceLoad', {
+    availableAudioTracks: [],
+    availableSubtitleTracks: [],
+    availableVideoTracks: [],
+    duration: Math.max((media.durationMs || 0) / 1000, 0),
+    videoSource: null
+  });
+  const durationSeconds = Math.max(sourceEvent.duration || player.duration || (media.durationMs || 0) / 1000, 0);
+  const currentSeconds = Math.min(Math.max(timeEvent.currentTime || player.currentTime || 0, 0), Math.max(durationSeconds, 0));
+  const playbackProgress = durationSeconds > 0 ? currentSeconds / durationSeconds : 0;
+  const remainingSeconds = Math.max(durationSeconds - currentSeconds, 0);
+
+  function handleTogglePlayback() {
+    if (playingEvent.isPlaying || player.playing) {
+      player.pause();
+      return;
+    }
+
+    player.play();
+  }
+
+  function handleRestartPlayback() {
+    player.currentTime = 0;
+    player.play();
+  }
+
+  function handleToggleSpeed() {
+    const nextSpeedIndex = (speedIndex + 1) % speeds.length;
+    const nextSpeed = speeds[nextSpeedIndex];
+
+    setSpeedIndex(nextSpeedIndex);
+    player.playbackRate = nextSpeed;
+  }
+
+  function handleSeek(locationX: number) {
+    if (durationSeconds <= 0 || trackWidth <= 0) {
+      return;
+    }
+
+    player.currentTime = clampAudioSeconds(durationSeconds * Math.min(Math.max(locationX / trackWidth, 0), 1), durationSeconds);
+  }
+
+  async function handleEnterFullscreen() {
+    try {
+      await videoViewRef.current?.enterFullscreen();
+    } catch (error) {
+      Alert.alert('Fullscreen unavailable', getErrorMessage(error, 'Unable to open this video in fullscreen.'));
+    }
+  }
+
+  async function handleStartPictureInPicture() {
+    try {
+      await videoViewRef.current?.startPictureInPicture();
+    } catch (error) {
+      Alert.alert('Picture in Picture unavailable', getErrorMessage(error, 'This device does not support Picture in Picture for this video.'));
+    }
+  }
 
   return (
-    <VideoView
-      allowsFullscreen
-      contentFit="contain"
-      nativeControls
-      player={player}
-      style={styles.mediaViewerVideo}
-    />
+    <View style={styles.mediaViewerVideoShell}>
+      <View style={styles.mediaViewerVideoControlsTop}>
+        <Text style={styles.mediaViewerVideoTimeText}>{formatAudioSeconds(currentSeconds)}</Text>
+        <View
+          onLayout={(event) => setTrackWidth(event.nativeEvent.layout.width)}
+          onMoveShouldSetResponder={() => true}
+          onResponderGrant={(event) => {
+            event.stopPropagation();
+            handleSeek(event.nativeEvent.locationX);
+          }}
+          onResponderMove={(event) => {
+            event.stopPropagation();
+            handleSeek(event.nativeEvent.locationX);
+          }}
+          onStartShouldSetResponder={() => true}
+          style={styles.mediaViewerVideoTrackHitArea}
+        >
+          <View style={styles.mediaViewerVideoTrack}>
+            <View style={[
+              styles.mediaViewerVideoTrackFill,
+              { width: `${Math.round(playbackProgress * 100)}%` }
+            ]} />
+            <View style={[
+              styles.mediaViewerVideoTrackThumb,
+              { left: `${Math.round(playbackProgress * 100)}%` }
+            ]} />
+          </View>
+        </View>
+        <Text style={styles.mediaViewerVideoTimeText}>-{formatAudioSeconds(remainingSeconds)}</Text>
+        <Pressable
+          accessibilityLabel="Change playback speed"
+          accessibilityRole="button"
+          onPress={handleToggleSpeed}
+          style={({ pressed }) => [styles.mediaViewerSpeedButton, pressed && styles.pressed]}
+        >
+          <Text style={styles.mediaViewerSpeedText}>{speeds[speedIndex]}x</Text>
+        </Pressable>
+        <Pressable
+          accessibilityLabel="Open full screen"
+          accessibilityRole="button"
+          onPress={() => void handleEnterFullscreen()}
+          style={({ pressed }) => [styles.mediaViewerSpeedButton, pressed && styles.pressed]}
+        >
+          <Feather color="#0F172A" name="maximize" size={16} />
+        </Pressable>
+        <Pressable
+          accessibilityLabel="Start Picture in Picture"
+          accessibilityRole="button"
+          onPress={() => void handleStartPictureInPicture()}
+          style={({ pressed }) => [styles.mediaViewerSpeedButton, pressed && styles.pressed]}
+        >
+          <Feather color="#0F172A" name="copy" size={16} />
+        </Pressable>
+      </View>
+      <View style={styles.mediaViewerVideoStage}>
+        {posterUri ? (
+          <Image
+            blurRadius={playingEvent.isPlaying || player.playing ? 0 : 1}
+            resizeMode="cover"
+            source={{ uri: posterUri }}
+            style={[
+              styles.mediaViewerVideoPosterImage,
+              (playingEvent.isPlaying || player.playing) && styles.mediaViewerVideoPosterImageHidden
+            ]}
+          />
+        ) : null}
+        <VideoView
+          allowsFullscreen
+          allowsPictureInPicture
+          contentFit="contain"
+          nativeControls={false}
+          player={player}
+          ref={videoViewRef}
+          style={styles.mediaViewerVideo}
+        />
+        <Pressable
+          accessibilityLabel={playingEvent.isPlaying || player.playing ? 'Pause video' : 'Play video'}
+          accessibilityRole="button"
+          onPress={handleTogglePlayback}
+          style={({ pressed }) => [
+            styles.mediaViewerVideoCenterButton,
+            pressed && styles.pressed
+          ]}
+        >
+          <Ionicons
+            color="#0F172A"
+            name={playingEvent.isPlaying || player.playing ? 'pause' : 'play'}
+            size={32}
+          />
+        </Pressable>
+        <View style={styles.mediaViewerVideoCaptionBar}>
+          <Text numberOfLines={2} style={styles.mediaViewerVideoCaptionText}>
+            {fileName || 'Synzapp video'}
+          </Text>
+          <Pressable
+            accessibilityLabel="Reply to this video"
+            accessibilityRole="button"
+            onPress={handleRestartPlayback}
+            style={({ pressed }) => [styles.mediaViewerVideoReplyPill, pressed && styles.pressed]}
+          >
+            <Feather color="#FFFFFF" name="rotate-ccw" size={15} />
+            <Text style={styles.mediaViewerVideoReplyText}>Replay</Text>
+          </Pressable>
+        </View>
+      </View>
+    </View>
+  );
+}
+
+function MediaViewerActionButton({
+  destructive = false,
+  icon,
+  label,
+  onPress
+}: {
+  destructive?: boolean;
+  icon: FeatherIconName;
+  label: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityLabel={label}
+      accessibilityRole="button"
+      onPress={onPress}
+      style={({ pressed }) => [styles.mediaViewerActionButton, pressed && styles.pressed]}
+    >
+      <Feather color={destructive ? '#DC2626' : '#0F172A'} name={icon} size={22} />
+    </Pressable>
   );
 }
 
@@ -13924,9 +14343,11 @@ function MessageThread({
   onMessageLongPress,
   onOpenMedia,
   onPrepareAttachment,
+  preparingVideoKey,
   onMessageReply,
   onPickFile,
   onPickMedia,
+  onPickMediaLibrary,
   onToggleForwardMessage,
   onSend,
   onSendVoiceNote,
@@ -13958,9 +14379,11 @@ function MessageThread({
   onMessageLongPress: (message: ChatMessage) => void;
   onOpenMedia: (message: ChatMessage, activeIndex: number) => void;
   onPrepareAttachment: (message: ChatMessage, activeIndex: number) => Promise<string | null>;
+  preparingVideoKey: string | null;
   onMessageReply: (message: ChatMessage) => void;
   onPickFile: () => void;
   onPickMedia: () => void;
+  onPickMediaLibrary: () => void;
   onToggleForwardMessage: (message: ChatMessage) => void;
   onSend: () => void;
   onSendVoiceNote: (media: LocalChatMediaInput) => void;
@@ -14487,6 +14910,7 @@ function MessageThread({
               onLongPress={isForwardMode ? undefined : onMessageLongPress}
               onOpenMedia={isForwardMode ? undefined : onOpenMedia}
               onPrepareAttachment={isForwardMode ? undefined : onPrepareAttachment}
+              preparingVideoKey={preparingVideoKey}
               onReplyPreviewPress={isForwardMode ? undefined : handleReplyPreviewPress}
               onReply={isForwardMode ? undefined : onMessageReply}
               onToggleSelect={onToggleForwardMessage}
@@ -14637,6 +15061,20 @@ function MessageThread({
           paddingBottom: composerBottomPadding
         }
       ]}>
+        <Pressable
+          accessibilityLabel="Open photo and video library"
+          accessibilityRole="button"
+          disabled={!canChat || isSending}
+          onPress={onPickMediaLibrary}
+          style={({ pressed }) => [
+            styles.messageComposerLibraryButton,
+            pressed && styles.pressed,
+            (!canChat || isSending) && styles.disabled
+          ]}
+        >
+          <Feather color="#64748B" name="plus" size={22} />
+        </Pressable>
+
         <View style={styles.messageComposerMain}>
           {replyTarget ? (
             <ComposerReplyPreview
@@ -15672,6 +16110,7 @@ function MessageMediaPreview({
   onLongPress,
   onPress,
   onPrepareFile,
+  preparing = false,
   profilePhotoHeaders,
   senderName,
   senderProfilePhotoUrl,
@@ -15688,6 +16127,7 @@ function MessageMediaPreview({
   onLongPress?: () => void;
   onPress?: () => void;
   onPrepareFile?: () => Promise<string | null>;
+  preparing?: boolean;
   profilePhotoHeaders?: Record<string, string>;
   senderName: string;
   senderProfilePhotoUrl: string | null;
@@ -15717,6 +16157,11 @@ function MessageMediaPreview({
         accessibilityLabel="Open media"
         accessibilityRole="imagebutton"
         disabled={!onPress}
+        delayLongPress={320}
+        onLongPress={(event) => {
+          event.stopPropagation();
+          onLongPress?.();
+        }}
         onPress={(event) => {
           event.stopPropagation();
           onPress?.();
@@ -15746,11 +16191,21 @@ function MessageMediaPreview({
         {media.kind === 'video' ? (
           <>
             <View style={styles.messageVideoPlayBadge}>
-              <Ionicons color="#FFFFFF" name="play" size={28} />
+              {preparing ? (
+                <ActivityIndicator color="#FFFFFF" size="small" />
+              ) : (
+                <Ionicons color="#FFFFFF" name="play" size={28} />
+              )}
             </View>
             <View style={styles.messageVideoDurationBadge}>
-              <Feather color="#FFFFFF" name="video" size={12} />
-              <Text style={styles.messageVideoDurationText}>{formatMediaDuration(media.durationMs)}</Text>
+              {preparing ? (
+                <ActivityIndicator color="#FFFFFF" size="small" />
+              ) : (
+                <Feather color="#FFFFFF" name="video" size={12} />
+              )}
+              <Text style={styles.messageVideoDurationText}>
+                {preparing ? 'Preparing' : formatMediaDuration(media.durationMs)}
+              </Text>
             </View>
           </>
         ) : null}
@@ -15847,6 +16302,7 @@ function MessageMediaAlbumPreview({
   onLongPress,
   onOpenMedia,
   onPrepareMedia,
+  preparingVideoKey,
   profilePhotoHeaders,
   senderName,
   senderProfilePhotoUrl,
@@ -15861,6 +16317,7 @@ function MessageMediaAlbumPreview({
   onLongPress?: () => void;
   onOpenMedia?: (index: number) => void;
   onPrepareMedia?: (index: number) => Promise<string | null>;
+  preparingVideoKey?: string | null;
   profilePhotoHeaders?: Record<string, string>;
   senderName: string;
   senderProfilePhotoUrl: string | null;
@@ -15885,6 +16342,7 @@ function MessageMediaAlbumPreview({
         onLongPress={onLongPress}
         onPress={() => onOpenMedia?.(0)}
         onPrepareFile={() => onPrepareMedia?.(0) || Promise.resolve(getMediaLocalUri(media) || null)}
+        preparing={media.kind === 'video' && preparingVideoKey === getMediaPreparationKey(messageId, media, 0)}
         profilePhotoHeaders={profilePhotoHeaders}
         senderName={senderName}
         senderProfilePhotoUrl={senderProfilePhotoUrl}
@@ -15914,12 +16372,19 @@ function MessageMediaAlbumPreview({
       {visibleMediaItems.map((media, index) => {
         const sourceUri = getMediaPreviewUri(media);
         const isLastVisibleTile = index === visibleMediaItems.length - 1 && hiddenCount > 0;
+        const isPreparingVideo = media.kind === 'video' &&
+          preparingVideoKey === getMediaPreparationKey(messageId, media, index);
 
         return (
           <Pressable
             accessibilityLabel={`Open media item ${index + 1}`}
             accessibilityRole="imagebutton"
             key={`${media.mediaId || media.localUri || media.fileName}_${index}`}
+            delayLongPress={320}
+            onLongPress={(event) => {
+              event.stopPropagation();
+              onLongPress?.();
+            }}
             onPress={(event) => {
               event.stopPropagation();
               onOpenMedia?.(index);
@@ -15951,8 +16416,14 @@ function MessageMediaAlbumPreview({
             )}
             {media.kind === 'video' ? (
               <View style={styles.messageAlbumVideoBadge}>
-                <Feather color="#FFFFFF" name="video" size={12} />
-                <Text style={styles.messageAlbumVideoText}>{formatMediaDuration(media.durationMs)}</Text>
+                {isPreparingVideo ? (
+                  <ActivityIndicator color="#FFFFFF" size="small" />
+                ) : (
+                  <Feather color="#FFFFFF" name="video" size={12} />
+                )}
+                <Text style={styles.messageAlbumVideoText}>
+                  {isPreparingVideo ? 'Preparing' : formatMediaDuration(media.durationMs)}
+                </Text>
               </View>
             ) : null}
             {isLastVisibleTile ? (
@@ -15999,6 +16470,7 @@ function MessageBubble({
   onLongPress,
   onOpenMedia,
   onPrepareAttachment,
+  preparingVideoKey,
   onActivateAudioPlayback,
   onDeactivateAudioPlayback,
   onReplyPreviewPress,
@@ -16023,6 +16495,7 @@ function MessageBubble({
   onLongPress?: (message: ChatMessage) => void;
   onOpenMedia?: (message: ChatMessage, activeIndex: number) => void;
   onPrepareAttachment?: (message: ChatMessage, activeIndex: number) => Promise<string | null>;
+  preparingVideoKey?: string | null;
   onActivateAudioPlayback?: (audioPlaybackId: string) => void;
   onDeactivateAudioPlayback?: (audioPlaybackId: string) => void;
   onReplyPreviewPress?: (messageId: string) => void;
@@ -16246,6 +16719,7 @@ function MessageBubble({
                 onLongPress={!isSelectable && onLongPress ? () => onLongPress(message) : undefined}
                 onOpenMedia={(activeIndex) => onOpenMedia?.(message, activeIndex)}
                 onPrepareMedia={(activeIndex) => onPrepareAttachment?.(message, activeIndex) || Promise.resolve(null)}
+                preparingVideoKey={preparingVideoKey}
                 profilePhotoHeaders={profilePhotoHeaders}
                 senderName={message.isMine ? 'You' : contactName || 'Contact'}
                 senderProfilePhotoUrl={message.isMine ? null : contactProfilePhotoUrl || null}
@@ -26680,6 +27154,34 @@ function getReplyAuthorLabel(senderUid: string, currentUid: string, contactName:
   return contactName || 'Message';
 }
 
+function applyMediaReviewQualityMode(
+  media: LocalChatMediaInput,
+  qualityMode: ChatMediaQualityMode
+): LocalChatMediaInput {
+  if (
+    qualityMode === 'hd' &&
+    media.originalUri &&
+    media.originalSizeBytes &&
+    media.originalSizeBytes > 0 &&
+    media.originalSizeBytes <= CHAT_MEDIA_LIMITS[media.kind]
+  ) {
+    return {
+      ...media,
+      contentType: media.originalContentType || media.contentType,
+      height: media.originalHeight || media.height,
+      qualityMode: 'hd',
+      sizeBytes: media.originalSizeBytes,
+      uri: media.originalUri,
+      width: media.originalWidth || media.width
+    };
+  }
+
+  return {
+    ...media,
+    qualityMode: 'standard'
+  };
+}
+
 function buildLocalChatMediaAttachment(media: LocalChatMediaInput): ChatMediaAttachment {
   return {
     contentType: media.contentType,
@@ -26688,6 +27190,7 @@ function buildLocalChatMediaAttachment(media: LocalChatMediaInput): ChatMediaAtt
     height: media.height,
     kind: media.kind,
     localUri: media.uri,
+    qualityMode: media.qualityMode,
     sizeBytes: media.sizeBytes,
     thumbnailContentType: media.thumbnailContentType,
     thumbnailDataUrl: media.thumbnailDataUrl,
@@ -26793,7 +27296,23 @@ function getMediaPreviewUri(media: ChatMediaAttachment | null): string {
     return '';
   }
 
+  if (media.kind === 'video') {
+    return media.thumbnailDataUrl || getMediaLocalUri(media) || '';
+  }
+
   return getMediaLocalUri(media) || media.thumbnailDataUrl || '';
+}
+
+function getLocalChatMediaPreviewUri(media: LocalChatMediaInput | null): string {
+  if (!media) {
+    return '';
+  }
+
+  return media.thumbnailDataUrl || (media.kind === 'image' ? media.uri : '');
+}
+
+function getMediaPreparationKey(messageId: string, media: ChatMediaAttachment, index: number): string {
+  return `${messageId}:${media.mediaId || media.localUri || media.fileName}:${index}`;
 }
 
 function isAudioAttachment(media: ChatMediaAttachment): boolean {
@@ -26828,20 +27347,49 @@ function isMediaTransferActive(media: ChatMediaAttachment): boolean {
     media.transferStatus === 'downloading';
 }
 
-function shouldSkipAutomaticMediaDownload(media: ChatMediaAttachment): boolean {
+function shouldSkipAutomaticMediaDownload(
+  media: ChatMediaAttachment,
+  networkPolicy = buildChatMediaNetworkPolicy(null)
+): boolean {
   if (media.kind === 'video') {
     return true;
+  }
+
+  const sizeBytes = Math.max(media.sizeBytes || 0, 0);
+
+  if (media.kind === 'image') {
+    if (!networkPolicy.canAutoDownloadImages) {
+      return true;
+    }
+
+    return networkPolicy.isConnectionExpensive &&
+      sizeBytes > CHAT_CELLULAR_IMAGE_AUTO_DOWNLOAD_MAX_BYTES;
   }
 
   if (media.kind !== 'file') {
     return false;
   }
 
-  const sizeBytes = Math.max(media.sizeBytes || 0, 0);
-
-  return sizeBytes <= 0 ||
+  return !networkPolicy.canAutoDownloadFiles ||
+    sizeBytes <= 0 ||
     sizeBytes > CHAT_SMALL_FILE_AUTO_DOWNLOAD_MAX_BYTES ||
     sizeBytes > CHAT_MEDIA_LIMITS.file;
+}
+
+function buildChatMediaNetworkPolicy(state: NetInfoState | null): ChatMediaNetworkPolicy {
+  const isConnected = state?.isConnected !== false && state?.isInternetReachable !== false;
+  const isConnectionExpensive = Boolean(state?.details?.isConnectionExpensive);
+  const type = state?.type || 'unknown';
+  const isCellular = type === 'cellular';
+  const canAutoDownloadImages = isConnected;
+  const canAutoDownloadFiles = isConnected && !isCellular && !isConnectionExpensive;
+
+  return {
+    canAutoDownloadFiles,
+    canAutoDownloadImages,
+    isConnectionExpensive: isCellular || isConnectionExpensive,
+    networkLabel: type
+  };
 }
 
 function getMediaTransferLabel(media: ChatMediaAttachment): string {
@@ -27314,6 +27862,33 @@ function formatMessageDate(value: string): string {
     weekday: 'short',
     year: 'numeric'
   });
+}
+
+function formatMessageDateTime(value: string): string {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+
+  return `${date.toLocaleDateString([], {
+    day: 'numeric',
+    month: 'short',
+    year: '2-digit'
+  })}, ${date.toLocaleTimeString([], {
+    hour: 'numeric',
+    minute: '2-digit'
+  })}`;
+}
+
+function formatCompactCount(value: number): string {
+  const safeValue = Math.max(0, Math.floor(value));
+
+  if (safeValue > 99) {
+    return '99+';
+  }
+
+  return String(safeValue);
 }
 
 async function cacheCurrentUserProfilePhoto(
@@ -30513,15 +31088,25 @@ const styles = StyleSheet.create({
   },
   messageBackButton: {
     alignItems: 'center',
+    flexDirection: 'row',
     height: 48,
     justifyContent: 'center',
-    width: 34
+    minWidth: 48,
+    paddingRight: 4
   },
   messageBackText: {
     color: '#FFFFFF',
     fontSize: 40,
     fontWeight: '400',
     lineHeight: 43
+  },
+  messageBackCountText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '400',
+    lineHeight: 20,
+    marginLeft: -7,
+    minWidth: 18
   },
   messageHeaderIdentity: {
     alignItems: 'center',
@@ -32511,6 +33096,30 @@ const styles = StyleSheet.create({
     minWidth: 36,
     paddingHorizontal: 10
   },
+  mediaReviewQualityPill: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.13)',
+    borderColor: 'rgba(255, 255, 255, 0.16)',
+    borderRadius: 18,
+    borderWidth: StyleSheet.hairlineWidth,
+    height: 36,
+    justifyContent: 'center',
+    minWidth: 74,
+    paddingHorizontal: 12
+  },
+  mediaReviewQualityPillActive: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#FFFFFF'
+  },
+  mediaReviewQualityText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '400',
+    lineHeight: 17
+  },
+  mediaReviewQualityTextActive: {
+    color: '#0F172A'
+  },
   mediaReviewToolText: {
     color: '#FFFFFF',
     fontSize: 16,
@@ -32551,6 +33160,17 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center'
   },
+  mediaReviewThumbnailPlayBadge: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(15, 23, 42, 0.72)',
+    borderRadius: 8,
+    bottom: 3,
+    height: 16,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: 3,
+    width: 16
+  },
   mediaReviewPager: {
     flex: 1
   },
@@ -32570,6 +33190,26 @@ const styles = StyleSheet.create({
     height: '92%',
     justifyContent: 'center',
     width: '92%'
+  },
+  mediaReviewVideoPosterOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'flex-start',
+    justifyContent: 'flex-end',
+    paddingBottom: 14,
+    paddingHorizontal: 14,
+    pointerEvents: 'none'
+  },
+  mediaReviewVideoPlayButton: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.94)',
+    borderRadius: 32,
+    height: 64,
+    justifyContent: 'center',
+    shadowColor: '#000000',
+    shadowOffset: { height: 3, width: 0 },
+    shadowOpacity: 0.24,
+    shadowRadius: 7,
+    width: 64
   },
   mediaReviewVideoMeta: {
     backgroundColor: 'rgba(0, 0, 0, 0.56)',
@@ -32676,36 +33316,45 @@ const styles = StyleSheet.create({
     lineHeight: 13
   },
   mediaViewerRoot: {
-    backgroundColor: '#020617',
+    backgroundColor: '#0F172A',
     flex: 1
   },
   mediaViewerTopBar: {
     alignItems: 'center',
+    backgroundColor: 'rgba(248, 250, 252, 0.96)',
     flexDirection: 'row',
-    gap: 12,
-    paddingBottom: 8,
+    gap: 10,
+    paddingBottom: 10,
     paddingHorizontal: 12
   },
   mediaViewerCloseButton: {
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.16)',
+    backgroundColor: '#FFFFFF',
     borderRadius: 19,
     height: 38,
     justifyContent: 'center',
     width: 38
+  },
+  mediaViewerTopActionButton: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    height: 36,
+    justifyContent: 'center',
+    width: 36
   },
   mediaViewerTitleWrap: {
     flex: 1,
     minWidth: 0
   },
   mediaViewerTitle: {
-    color: '#FFFFFF',
+    color: colors.ink,
     fontSize: 16,
     fontWeight: '400',
     lineHeight: 21
   },
   mediaViewerSubtitle: {
-    color: 'rgba(255, 255, 255, 0.68)',
+    color: '#64748B',
     fontSize: 13,
     fontWeight: '400',
     lineHeight: 17
@@ -32724,6 +33373,131 @@ const styles = StyleSheet.create({
   mediaViewerVideo: {
     height: '100%',
     width: '100%'
+  },
+  mediaViewerVideoShell: {
+    backgroundColor: '#020617',
+    height: '100%',
+    width: '100%'
+  },
+  mediaViewerVideoControlsTop: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(248, 250, 252, 0.98)',
+    flexDirection: 'row',
+    gap: 7,
+    minHeight: 38,
+    paddingHorizontal: 8
+  },
+  mediaViewerVideoTimeText: {
+    color: colors.ink,
+    fontSize: 12,
+    fontWeight: '400',
+    lineHeight: 16,
+    minWidth: 38,
+    textAlign: 'center'
+  },
+  mediaViewerVideoTrackHitArea: {
+    flex: 1,
+    height: 28,
+    justifyContent: 'center',
+    minWidth: 80
+  },
+  mediaViewerVideoTrack: {
+    backgroundColor: 'rgba(15, 23, 42, 0.18)',
+    borderRadius: 2,
+    height: 4,
+    position: 'relative'
+  },
+  mediaViewerVideoTrackFill: {
+    backgroundColor: colors.primary,
+    borderRadius: 2,
+    height: 4
+  },
+  mediaViewerVideoTrackThumb: {
+    backgroundColor: '#FFFFFF',
+    borderColor: colors.primary,
+    borderRadius: 7,
+    borderWidth: 1.5,
+    height: 14,
+    marginLeft: -7,
+    position: 'absolute',
+    top: -5,
+    width: 14
+  },
+  mediaViewerSpeedButton: {
+    alignItems: 'center',
+    borderRadius: 14,
+    height: 28,
+    justifyContent: 'center',
+    minWidth: 34,
+    paddingHorizontal: 5
+  },
+  mediaViewerSpeedText: {
+    color: colors.ink,
+    fontSize: 13,
+    fontWeight: '400',
+    lineHeight: 17
+  },
+  mediaViewerVideoStage: {
+    flex: 1,
+    position: 'relative'
+  },
+  mediaViewerVideoPosterImage: {
+    ...StyleSheet.absoluteFillObject,
+    height: '100%',
+    opacity: 0.82,
+    width: '100%'
+  },
+  mediaViewerVideoPosterImageHidden: {
+    opacity: 0
+  },
+  mediaViewerVideoCenterButton: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.86)',
+    borderRadius: 33,
+    height: 66,
+    justifyContent: 'center',
+    left: '50%',
+    marginLeft: -33,
+    marginTop: -33,
+    position: 'absolute',
+    top: '50%',
+    width: 66
+  },
+  mediaViewerVideoCaptionBar: {
+    alignItems: 'flex-end',
+    backgroundColor: 'rgba(15, 23, 42, 0.48)',
+    bottom: 0,
+    flexDirection: 'row',
+    gap: 10,
+    left: 0,
+    minHeight: 58,
+    paddingBottom: 12,
+    paddingHorizontal: 14,
+    paddingTop: 10,
+    position: 'absolute',
+    right: 0
+  },
+  mediaViewerVideoCaptionText: {
+    color: '#FFFFFF',
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '400',
+    lineHeight: 19
+  },
+  mediaViewerVideoReplyPill: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(15, 23, 42, 0.64)',
+    borderRadius: 18,
+    flexDirection: 'row',
+    gap: 5,
+    minHeight: 34,
+    paddingHorizontal: 11
+  },
+  mediaViewerVideoReplyText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '400',
+    lineHeight: 17
   },
   mediaViewerVideoPoster: {
     height: '100%',
@@ -32761,9 +33535,10 @@ const styles = StyleSheet.create({
     textAlign: 'center'
   },
   mediaViewerFooter: {
-    borderTopColor: 'rgba(255, 255, 255, 0.12)',
+    backgroundColor: '#FFFFFF',
+    borderTopColor: '#E5E7EB',
     borderTopWidth: StyleSheet.hairlineWidth,
-    gap: 7,
+    gap: 8,
     paddingHorizontal: 10,
     paddingTop: 8
   },
@@ -32798,6 +33573,19 @@ const styles = StyleSheet.create({
     fontWeight: '400',
     lineHeight: 16,
     textAlign: 'center'
+  },
+  mediaViewerActionRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    minHeight: 44
+  },
+  mediaViewerActionButton: {
+    alignItems: 'center',
+    borderRadius: 19,
+    height: 38,
+    justifyContent: 'center',
+    width: 44
   },
   audioPreviewRoot: {
     backgroundColor: '#F8FAFC',
@@ -32947,6 +33735,15 @@ const styles = StyleSheet.create({
   messageComposerMain: {
     flex: 1,
     gap: 0
+  },
+  messageComposerLibraryButton: {
+    alignItems: 'center',
+    alignSelf: 'flex-end',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 21,
+    height: 42,
+    justifyContent: 'center',
+    width: 42
   },
   composerReplyPreview: {
     alignItems: 'center',

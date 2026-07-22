@@ -68,7 +68,7 @@ const CHAT_MEDIA_LIMITS: Record<ChatMediaKind, number> = {
   audio: 16 * 1024 * 1024,
   file: 100 * 1024 * 1024,
   image: 8 * 1024 * 1024,
-  video: 64 * 1024 * 1024
+  video: 250 * 1024 * 1024
 };
 
 export async function createEncryptedChatMediaUploadSession(

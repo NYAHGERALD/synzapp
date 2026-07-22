@@ -6,11 +6,13 @@ import { getSynzappApiBaseUrl } from './apiConfig';
 import { getRegisteredDeviceHeaders } from './deviceIdentity';
 import type { ChatMediaAttachment, ChatMediaKind } from './chatApi';
 
+export type ChatMediaQualityMode = 'hd' | 'standard';
+
 export const CHAT_MEDIA_LIMITS: Record<ChatMediaKind, number> = {
   audio: 16 * 1024 * 1024,
   file: 100 * 1024 * 1024,
   image: 8 * 1024 * 1024,
-  video: 64 * 1024 * 1024
+  video: 250 * 1024 * 1024
 };
 
 interface MediaUploadSession {
@@ -36,6 +38,12 @@ export interface LocalChatMediaInput {
   fileName: string;
   height?: number;
   kind: ChatMediaKind;
+  originalContentType?: string;
+  originalHeight?: number;
+  originalSizeBytes?: number;
+  originalUri?: string;
+  originalWidth?: number;
+  qualityMode?: ChatMediaQualityMode;
   sizeBytes: number;
   thumbnailContentType?: string;
   thumbnailDataUrl?: string;
@@ -85,9 +93,11 @@ export async function cacheLocalChatMedia(media: LocalChatMediaInput): Promise<L
   const cachedSizeBytes = cachedInfo.exists && typeof cachedInfo.size === 'number' && cachedInfo.size > 0
     ? cachedInfo.size
     : sourceSizeBytes;
+  const cachedOriginalUri = await cacheOriginalMediaUri(media);
 
   return {
     ...media,
+    originalUri: cachedOriginalUri || media.originalUri,
     sizeBytes: cachedSizeBytes,
     uri: cachedUri
   };
@@ -142,6 +152,7 @@ export async function uploadEncryptedChatMedia(input: {
     localUri: localMedia.uri,
     mediaId: session.mediaId,
     nonce: encryptedMedia.nonce,
+    qualityMode: localMedia.qualityMode,
     sizeBytes: localMedia.sizeBytes,
     thumbnailContentType: localMedia.thumbnailContentType,
     thumbnailDataUrl: localMedia.thumbnailDataUrl,
@@ -151,6 +162,41 @@ export async function uploadEncryptedChatMedia(input: {
     transferStatus: 'uploading',
     width: localMedia.width
   };
+}
+
+async function cacheOriginalMediaUri(media: LocalChatMediaInput): Promise<string | null> {
+  if (!media.originalUri || media.originalUri === media.uri || isDataUri(media.originalUri)) {
+    return null;
+  }
+
+  if (isSynzappMediaCacheUri(media.originalUri)) {
+    return media.originalUri;
+  }
+
+  const originalInfo = await FileSystem.getInfoAsync(media.originalUri).catch(() => null);
+
+  if (!originalInfo?.exists) {
+    return null;
+  }
+
+  const originalSizeBytes = typeof originalInfo.size === 'number' && originalInfo.size > 0
+    ? originalInfo.size
+    : media.originalSizeBytes || 0;
+
+  if (originalSizeBytes <= 0 || originalSizeBytes > CHAT_MEDIA_LIMITS[media.kind]) {
+    return null;
+  }
+
+  const cachedOriginalUri = getMediaCacheFileUri(
+    `original_${Date.now()}_${randomHex(5)}_${sanitizeLocalCacheFileName(media.fileName, media.kind)}`
+  );
+
+  await FileSystem.copyAsync({
+    from: media.originalUri,
+    to: cachedOriginalUri
+  });
+
+  return cachedOriginalUri;
 }
 
 export async function downloadAndDecryptChatMedia(input: {

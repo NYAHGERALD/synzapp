@@ -4,6 +4,8 @@
 
 Make Synzapp media messaging feel close to WhatsApp and Microsoft Teams while preserving Synzapp's enterprise security model: encrypted media, tenant authorization, local-first chat behavior, and reliable playback on mobile devices.
 
+Detailed WhatsApp-style media parity work is tracked in `SYNZAPP_WHATSAPP_STYLE_MEDIA_PARITY_PLAN.md`.
+
 ## Current Gaps
 
 - Image receivers often wait for the full encrypted file before seeing useful visual context.
@@ -26,6 +28,7 @@ Every photo and video message carries a small encrypted preview inside the chat 
 ### 2. Sender Experience
 
 - Sender sees the selected media preview immediately in the chat bubble.
+- Pre-send review shows the selected photo or video poster thumbnail; it does not require the video player to open before send.
 - Upload progress overlays the preview.
 - Offline or retry states still show the local preview.
 - The sender does not wait for a backend round trip before the chat feels alive.
