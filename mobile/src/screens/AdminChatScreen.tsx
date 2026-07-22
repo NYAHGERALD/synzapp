@@ -7684,11 +7684,29 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     setMessageActionTarget(null);
   }
 
+  function handleQuickForwardMessage(message: ChatMessage) {
+    setIsForwardMode(false);
+    setForwardSelectedMessageIds({ [message.messageId]: true });
+    setForwardRecipientIds({});
+    setIsForwardRecipientModalOpen(true);
+    setReplyTarget(null);
+    setMessageActionTarget(null);
+  }
+
   function resetForwardMode() {
     setIsForwardMode(false);
     setForwardSelectedMessageIds({});
     setForwardRecipientIds({});
     setIsForwardRecipientModalOpen(false);
+  }
+
+  function handleCancelForwardRecipients() {
+    setIsForwardRecipientModalOpen(false);
+
+    if (!isForwardMode) {
+      setForwardSelectedMessageIds({});
+      setForwardRecipientIds({});
+    }
   }
 
   function handleToggleForwardMessage(message: ChatMessage) {
@@ -10046,6 +10064,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           onDraftChange={setMessageDraft}
           onMessageLongPress={activeTrashSegmentId ? () => undefined : handleOpenMessageActions}
           onCloseSearch={handleCloseConversationSearch}
+          onForwardMessage={handleQuickForwardMessage}
           onOpenMedia={handleOpenMessageAttachment}
           onPrepareAttachment={handlePrepareAttachment}
           preparingVideoKey={preparingVideoKey}
@@ -10543,7 +10562,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         }}
         onForward={(message) => {
           setMediaViewer(null);
-          handleForwardMessage(message);
+          handleQuickForwardMessage(message);
         }}
         onInfo={(message) => {
           setMediaViewer(null);
@@ -10571,7 +10590,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         contacts={chatContacts}
         isForwarding={isForwardingMessages}
         isOpen={isForwardRecipientModalOpen}
-        onCancel={() => setIsForwardRecipientModalOpen(false)}
+        onCancel={handleCancelForwardRecipients}
         onConfirm={() => {
           void handleConfirmForwardMessages();
         }}
@@ -14341,6 +14360,7 @@ function MessageThread({
   onCloseSearch,
   onDraftChange,
   onMessageLongPress,
+  onForwardMessage,
   onOpenMedia,
   onPrepareAttachment,
   preparingVideoKey,
@@ -14377,6 +14397,7 @@ function MessageThread({
   onCloseSearch: () => void;
   onDraftChange: (value: string) => void;
   onMessageLongPress: (message: ChatMessage) => void;
+  onForwardMessage: (message: ChatMessage) => void;
   onOpenMedia: (message: ChatMessage, activeIndex: number) => void;
   onPrepareAttachment: (message: ChatMessage, activeIndex: number) => Promise<string | null>;
   preparingVideoKey: string | null;
@@ -14907,6 +14928,7 @@ function MessageThread({
               message={item.message}
               isGroupChat={isGroupChat}
               onLayout={handleMessageLayout}
+              onForwardMessage={isForwardMode ? undefined : onForwardMessage}
               onLongPress={isForwardMode ? undefined : onMessageLongPress}
               onOpenMedia={isForwardMode ? undefined : onOpenMedia}
               onPrepareAttachment={isForwardMode ? undefined : onPrepareAttachment}
@@ -16467,6 +16489,7 @@ function MessageBubble({
   isSelected = false,
   message,
   onLayout,
+  onForwardMessage,
   onLongPress,
   onOpenMedia,
   onPrepareAttachment,
@@ -16492,6 +16515,7 @@ function MessageBubble({
   isSelected?: boolean;
   message: ChatMessage;
   onLayout?: (messageId: string, y: number) => void;
+  onForwardMessage?: (message: ChatMessage) => void;
   onLongPress?: (message: ChatMessage) => void;
   onOpenMedia?: (message: ChatMessage, activeIndex: number) => void;
   onPrepareAttachment?: (message: ChatMessage, activeIndex: number) => Promise<string | null>;
@@ -16513,6 +16537,9 @@ function MessageBubble({
     : '';
   const mediaItems = getMessageMediaItems(message);
   const hasMedia = mediaItems.length > 0;
+  const hasForwardableVisualMedia = mediaItems.some((media) =>
+    media.kind === 'image' || media.kind === 'video'
+  );
   const imageWidth = 222;
   const hasRichBubbleContent = Boolean(message.replyTo || message.forwarded || hasMedia);
   const replyTargetMessageId = message.replyTo?.messageId || '';
@@ -16662,6 +16689,12 @@ function MessageBubble({
             profilePhotoHeaders={profilePhotoHeaders}
           />
         ) : null}
+        {message.isMine && hasForwardableVisualMedia && !isSelectable && onForwardMessage ? (
+          <MediaQuickForwardButton
+            isMine={message.isMine}
+            onPress={() => onForwardMessage(message)}
+          />
+        ) : null}
         <Animated.View
           style={[
             styles.messageBubbleMotionWrap,
@@ -16766,6 +16799,12 @@ function MessageBubble({
             ) : null}
           </Pressable>
         </Animated.View>
+        {!message.isMine && hasForwardableVisualMedia && !isSelectable && onForwardMessage ? (
+          <MediaQuickForwardButton
+            isMine={message.isMine}
+            onPress={() => onForwardMessage(message)}
+          />
+        ) : null}
         {isGroupChat && message.isMine ? (
           <GroupMessageSenderAvatar
             member={senderMember || null}
@@ -16809,6 +16848,29 @@ function GroupMessageSenderAvatar({
     <View style={[styles.groupMessageAvatarFallback, placementStyle]}>
       <Text numberOfLines={1} style={styles.groupMessageAvatarText}>{initials}</Text>
     </View>
+  );
+}
+
+function MediaQuickForwardButton({
+  isMine,
+  onPress
+}: {
+  isMine: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityLabel="Forward media"
+      accessibilityRole="button"
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.messageMediaForwardButton,
+        isMine ? styles.messageMediaForwardButtonMine : styles.messageMediaForwardButtonTheirs,
+        pressed && styles.pressed
+      ]}
+    >
+      <Feather color="#FFFFFF" name="corner-up-right" size={18} />
+    </Pressable>
   );
 }
 
@@ -17215,8 +17277,69 @@ function ForwardRecipientModal({
   selectedCount: number;
   selectedRecipientIds: Record<string, boolean>;
 }) {
+  const [query, setQuery] = useState('');
+  const safeQuery = query.trim().toLowerCase();
+  const filteredContacts = safeQuery
+    ? contacts.filter((contact) => [
+        contact.displayName,
+        contact.preview,
+        contact.chatType
+      ].some((value) => (value || '').toLowerCase().includes(safeQuery)))
+    : contacts;
+  const frequentContacts = safeQuery ? filteredContacts : filteredContacts.slice(0, 6);
+  const recentContacts = safeQuery ? [] : filteredContacts.slice(6);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setQuery('');
+    }
+  }, [isOpen]);
+
   if (!isOpen) {
     return null;
+  }
+
+  function renderContact(contact: ChatContact) {
+    const isSelected = Boolean(selectedRecipientIds[contact.contactId]);
+
+    return (
+      <Pressable
+        accessibilityLabel={`Forward to ${contact.displayName}`}
+        accessibilityRole="checkbox"
+        accessibilityState={{ checked: isSelected, disabled: !contact.hasActiveDevice }}
+        disabled={!contact.hasActiveDevice || isForwarding}
+        key={contact.contactId}
+        onPress={() => onToggleRecipient(contact.contactId)}
+        style={({ pressed }) => [
+          styles.forwardRecipientRow,
+          !contact.hasActiveDevice && styles.forwardRecipientRowDisabled,
+          pressed && contact.hasActiveDevice && styles.pressed
+        ]}
+      >
+        <ProfileAvatar
+          headers={profilePhotoHeaders}
+          name={contact.displayName}
+          size={42}
+          uri={contact.profilePhotoUrl}
+        />
+
+        <View style={styles.forwardRecipientText}>
+          <Text numberOfLines={1} style={styles.forwardRecipientName}>{contact.displayName}</Text>
+          <Text numberOfLines={1} style={styles.forwardRecipientSubtitle}>
+            {contact.hasActiveDevice ? contact.preview || 'Available' : 'Secure device not ready'}
+          </Text>
+        </View>
+
+        <View style={[
+          styles.forwardRecipientCheck,
+          isSelected && styles.forwardRecipientCheckSelected
+        ]}>
+          {isSelected ? (
+            <Feather color="#FFFFFF" name="check" size={15} />
+          ) : null}
+        </View>
+      </Pressable>
+    );
   }
 
   return (
@@ -17231,15 +17354,29 @@ function ForwardRecipientModal({
 
         <View style={styles.forwardRecipientSheet}>
           <View style={styles.forwardRecipientHeader}>
-            <Text style={styles.forwardRecipientTitle}>Forward to...</Text>
             <Pressable
               accessibilityLabel="Close"
               accessibilityRole="button"
               onPress={onCancel}
               style={({ pressed }) => [styles.forwardRecipientCloseButton, pressed && styles.pressed]}
             >
-              <Feather color="#334155" name="x" size={24} />
+              <Feather color="#0F172A" name="x" size={24} />
             </Pressable>
+            <Text style={styles.forwardRecipientTitle}>Send to</Text>
+            <View style={styles.forwardRecipientHeaderSpacer} />
+          </View>
+
+          <View style={styles.forwardRecipientSearchWrap}>
+            <Feather color="#64748B" name="search" size={18} />
+            <TextInput
+              autoCapitalize="none"
+              autoCorrect={false}
+              onChangeText={setQuery}
+              placeholder="Search"
+              placeholderTextColor="#8B95A5"
+              style={styles.forwardRecipientSearchInput}
+              value={query}
+            />
           </View>
 
           <ScrollView
@@ -17247,48 +17384,27 @@ function ForwardRecipientModal({
             showsVerticalScrollIndicator={false}
             style={styles.forwardRecipientList}
           >
-            {contacts.map((contact) => {
-              const isSelected = Boolean(selectedRecipientIds[contact.contactId]);
-
-              return (
-                <Pressable
-                  accessibilityLabel={`Forward to ${contact.displayName}`}
-                  accessibilityRole="checkbox"
-                  accessibilityState={{ checked: isSelected, disabled: !contact.hasActiveDevice }}
-                  disabled={!contact.hasActiveDevice || isForwarding}
-                  key={contact.contactId}
-                  onPress={() => onToggleRecipient(contact.contactId)}
-                  style={({ pressed }) => [
-                    styles.forwardRecipientRow,
-                    !contact.hasActiveDevice && styles.forwardRecipientRowDisabled,
-                    pressed && contact.hasActiveDevice && styles.pressed
-                  ]}
-                >
-                  <ProfileAvatar
-                    headers={profilePhotoHeaders}
-                    name={contact.displayName}
-                    size={42}
-                    uri={contact.profilePhotoUrl}
-                  />
-
-                  <View style={styles.forwardRecipientText}>
-                    <Text numberOfLines={1} style={styles.forwardRecipientName}>{contact.displayName}</Text>
-                    <Text numberOfLines={1} style={styles.forwardRecipientSubtitle}>
-                      {contact.hasActiveDevice ? contact.preview || 'Available' : 'Secure device not ready'}
-                    </Text>
+            {safeQuery ? (
+              <View style={styles.forwardRecipientSection}>
+                <Text style={styles.forwardRecipientSectionTitle}>Search results</Text>
+                {filteredContacts.length ? filteredContacts.map(renderContact) : (
+                  <Text style={styles.forwardRecipientEmptyText}>No matching chats</Text>
+                )}
+              </View>
+            ) : (
+              <>
+                <View style={styles.forwardRecipientSection}>
+                  <Text style={styles.forwardRecipientSectionTitle}>Frequently contacted</Text>
+                  {frequentContacts.map(renderContact)}
+                </View>
+                {recentContacts.length ? (
+                  <View style={styles.forwardRecipientSection}>
+                    <Text style={styles.forwardRecipientSectionTitle}>Recent chats</Text>
+                    {recentContacts.map(renderContact)}
                   </View>
-
-                  <View style={[
-                    styles.forwardRecipientCheck,
-                    isSelected && styles.forwardRecipientCheckSelected
-                  ]}>
-                    {isSelected ? (
-                      <Feather color="#FFFFFF" name="check" size={15} />
-                    ) : null}
-                  </View>
-                </Pressable>
-              );
-            })}
+                ) : null}
+              </>
+            )}
           </ScrollView>
 
           <View style={styles.forwardRecipientFooter}>
@@ -32210,6 +32326,27 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     lineHeight: 13
   },
+  messageMediaForwardButton: {
+    alignItems: 'center',
+    alignSelf: 'center',
+    backgroundColor: 'rgba(148, 163, 184, 0.72)',
+    borderColor: 'rgba(255, 255, 255, 0.78)',
+    borderRadius: 18,
+    borderWidth: 1,
+    height: 36,
+    justifyContent: 'center',
+    shadowColor: '#0F172A',
+    shadowOffset: { height: 2, width: 0 },
+    shadowOpacity: 0.18,
+    shadowRadius: 5,
+    width: 36
+  },
+  messageMediaForwardButtonMine: {
+    marginRight: 7
+  },
+  messageMediaForwardButtonTheirs: {
+    marginLeft: 7
+  },
   messageBubbleMotionWrapRich: {
     minWidth: 148
   },
@@ -32935,7 +33072,7 @@ const styles = StyleSheet.create({
     marginVertical: 5
   },
   forwardRecipientOverlay: {
-    backgroundColor: 'rgba(15, 23, 42, 0.22)',
+    backgroundColor: 'rgba(15, 23, 42, 0.24)',
     flex: 1,
     justifyContent: 'flex-end'
   },
@@ -32943,12 +33080,13 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject
   },
   forwardRecipientSheet: {
-    backgroundColor: '#FFFFFF',
-    borderTopLeftRadius: 18,
-    borderTopRightRadius: 18,
-    maxHeight: '76%',
-    minHeight: 360,
-    paddingBottom: 12,
+    backgroundColor: '#F8FAFC',
+    borderTopLeftRadius: 30,
+    borderTopRightRadius: 30,
+    maxHeight: '86%',
+    minHeight: 430,
+    paddingBottom: 10,
+    paddingHorizontal: 14,
     shadowColor: '#0F172A',
     shadowOffset: { height: -6, width: 0 },
     shadowOpacity: 0.16,
@@ -32956,35 +33094,86 @@ const styles = StyleSheet.create({
   },
   forwardRecipientHeader: {
     alignItems: 'center',
-    borderBottomColor: '#E5E7EB',
-    borderBottomWidth: 1,
     flexDirection: 'row',
     justifyContent: 'space-between',
-    minHeight: 58,
-    paddingLeft: 18,
-    paddingRight: 10
+    minHeight: 62,
+    paddingHorizontal: 0,
+    paddingTop: 8
   },
   forwardRecipientTitle: {
     color: colors.ink,
-    fontSize: 19,
+    flex: 1,
+    fontSize: 18,
     fontWeight: '400',
-    lineHeight: 25
+    lineHeight: 24,
+    textAlign: 'center'
   },
   forwardRecipientCloseButton: {
     alignItems: 'center',
-    height: 40,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 22,
+    height: 44,
     justifyContent: 'center',
-    width: 40
+    width: 44
+  },
+  forwardRecipientHeaderSpacer: {
+    height: 44,
+    width: 44
+  },
+  forwardRecipientSearchWrap: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderColor: '#E5E7EB',
+    borderRadius: 22,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 9,
+    minHeight: 46,
+    paddingHorizontal: 13
+  },
+  forwardRecipientSearchInput: {
+    color: colors.ink,
+    flex: 1,
+    fontSize: 16,
+    fontWeight: '400',
+    lineHeight: 21,
+    paddingVertical: 8
   },
   forwardRecipientList: {
-    flexGrow: 0
+    flexGrow: 0,
+    marginTop: 14
+  },
+  forwardRecipientSection: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    marginBottom: 15,
+    overflow: 'hidden'
+  },
+  forwardRecipientSectionTitle: {
+    color: '#64748B',
+    fontSize: 16,
+    fontWeight: '400',
+    lineHeight: 21,
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 4
+  },
+  forwardRecipientEmptyText: {
+    color: '#64748B',
+    fontSize: 15,
+    fontWeight: '400',
+    lineHeight: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 18
   },
   forwardRecipientRow: {
     alignItems: 'center',
+    borderBottomColor: '#E5E7EB',
+    borderBottomWidth: StyleSheet.hairlineWidth,
     flexDirection: 'row',
     gap: 12,
     minHeight: 66,
-    paddingHorizontal: 18,
+    paddingHorizontal: 16,
     paddingVertical: 8
   },
   forwardRecipientRowDisabled: {
@@ -33009,11 +33198,11 @@ const styles = StyleSheet.create({
   forwardRecipientCheck: {
     alignItems: 'center',
     borderColor: '#CBD5E1',
-    borderRadius: 11,
+    borderRadius: 13,
     borderWidth: 1.5,
-    height: 22,
+    height: 26,
     justifyContent: 'center',
-    width: 22
+    width: 26
   },
   forwardRecipientCheckSelected: {
     backgroundColor: colors.primary,
@@ -33021,13 +33210,15 @@ const styles = StyleSheet.create({
   },
   forwardRecipientFooter: {
     alignItems: 'center',
+    backgroundColor: '#F8FAFC',
     borderTopColor: '#E5E7EB',
-    borderTopWidth: 1,
+    borderTopWidth: StyleSheet.hairlineWidth,
     flexDirection: 'row',
     gap: 12,
     justifyContent: 'space-between',
+    marginHorizontal: -14,
     paddingHorizontal: 18,
-    paddingTop: 12
+    paddingTop: 10
   },
   forwardRecipientCount: {
     color: '#64748B',
@@ -33039,12 +33230,12 @@ const styles = StyleSheet.create({
   forwardRecipientSendButton: {
     alignItems: 'center',
     backgroundColor: colors.primary,
-    borderRadius: 18,
+    borderRadius: 22,
     flexDirection: 'row',
     gap: 7,
     justifyContent: 'center',
-    minHeight: 38,
-    minWidth: 112,
+    minHeight: 44,
+    minWidth: 118,
     paddingHorizontal: 16
   },
   forwardRecipientSendText: {
