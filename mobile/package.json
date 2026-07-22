@@ -22,6 +22,15 @@
     "eas-build-post-install": "node scripts/patch-ios-notification-service-icon.js",
     "ios": "expo start --ios",
     "android": "expo start --android",
+    "local:prebuild": "expo prebuild",
+    "local:prebuild:clean": "expo prebuild --clean",
+    "local:start": "expo start --dev-client --lan --clear --port 8081",
+    "local:ios": "expo run:ios",
+    "local:ios:device": "expo run:ios --device",
+    "local:android": "ANDROID_HOME=$HOME/Library/Android/sdk ANDROID_SDK_ROOT=$HOME/Library/Android/sdk PATH=$HOME/Library/Android/sdk/platform-tools:$HOME/Library/Android/sdk/emulator:$PATH expo run:android",
+    "local:android:device": "ANDROID_HOME=$HOME/Library/Android/sdk ANDROID_SDK_ROOT=$HOME/Library/Android/sdk PATH=$HOME/Library/Android/sdk/platform-tools:$HOME/Library/Android/sdk/emulator:$PATH expo run:android --device",
+    "local:android:devices": "ANDROID_HOME=$HOME/Library/Android/sdk ANDROID_SDK_ROOT=$HOME/Library/Android/sdk PATH=$HOME/Library/Android/sdk/platform-tools:$HOME/Library/Android/sdk/emulator:$PATH adb devices",
+    "local:android:emulators": "ANDROID_HOME=$HOME/Library/Android/sdk ANDROID_SDK_ROOT=$HOME/Library/Android/sdk PATH=$HOME/Library/Android/sdk/platform-tools:$HOME/Library/Android/sdk/emulator:$PATH emulator -list-avds",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
