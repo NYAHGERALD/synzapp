@@ -3,6 +3,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
+import * as VideoThumbnails from 'expo-video-thumbnails';
 import { CHAT_MEDIA_LIMITS, type LocalChatMediaInput } from './chatMediaApi';
 
 type ChatCameraSource = 'library' | 'photo' | 'video';
@@ -13,6 +14,15 @@ const CHAT_VIDEO_MIN_COMPRESS_MB = 3;
 const CHAT_VIDEO_MAX_DIMENSION = 960;
 const CHAT_LIBRARY_SELECTION_LIMIT = 10;
 const CHAT_IMAGE_RETRY_WIDTHS = [1280, 1080, 960, 720];
+const CHAT_MEDIA_THUMBNAIL_WIDTHS = [360, 280, 220];
+const CHAT_MEDIA_THUMBNAIL_MAX_BASE64_BYTES = 120 * 1024;
+
+interface PreparedMediaThumbnail {
+  contentType: 'image/jpeg';
+  dataUrl: string;
+  height: number;
+  width: number;
+}
 
 export async function pickNativeChatCameraMedia(
   onProgress?: (progress: number) => void
@@ -100,7 +110,7 @@ async function prepareImageMedia(asset: ImagePicker.ImagePickerAsset): Promise<L
         }
       );
 
-      return {
+      return await attachMediaThumbnail({
         contentType: 'image/jpeg',
         fileName: getAssetFileName(asset, 'photo.jpg'),
         height: optimized.height,
@@ -108,7 +118,7 @@ async function prepareImageMedia(asset: ImagePicker.ImagePickerAsset): Promise<L
         sizeBytes: await getFileSize(optimized.uri),
         uri: optimized.uri,
         width: optimized.width
-      };
+      }, optimized.uri);
     } catch (error) {
       lastError = error;
       await waitForImageManipulatorRecovery();
@@ -165,7 +175,7 @@ async function prepareVideoMedia(
     throw new Error('Video is too large after compression. Please choose a shorter video.');
   }
 
-  return {
+  return await attachMediaThumbnail({
     contentType: isCompressedOutput ? 'video/mp4' : originalContentType,
     durationMs: asset.duration || undefined,
     fileName: isCompressedOutput ? getVideoFileName(asset) : getAssetFileName(asset, 'video.mp4'),
@@ -174,7 +184,7 @@ async function prepareVideoMedia(
     sizeBytes,
     uri: compressedUri,
     width: asset.width || undefined
-  };
+  }, compressedUri);
 }
 
 async function compressVideo(
@@ -222,7 +232,7 @@ async function buildOriginalImageMediaFallback(
   const sizeBytes = await getFileSize(asset.uri);
 
   if (contentType && sizeBytes > 0 && sizeBytes <= CHAT_MEDIA_LIMITS.image) {
-    return {
+    return attachMediaThumbnail({
       contentType,
       fileName: getAssetFileName(asset, contentType === 'image/png' ? 'photo.png' : 'photo.jpg'),
       height: asset.height || undefined,
@@ -230,7 +240,7 @@ async function buildOriginalImageMediaFallback(
       sizeBytes,
       uri: asset.uri,
       width: asset.width || undefined
-    };
+    }, asset.uri);
   }
 
   if (isImageManipulatorContextError(lastError)) {
@@ -255,7 +265,7 @@ async function buildOriginalImageMediaIfSendable(
     return null;
   }
 
-  return {
+  return attachMediaThumbnail({
     contentType,
     fileName: getAssetFileName(asset, contentType === 'image/png' ? 'photo.png' : 'photo.jpg'),
     height: asset.height || undefined,
@@ -263,7 +273,79 @@ async function buildOriginalImageMediaIfSendable(
     sizeBytes,
     uri: asset.uri,
     width: asset.width || undefined
+  }, asset.uri);
+}
+
+async function attachMediaThumbnail(
+  media: LocalChatMediaInput,
+  sourceUri: string
+): Promise<LocalChatMediaInput> {
+  const thumbnail = media.kind === 'image'
+    ? await generateImageThumbnail(sourceUri)
+    : media.kind === 'video'
+      ? await generateVideoThumbnail(sourceUri)
+      : null;
+
+  if (!thumbnail) {
+    return media;
+  }
+
+  return {
+    ...media,
+    thumbnailContentType: thumbnail.contentType,
+    thumbnailDataUrl: thumbnail.dataUrl,
+    thumbnailHeight: thumbnail.height,
+    thumbnailWidth: thumbnail.width
   };
+}
+
+async function generateImageThumbnail(sourceUri: string): Promise<PreparedMediaThumbnail | null> {
+  for (const width of CHAT_MEDIA_THUMBNAIL_WIDTHS) {
+    try {
+      const thumbnail = await ImageManipulator.manipulateAsync(
+        sourceUri,
+        [{ resize: { width } }],
+        {
+          base64: true,
+          compress: width >= 320 ? 0.54 : 0.48,
+          format: ImageManipulator.SaveFormat.JPEG
+        }
+      );
+
+      if (!thumbnail.base64) {
+        continue;
+      }
+
+      if (getUtf8ByteCount(thumbnail.base64) > CHAT_MEDIA_THUMBNAIL_MAX_BASE64_BYTES) {
+        await waitForImageManipulatorRecovery();
+        continue;
+      }
+
+      return {
+        contentType: 'image/jpeg',
+        dataUrl: `data:image/jpeg;base64,${thumbnail.base64}`,
+        height: thumbnail.height,
+        width: thumbnail.width
+      };
+    } catch {
+      await waitForImageManipulatorRecovery();
+    }
+  }
+
+  return null;
+}
+
+async function generateVideoThumbnail(sourceUri: string): Promise<PreparedMediaThumbnail | null> {
+  try {
+    const poster = await VideoThumbnails.getThumbnailAsync(sourceUri, {
+      quality: 0.62,
+      time: 900
+    });
+
+    return await generateImageThumbnail(poster.uri);
+  } catch {
+    return null;
+  }
 }
 
 function getAssetImageContentType(asset: ImagePicker.ImagePickerAsset): string | null {
@@ -348,6 +430,27 @@ function waitForImageManipulatorRecovery(): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, 90);
   });
+}
+
+function getUtf8ByteCount(value: string): number {
+  let bytes = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const codePoint = value.charCodeAt(index);
+
+    if (codePoint <= 0x7F) {
+      bytes += 1;
+    } else if (codePoint <= 0x7FF) {
+      bytes += 2;
+    } else if (codePoint >= 0xD800 && codePoint <= 0xDBFF) {
+      bytes += 4;
+      index += 1;
+    } else {
+      bytes += 3;
+    }
+  }
+
+  return bytes;
 }
 
 async function launchCamera(mediaTypes: ImagePicker.MediaTypeOptions) {

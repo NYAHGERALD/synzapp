@@ -1062,20 +1062,22 @@ profileRouter.post('/chat/groups/:groupId/encrypted-messages', verifyAppCheck, a
       tenantId: envelope.tenantId,
       uid: decodedToken.uid
     });
-    void sendGroupChatMessagePushNotifications({
-      conversationId: envelope.conversationId,
-      envelopeId: envelope.envelopeId,
-      groupId,
-      notificationPreviewByDevice: envelope.notificationPreviewByDevice,
-      recipientDeviceIds: envelope.recipientDeviceIds,
-      recipientUids: envelope.recipientUids,
-      senderKeyAgreementPublicKey: envelope.senderKeyAgreementPublicKey,
-      senderUid: decodedToken.uid,
-      sentAt: envelope.sentAt,
-      tenantId: envelope.tenantId
-    }).catch((error) => {
-      console.warn('Group chat push notification failed:', error instanceof Error ? error.message : error);
-    });
+    if (!envelope.isDuplicate) {
+      void sendGroupChatMessagePushNotifications({
+        conversationId: envelope.conversationId,
+        envelopeId: envelope.envelopeId,
+        groupId,
+        notificationPreviewByDevice: envelope.notificationPreviewByDevice,
+        recipientDeviceIds: envelope.recipientDeviceIds,
+        recipientUids: envelope.recipientUids,
+        senderKeyAgreementPublicKey: envelope.senderKeyAgreementPublicKey,
+        senderUid: decodedToken.uid,
+        sentAt: envelope.sentAt,
+        tenantId: envelope.tenantId
+      }).catch((error) => {
+        console.warn('Group chat push notification failed:', error instanceof Error ? error.message : error);
+      });
+    }
 
     res.status(201).json({ contact, envelope });
   } catch (error) {
@@ -1414,19 +1416,21 @@ profileRouter.post('/chat/conversations/:contactId/encrypted-messages', verifyAp
       tenantId: envelope.tenantId,
       uid: decodedToken.uid
     });
-    void sendChatMessagePushNotification({
-      conversationId: envelope.conversationId,
-      envelopeId: envelope.envelopeId,
-      notificationPreviewByDevice: envelope.notificationPreviewByDevice,
-      recipientDeviceIds: envelope.recipientDeviceIds,
-      recipientUid: contactId,
-      senderUid: decodedToken.uid,
-      senderKeyAgreementPublicKey: envelope.senderKeyAgreementPublicKey,
-      sentAt: envelope.sentAt,
-      tenantId: envelope.tenantId
-    }).catch((error) => {
-      console.warn('Chat push notification failed:', error instanceof Error ? error.message : error);
-    });
+    if (!envelope.isDuplicate) {
+      void sendChatMessagePushNotification({
+        conversationId: envelope.conversationId,
+        envelopeId: envelope.envelopeId,
+        notificationPreviewByDevice: envelope.notificationPreviewByDevice,
+        recipientDeviceIds: envelope.recipientDeviceIds,
+        recipientUid: contactId,
+        senderUid: decodedToken.uid,
+        senderKeyAgreementPublicKey: envelope.senderKeyAgreementPublicKey,
+        sentAt: envelope.sentAt,
+        tenantId: envelope.tenantId
+      }).catch((error) => {
+        console.warn('Chat push notification failed:', error instanceof Error ? error.message : error);
+      });
+    }
 
     res.status(201).json({ contact, envelope });
   } catch (error) {

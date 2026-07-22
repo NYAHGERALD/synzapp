@@ -15,6 +15,7 @@ import {
   useAudioRecorderState
 } from 'expo-audio';
 import * as FileSystem from 'expo-file-system/legacy';
+import { VideoView, useVideoPlayer } from 'expo-video';
 import {
   ActionSheetIOS,
   ActivityIndicator,
@@ -1011,6 +1012,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const deviceIdentityRegistrationStartedRef = useRef(false);
   const activeLocalSendQueueIdsRef = useRef<Set<string>>(new Set());
   const pendingSyncContactIdsRef = useRef<Set<string>>(new Set());
+  const activePushHydrationContactIdsRef = useRef<Set<string>>(new Set());
   const activeMediaDownloadPromisesRef = useRef<Map<string, Promise<string | null>>>(new Map());
   const organizationDeletionProgressAnim = useRef(new Animated.Value(0)).current;
   const hasPromptedOfflineAiInstallRef = useRef(false);
@@ -1247,6 +1249,10 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       appStateRef.current = nextState;
       if (nextState === 'active') {
         void loadUserProfile(false);
+        void syncAllPendingMessages();
+        if (selectedChatRef.current && !activeTrashSegmentIdRef.current) {
+          void loadMessagesForChat(selectedChatRef.current, false);
+        }
         if (realtimeSocketRef.current) {
           sendRealtimePresenceHeartbeat(realtimeSocketRef.current);
         }
@@ -1521,8 +1527,8 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       onCallResponse: (data) => {
         void handleIncomingCallPushNotification(data);
       },
-      onReceived: () => {
-        void loadChatContacts(false);
+      onReceived: (data) => {
+        void hydrateChatFromPushNotification(data);
       },
       onResponse: (data) => {
         void openChatFromPushNotification(data);
@@ -6244,6 +6250,78 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     }
   }
 
+  async function hydrateChatFromPushNotification(data: ChatPushNotificationData) {
+    if (!data.contactId || activePushHydrationContactIdsRef.current.has(data.contactId)) {
+      return;
+    }
+
+    activePushHydrationContactIdsRef.current.add(data.contactId);
+
+    try {
+      const chatType = data.chatType || getChatTypeForContactId(data.contactId);
+      const idToken = await getIdToken();
+      const result = await getChatMessages({
+        chatType,
+        contactId: data.contactId,
+        currentUid,
+        idToken
+      });
+      const cachedContact = await cacheChatContactPhoto(result.contact, idToken);
+      const [cachedConversation, pendingMessages] = await Promise.all([
+        loadCachedChatConversation({
+          contactId: data.contactId,
+          ...getLocalChatScope()
+        }).catch(() => null),
+        listPendingChatMessages({
+          contactId: data.contactId,
+          ...getLocalChatScope()
+        }).catch(() => [])
+      ]);
+      const serverMessages = applyReactionMapToMessages(
+        uniqueChatMessages(result.messages),
+        result.messageReactions
+      );
+      const mergedMessages = uniqueChatMessages([
+        ...(cachedConversation?.messages || []),
+        ...serverMessages
+      ]);
+      const visiblePersistedMessages = await filterHiddenMessagesForChat(data.contactId, mergedMessages);
+      const nextMessages = uniqueChatMessages([
+        ...visiblePersistedMessages,
+        ...pendingMessages.map((pendingMessage) => pendingMessage.message)
+      ]);
+      const isActiveChat = selectedChatRef.current?.contactId === data.contactId &&
+        !activeTrashSegmentIdRef.current;
+      const contactWithLocalPreview = applyLocalChatPreview(
+        isActiveChat ? { ...cachedContact, unreadCount: 0 } : cachedContact,
+        nextMessages
+      );
+
+      setProfilePhotoAuthToken(idToken);
+      setChatContacts((currentContacts) => upsertChatContact(currentContacts, contactWithLocalPreview));
+
+      if (isActiveChat) {
+        setMessageReactions(result.messageReactions);
+        setMessages(nextMessages);
+        setSelectedChat(mapChatContactToChatItem(contactWithLocalPreview));
+      }
+
+      await saveCachedChatConversation({
+        contact: contactWithLocalPreview,
+        contactId: data.contactId,
+        messages: visiblePersistedMessages,
+        ...getLocalChatScope()
+      });
+      queueEncryptedChatBackup();
+      queueMediaDownloadsForMessages(data.contactId, nextMessages, chatType);
+      void syncPendingMessagesForChat(data.contactId);
+    } catch {
+      void loadChatContacts(false);
+    } finally {
+      activePushHydrationContactIdsRef.current.delete(data.contactId);
+    }
+  }
+
   function isActiveChatOpenRequest(openRequestId: number | undefined, contactId: string): boolean {
     return openRequestId === undefined ||
       (chatOpenRequestIdRef.current === openRequestId && selectedChatRef.current?.contactId === contactId);
@@ -6455,6 +6533,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
             : null;
           const result = await sendChatMessage({
             chatType: pendingMessage.chatType || 'DIRECT',
+            clientMessageId: pendingMessage.queueId,
             contactId,
             currentUid,
             idToken,
@@ -6540,29 +6619,6 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     }
 
     setChatContacts((currentContacts) => upsertChatContact(currentContacts, contactWithLocalPreview));
-  }
-
-  async function saveOptimisticLocalMessage(chat: ChatItem, message: ChatMessage) {
-    const cachedConversation = await loadCachedChatConversation({
-      contactId: chat.contactId,
-      ...getLocalChatScope()
-    }).catch(() => null);
-    const nextMessages = uniqueChatMessages([
-      ...(cachedConversation?.messages || []),
-      message
-    ]);
-    const fallbackContact = mapChatItemToChatContact(chat);
-    const contactWithLocalPreview = applyLocalChatPreview(
-      cachedConversation?.contact || fallbackContact,
-      nextMessages
-    );
-
-    await saveCachedChatConversation({
-      contact: contactWithLocalPreview,
-      contactId: chat.contactId,
-      messages: nextMessages,
-      ...getLocalChatScope()
-    });
   }
 
   function addVisibleLocalMessage(chat: ChatItem, message: ChatMessage) {
@@ -7053,12 +7109,12 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
 
     const optimisticMessage: ChatMessage = {
       ...pendingMessage.message,
-      deliveryStatus: 'sent',
+      deliveryStatus: 'queued',
       media: primaryMedia
         ? {
             ...primaryMedia,
             transferProgress: 0,
-            transferStatus: 'uploading'
+            transferStatus: 'queued'
           }
         : null,
       image: primaryMedia?.kind === 'image'
@@ -7073,7 +7129,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       mediaItems: mediaItems.map((mediaItem) => ({
         ...mediaItem,
         transferProgress: 0,
-        transferStatus: 'uploading'
+        transferStatus: 'queued'
       }))
     };
 
@@ -7082,10 +7138,46 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     }
     setReplyTarget(null);
     addVisibleLocalMessage(activeChat, optimisticMessage);
-    await saveOptimisticLocalMessage(activeChat, optimisticMessage).catch(() => undefined);
+    void sendQueuedChatPayload({
+      activeChat,
+      media,
+      mediaItems,
+      pendingMessage,
+      replyReference,
+      text
+    });
+  }
+
+  async function sendQueuedChatPayload(input: {
+    activeChat: ChatItem;
+    media: ChatMediaAttachment | null;
+    mediaItems: ChatMediaAttachment[];
+    pendingMessage: Awaited<ReturnType<typeof enqueuePendingChatMessage>>;
+    replyReference: ChatReplyReference | null;
+    text: string;
+  }) {
+    const {
+      activeChat,
+      media,
+      mediaItems,
+      pendingMessage,
+      replyReference,
+      text
+    } = input;
+
+    if (activeLocalSendQueueIdsRef.current.has(pendingMessage.queueId)) {
+      return;
+    }
+
     activeLocalSendQueueIdsRef.current.add(pendingMessage.queueId);
 
     try {
+      await updatePendingChatMessage({
+        lastError: null,
+        ...getLocalChatScope(),
+        queueId: pendingMessage.queueId,
+        status: 'sending'
+      });
       const idToken = await getIdToken();
       const sendMediaItems = mediaItems.length > 1
         ? await Promise.all(mediaItems.map((mediaItem, index) => uploadMediaForMessage({
@@ -7108,6 +7200,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         : null;
       const result = await sendChatMessage({
         chatType: activeChat.chatType,
+        clientMessageId: pendingMessage.queueId,
         contactId: activeChat.contactId,
         currentUid,
         idToken,
@@ -7322,7 +7415,12 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       return;
     }
 
-    if (media.kind === 'image' || media.kind === 'video') {
+    if (media.kind === 'video') {
+      void handleOpenVideoAttachment(message, activeIndex);
+      return;
+    }
+
+    if (media.kind === 'image') {
       handleOpenMediaViewer(message, activeIndex);
       return;
     }
@@ -7332,6 +7430,65 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     }
 
     void handleOpenFileAttachment(message, activeIndex);
+  }
+
+  async function handleOpenVideoAttachment(message: ChatMessage, activeIndex: number) {
+    const activeChat = selectedChatRef.current;
+    const allMediaItems = getMessageMediaItems(message);
+    const selectedMedia = allMediaItems[activeIndex] || allMediaItems[0] || getMessageMedia(message);
+
+    if (!selectedMedia || selectedMedia.kind !== 'video') {
+      return;
+    }
+
+    try {
+      let localUri = getMediaLocalUri(selectedMedia);
+
+      if (!localUri) {
+        if (!activeChat || !selectedMedia.mediaId || !selectedMedia.key || !selectedMedia.nonce) {
+          throw new Error('This video is not available yet.');
+        }
+
+        localUri = await downloadMediaForMessage(
+          activeChat.contactId,
+          activeChat.chatType,
+          message.messageId,
+          selectedMedia,
+          activeIndex
+        ) || '';
+      }
+
+      if (!localUri) {
+        throw new Error('This video could not be downloaded.');
+      }
+
+      const mediaItems = allMediaItems.filter((media) =>
+        media.kind === 'image' || media.kind === 'video'
+      );
+      const viewerIndex = Math.max(0, mediaItems.findIndex((media) =>
+        media === selectedMedia ||
+        Boolean(media.mediaId && media.mediaId === selectedMedia.mediaId) ||
+        Boolean(media.localUri && media.localUri === selectedMedia.localUri)
+      ));
+      const preparedItems = mediaItems.map((media, index) =>
+        index === viewerIndex
+          ? {
+              ...media,
+              localUri,
+              transferProgress: 1,
+              transferStatus: 'available' as const
+            }
+          : media
+      );
+
+      setMediaViewer({
+        activeIndex: Math.max(0, Math.min(viewerIndex, preparedItems.length - 1)),
+        items: preparedItems,
+        title: activeChat?.title || 'Video'
+      });
+    } catch (nextError) {
+      Alert.alert('Video unavailable', getErrorMessage(nextError, 'Unable to open this video.'));
+    }
   }
 
   function handleOpenMediaViewer(message: ChatMessage, activeIndex: number) {
@@ -13389,6 +13546,7 @@ function MediaViewerModal({
         >
           {state.items.map((media, index) => {
             const localUri = getMediaLocalUri(media);
+            const previewUri = getMediaPreviewUri(media);
 
             return (
               <View
@@ -13401,12 +13559,32 @@ function MediaViewerModal({
                   }
                 ]}
               >
-                {media.kind === 'image' && localUri ? (
+                {media.kind === 'video' && localUri ? (
+                  <MediaViewerVideoSlide
+                    fileName={media.fileName}
+                    posterUri={previewUri}
+                    uri={localUri}
+                  />
+                ) : media.kind === 'image' && previewUri ? (
                   <Image
                     resizeMode="contain"
-                    source={{ uri: localUri }}
+                    source={{ uri: previewUri }}
                     style={styles.mediaViewerImage}
                   />
+                ) : media.kind === 'video' && previewUri ? (
+                  <View style={styles.mediaViewerVideoPoster}>
+                    <Image
+                      resizeMode="contain"
+                      source={{ uri: previewUri }}
+                      style={styles.mediaViewerImage}
+                    />
+                    <View style={styles.mediaViewerVideoPosterOverlay}>
+                      <Feather color="#FFFFFF" name="download" size={22} />
+                      <Text style={styles.mediaViewerUnavailableText}>
+                        Downloading secure video when opened
+                      </Text>
+                    </View>
+                  </View>
                 ) : (
                   <View style={styles.mediaViewerUnavailable}>
                     <Ionicons
@@ -13437,7 +13615,7 @@ function MediaViewerModal({
             showsHorizontalScrollIndicator={false}
           >
             {state.items.map((media, index) => {
-              const localUri = getMediaLocalUri(media);
+              const previewUri = getMediaPreviewUri(media);
 
               return (
                 <Pressable
@@ -13457,10 +13635,10 @@ function MediaViewerModal({
                     index === activeIndex && styles.mediaViewerThumbnailActive
                   ]}
                 >
-                  {media.kind === 'image' && localUri ? (
+                  {previewUri ? (
                     <Image
                       resizeMode="cover"
-                      source={{ uri: localUri }}
+                      source={{ uri: previewUri }}
                       style={styles.mediaViewerThumbnailImage}
                     />
                   ) : (
@@ -13481,6 +13659,37 @@ function MediaViewerModal({
         </View>
       </View>
     </Modal>
+  );
+}
+
+function MediaViewerVideoSlide({
+  fileName,
+  posterUri,
+  uri
+}: {
+  fileName: string;
+  posterUri: string;
+  uri: string;
+}) {
+  const player = useVideoPlayer({
+    metadata: {
+      artwork: posterUri || undefined,
+      title: fileName || 'Synzapp video'
+    },
+    uri
+  }, (nextPlayer) => {
+    nextPlayer.loop = false;
+    nextPlayer.play();
+  });
+
+  return (
+    <VideoView
+      allowsFullscreen
+      contentFit="contain"
+      nativeControls
+      player={player}
+      style={styles.mediaViewerVideo}
+    />
   );
 }
 
@@ -15502,7 +15711,7 @@ function MessageMediaPreview({
   const attachmentMetaColor = isMine || isDark ? 'rgba(255, 255, 255, 0.72)' : appTheme.colors.muted;
   const attachmentIconColor = isMine || isDark ? '#FFFFFF' : appTheme.colors.primary;
 
-  if (media.kind === 'image') {
+  if (media.kind === 'image' || media.kind === 'video') {
     return (
       <Pressable
         accessibilityLabel="Open media"
@@ -15527,9 +15736,24 @@ function MessageMediaPreview({
           />
         ) : (
           <View style={styles.messageBubbleMediaPlaceholder}>
-            <Ionicons color="#94A3B8" name="image-outline" size={34} />
+            <Ionicons
+              color="#94A3B8"
+              name={media.kind === 'video' ? 'play-circle-outline' : 'image-outline'}
+              size={34}
+            />
           </View>
         )}
+        {media.kind === 'video' ? (
+          <>
+            <View style={styles.messageVideoPlayBadge}>
+              <Ionicons color="#FFFFFF" name="play" size={28} />
+            </View>
+            <View style={styles.messageVideoDurationBadge}>
+              <Feather color="#FFFFFF" name="video" size={12} />
+              <Text style={styles.messageVideoDurationText}>{formatMediaDuration(media.durationMs)}</Text>
+            </View>
+          </>
+        ) : null}
         {transferLabel ? (
           <View style={styles.messageMediaProgressOverlay}>
             <View style={styles.messageMediaProgressCircle}>
@@ -15596,14 +15820,14 @@ function MessageMediaPreview({
         ) : (
           <Feather
             color={attachmentIconColor}
-            name={media.kind === 'video' ? 'play-circle' : isAudioAttachment(media) ? 'music' : 'file-text'}
+            name="file-text"
             size={22}
           />
         )}
       </View>
       <View style={styles.messageAttachmentText}>
         <Text numberOfLines={1} style={[styles.messageAttachmentName, { color: attachmentTextColor }]}>
-          {media.fileName || (media.kind === 'video' ? 'Video' : 'File')}
+          {media.fileName || 'File'}
         </Text>
         <Text numberOfLines={1} style={[styles.messageAttachmentMeta, { color: attachmentMetaColor }]}>
           {transferLabel || formatAttachmentMeta(media)}
@@ -15664,7 +15888,7 @@ function MessageMediaAlbumPreview({
         profilePhotoHeaders={profilePhotoHeaders}
         senderName={senderName}
         senderProfilePhotoUrl={senderProfilePhotoUrl}
-        sourceUri={media.kind === 'image' ? getMediaLocalUri(media) : ''}
+        sourceUri={getMediaPreviewUri(media)}
         width={width}
       />
     ) : null;
@@ -15688,7 +15912,7 @@ function MessageMediaAlbumPreview({
       }
     ]}>
       {visibleMediaItems.map((media, index) => {
-        const sourceUri = media.kind === 'image' ? getMediaLocalUri(media) : '';
+        const sourceUri = getMediaPreviewUri(media);
         const isLastVisibleTile = index === visibleMediaItems.length - 1 && hiddenCount > 0;
 
         return (
@@ -26465,6 +26689,10 @@ function buildLocalChatMediaAttachment(media: LocalChatMediaInput): ChatMediaAtt
     kind: media.kind,
     localUri: media.uri,
     sizeBytes: media.sizeBytes,
+    thumbnailContentType: media.thumbnailContentType,
+    thumbnailDataUrl: media.thumbnailDataUrl,
+    thumbnailHeight: media.thumbnailHeight,
+    thumbnailWidth: media.thumbnailWidth,
     transferProgress: 0,
     transferStatus: 'queued',
     width: media.width
@@ -26540,6 +26768,10 @@ function mergeSyncedMediaWithPendingLocalMedia(
   return {
     ...syncedMedia,
     localUri: pendingMedia.localUri,
+    thumbnailContentType: syncedMedia.thumbnailContentType || pendingMedia.thumbnailContentType,
+    thumbnailDataUrl: syncedMedia.thumbnailDataUrl || pendingMedia.thumbnailDataUrl,
+    thumbnailHeight: syncedMedia.thumbnailHeight || pendingMedia.thumbnailHeight,
+    thumbnailWidth: syncedMedia.thumbnailWidth || pendingMedia.thumbnailWidth,
     transferProgress: 1,
     transferStatus: 'available'
   };
@@ -26554,6 +26786,14 @@ function getMediaLocalUri(media: ChatMediaAttachment | null): string {
     (typeof (media as ChatImageAttachment).dataUrl === 'string'
       ? (media as ChatImageAttachment).dataUrl || ''
       : '');
+}
+
+function getMediaPreviewUri(media: ChatMediaAttachment | null): string {
+  if (!media) {
+    return '';
+  }
+
+  return getMediaLocalUri(media) || media.thumbnailDataUrl || '';
 }
 
 function isAudioAttachment(media: ChatMediaAttachment): boolean {
@@ -26589,6 +26829,10 @@ function isMediaTransferActive(media: ChatMediaAttachment): boolean {
 }
 
 function shouldSkipAutomaticMediaDownload(media: ChatMediaAttachment): boolean {
+  if (media.kind === 'video') {
+    return true;
+  }
+
   if (media.kind !== 'file') {
     return false;
   }
@@ -26795,6 +27039,10 @@ function toLocalChatMediaInput(media: ChatMediaAttachment): LocalChatMediaInput 
     fileName: media.fileName,
     height: media.height,
     kind: media.kind,
+    thumbnailContentType: media.thumbnailContentType,
+    thumbnailDataUrl: media.thumbnailDataUrl,
+    thumbnailHeight: media.thumbnailHeight,
+    thumbnailWidth: media.thumbnailWidth,
     sizeBytes: media.sizeBytes,
     uri: media.localUri,
     width: media.width
@@ -31553,6 +31801,39 @@ const styles = StyleSheet.create({
     fontWeight: '400',
     lineHeight: 14
   },
+  messageVideoPlayBadge: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(15, 23, 42, 0.58)',
+    borderColor: 'rgba(255, 255, 255, 0.72)',
+    borderRadius: 28,
+    borderWidth: 1,
+    height: 56,
+    justifyContent: 'center',
+    left: '50%',
+    marginLeft: -28,
+    marginTop: -28,
+    position: 'absolute',
+    top: '50%',
+    width: 56
+  },
+  messageVideoDurationBadge: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(15, 23, 42, 0.72)',
+    borderRadius: 12,
+    bottom: 7,
+    flexDirection: 'row',
+    gap: 5,
+    minHeight: 22,
+    paddingHorizontal: 7,
+    position: 'absolute',
+    right: 7
+  },
+  messageVideoDurationText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '400',
+    lineHeight: 14
+  },
   messageAlbumMoreOverlay: {
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
@@ -32439,6 +32720,24 @@ const styles = StyleSheet.create({
   mediaViewerImage: {
     height: '100%',
     width: '100%'
+  },
+  mediaViewerVideo: {
+    height: '100%',
+    width: '100%'
+  },
+  mediaViewerVideoPoster: {
+    height: '100%',
+    justifyContent: 'center',
+    position: 'relative',
+    width: '100%'
+  },
+  mediaViewerVideoPosterOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    backgroundColor: 'rgba(2, 6, 23, 0.42)',
+    gap: 8,
+    justifyContent: 'center',
+    paddingHorizontal: 28
   },
   mediaViewerUnavailable: {
     alignItems: 'center',

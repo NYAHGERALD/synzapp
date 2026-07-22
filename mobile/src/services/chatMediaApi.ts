@@ -37,6 +37,10 @@ export interface LocalChatMediaInput {
   height?: number;
   kind: ChatMediaKind;
   sizeBytes: number;
+  thumbnailContentType?: string;
+  thumbnailDataUrl?: string;
+  thumbnailHeight?: number;
+  thumbnailWidth?: number;
   uri: string;
   width?: number;
 }
@@ -139,6 +143,10 @@ export async function uploadEncryptedChatMedia(input: {
     mediaId: session.mediaId,
     nonce: encryptedMedia.nonce,
     sizeBytes: localMedia.sizeBytes,
+    thumbnailContentType: localMedia.thumbnailContentType,
+    thumbnailDataUrl: localMedia.thumbnailDataUrl,
+    thumbnailHeight: localMedia.thumbnailHeight,
+    thumbnailWidth: localMedia.thumbnailWidth,
     transferProgress: 0.92,
     transferStatus: 'uploading',
     width: localMedia.width

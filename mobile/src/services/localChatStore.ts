@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { fromByteArray, toByteArray } from 'base64-js';
 import * as Crypto from 'expo-crypto';
 import * as SecureStore from 'expo-secure-store';
+import * as SQLite from 'expo-sqlite';
 import nacl from 'tweetnacl';
 import type { ChatContact, ChatMessage } from './chatApi';
 
@@ -14,6 +15,17 @@ interface EncryptedPayload {
 interface LocalChatScope {
   ownerUid: string;
   tenantId: string;
+}
+
+interface SqliteConversationRow {
+  contact_id: string;
+  contact_payload: string | null;
+  hidden_payload: string | null;
+  updated_at: string;
+}
+
+interface SqliteMessageRow {
+  payload: string;
 }
 
 export interface LocalConversationRecord {
@@ -55,10 +67,12 @@ const LOCAL_CHAT_KEY_STORAGE_KEY = 'synzapp.localChatKey.v1';
 const LOCAL_CACHED_CHAT_CONTACT_LIMIT = 500;
 const LOCAL_CACHED_MESSAGE_LIMIT = 1000;
 const LOCAL_HIDDEN_MESSAGE_LIMIT = 5000;
+const LOCAL_SQLITE_DATABASE_NAME = 'synzapp-local-chat-v1.db';
 const localChatSecureStoreOptions: SecureStore.SecureStoreOptions = {
   keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
   keychainService: 'synzapp.local.chat.v1'
 };
+let sqliteDatabasePromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
 export async function loadCachedChatContacts(input: {
   ownerUid: string;
@@ -120,7 +134,8 @@ export async function loadCachedChatConversation(input: {
   ownerUid: string;
   tenantId: string;
 }): Promise<LocalConversationRecord | null> {
-  const record = await loadRawCachedChatConversation(input);
+  const sqliteRecord = await loadRawCachedChatConversationFromSqlite(input).catch(() => null);
+  const record = sqliteRecord || await loadRawCachedChatConversation(input);
 
   return record ? filterHiddenMessagesInRecord(record) : null;
 }
@@ -136,6 +151,16 @@ export async function saveCachedChatConversation(input: {
   const scope = normalizeLocalChatScope(input);
 
   if (!scope) {
+    return;
+  }
+
+  const didSaveToSqlite = await saveCachedChatConversationToSqlite({
+    ...input,
+    ownerUid: scope.ownerUid,
+    tenantId: scope.tenantId
+  }).catch(() => false);
+
+  if (didSaveToSqlite) {
     return;
   }
 
@@ -176,6 +201,12 @@ export async function listCachedChatConversations(input: {
 
   if (!scope) {
     return [];
+  }
+
+  const sqliteRecords = await listCachedChatConversationsFromSqlite(scope).catch(() => []);
+
+  if (sqliteRecords.length) {
+    return sqliteRecords;
   }
 
   const keys = await AsyncStorage.getAllKeys();
@@ -267,6 +298,8 @@ export async function clearLocalChatDataForOwner(input: {
   if (matchingKeys.length) {
     await AsyncStorage.multiRemove(matchingKeys);
   }
+
+  await clearSqliteChatDataForOwner(input).catch(() => undefined);
 }
 
 export async function loadHiddenChatMessageIds(input: {
@@ -274,7 +307,8 @@ export async function loadHiddenChatMessageIds(input: {
   ownerUid: string;
   tenantId: string;
 }): Promise<string[]> {
-  const record = await loadRawCachedChatConversation(input);
+  const record = await loadRawCachedChatConversationFromSqlite(input).catch(() => null) ||
+    await loadRawCachedChatConversation(input);
 
   return record?.hiddenMessageIds || [];
 }
@@ -291,7 +325,11 @@ export async function hideCachedChatMessagesForMe(input: {
     return null;
   }
 
-  const existingRecord = await loadRawCachedChatConversation({
+  const existingRecord = await loadRawCachedChatConversationFromSqlite({
+    contactId: input.contactId,
+    ownerUid: scope.ownerUid,
+    tenantId: scope.tenantId
+  }).catch(() => null) || await loadRawCachedChatConversation({
     contactId: input.contactId,
     ownerUid: scope.ownerUid,
     tenantId: scope.tenantId
@@ -314,10 +352,14 @@ export async function hideCachedChatMessagesForMe(input: {
     version: 1
   };
 
-  await AsyncStorage.setItem(
-    getConversationStorageKey(scope, input.contactId),
-    await encryptJson(nextRecord)
-  );
+  const didSaveToSqlite = await saveCachedChatConversationToSqlite(nextRecord).catch(() => false);
+
+  if (!didSaveToSqlite) {
+    await AsyncStorage.setItem(
+      getConversationStorageKey(scope, input.contactId),
+      await encryptJson(nextRecord)
+    );
+  }
 
   return filterHiddenMessagesInRecord(nextRecord);
 }
@@ -473,6 +515,283 @@ async function savePendingChatMessages(scope: LocalChatScope, messages: PendingC
     getOutboxStorageKey(scope),
     await encryptJson(safeMessages)
   );
+}
+
+async function loadRawCachedChatConversationFromSqlite(input: {
+  contactId: string;
+  ownerUid: string;
+  tenantId: string;
+}): Promise<LocalConversationRecord | null> {
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    return null;
+  }
+
+  const db = await getLocalChatSqliteDatabase();
+  const conversation = await db.getFirstAsync<SqliteConversationRow>(
+    `SELECT contact_id, contact_payload, hidden_payload, updated_at
+     FROM local_conversations
+     WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?
+     LIMIT 1`,
+    [scope.ownerUid, scope.tenantId, input.contactId]
+  );
+
+  if (!conversation) {
+    return null;
+  }
+
+  const rows = await db.getAllAsync<SqliteMessageRow>(
+    `SELECT payload
+     FROM local_messages
+     WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?
+     ORDER BY sent_at_ms ASC, message_id ASC
+     LIMIT ?`,
+    [scope.ownerUid, scope.tenantId, input.contactId, LOCAL_CACHED_MESSAGE_LIMIT]
+  );
+  const [contact, hiddenMessageIds, messages] = await Promise.all([
+    conversation.contact_payload
+      ? decryptJson<ChatContact>(conversation.contact_payload).catch(() => null)
+      : null,
+    conversation.hidden_payload
+      ? decryptJson<string[]>(conversation.hidden_payload).catch(() => [])
+      : [],
+    Promise.all(rows.map((row) => decryptJson<ChatMessage>(row.payload).catch(() => null)))
+  ]);
+
+  return normalizeCachedConversationRecord({
+    contact,
+    contactId: conversation.contact_id,
+    hiddenMessageIds: Array.isArray(hiddenMessageIds) ? hiddenMessageIds : [],
+    messages: messages.filter((message): message is ChatMessage => Boolean(message)),
+    ownerUid: scope.ownerUid,
+    tenantId: scope.tenantId,
+    updatedAt: conversation.updated_at,
+    version: 1
+  });
+}
+
+async function saveCachedChatConversationToSqlite(input: {
+  contact: ChatContact | null;
+  contactId: string;
+  hiddenMessageIds?: string[];
+  messages: ChatMessage[];
+  ownerUid: string;
+  tenantId: string;
+}): Promise<boolean> {
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    return false;
+  }
+
+  const existingRecord = await loadRawCachedChatConversationFromSqlite({
+    contactId: input.contactId,
+    ownerUid: scope.ownerUid,
+    tenantId: scope.tenantId
+  }).catch(() => null);
+  const hiddenMessageIds = normalizeHiddenMessageIds([
+    ...(existingRecord?.hiddenMessageIds || []),
+    ...(input.hiddenMessageIds || [])
+  ]);
+  const hiddenMessageIdSet = new Set(hiddenMessageIds);
+  const messages = uniqueMessages(input.messages)
+    .filter((message) => !hiddenMessageIdSet.has(message.messageId))
+    .slice(-LOCAL_CACHED_MESSAGE_LIMIT);
+  const db = await getLocalChatSqliteDatabase();
+  const nowIso = new Date().toISOString();
+  const contactPayload = input.contact ? await encryptJson(input.contact) : null;
+  const hiddenPayload = await encryptJson(hiddenMessageIds);
+  const messageIds = messages.map((message) => message.messageId).filter(Boolean);
+
+  await db.withTransactionAsync(async () => {
+    await db.runAsync(
+      `INSERT INTO local_conversations (
+        owner_uid, tenant_id, contact_id, contact_payload, hidden_payload, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(owner_uid, tenant_id, contact_id)
+      DO UPDATE SET
+        contact_payload = excluded.contact_payload,
+        hidden_payload = excluded.hidden_payload,
+        updated_at = excluded.updated_at`,
+      [scope.ownerUid, scope.tenantId, input.contactId, contactPayload, hiddenPayload, nowIso]
+    );
+
+    if (messageIds.length) {
+      const placeholders = messageIds.map(() => '?').join(', ');
+
+      await db.runAsync(
+        `DELETE FROM local_messages
+         WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?
+           AND message_id NOT IN (${placeholders})`,
+        [scope.ownerUid, scope.tenantId, input.contactId, ...messageIds]
+      );
+    } else {
+      await db.runAsync(
+        `DELETE FROM local_messages
+         WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?`,
+        [scope.ownerUid, scope.tenantId, input.contactId]
+      );
+    }
+
+    for (const message of messages) {
+      const payload = await encryptJson(message);
+
+      await db.runAsync(
+        `INSERT INTO local_messages (
+          owner_uid, tenant_id, contact_id, message_id, sent_at_ms,
+          sender_uid, is_mine, delivery_status, payload, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(owner_uid, tenant_id, contact_id, message_id)
+        DO UPDATE SET
+          sent_at_ms = excluded.sent_at_ms,
+          sender_uid = excluded.sender_uid,
+          is_mine = excluded.is_mine,
+          delivery_status = excluded.delivery_status,
+          payload = excluded.payload,
+          updated_at = excluded.updated_at`,
+        [
+          scope.ownerUid,
+          scope.tenantId,
+          input.contactId,
+          message.messageId,
+          getMessageSentAtMs(message),
+          message.senderUid,
+          message.isMine ? 1 : 0,
+          message.deliveryStatus || null,
+          payload,
+          nowIso
+        ]
+      );
+    }
+
+    await db.runAsync(
+      `DELETE FROM local_messages
+       WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?
+         AND message_id NOT IN (
+           SELECT message_id FROM local_messages
+           WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?
+           ORDER BY sent_at_ms DESC, message_id DESC
+           LIMIT ?
+         )`,
+      [
+        scope.ownerUid,
+        scope.tenantId,
+        input.contactId,
+        scope.ownerUid,
+        scope.tenantId,
+        input.contactId,
+        LOCAL_CACHED_MESSAGE_LIMIT
+      ]
+    );
+  });
+
+  return true;
+}
+
+async function listCachedChatConversationsFromSqlite(
+  scope: LocalChatScope
+): Promise<LocalConversationRecord[]> {
+  const db = await getLocalChatSqliteDatabase();
+  const rows = await db.getAllAsync<Pick<SqliteConversationRow, 'contact_id'>>(
+    `SELECT contact_id
+     FROM local_conversations
+     WHERE owner_uid = ? AND tenant_id = ?
+     ORDER BY updated_at DESC
+     LIMIT ?`,
+    [scope.ownerUid, scope.tenantId, LOCAL_CACHED_CHAT_CONTACT_LIMIT]
+  );
+  const records = await Promise.all(rows.map((row) =>
+    loadRawCachedChatConversationFromSqlite({
+      contactId: row.contact_id,
+      ownerUid: scope.ownerUid,
+      tenantId: scope.tenantId
+    }).catch(() => null)
+  ));
+
+  return records
+    .filter((record): record is LocalConversationRecord => Boolean(record))
+    .map(filterHiddenMessagesInRecord)
+    .sort((first, second) => first.contactId.localeCompare(second.contactId));
+}
+
+async function clearSqliteChatDataForOwner(input: {
+  ownerUid: string;
+  tenantId?: string;
+}): Promise<void> {
+  const ownerUid = typeof input.ownerUid === 'string' ? input.ownerUid.trim() : '';
+
+  if (!ownerUid) {
+    return;
+  }
+
+  const db = await getLocalChatSqliteDatabase();
+  const tenantId = typeof input.tenantId === 'string' ? input.tenantId.trim() : '';
+
+  if (tenantId) {
+    await Promise.all([
+      db.runAsync(
+        'DELETE FROM local_messages WHERE owner_uid = ? AND tenant_id = ?',
+        [ownerUid, tenantId]
+      ),
+      db.runAsync(
+        'DELETE FROM local_conversations WHERE owner_uid = ? AND tenant_id = ?',
+        [ownerUid, tenantId]
+      )
+    ]);
+    return;
+  }
+
+  await Promise.all([
+    db.runAsync('DELETE FROM local_messages WHERE owner_uid = ?', [ownerUid]),
+    db.runAsync('DELETE FROM local_conversations WHERE owner_uid = ?', [ownerUid])
+  ]);
+}
+
+async function getLocalChatSqliteDatabase(): Promise<SQLite.SQLiteDatabase> {
+  sqliteDatabasePromise ??= (async () => {
+    const db = await SQLite.openDatabaseAsync(LOCAL_SQLITE_DATABASE_NAME);
+
+    await db.execAsync(`
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE IF NOT EXISTS local_conversations (
+        owner_uid TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        contact_id TEXT NOT NULL,
+        contact_payload TEXT,
+        hidden_payload TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (owner_uid, tenant_id, contact_id)
+      );
+      CREATE TABLE IF NOT EXISTS local_messages (
+        owner_uid TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        contact_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        sent_at_ms INTEGER NOT NULL,
+        sender_uid TEXT NOT NULL,
+        is_mine INTEGER NOT NULL,
+        delivery_status TEXT,
+        payload TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (owner_uid, tenant_id, contact_id, message_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_local_messages_thread_time
+        ON local_messages(owner_uid, tenant_id, contact_id, sent_at_ms);
+      CREATE INDEX IF NOT EXISTS idx_local_conversations_owner_time
+        ON local_conversations(owner_uid, tenant_id, updated_at);
+    `);
+
+    return db;
+  })();
+
+  return sqliteDatabasePromise;
+}
+
+function getMessageSentAtMs(message: ChatMessage): number {
+  const sentAtMs = Date.parse(message.sentAt);
+
+  return Number.isFinite(sentAtMs) ? sentAtMs : Date.now();
 }
 
 async function loadRawCachedChatConversation(input: {

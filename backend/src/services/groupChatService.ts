@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DecodedIdToken } from 'firebase-admin/auth';
 import type { DocumentReference } from 'firebase-admin/firestore';
 import { fieldValue, firestore, storageBucket } from '../config/firebaseAdmin.js';
@@ -165,6 +165,7 @@ export interface EncryptedGroupEnvelopeResponse {
   clientMessageId: string;
   conversationId: string;
   envelopeId: string;
+  isDuplicate?: boolean;
   keyVersion: number;
   notificationPreviewByDevice?: Record<string, EncryptedNotificationPreviewRecord>;
   recipientDeviceIds: string[];
@@ -999,6 +1000,19 @@ export async function sendEncryptedGroupEnvelope(
     throw authorizationError('This device is not authorized.');
   }
 
+  const existingEnvelope = await findExistingGroupEnvelopeByClientMessageId({
+    clientMessageId: input.clientMessageId,
+    groupId: context.groupId,
+    groupRef: context.groupRef,
+    senderKeyAgreementPublicKey: senderDevice.keyAgreementPublicKey,
+    senderUid: decodedToken.uid,
+    tenantId: context.tenantId
+  });
+
+  if (existingEnvelope) {
+    return existingEnvelope;
+  }
+
   assertExactRecipientDevices(
     uniqueRecipientDeviceIds,
     expectedRecipientDevices.map((device) => device.deviceId || ''),
@@ -1011,7 +1025,9 @@ export async function sendEncryptedGroupEnvelope(
   });
 
   const envelopeRef = context.groupRef.collection('encryptedEnvelopes').doc();
-  const messageMetadataRef = context.groupRef.collection('messageMetadata').doc(envelopeRef.id);
+  const messageMetadataRef = context.groupRef
+    .collection('messageMetadata')
+    .doc(buildClientMessageMetadataId(decodedToken.uid, input.clientMessageId));
   const sentAtMs = Date.now();
   const recipientUids = Array.from(new Set(
     expectedRecipientDevices
@@ -1024,8 +1040,37 @@ export async function sendEncryptedGroupEnvelope(
       memberId === decodedToken.uid ? 0 : fieldValue.increment(1)
     ])
   );
+  let transactionDuplicateEnvelope: EncryptedGroupEnvelopeResponse | null = null;
 
   await firestore.runTransaction(async (transaction) => {
+    const existingMetadataSnapshot = await transaction.get(messageMetadataRef);
+
+    if (existingMetadataSnapshot.exists) {
+      const metadata = existingMetadataSnapshot.data() as {
+        envelopeId?: string;
+        recipientUids?: string[];
+      };
+      const existingEnvelopeId = metadata.envelopeId || '';
+      const existingEnvelopeSnapshot = existingEnvelopeId
+        ? await transaction.get(context.groupRef.collection('encryptedEnvelopes').doc(existingEnvelopeId))
+        : null;
+
+      if (existingEnvelopeSnapshot?.exists) {
+        const record = existingEnvelopeSnapshot.data() as EncryptedGroupEnvelopeRecord;
+
+        if (record.senderUid === decodedToken.uid && record.clientMessageId === input.clientMessageId) {
+          transactionDuplicateEnvelope = mapExistingGroupEnvelopeResponse({
+            envelopeId: existingEnvelopeSnapshot.id,
+            groupId: context.groupId,
+            record,
+            senderKeyAgreementPublicKey: senderDevice.keyAgreementPublicKey || '',
+            tenantId: context.tenantId
+          });
+          return;
+        }
+      }
+    }
+
     transaction.set(envelopeRef, {
       algorithm: input.algorithm,
       ciphertext: input.ciphertext,
@@ -1080,11 +1125,16 @@ export async function sendEncryptedGroupEnvelope(
     }, { merge: true });
   });
 
+  if (transactionDuplicateEnvelope) {
+    return transactionDuplicateEnvelope;
+  }
+
   return {
     algorithm: input.algorithm,
     clientMessageId: input.clientMessageId,
     conversationId: context.groupId,
     envelopeId: envelopeRef.id,
+    isDuplicate: false,
     keyVersion: input.keyVersion,
     notificationPreviewByDevice: Object.keys(notificationPreviewByDevice).length
       ? notificationPreviewByDevice
@@ -1096,6 +1146,89 @@ export async function sendEncryptedGroupEnvelope(
     sentAt: new Date(sentAtMs).toISOString(),
     tenantId: context.tenantId
   };
+}
+
+async function findExistingGroupEnvelopeByClientMessageId(input: {
+  clientMessageId: string;
+  groupId: string;
+  groupRef: FirebaseFirestore.DocumentReference;
+  senderKeyAgreementPublicKey: string;
+  senderUid: string;
+  tenantId: string;
+}): Promise<EncryptedGroupEnvelopeResponse | null> {
+  const metadataSnapshot = await input.groupRef
+    .collection('messageMetadata')
+    .where('senderUid', '==', input.senderUid)
+    .where('clientMessageId', '==', input.clientMessageId)
+    .limit(1)
+    .get();
+
+  const metadataDoc = metadataSnapshot.docs[0];
+
+  if (!metadataDoc) {
+    return null;
+  }
+
+  const metadata = metadataDoc.data() as {
+    envelopeId?: string;
+    recipientUids?: string[];
+  };
+  const envelopeId = metadata.envelopeId || metadataDoc.id;
+  const envelopeSnapshot = await input.groupRef
+    .collection('encryptedEnvelopes')
+    .doc(envelopeId)
+    .get();
+
+  if (!envelopeSnapshot.exists) {
+    return null;
+  }
+
+  const record = envelopeSnapshot.data() as EncryptedGroupEnvelopeRecord;
+
+  if (record.senderUid !== input.senderUid || record.clientMessageId !== input.clientMessageId) {
+    return null;
+  }
+
+  return mapExistingGroupEnvelopeResponse({
+    envelopeId: envelopeSnapshot.id,
+    groupId: input.groupId,
+    record: {
+      ...record,
+      recipientUids: record.recipientUids || metadata.recipientUids || []
+    },
+    senderKeyAgreementPublicKey: input.senderKeyAgreementPublicKey,
+    tenantId: input.tenantId
+  });
+}
+
+function mapExistingGroupEnvelopeResponse(input: {
+  envelopeId: string;
+  groupId: string;
+  record: EncryptedGroupEnvelopeRecord;
+  senderKeyAgreementPublicKey: string;
+  tenantId: string;
+}): EncryptedGroupEnvelopeResponse {
+  return {
+    algorithm: input.record.algorithm || 'unknown',
+    clientMessageId: input.record.clientMessageId || input.envelopeId,
+    conversationId: input.groupId,
+    envelopeId: input.record.envelopeId || input.envelopeId,
+    isDuplicate: true,
+    keyVersion: input.record.keyVersion || 1,
+    notificationPreviewByDevice: undefined,
+    recipientDeviceIds: input.record.recipientDeviceIds || [],
+    recipientUids: input.record.recipientUids || [],
+    senderDeviceId: input.record.senderDeviceId || '',
+    senderKeyAgreementPublicKey: input.record.senderKeyAgreementPublicKey || input.senderKeyAgreementPublicKey,
+    sentAt: new Date(input.record.sentAtMs || Date.now()).toISOString(),
+    tenantId: input.record.tenantId || input.tenantId
+  };
+}
+
+function buildClientMessageMetadataId(senderUid: string, clientMessageId: string): string {
+  return createHash('sha256')
+    .update(`${senderUid}:${clientMessageId}`)
+    .digest('hex');
 }
 
 export async function getGroupChatContact(

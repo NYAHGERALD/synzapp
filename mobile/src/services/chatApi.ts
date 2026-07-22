@@ -203,6 +203,10 @@ export interface ChatMediaAttachment {
   mediaId?: string;
   nonce?: string;
   sizeBytes: number;
+  thumbnailContentType?: string;
+  thumbnailDataUrl?: string;
+  thumbnailHeight?: number;
+  thumbnailWidth?: number;
   transferProgress?: number;
   transferStatus?: ChatMediaTransferStatus;
   width?: number;
@@ -866,6 +870,7 @@ export async function deleteChatMessageForMe(input: {
 
 export async function sendChatMessage(input: {
   chatType?: 'DIRECT' | 'GROUP';
+  clientMessageId?: string;
   contactId: string;
   currentUid: string;
   forwarded?: boolean;
@@ -893,6 +898,7 @@ export async function sendChatMessage(input: {
     idToken: input.idToken
   });
   const encryptedBody = await encryptChatMessage({
+    clientMessageId: input.clientMessageId,
     forwarded: input.forwarded,
     idToken: input.idToken,
     media,
@@ -1590,6 +1596,12 @@ function normalizeChatMediaAttachment(
   const dataUrl = typeof (media as ChatImageAttachment).dataUrl === 'string'
     ? (media as ChatImageAttachment).dataUrl?.trim()
     : '';
+  const thumbnailDataUrl = typeof media.thumbnailDataUrl === 'string'
+    ? media.thumbnailDataUrl.trim()
+    : '';
+  const thumbnailContentType = typeof media.thumbnailContentType === 'string'
+    ? media.thumbnailContentType.trim().toLowerCase()
+    : '';
   const localUri = typeof media.localUri === 'string'
     ? media.localUri.trim()
     : typeof (media as { uri?: string }).uri === 'string'
@@ -1633,6 +1645,12 @@ function normalizeChatMediaAttachment(
     mediaId: mediaId || undefined,
     nonce: nonce || undefined,
     sizeBytes: Number.isFinite(media.sizeBytes) ? Math.max(Math.round(media.sizeBytes || 0), 0) : 0,
+    thumbnailContentType: thumbnailDataUrl
+      ? thumbnailContentType || getDataUrlContentType(thumbnailDataUrl) || 'image/jpeg'
+      : undefined,
+    thumbnailDataUrl: thumbnailDataUrl || undefined,
+    thumbnailHeight: Number.isFinite(media.thumbnailHeight) ? Math.max(Math.round(media.thumbnailHeight || 0), 1) : undefined,
+    thumbnailWidth: Number.isFinite(media.thumbnailWidth) ? Math.max(Math.round(media.thumbnailWidth || 0), 1) : undefined,
     transferProgress: Number.isFinite(media.transferProgress)
       ? Math.min(Math.max(media.transferProgress || 0, 0), 1)
       : undefined,
@@ -1645,6 +1663,12 @@ function normalizeChatMediaAttachment(
         : undefined,
     width: Number.isFinite(media.width) ? Math.max(Math.round(media.width || 0), 1) : undefined
   };
+}
+
+function getDataUrlContentType(dataUrl: string): string | null {
+  const match = /^data:([^;,]+)[;,]/i.exec(dataUrl.trim());
+
+  return match?.[1]?.trim().toLowerCase() || null;
 }
 
 function normalizeChatMediaAttachments(

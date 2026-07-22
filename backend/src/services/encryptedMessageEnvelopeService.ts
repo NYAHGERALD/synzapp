@@ -34,6 +34,7 @@ export interface EncryptedDirectEnvelopeResponse {
   clientMessageId: string;
   conversationId: string;
   envelopeId: string;
+  isDuplicate?: boolean;
   keyVersion: number;
   notificationPreviewByDevice?: Record<string, EncryptedNotificationPreviewRecord>;
   recipientDeviceIds: string[];
@@ -376,6 +377,19 @@ export async function sendEncryptedDirectEnvelope(
     throw authorizationError('This device is not authorized.');
   }
 
+  const existingEnvelope = await findExistingDirectEnvelopeByClientMessageId({
+    chatRef: context.chatRef,
+    clientMessageId: input.clientMessageId,
+    conversationId: context.chatId,
+    senderKeyAgreementPublicKey: senderDevice.keyAgreementPublicKey,
+    senderUid: decodedToken.uid,
+    tenantId: context.tenantId
+  });
+
+  if (existingEnvelope) {
+    return existingEnvelope;
+  }
+
   uniqueRecipientDeviceIds.forEach((deviceId) => {
     if (!input.encryptedKeysByDevice[deviceId]) {
       throw validationError('Encrypted key material is missing for a recipient device.');
@@ -383,11 +397,39 @@ export async function sendEncryptedDirectEnvelope(
   });
 
   const envelopeRef = context.chatRef.collection('encryptedEnvelopes').doc();
-  const messageMetadataRef = context.chatRef.collection('messageMetadata').doc(envelopeRef.id);
+  const messageMetadataRef = context.chatRef
+    .collection('messageMetadata')
+    .doc(buildClientMessageMetadataId(decodedToken.uid, input.clientMessageId));
   const sentAtMs = Date.now();
   const { participantIds, participants } = buildDirectChatParticipantData(decodedToken.uid, context.contactId);
+  let transactionDuplicateEnvelope: EncryptedDirectEnvelopeResponse | null = null;
 
   await firestore.runTransaction(async (transaction) => {
+    const existingMetadataSnapshot = await transaction.get(messageMetadataRef);
+
+    if (existingMetadataSnapshot.exists) {
+      const metadata = existingMetadataSnapshot.data() as EncryptedMessageMetadataRecord;
+      const existingEnvelopeId = metadata.envelopeId || '';
+      const existingEnvelopeSnapshot = existingEnvelopeId
+        ? await transaction.get(context.chatRef.collection('encryptedEnvelopes').doc(existingEnvelopeId))
+        : null;
+
+      if (existingEnvelopeSnapshot?.exists) {
+        const record = existingEnvelopeSnapshot.data() as EncryptedEnvelopeRecord;
+
+        if (record.senderUid === decodedToken.uid && record.clientMessageId === input.clientMessageId) {
+          transactionDuplicateEnvelope = mapExistingDirectEnvelopeResponse({
+            conversationId: context.chatId,
+            envelopeId: existingEnvelopeSnapshot.id,
+            record,
+            senderKeyAgreementPublicKey: senderDevice.keyAgreementPublicKey || '',
+            tenantId: context.tenantId
+          });
+          return;
+        }
+      }
+    }
+
     const chatSnapshot = await transaction.get(context.chatRef);
     const chatCreateData = chatSnapshot.exists
       ? {}
@@ -476,11 +518,16 @@ export async function sendEncryptedDirectEnvelope(
     }, { merge: true });
   });
 
+  if (transactionDuplicateEnvelope) {
+    return transactionDuplicateEnvelope;
+  }
+
   return {
     algorithm: input.algorithm,
     clientMessageId: input.clientMessageId,
     conversationId: context.chatId,
     envelopeId: envelopeRef.id,
+    isDuplicate: false,
     keyVersion: input.keyVersion,
     notificationPreviewByDevice: Object.keys(notificationPreviewByDevice).length
       ? notificationPreviewByDevice
@@ -491,6 +538,82 @@ export async function sendEncryptedDirectEnvelope(
     sentAt: new Date(sentAtMs).toISOString(),
     tenantId: context.tenantId
   };
+}
+
+async function findExistingDirectEnvelopeByClientMessageId(input: {
+  chatRef: FirebaseFirestore.DocumentReference;
+  clientMessageId: string;
+  conversationId: string;
+  senderKeyAgreementPublicKey: string;
+  senderUid: string;
+  tenantId: string;
+}): Promise<EncryptedDirectEnvelopeResponse | null> {
+  const metadataSnapshot = await input.chatRef
+    .collection('messageMetadata')
+    .where('senderUid', '==', input.senderUid)
+    .where('clientMessageId', '==', input.clientMessageId)
+    .limit(1)
+    .get();
+
+  const metadataDoc = metadataSnapshot.docs[0];
+
+  if (!metadataDoc) {
+    return null;
+  }
+
+  const metadata = metadataDoc.data() as EncryptedMessageMetadataRecord;
+  const envelopeId = metadata.envelopeId || metadataDoc.id;
+  const envelopeSnapshot = await input.chatRef
+    .collection('encryptedEnvelopes')
+    .doc(envelopeId)
+    .get();
+
+  if (!envelopeSnapshot.exists) {
+    return null;
+  }
+
+  const record = envelopeSnapshot.data() as EncryptedEnvelopeRecord;
+
+  if (record.senderUid !== input.senderUid || record.clientMessageId !== input.clientMessageId) {
+    return null;
+  }
+
+  return mapExistingDirectEnvelopeResponse({
+    conversationId: input.conversationId,
+    envelopeId: envelopeSnapshot.id,
+    record,
+    senderKeyAgreementPublicKey: input.senderKeyAgreementPublicKey,
+    tenantId: input.tenantId
+  });
+}
+
+function mapExistingDirectEnvelopeResponse(input: {
+  conversationId: string;
+  envelopeId: string;
+  record: EncryptedEnvelopeRecord;
+  senderKeyAgreementPublicKey: string;
+  tenantId: string;
+}): EncryptedDirectEnvelopeResponse {
+  return {
+    algorithm: input.record.algorithm || 'unknown',
+    clientMessageId: input.record.clientMessageId || input.envelopeId,
+    conversationId: input.conversationId,
+    envelopeId: input.record.envelopeId || input.envelopeId,
+    isDuplicate: true,
+    keyVersion: input.record.keyVersion || 1,
+    notificationPreviewByDevice: undefined,
+    recipientDeviceIds: input.record.recipientDeviceIds || [],
+    senderDeviceId: input.record.senderDeviceId || '',
+    senderKeyAgreementPublicKey: input.record.senderKeyAgreementPublicKey || input.senderKeyAgreementPublicKey,
+    sentAt: new Date(input.record.sentAtMs || Date.now()).toISOString(),
+    tenantId: input.tenantId
+  };
+}
+
+function buildClientMessageMetadataId(senderUid: string, clientMessageId: string): string {
+  return createHash('sha256')
+    .update(`${senderUid}:${clientMessageId}`)
+    .digest('hex');
 }
 
 async function listActiveDevicesForUser(

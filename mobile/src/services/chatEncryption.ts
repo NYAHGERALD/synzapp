@@ -89,6 +89,7 @@ const NOTIFICATION_PREVIEW_DERIVATION_LABEL = 'Synzapp notification preview v1';
 const NOTIFICATION_PREVIEW_MAX_CHARS = 180;
 
 export async function encryptChatText(input: {
+  clientMessageId?: string;
   forwarded?: boolean;
   idToken: string;
   recipientDevices: EncryptionDevicePublicKey[];
@@ -101,6 +102,7 @@ export async function encryptChatText(input: {
 }
 
 export async function encryptChatMessage(input: {
+  clientMessageId?: string;
   forwarded?: boolean;
   idToken: string;
   image?: ChatImageAttachment | null;
@@ -199,7 +201,7 @@ export async function encryptChatMessage(input: {
   return {
     algorithm: 'nacl-secretbox+x25519-xsalsa20-poly1305',
     ciphertext: fromByteArray(ciphertext),
-    clientMessageId: `client_${Date.now()}_${randomHex(6)}`,
+    clientMessageId: normalizeClientMessageId(input.clientMessageId) || `client_${Date.now()}_${randomHex(6)}`,
     encryptedKeysByDevice,
     keyVersion: Math.max(input.senderDevice.keyVersion || 1, 1),
     nonce: fromByteArray(messageNonce),
@@ -207,6 +209,12 @@ export async function encryptChatMessage(input: {
     recipientDeviceIds: input.recipientDevices.map((device) => device.deviceId),
     senderDeviceId: localDevice.deviceId
   };
+}
+
+function normalizeClientMessageId(value: string | undefined): string | null {
+  const safeValue = typeof value === 'string' ? value.trim() : '';
+
+  return safeValue.length >= 8 && safeValue.length <= 120 ? safeValue : null;
 }
 
 export async function decryptChatEnvelopes(input: {
@@ -512,6 +520,10 @@ function normalizeMediaAttachment(media?: Partial<ChatMediaAttachment> | null): 
   const nonce = typeof media.nonce === 'string' ? media.nonce.trim() : '';
   const contentType = typeof media.contentType === 'string' ? media.contentType.trim().toLowerCase() : '';
   const fileName = typeof media.fileName === 'string' ? media.fileName.trim().slice(0, 180) : '';
+  const thumbnailDataUrl = typeof media.thumbnailDataUrl === 'string' ? media.thumbnailDataUrl.trim() : '';
+  const thumbnailContentType = typeof media.thumbnailContentType === 'string'
+    ? media.thumbnailContentType.trim().toLowerCase()
+    : '';
 
   if (!kind || !mediaId || !key || !nonce || !contentType || !fileName) {
     return null;
@@ -528,8 +540,20 @@ function normalizeMediaAttachment(media?: Partial<ChatMediaAttachment> | null): 
     mediaId,
     nonce,
     sizeBytes: Number.isFinite(media.sizeBytes) ? Math.max(Math.round(media.sizeBytes || 0), 0) : 0,
+    thumbnailContentType: thumbnailDataUrl
+      ? thumbnailContentType || getDataUrlContentType(thumbnailDataUrl) || 'image/jpeg'
+      : undefined,
+    thumbnailDataUrl: thumbnailDataUrl || undefined,
+    thumbnailHeight: Number.isFinite(media.thumbnailHeight) ? Math.max(Math.round(media.thumbnailHeight || 0), 1) : undefined,
+    thumbnailWidth: Number.isFinite(media.thumbnailWidth) ? Math.max(Math.round(media.thumbnailWidth || 0), 1) : undefined,
     width: Number.isFinite(media.width) ? Math.max(Math.round(media.width || 0), 1) : undefined
   };
+}
+
+function getDataUrlContentType(dataUrl: string): string | null {
+  const match = /^data:([^;,]+)[;,]/i.exec(dataUrl.trim());
+
+  return match?.[1]?.trim().toLowerCase() || null;
 }
 
 function normalizeMediaAttachments(mediaItems?: Partial<ChatMediaAttachment>[] | null): ChatMediaAttachment[] {
