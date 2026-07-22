@@ -31089,24 +31089,30 @@ const styles = StyleSheet.create({
   messageBackButton: {
     alignItems: 'center',
     flexDirection: 'row',
+    gap: 5,
     height: 48,
     justifyContent: 'center',
-    minWidth: 48,
-    paddingRight: 4
+    minWidth: 62,
+    paddingHorizontal: 3
   },
   messageBackText: {
     color: '#FFFFFF',
-    fontSize: 40,
+    fontSize: 42,
     fontWeight: '400',
-    lineHeight: 43
+    lineHeight: 44
   },
   messageBackCountText: {
-    color: '#FFFFFF',
-    fontSize: 16,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 13,
+    color: colors.primary,
+    fontSize: 17,
     fontWeight: '400',
-    lineHeight: 20,
-    marginLeft: -7,
-    minWidth: 18
+    lineHeight: 21,
+    minWidth: 28,
+    overflow: 'hidden',
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    textAlign: 'center'
   },
   messageHeaderIdentity: {
     alignItems: 'center',
