@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useEvent } from 'expo';
-import { BlurView } from 'expo-blur';
 import * as Calendar from 'expo-calendar';
 import * as Clipboard from 'expo-clipboard';
 import * as Contacts from 'expo-contacts';
@@ -27,6 +26,7 @@ import {
   Easing,
   FlatList,
   Image,
+  InteractionManager,
   Keyboard,
   KeyboardAvoidingView,
   Linking,
@@ -331,6 +331,36 @@ type MessageThreadItem =
   | { id: string; label: string; type: 'date' }
   | { id: string; message: ChatMessage; type: 'message' };
 
+type MessageBubbleProps = {
+  activeAudioPlaybackId?: string | null;
+  contactName?: string;
+  contactProfilePhotoUrl?: string | null;
+  currentUid?: string;
+  highlighted?: boolean;
+  isGroupChat?: boolean;
+  isSelectable?: boolean;
+  isSelected?: boolean;
+  message: ChatMessage;
+  onLayout?: (messageId: string, y: number) => void;
+  onForwardMessage?: (message: ChatMessage) => void;
+  onLongPress?: (message: ChatMessage) => void;
+  onOpenMedia?: (message: ChatMessage, activeIndex: number) => void;
+  onPrepareAttachment?: (message: ChatMessage, activeIndex: number) => Promise<string | null>;
+  preparingVideoKey?: string | null;
+  onActivateAudioPlayback?: (audioPlaybackId: string) => void;
+  onDeactivateAudioPlayback?: (audioPlaybackId: string) => void;
+  onReplyPreviewPress?: (messageId: string) => void;
+  onReply?: (message: ChatMessage) => void;
+  onToggleSelect?: (message: ChatMessage) => void;
+  profilePhotoHeaders?: Record<string, string>;
+  reactions?: ChatMessageReaction[];
+  searchQuery?: string;
+  senderMember?: ChatGroupMember | null;
+  starred?: boolean;
+};
+
+const EMPTY_CHAT_REACTIONS: ChatMessageReaction[] = [];
+
 interface EmployeeListItem {
   baseRole: string;
   department: string;
@@ -427,7 +457,8 @@ const KEY_RESULT_ROW_SWIPE_TRIGGER = 18;
 const KEY_RESULT_UNIT_MODAL_HORIZONTAL_PADDING = 18;
 const CHAT_SMALL_FILE_AUTO_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024;
 const CHAT_CELLULAR_IMAGE_AUTO_DOWNLOAD_MAX_BYTES = 1.5 * 1024 * 1024;
-const CHAT_AUTO_MEDIA_DOWNLOAD_RECENT_WINDOW = 48;
+const CHAT_AUTO_MEDIA_DOWNLOAD_RECENT_WINDOW = 18;
+const CHAT_AUTO_MEDIA_DOWNLOAD_MAX_PER_PASS = 4;
 const VOICE_NOTE_MIN_DURATION_MS = 700;
 const VOICE_NOTE_RECORDING_OPTIONS = RecordingPresets.LOW_QUALITY;
 const CHAT_AUDIO_PLAYBACK_MODE: AudioMode = {
@@ -1060,6 +1091,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const pendingSyncContactIdsRef = useRef<Set<string>>(new Set());
   const activePushHydrationContactIdsRef = useRef<Set<string>>(new Set());
   const activeMediaDownloadPromisesRef = useRef<Map<string, Promise<string | null>>>(new Map());
+  const autoMediaDownloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const chatMediaNetworkPolicyRef = useRef<ChatMediaNetworkPolicy>(chatMediaNetworkPolicy);
   const organizationDeletionProgressAnim = useRef(new Animated.Value(0)).current;
   const hasPromptedOfflineAiInstallRef = useRef(false);
@@ -1578,7 +1610,34 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       return;
     }
 
-    queueMediaDownloadsForMessages(selectedChat.contactId, messages, selectedChat.chatType);
+    if (autoMediaDownloadTimerRef.current) {
+      clearTimeout(autoMediaDownloadTimerRef.current);
+    }
+
+    autoMediaDownloadTimerRef.current = setTimeout(() => {
+      const activeChat = selectedChatRef.current;
+
+      if (!activeChat) {
+        return;
+      }
+
+      InteractionManager.runAfterInteractions(() => {
+        if (selectedChatRef.current?.contactId !== activeChat.contactId) {
+          return;
+        }
+
+        queueMediaDownloadsForMessages(activeChat.contactId, messagesRef.current, activeChat.chatType, true);
+      });
+
+      autoMediaDownloadTimerRef.current = null;
+    }, 700);
+
+    return () => {
+      if (autoMediaDownloadTimerRef.current) {
+        clearTimeout(autoMediaDownloadTimerRef.current);
+        autoMediaDownloadTimerRef.current = null;
+      }
+    };
   }, [chatMediaNetworkPolicy, messages, selectedChat?.chatType, selectedChat?.contactId]);
 
   useEffect(() => {
@@ -3341,7 +3400,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           ...getLocalChatScope()
         });
         queueEncryptedChatBackup();
-        queueMediaDownloadsForMessages(nextContact.contactId, visibleMergedMessages, nextContact.chatType || 'DIRECT');
+        queueMediaDownloadsForMessages(nextContact.contactId, visibleMergedMessages, nextContact.chatType || 'DIRECT', true);
       } else if (shouldMarkRead) {
         const cachedConversation = await loadCachedChatConversation({
           contactId: nextContact.contactId,
@@ -3439,7 +3498,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         ...getLocalChatScope()
       });
       queueEncryptedChatBackup();
-      queueMediaDownloadsForMessages(event.contactId, nextMessages, event.contact.chatType || 'DIRECT');
+      queueMediaDownloadsForMessages(event.contactId, nextMessages, event.contact.chatType || 'DIRECT', true);
       void syncPendingMessagesForChat(event.contactId);
     }
   }
@@ -6434,7 +6493,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         ...getLocalChatScope()
       });
       queueEncryptedChatBackup();
-      queueMediaDownloadsForMessages(data.contactId, nextMessages, chatType);
+      queueMediaDownloadsForMessages(data.contactId, nextMessages, chatType, true);
       void syncPendingMessagesForChat(data.contactId);
     } catch {
       void loadChatContacts(false);
@@ -6502,7 +6561,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       if (nextMessages.length) {
         setMessageReactions(extractReactionMapFromMessages(nextMessages));
         setMessages(nextMessages);
-        queueMediaDownloadsForMessages(chat.contactId, nextMessages, chat.chatType);
+        queueMediaDownloadsForMessages(chat.contactId, nextMessages, chat.chatType, true);
       }
     } catch {
       // Local cache should never block opening a live chat.
@@ -6578,7 +6637,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           ...getLocalChatScope()
         });
         queueEncryptedChatBackup();
-        queueMediaDownloadsForMessages(chat.contactId, nextMessages, chat.chatType);
+        queueMediaDownloadsForMessages(chat.contactId, nextMessages, chat.chatType, true);
         void syncPendingMessagesForChat(chat.contactId);
       }
     } catch (nextError) {
@@ -6856,7 +6915,8 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     chatType: 'DIRECT' | 'GROUP',
     messageId: string,
     media: ChatMediaAttachment,
-    mediaIndex?: number
+    mediaIndex?: number,
+    options: { silent?: boolean } = {}
   ): Promise<string | null> {
     const mediaDownloadKey = `${contactId}:${messageId}:${media.mediaId}`;
     const activeDownload = activeMediaDownloadPromisesRef.current.get(mediaDownloadKey);
@@ -6868,11 +6928,13 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     const downloadPromise = (async () => {
       let lastProgressUpdate = 0;
 
-      updateVisibleMessageMedia(contactId, messageId, {
-        ...media,
-        transferProgress: 0,
-        transferStatus: 'downloading'
-      }, mediaIndex);
+      if (!options.silent) {
+        updateVisibleMessageMedia(contactId, messageId, {
+          ...media,
+          transferProgress: 0,
+          transferStatus: 'downloading'
+        }, mediaIndex);
+      }
 
       try {
         const idToken = await getIdToken();
@@ -6887,11 +6949,13 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
             }
 
             lastProgressUpdate = progress;
-            updateVisibleMessageMedia(contactId, messageId, {
-              ...media,
-              transferProgress: progress,
-              transferStatus: 'downloading'
-            }, mediaIndex);
+              if (!options.silent) {
+                updateVisibleMessageMedia(contactId, messageId, {
+                  ...media,
+                  transferProgress: progress,
+                  transferStatus: 'downloading'
+                }, mediaIndex);
+              }
           }
         });
         const availableMedia: ChatMediaAttachment = {
@@ -6906,11 +6970,13 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
 
         return localUri;
       } catch {
-        updateVisibleMessageMedia(contactId, messageId, {
-          ...media,
-          transferProgress: 0,
-          transferStatus: 'failed'
-        }, mediaIndex);
+        if (!options.silent) {
+          updateVisibleMessageMedia(contactId, messageId, {
+            ...media,
+            transferProgress: 0,
+            transferStatus: 'failed'
+          }, mediaIndex);
+        }
 
         return null;
       } finally {
@@ -6926,14 +6992,24 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   function queueMediaDownloadsForMessages(
     contactId: string,
     nextMessages: ChatMessage[],
-    chatType = getChatTypeForContactId(contactId)
+    chatType = getChatTypeForContactId(contactId),
+    silent = false
   ) {
     const recentMessages = nextMessages.slice(-CHAT_AUTO_MEDIA_DOWNLOAD_RECENT_WINDOW);
+    let queuedCount = 0;
 
     recentMessages.forEach((message) => {
+      if (queuedCount >= CHAT_AUTO_MEDIA_DOWNLOAD_MAX_PER_PASS) {
+        return;
+      }
+
       const mediaItems = getMessageMediaItems(message);
 
       mediaItems.forEach((media, index) => {
+        if (queuedCount >= CHAT_AUTO_MEDIA_DOWNLOAD_MAX_PER_PASS) {
+          return;
+        }
+
         if (
           !media ||
           !media.mediaId ||
@@ -6947,7 +7023,8 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           return;
         }
 
-        void downloadMediaForMessage(contactId, chatType, message.messageId, media, index);
+        queuedCount += 1;
+        void downloadMediaForMessage(contactId, chatType, message.messageId, media, index, { silent });
       });
     });
   }
@@ -14260,11 +14337,11 @@ function MediaViewerVideoSlide({
           onLayout={(event) => setTrackWidth(event.nativeEvent.layout.width)}
           onMoveShouldSetResponder={() => true}
           onResponderGrant={(event) => {
-            event.stopPropagation();
+            event.stopPropagation?.();
             handleSeek(event.nativeEvent.locationX);
           }}
           onResponderMove={(event) => {
-            event.stopPropagation();
+            event.stopPropagation?.();
             handleSeek(event.nativeEvent.locationX);
           }}
           onStartShouldSetResponder={() => true}
@@ -14557,11 +14634,11 @@ function AudioAttachmentPreviewModal({
               onLayout={(event) => setTimelineWidth(event.nativeEvent.layout.width)}
               onMoveShouldSetResponder={() => true}
               onResponderGrant={(event) => {
-                event.stopPropagation();
+                event.stopPropagation?.();
                 handleSeekPreviewAudio(event.nativeEvent.locationX);
               }}
               onResponderMove={(event) => {
-                event.stopPropagation();
+                event.stopPropagation?.();
                 handleSeekPreviewAudio(event.nativeEvent.locationX);
               }}
               onStartShouldSetResponder={() => true}
@@ -14751,6 +14828,12 @@ function MessageThread({
   function handleMessageLayout(messageId: string, y: number) {
     messageOffsetsRef.current[messageId] = y;
   }
+
+  const handleDeactivateAudioPlayback = useCallback((audioPlaybackId: string) => {
+    setActiveAudioPlaybackId((currentAudioPlaybackId) =>
+      currentAudioPlaybackId === audioPlaybackId ? null : currentAudioPlaybackId
+    );
+  }, []);
 
   function scrollToMessage(messageId: string, animated = true) {
     const targetY = messageOffsetsRef.current[messageId];
@@ -15119,7 +15202,7 @@ function MessageThread({
     }
 
     return (
-      <MessageBubble
+      <MemoizedMessageBubble
         contactName={contactName}
         contactProfilePhotoUrl={contactProfilePhotoUrl}
         currentUid={currentUid}
@@ -15129,11 +15212,7 @@ function MessageThread({
         isSelected={Boolean(selectedForwardMessageIds[item.message.messageId])}
         message={item.message}
         onActivateAudioPlayback={setActiveAudioPlaybackId}
-        onDeactivateAudioPlayback={(audioPlaybackId) => {
-          setActiveAudioPlaybackId((currentAudioPlaybackId) =>
-            currentAudioPlaybackId === audioPlaybackId ? null : currentAudioPlaybackId
-          );
-        }}
+        onDeactivateAudioPlayback={handleDeactivateAudioPlayback}
         onForwardMessage={isForwardMode ? undefined : onForwardMessage}
         onLayout={handleMessageLayout}
         onLongPress={isForwardMode ? undefined : onMessageLongPress}
@@ -15145,7 +15224,7 @@ function MessageThread({
         preparingVideoKey={preparingVideoKey}
         activeAudioPlaybackId={activeAudioPlaybackId}
         profilePhotoHeaders={profilePhotoHeaders}
-        reactions={messageReactions[item.message.messageId] || item.message.reactions || []}
+        reactions={messageReactions[item.message.messageId] || item.message.reactions || EMPTY_CHAT_REACTIONS}
         searchQuery={isSearchOpen ? searchQuery : ''}
         senderMember={isGroupChat ? groupMemberByUid.get(item.message.senderUid) || null : null}
         starred={Boolean(starredMessageIds[item.message.messageId])}
@@ -15157,6 +15236,7 @@ function MessageThread({
     contactProfilePhotoUrl,
     currentUid,
     groupMemberByUid,
+    handleDeactivateAudioPlayback,
     highlightedMessageId,
     isForwardMode,
     isGroupChat,
@@ -16326,13 +16406,13 @@ function AudioMessageAttachment({
     <Pressable
       accessibilityLabel={status.playing ? 'Pause audio' : 'Play audio'}
       accessibilityRole="button"
-      delayLongPress={320}
+      delayLongPress={260}
       onLongPress={(event) => {
-        event.stopPropagation();
+        event.stopPropagation?.();
         onLongPress?.();
       }}
       onPress={(event) => {
-        event.stopPropagation();
+        event.stopPropagation?.();
         void handleTogglePlayback().catch((error) => {
           Alert.alert('Audio unavailable', getErrorMessage(error, 'Unable to play this audio.'));
         });
@@ -16364,11 +16444,11 @@ function AudioMessageAttachment({
           onLayout={(event) => setWaveformWidth(event.nativeEvent.layout.width)}
           onMoveShouldSetResponder={() => true}
           onResponderGrant={(event) => {
-            event.stopPropagation();
+            event.stopPropagation?.();
             void handleSeekVoiceNote(event.nativeEvent.locationX);
           }}
           onResponderMove={(event) => {
-            event.stopPropagation();
+            event.stopPropagation?.();
             void handleSeekVoiceNote(event.nativeEvent.locationX);
           }}
           onStartShouldSetResponder={() => true}
@@ -16470,13 +16550,13 @@ function MessageMediaPreview({
         accessibilityLabel="Open media"
         accessibilityRole="imagebutton"
         disabled={!onPress}
-        delayLongPress={320}
+        delayLongPress={260}
         onLongPress={(event) => {
-          event.stopPropagation();
+          event.stopPropagation?.();
           onLongPress?.();
         }}
         onPress={(event) => {
-          event.stopPropagation();
+          event.stopPropagation?.();
           onPress?.();
         }}
         style={[
@@ -16567,14 +16647,14 @@ function MessageMediaPreview({
     <Pressable
       accessibilityLabel="Open media"
       accessibilityRole="button"
-      delayLongPress={320}
+      delayLongPress={260}
       disabled={!onPress}
       onLongPress={(event) => {
-        event.stopPropagation();
+        event.stopPropagation?.();
         onLongPress?.();
       }}
       onPress={(event) => {
-        event.stopPropagation();
+        event.stopPropagation?.();
         onPress?.();
       }}
       style={[
@@ -16693,13 +16773,13 @@ function MessageMediaAlbumPreview({
             accessibilityLabel={`Open media item ${index + 1}`}
             accessibilityRole="imagebutton"
             key={`${media.mediaId || media.localUri || media.fileName}_${index}`}
-            delayLongPress={320}
+            delayLongPress={260}
             onLongPress={(event) => {
-              event.stopPropagation();
+              event.stopPropagation?.();
               onLongPress?.();
             }}
             onPress={(event) => {
-              event.stopPropagation();
+              event.stopPropagation?.();
               onOpenMedia?.(index);
             }}
             style={[
@@ -16795,33 +16875,7 @@ function MessageBubble({
   searchQuery = '',
   senderMember,
   starred
-}: {
-  activeAudioPlaybackId?: string | null;
-  contactName?: string;
-  contactProfilePhotoUrl?: string | null;
-  currentUid?: string;
-  highlighted?: boolean;
-  isGroupChat?: boolean;
-  isSelectable?: boolean;
-  isSelected?: boolean;
-  message: ChatMessage;
-  onLayout?: (messageId: string, y: number) => void;
-  onForwardMessage?: (message: ChatMessage) => void;
-  onLongPress?: (message: ChatMessage) => void;
-  onOpenMedia?: (message: ChatMessage, activeIndex: number) => void;
-  onPrepareAttachment?: (message: ChatMessage, activeIndex: number) => Promise<string | null>;
-  preparingVideoKey?: string | null;
-  onActivateAudioPlayback?: (audioPlaybackId: string) => void;
-  onDeactivateAudioPlayback?: (audioPlaybackId: string) => void;
-  onReplyPreviewPress?: (messageId: string) => void;
-  onReply?: (message: ChatMessage) => void;
-  onToggleSelect?: (message: ChatMessage) => void;
-  profilePhotoHeaders?: Record<string, string>;
-  reactions?: ChatMessageReaction[];
-  searchQuery?: string;
-  senderMember?: ChatGroupMember | null;
-  starred?: boolean;
-}) {
+}: MessageBubbleProps) {
   const appTheme = useAppTheme();
   const deliveryStatusLabel = message.isMine
     ? formatMessageDeliveryStatus(message.deliveryStatus)
@@ -16852,13 +16906,9 @@ function MessageBubble({
     onMoveShouldSetPanResponder: (_event, gestureState) =>
       !isSelectable &&
       Boolean(onReply) &&
-      gestureState.dx > 6 &&
+      gestureState.dx > 14 &&
       Math.abs(gestureState.dy) < 22,
-    onMoveShouldSetPanResponderCapture: (_event, gestureState) =>
-      !isSelectable &&
-      Boolean(onReply) &&
-      gestureState.dx > 6 &&
-      Math.abs(gestureState.dy) < 22,
+    onMoveShouldSetPanResponderCapture: () => false,
     onPanResponderGrant: () => {
       swipeTranslateX.stopAnimation();
     },
@@ -16887,7 +16937,7 @@ function MessageBubble({
         useNativeDriver: true
       }).start();
     },
-    onPanResponderTerminationRequest: () => false,
+    onPanResponderTerminationRequest: () => true,
     onStartShouldSetPanResponder: () => false
   }), [isSelectable, message, onReply, swipeTranslateX]);
 
@@ -16996,7 +17046,7 @@ function MessageBubble({
         >
           <Pressable
             accessibilityRole="button"
-            delayLongPress={320}
+            delayLongPress={260}
             onLongPress={!isSelectable && onLongPress ? () => onLongPress(message) : undefined}
             onPress={isSelectable
               ? () => onToggleSelect?.(message)
@@ -17108,6 +17158,68 @@ function MessageBubble({
   );
 }
 
+const MemoizedMessageBubble = React.memo(MessageBubble, areMessageBubblePropsEqual);
+
+function areMessageBubblePropsEqual(
+  previousProps: MessageBubbleProps,
+  nextProps: MessageBubbleProps
+): boolean {
+  return previousProps.message === nextProps.message &&
+    previousProps.activeAudioPlaybackId === nextProps.activeAudioPlaybackId &&
+    previousProps.contactName === nextProps.contactName &&
+    previousProps.contactProfilePhotoUrl === nextProps.contactProfilePhotoUrl &&
+    previousProps.currentUid === nextProps.currentUid &&
+    previousProps.highlighted === nextProps.highlighted &&
+    previousProps.isGroupChat === nextProps.isGroupChat &&
+    previousProps.isSelectable === nextProps.isSelectable &&
+    previousProps.isSelected === nextProps.isSelected &&
+    previousProps.preparingVideoKey === nextProps.preparingVideoKey &&
+    previousProps.profilePhotoHeaders === nextProps.profilePhotoHeaders &&
+    previousProps.searchQuery === nextProps.searchQuery &&
+    previousProps.starred === nextProps.starred &&
+    areChatGroupMembersEqual(previousProps.senderMember || null, nextProps.senderMember || null) &&
+    areChatReactionsEqual(previousProps.reactions || EMPTY_CHAT_REACTIONS, nextProps.reactions || EMPTY_CHAT_REACTIONS);
+}
+
+function areChatReactionsEqual(
+  previousReactions: ChatMessageReaction[],
+  nextReactions: ChatMessageReaction[]
+): boolean {
+  if (previousReactions === nextReactions) {
+    return true;
+  }
+
+  if (previousReactions.length !== nextReactions.length) {
+    return false;
+  }
+
+  return previousReactions.every((reaction, index) => {
+    const nextReaction = nextReactions[index];
+
+    return reaction.uid === nextReaction.uid &&
+      reaction.emoji === nextReaction.emoji &&
+      reaction.reactedAt === nextReaction.reactedAt;
+  });
+}
+
+function areChatGroupMembersEqual(
+  previousMember: ChatGroupMember | null,
+  nextMember: ChatGroupMember | null
+): boolean {
+  if (previousMember === nextMember) {
+    return true;
+  }
+
+  if (!previousMember || !nextMember) {
+    return false;
+  }
+
+  return previousMember.uid === nextMember.uid &&
+    previousMember.displayName === nextMember.displayName &&
+    previousMember.initials === nextMember.initials &&
+    previousMember.profilePhotoUrl === nextMember.profilePhotoUrl;
+}
+
 function GroupMessageSenderAvatar({
   member,
   placement,
@@ -17204,61 +17316,27 @@ function MessageActionOverlay({
   reactions?: ChatMessageReaction[];
   starred: boolean;
 }) {
-  const overlayProgress = useRef(new Animated.Value(0)).current;
-  const reactionButtonAnimations = useRef(
-    [...MESSAGE_REACTIONS, 'more'].map(() => new Animated.Value(0))
-  ).current;
   const [isEmojiPickerOpen, setIsEmojiPickerOpen] = useState(false);
-  const groupMemberByUid = useMemo(() => new Map(groupMembers.map((member) => [member.uid, member])), [groupMembers]);
 
   useEffect(() => {
-    if (!message) {
-      return;
-    }
-
-    overlayProgress.setValue(0);
-    reactionButtonAnimations.forEach((animation) => animation.setValue(0));
-
-    Animated.parallel([
-      Animated.timing(overlayProgress, {
-        duration: 140,
-        toValue: 1,
-        useNativeDriver: true
-      }),
-      Animated.stagger(24, reactionButtonAnimations.map((animation) =>
-        Animated.spring(animation, {
-          damping: 11,
-          mass: 0.55,
-          stiffness: 320,
-          toValue: 1,
-          useNativeDriver: true
-        })
-      ))
-    ]).start();
     setIsEmojiPickerOpen(false);
-  }, [message?.messageId, overlayProgress, reactionButtonAnimations]);
+  }, [message?.messageId]);
 
   if (!message) {
     return null;
   }
 
-  const contentScale = overlayProgress.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0.96, 1]
-  });
-  const contentTranslateY = overlayProgress.interpolate({
-    inputRange: [0, 1],
-    outputRange: [14, 0]
-  });
+  const messagePreview = getChatMessagePreview(message) || 'Message';
+  const messageAuthor = message.isMine ? 'You' : contactName || 'Contact';
   const openEmojiPicker = () => {
     Keyboard.dismiss();
     setIsEmojiPickerOpen(true);
   };
 
   return (
-    <Modal animationType="fade" transparent visible onRequestClose={onDismiss}>
+    <Modal animationType="none" transparent visible onRequestClose={onDismiss}>
       <View style={styles.messageActionOverlay}>
-        <BlurView intensity={55} style={StyleSheet.absoluteFill} tint="light" />
+        <View style={styles.messageActionFastBackdrop} />
         <Pressable
           accessibilityLabel="Close message actions"
           accessibilityRole="button"
@@ -17266,18 +17344,9 @@ function MessageActionOverlay({
           style={styles.messageActionDismiss}
         />
 
-        <Animated.View
+        <View
           pointerEvents="box-none"
-          style={[
-            styles.messageActionContent,
-            {
-              opacity: overlayProgress,
-              transform: [
-                { translateY: contentTranslateY },
-                { scale: contentScale }
-              ]
-            }
-          ]}
+          style={styles.messageActionContent}
         >
           <View style={[
             styles.messageActionStack,
@@ -17293,88 +17362,40 @@ function MessageActionOverlay({
                 style={styles.messageReactionStripScroll}
               >
                 {MESSAGE_REACTIONS.map((emoji, index) => {
-                  const buttonProgress = reactionButtonAnimations[index];
                   const isActive = currentUserReactions.includes(emoji);
 
                   return (
-                    <Animated.View
+                    <Pressable
+                      accessibilityLabel={`React ${emoji}`}
+                      accessibilityRole="button"
                       key={emoji}
-                      style={{
-                        opacity: buttonProgress,
-                        transform: [
-                          {
-                            translateY: buttonProgress.interpolate({
-                              inputRange: [0, 1],
-                              outputRange: [8, 0]
-                            })
-                          },
-                          {
-                            scale: buttonProgress.interpolate({
-                              inputRange: [0, 1],
-                              outputRange: [0.45, isActive ? 1.14 : 1]
-                            })
-                          }
-                        ]
-                      }}
+                      onPress={() => onReact(message, emoji)}
+                      style={({ pressed }) => [
+                        styles.messageReactionButton,
+                        isActive && styles.messageReactionButtonActive,
+                        pressed && styles.messageReactionButtonPressed
+                      ]}
                     >
-                      <Pressable
-                        accessibilityLabel={`React ${emoji}`}
-                        accessibilityRole="button"
-                        onPress={() => onReact(message, emoji)}
-                        style={({ pressed }) => [
-                          styles.messageReactionButton,
-                          isActive && styles.messageReactionButtonActive,
-                          pressed && styles.messageReactionButtonPressed
-                        ]}
-                      >
-                        <Text style={styles.messageReactionButtonText}>{emoji}</Text>
-                      </Pressable>
-                    </Animated.View>
+                      <Text style={styles.messageReactionButtonText}>{emoji}</Text>
+                    </Pressable>
                   );
                 })}
 
-                <Animated.View
-                  style={{
-                    opacity: reactionButtonAnimations[MESSAGE_REACTIONS.length],
-                    transform: [
-                      {
-                        translateY: reactionButtonAnimations[MESSAGE_REACTIONS.length].interpolate({
-                          inputRange: [0, 1],
-                          outputRange: [8, 0]
-                        })
-                      },
-                      {
-                        scale: reactionButtonAnimations[MESSAGE_REACTIONS.length].interpolate({
-                          inputRange: [0, 1],
-                          outputRange: [0.45, 1]
-                        })
-                      }
-                    ]
-                  }}
+                <Pressable
+                  accessibilityLabel="Open all reactions"
+                  accessibilityRole="button"
+                  onPress={openEmojiPicker}
+                  style={({ pressed }) => [styles.messageReactionMoreButton, pressed && styles.pressed]}
                 >
-                  <Pressable
-                    accessibilityLabel="Open all reactions"
-                    accessibilityRole="button"
-                    onPress={openEmojiPicker}
-                    style={({ pressed }) => [styles.messageReactionMoreButton, pressed && styles.pressed]}
-                  >
-                    <Feather color="#64748B" name="plus" size={20} />
-                  </Pressable>
-                </Animated.View>
+                  <Feather color="#64748B" name="plus" size={20} />
+                </Pressable>
               </ScrollView>
             </View>
 
-            <View style={styles.messageActionBubbleWrap}>
-              <MessageBubble
-                contactName={contactName}
-                currentUid={currentUid}
-                isGroupChat={isGroupChat}
-                message={message}
-                profilePhotoHeaders={profilePhotoHeaders}
-                reactions={reactions}
-                senderMember={isGroupChat ? groupMemberByUid.get(message.senderUid) || null : null}
-                starred={starred}
-              />
+            <View style={styles.messageActionPreviewCard}>
+              <Text numberOfLines={1} style={styles.messageActionPreviewAuthor}>{messageAuthor}</Text>
+              <Text numberOfLines={2} style={styles.messageActionPreviewText}>{messagePreview}</Text>
+              <Text numberOfLines={1} style={styles.messageActionPreviewMeta}>{formatMessageTime(message.sentAt)}</Text>
             </View>
 
             <View style={styles.messageActionMenu}>
@@ -17389,7 +17410,7 @@ function MessageActionOverlay({
               <MessageActionRow icon="smile" label="More..." onPress={openEmojiPicker} />
             </View>
           </View>
-        </Animated.View>
+        </View>
 
         {isEmojiPickerOpen ? (
           <EmojiPicker
@@ -33350,6 +33371,10 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(15, 23, 42, 0.12)',
     flex: 1
   },
+  messageActionFastBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(226, 232, 240, 0.72)'
+  },
   messageActionDismiss: {
     ...StyleSheet.absoluteFillObject
   },
@@ -33422,8 +33447,39 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     width: 30
   },
-  messageActionBubbleWrap: {
-    alignSelf: 'stretch'
+  messageActionPreviewCard: {
+    alignSelf: 'stretch',
+    backgroundColor: 'rgba(255, 255, 255, 0.96)',
+    borderRadius: 18,
+    elevation: 6,
+    maxWidth: 292,
+    minWidth: 220,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    shadowColor: '#0F172A',
+    shadowOffset: { height: 5, width: 0 },
+    shadowOpacity: 0.12,
+    shadowRadius: 14
+  },
+  messageActionPreviewAuthor: {
+    color: '#0F766E',
+    fontSize: 12,
+    fontWeight: '400',
+    lineHeight: 16
+  },
+  messageActionPreviewText: {
+    color: colors.ink,
+    fontSize: 14,
+    fontWeight: '400',
+    lineHeight: 19,
+    marginTop: 3
+  },
+  messageActionPreviewMeta: {
+    color: '#64748B',
+    fontSize: 11,
+    fontWeight: '400',
+    lineHeight: 15,
+    marginTop: 4
   },
   messageActionMenu: {
     backgroundColor: 'rgba(255, 255, 255, 0.96)',
