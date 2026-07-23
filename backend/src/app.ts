@@ -76,6 +76,11 @@ export const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
     return;
   }
 
+  if (error?.name === 'TranslationServiceError') {
+    res.status(503).json({ error: error.message });
+    return;
+  }
+
   if (error?.name === 'AuthorizationError') {
     res.status(403).json({ error: error.message });
     return;

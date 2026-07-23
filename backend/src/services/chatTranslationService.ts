@@ -136,26 +136,32 @@ async function requestOpenAiTranslation(
       body: JSON.stringify({
         input: [
           {
-            content: [
-              'You are Synzapp secure message translation.',
-              'Translate only the provided user message.',
-              'Preserve meaning, names, dates, and numbers.',
-              'Do not add explanations, quotation marks, markdown, or commentary.',
-              'If the text is already in the target language, return it unchanged.'
-            ].join('\n'),
+            content: [{
+              text: [
+                'You are Synzapp secure message translation.',
+                'Translate only the provided user message.',
+                'Preserve meaning, names, dates, and numbers.',
+                'Do not add explanations, quotation marks, markdown, or commentary.',
+                'If the text is already in the target language, return it unchanged.'
+              ].join('\n'),
+              type: 'input_text'
+            }],
             role: 'system'
           },
           {
-            content: [
-              `Translate from ${sourceLanguage} (${sourceLanguageCode}) to ${targetLanguage} (${targetLanguageCode}).`,
-              'Message:',
-              text
-            ].join('\n')
+            content: [{
+              text: [
+                `Translate from ${sourceLanguage} (${sourceLanguageCode}) to ${targetLanguage} (${targetLanguageCode}).`,
+                'Message:',
+                text
+              ].join('\n'),
+              type: 'input_text'
+            }],
+            role: 'user'
           }
         ],
         max_output_tokens: Math.min(1_200, Math.max(120, text.length * 2)),
-        model: env.openAiModel,
-        temperature: 0
+        model: env.openAiModel
       }),
       headers: {
         Authorization: `Bearer ${env.openAiApiKey}`,
@@ -166,7 +172,7 @@ async function requestOpenAiTranslation(
     });
 
     if (!response.ok) {
-      throw new Error(`OpenAI translation request failed with status ${response.status}.`);
+      throw translationServiceError(await getOpenAiErrorMessage(response));
     }
 
     const body = await response.json() as {
@@ -188,9 +194,43 @@ async function requestOpenAiTranslation(
     }
 
     return translatedText.trim().slice(0, MAX_TRANSLATION_TEXT_LENGTH * 2);
+  } catch (error) {
+    if (error instanceof Error && error.name === 'TranslationServiceError') {
+      throw error;
+    }
+
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw translationServiceError('Translation timed out. Please try again.');
+    }
+
+    throw translationServiceError('Translation service is temporarily unavailable. Please try again.');
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function getOpenAiErrorMessage(response: Response): Promise<string> {
+  try {
+    const body = await response.json() as {
+      error?: {
+        message?: string;
+      };
+    };
+
+    if (typeof body.error?.message === 'string' && body.error.message.trim()) {
+      return 'Translation service rejected the request. Please try again.';
+    }
+  } catch {
+    // Keep the client-facing response stable.
+  }
+
+  return `Translation service failed with status ${response.status}. Please try again.`;
+}
+
+function translationServiceError(message: string): Error {
+  const error = new Error(message);
+  error.name = 'TranslationServiceError';
+  return error;
 }
 
 function validationError(message: string): Error {
