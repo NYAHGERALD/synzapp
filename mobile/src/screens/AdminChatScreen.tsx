@@ -671,6 +671,11 @@ interface MessageTranslationModalState {
   translation: ChatMessageTranslation | null;
 }
 
+interface MessageTranslationAlertState {
+  message: string;
+  retryState: MessageTranslationModalState;
+}
+
 interface ScheduleCallDraft {
   callType: SynzappCallMode;
   calendarAddedAt?: string | null;
@@ -952,6 +957,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [messageActionTarget, setMessageActionTarget] = useState<ChatMessage | null>(null);
   const [messageTranslationModal, setMessageTranslationModal] = useState<MessageTranslationModalState | null>(null);
+  const [messageTranslationAlert, setMessageTranslationAlert] = useState<MessageTranslationAlertState | null>(null);
   const [downloadedTranslationLanguageCodes, setDownloadedTranslationLanguageCodes] = useState<ChatTranscriptLanguageCode[]>(['en-US', 'es-MX']);
   const [replyTarget, setReplyTarget] = useState<ChatMessage | null>(null);
   const [isForwardMode, setIsForwardMode] = useState(false);
@@ -7584,15 +7590,25 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           : currentState
       );
     } catch (nextError) {
+      const errorMessage = getErrorMessage(nextError, 'Unable to translate this message.');
+
       setMessageTranslationModal((currentState) =>
         currentState?.message.messageId === state.message.messageId
           ? {
               ...currentState,
-              error: getErrorMessage(nextError, 'Unable to translate this message.'),
+              error: null,
               isLoading: false
             }
           : currentState
       );
+      setMessageTranslationAlert({
+        message: errorMessage,
+        retryState: {
+          ...state,
+          error: null,
+          isLoading: false
+        }
+      });
     }
   }
 
@@ -10703,12 +10719,19 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         onDownloadLanguage={(code) => {
           void handleDownloadTranslationLanguage(code);
         }}
+        state={messageTranslationModal}
+      />
+
+      <MessageTranslationErrorModal
+        alert={messageTranslationAlert}
+        onClose={() => setMessageTranslationAlert(null)}
         onRetry={() => {
-          if (messageTranslationModal) {
-            void requestMessageTranslation(messageTranslationModal);
+          if (messageTranslationAlert) {
+            const retryState = messageTranslationAlert.retryState;
+            setMessageTranslationAlert(null);
+            void requestMessageTranslation(retryState);
           }
         }}
-        state={messageTranslationModal}
       />
 
       <MediaReviewModal
@@ -17373,7 +17396,6 @@ function MessageTranslationModal({
   onChangeLanguages,
   onClose,
   onDownloadLanguage,
-  onRetry,
   state
 }: {
   downloadedLanguageCodes: ChatTranscriptLanguageCode[];
@@ -17384,7 +17406,6 @@ function MessageTranslationModal({
   }) => void;
   onClose: () => void;
   onDownloadLanguage: (code: ChatTranscriptLanguageCode) => void;
-  onRetry: () => void;
   state: MessageTranslationModalState | null;
 }) {
   const insets = useSafeAreaInsets();
@@ -17557,32 +17578,68 @@ function MessageTranslationModal({
                 <Text style={styles.translationSectionLabel}>Translated message</Text>
                 {state.isLoading ? <ActivityIndicator color="#0F766E" size="small" /> : null}
               </View>
-              {state.error ? (
-                <View style={styles.translationErrorBox}>
-                  <Text style={styles.translationErrorText}>{state.error}</Text>
-                  <Pressable
-                    accessibilityRole="button"
-                    onPress={onRetry}
-                    style={({ pressed }) => [styles.translationRetryButton, pressed && styles.pressed]}
-                  >
-                    <Feather color="#FFFFFF" name="refresh-cw" size={15} />
-                    <Text style={styles.translationRetryText}>Retry</Text>
-                  </Pressable>
-                </View>
-              ) : (
-                <Text style={[
-                  styles.translationMessageText,
-                  !state.translation?.translatedText && styles.translationPendingText
-                ]}>
-                  {state.translation?.translatedText || 'Translating...'}
-                </Text>
-              )}
+              <Text style={[
+                styles.translationMessageText,
+                !state.translation?.translatedText && styles.translationPendingText
+              ]}>
+                {state.translation?.translatedText || (state.isLoading ? 'Translating...' : 'Translation unavailable')}
+              </Text>
             </View>
 
             <Text style={styles.translationPrivacyText}>
               Your Synzapp messages stay encrypted in chat. Translation runs on this device with Synzapp Offline AI, so message text is not sent to OpenAI or another cloud translation provider.
             </Text>
           </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function MessageTranslationErrorModal({
+  alert,
+  onClose,
+  onRetry
+}: {
+  alert: MessageTranslationAlertState | null;
+  onClose: () => void;
+  onRetry: () => void;
+}) {
+  if (!alert) {
+    return null;
+  }
+
+  return (
+    <Modal animationType="fade" presentationStyle="overFullScreen" transparent visible onRequestClose={onClose}>
+      <View style={styles.translationAlertRoot}>
+        <View style={styles.translationAlertCard}>
+          <View style={styles.translationAlertIcon}>
+            <Feather color="#DC2626" name="alert-triangle" size={24} />
+          </View>
+          <View style={styles.translationAlertContent}>
+            <Text style={styles.translationAlertEyebrow}>Translation needs attention</Text>
+            <Text style={styles.translationAlertTitle}>Unable to translate this message</Text>
+            <Text style={styles.translationAlertMessage}>{alert.message}</Text>
+            <View style={styles.translationAlertActions}>
+              <Pressable
+                accessibilityLabel="Close translation alert"
+                accessibilityRole="button"
+                onPress={onClose}
+                style={({ pressed }) => [styles.translationAlertSecondaryButton, pressed && styles.pressed]}
+              >
+                <Text style={styles.translationAlertSecondaryText}>Close</Text>
+              </Pressable>
+              <Pressable
+                accessibilityLabel="Retry translation"
+                accessibilityRole="button"
+                onPress={onRetry}
+                style={({ pressed }) => [styles.translationAlertPrimaryButton, pressed && styles.pressed]}
+              >
+                <Feather color="#FFFFFF" name="refresh-cw" size={15} />
+                <Text style={styles.translationAlertPrimaryText}>Retry</Text>
+              </Pressable>
+            </View>
+          </View>
         </View>
       </View>
     </Modal>
@@ -33527,35 +33584,101 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between'
   },
-  translationErrorBox: {
+  translationAlertRoot: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(15, 23, 42, 0.42)',
+    flex: 1,
+    justifyContent: 'center',
+    padding: 22
+  },
+  translationAlertCard: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#FECACA',
+    borderRadius: 24,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 16,
+    maxWidth: 520,
+    padding: 18,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 20 },
+    shadowOpacity: 0.2,
+    shadowRadius: 34,
+    width: '100%'
+  },
+  translationAlertIcon: {
+    alignItems: 'center',
     backgroundColor: '#FEF2F2',
     borderColor: '#FECACA',
-    borderRadius: 16,
+    borderRadius: 14,
     borderWidth: 1,
-    gap: 12,
-    padding: 12
+    height: 46,
+    justifyContent: 'center',
+    width: 46
   },
-  translationErrorText: {
-    color: '#991B1B',
+  translationAlertContent: {
+    flex: 1,
+    gap: 8
+  },
+  translationAlertEyebrow: {
+    color: '#B91C1C',
+    fontSize: 11,
+    fontWeight: '400',
+    letterSpacing: 1.2,
+    lineHeight: 15,
+    textTransform: 'uppercase'
+  },
+  translationAlertTitle: {
+    color: '#0F172A',
+    fontSize: 18,
+    fontWeight: '400',
+    lineHeight: 24
+  },
+  translationAlertMessage: {
+    color: '#334155',
     fontSize: 14,
     fontWeight: '400',
-    lineHeight: 19
+    lineHeight: 20
   },
-  translationRetryButton: {
+  translationAlertActions: {
     alignItems: 'center',
-    alignSelf: 'flex-start',
-    backgroundColor: '#2563EB',
-    borderRadius: 18,
     flexDirection: 'row',
-    gap: 7,
-    minHeight: 36,
-    paddingHorizontal: 13
+    gap: 10,
+    justifyContent: 'flex-end',
+    marginTop: 10
   },
-  translationRetryText: {
-    color: '#FFFFFF',
-    fontSize: 13,
+  translationAlertSecondaryButton: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderColor: '#CBD5E1',
+    borderRadius: 12,
+    borderWidth: 1,
+    minHeight: 42,
+    minWidth: 92,
+    justifyContent: 'center',
+    paddingHorizontal: 16
+  },
+  translationAlertSecondaryText: {
+    color: '#0F172A',
+    fontSize: 14,
     fontWeight: '400',
-    lineHeight: 17
+    lineHeight: 18
+  },
+  translationAlertPrimaryButton: {
+    alignItems: 'center',
+    backgroundColor: '#2563EB',
+    borderRadius: 12,
+    flexDirection: 'row',
+    gap: 8,
+    minHeight: 42,
+    justifyContent: 'center',
+    paddingHorizontal: 16
+  },
+  translationAlertPrimaryText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '400',
+    lineHeight: 18
   },
   translationPrivacyText: {
     color: '#7A8494',
