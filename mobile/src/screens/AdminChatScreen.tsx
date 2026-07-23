@@ -10368,14 +10368,22 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           profilePhotoHeaders={profilePhotoHeaders}
           readOnlyReason={activeTrashSegmentId ? 'This chat is in Trash' : undefined}
           onCancelReply={() => setReplyTarget(null)}
+          onCopyMessage={(message) => {
+            void handleCopyMessage(message);
+          }}
+          onDeleteMessage={handleDeleteMessageForMe}
           onDraftChange={setMessageDraft}
-          onMessageLongPress={activeTrashSegmentId ? () => undefined : handleOpenMessageActions}
+          onInfoMessage={handleShowMessageInfo}
           onCloseSearch={handleCloseConversationSearch}
+          onForwardActionMessage={handleForwardMessage}
           onForwardMessage={handleQuickForwardMessage}
           onOpenMedia={handleOpenMessageAttachment}
           onPrepareAttachment={handlePrepareAttachment}
           preparingVideoKey={preparingVideoKey}
+          onReactMessage={handleReactToMessage}
           onMessageReply={handleReplyToMessage}
+          onStarMessage={handleToggleMessageStar}
+          onTranslateMessage={handleOpenTranslateMessage}
           onPickFile={() => {
             void handlePickChatFile();
           }}
@@ -10815,36 +10823,6 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         onToggleSpeaker={toggleSynzappCallSpeaker}
         onToggleVideo={toggleSynzappCallVideo}
         profilePhotoHeaders={profilePhotoHeaders}
-      />
-
-      <MessageActionOverlay
-        contactName={selectedChat?.title || ''}
-        currentUid={currentUid}
-        groupMembers={selectedChat?.members || []}
-        isGroupChat={selectedChat?.chatType === 'GROUP'}
-        message={messageActionTarget}
-        onCopy={(message) => {
-          void handleCopyMessage(message);
-        }}
-        onDelete={handleDeleteMessageForMe}
-        onDismiss={() => setMessageActionTarget(null)}
-        onForward={handleForwardMessage}
-        onInfo={handleShowMessageInfo}
-        onReact={handleReactToMessage}
-        onReply={handleReplyToMessage}
-        onStar={handleToggleMessageStar}
-        onTranslate={handleOpenTranslateMessage}
-        profilePhotoHeaders={profilePhotoHeaders}
-        currentUserReactions={messageActionTarget
-          ? getCurrentUserReactionEmojis(
-              messageReactions[messageActionTarget.messageId] || messageActionTarget.reactions,
-              currentUid
-            )
-          : []}
-        reactions={messageActionTarget
-          ? messageReactions[messageActionTarget.messageId] || messageActionTarget.reactions || []
-          : []}
-        starred={messageActionTarget ? Boolean(starredMessageIds[messageActionTarget.messageId]) : false}
       />
 
       <MessageTranslationModal
@@ -14688,14 +14666,20 @@ function MessageThread({
   messageReactions,
   messages,
   onCancelReply,
+  onCopyMessage,
+  onDeleteMessage,
   onCloseSearch,
   onDraftChange,
-  onMessageLongPress,
+  onInfoMessage,
+  onForwardActionMessage,
   onForwardMessage,
   onOpenMedia,
   onPrepareAttachment,
   preparingVideoKey,
+  onReactMessage,
   onMessageReply,
+  onStarMessage,
+  onTranslateMessage,
   onPickFile,
   onPickMedia,
   onPickMediaLibrary,
@@ -14725,14 +14709,20 @@ function MessageThread({
   messageReactions: ChatMessageReactionMap;
   messages: ChatMessage[];
   onCancelReply: () => void;
+  onCopyMessage: (message: ChatMessage) => void;
+  onDeleteMessage: (message: ChatMessage) => void;
   onCloseSearch: () => void;
   onDraftChange: (value: string) => void;
-  onMessageLongPress: (message: ChatMessage) => void;
+  onInfoMessage: (message: ChatMessage) => void;
+  onForwardActionMessage: (message: ChatMessage) => void;
   onForwardMessage: (message: ChatMessage) => void;
   onOpenMedia: (message: ChatMessage, activeIndex: number) => void;
   onPrepareAttachment: (message: ChatMessage, activeIndex: number) => Promise<string | null>;
   preparingVideoKey: string | null;
+  onReactMessage: (message: ChatMessage, reaction: string) => void;
   onMessageReply: (message: ChatMessage) => void;
+  onStarMessage: (message: ChatMessage) => void;
+  onTranslateMessage: (message: ChatMessage) => void;
   onPickFile: () => void;
   onPickMedia: () => void;
   onPickMediaLibrary: () => void;
@@ -14763,6 +14753,7 @@ function MessageThread({
   const [isSearchDateModalOpen, setIsSearchDateModalOpen] = useState(false);
   const [isSearchPersonModalOpen, setIsSearchPersonModalOpen] = useState(false);
   const [isPrivacyInfoModalOpen, setIsPrivacyInfoModalOpen] = useState(false);
+  const [messageActionTarget, setMessageActionTarget] = useState<ChatMessage | null>(null);
   const [activeAudioPlaybackId, setActiveAudioPlaybackId] = useState<string | null>(null);
   const canSend = canChat && draft.trim().length > 0 && !isSending && !isVoiceRecording;
   const threadMessages = useMemo(() => uniqueChatMessages(messages), [messages]);
@@ -14833,6 +14824,20 @@ function MessageThread({
     setActiveAudioPlaybackId((currentAudioPlaybackId) =>
       currentAudioPlaybackId === audioPlaybackId ? null : currentAudioPlaybackId
     );
+  }, []);
+
+  const handleOpenThreadMessageActions = useCallback((message: ChatMessage) => {
+    Keyboard.dismiss();
+    setMessageActionTarget(message);
+  }, []);
+
+  const handleDismissThreadMessageActions = useCallback(() => {
+    setMessageActionTarget(null);
+  }, []);
+
+  const handleThreadAction = useCallback((callback: (message: ChatMessage) => void, message: ChatMessage) => {
+    setMessageActionTarget(null);
+    callback(message);
   }, []);
 
   function scrollToMessage(messageId: string, animated = true) {
@@ -15215,7 +15220,7 @@ function MessageThread({
         onDeactivateAudioPlayback={handleDeactivateAudioPlayback}
         onForwardMessage={isForwardMode ? undefined : onForwardMessage}
         onLayout={handleMessageLayout}
-        onLongPress={isForwardMode ? undefined : onMessageLongPress}
+        onLongPress={isForwardMode ? undefined : handleOpenThreadMessageActions}
         onOpenMedia={isForwardMode ? undefined : onOpenMedia}
         onPrepareAttachment={isForwardMode ? undefined : onPrepareAttachment}
         onReply={isForwardMode ? undefined : onMessageReply}
@@ -15243,7 +15248,7 @@ function MessageThread({
     isSearchOpen,
     messageReactions,
     onForwardMessage,
-    onMessageLongPress,
+    handleOpenThreadMessageActions,
     onMessageReply,
     onOpenMedia,
     onPrepareAttachment,
@@ -15609,6 +15614,30 @@ function MessageThread({
         </Pressable>
       </View>
       ) : null}
+
+      <MessageActionOverlay
+        contactName={contactName}
+        currentUserReactions={messageActionTarget
+          ? getCurrentUserReactionEmojis(
+              messageReactions[messageActionTarget.messageId] || messageActionTarget.reactions,
+              currentUid
+            )
+          : []}
+        message={messageActionTarget}
+        onCopy={(message) => handleThreadAction(onCopyMessage, message)}
+        onDelete={(message) => handleThreadAction(onDeleteMessage, message)}
+        onDismiss={handleDismissThreadMessageActions}
+        onForward={(message) => handleThreadAction(onForwardActionMessage, message)}
+        onInfo={(message) => handleThreadAction(onInfoMessage, message)}
+        onReact={(message, reaction) => {
+          setMessageActionTarget(null);
+          onReactMessage(message, reaction);
+        }}
+        onReply={(message) => handleThreadAction(onMessageReply, message)}
+        onStar={(message) => handleThreadAction(onStarMessage, message)}
+        onTranslate={(message) => handleThreadAction(onTranslateMessage, message)}
+        starred={messageActionTarget ? Boolean(starredMessageIds[messageActionTarget.messageId]) : false}
+      />
 
       <ChatSearchDateModal
         currentDateKey={searchDateKey}
@@ -17279,10 +17308,7 @@ function MediaQuickForwardButton({
 
 function MessageActionOverlay({
   contactName,
-  currentUid,
   currentUserReactions,
-  groupMembers,
-  isGroupChat,
   message,
   onCopy,
   onDelete,
@@ -17293,15 +17319,10 @@ function MessageActionOverlay({
   onReply,
   onStar,
   onTranslate,
-  profilePhotoHeaders,
-  reactions = [],
   starred
 }: {
   contactName: string;
-  currentUid: string;
   currentUserReactions: string[];
-  groupMembers: ChatGroupMember[];
-  isGroupChat: boolean;
   message: ChatMessage | null;
   onCopy: (message: ChatMessage) => void;
   onDelete: (message: ChatMessage) => void;
@@ -17312,8 +17333,6 @@ function MessageActionOverlay({
   onReply: (message: ChatMessage) => void;
   onStar: (message: ChatMessage) => void;
   onTranslate: (message: ChatMessage) => void;
-  profilePhotoHeaders?: Record<string, string>;
-  reactions?: ChatMessageReaction[];
   starred: boolean;
 }) {
   const [isEmojiPickerOpen, setIsEmojiPickerOpen] = useState(false);
