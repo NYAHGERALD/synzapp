@@ -203,6 +203,7 @@ import {
   removePendingChatMessage,
   saveCachedChatContacts,
   saveCachedChatConversation,
+  updateCachedChatMessageMedia,
   updatePendingChatMessage
 } from '../services/localChatStore';
 import type {
@@ -426,6 +427,7 @@ const KEY_RESULT_ROW_SWIPE_TRIGGER = 18;
 const KEY_RESULT_UNIT_MODAL_HORIZONTAL_PADDING = 18;
 const CHAT_SMALL_FILE_AUTO_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024;
 const CHAT_CELLULAR_IMAGE_AUTO_DOWNLOAD_MAX_BYTES = 1.5 * 1024 * 1024;
+const CHAT_AUTO_MEDIA_DOWNLOAD_RECENT_WINDOW = 48;
 const VOICE_NOTE_MIN_DURATION_MS = 700;
 const VOICE_NOTE_RECORDING_OPTIONS = RecordingPresets.LOW_QUALITY;
 const CHAT_AUDIO_PLAYBACK_MODE: AudioMode = {
@@ -1098,27 +1100,69 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const visibleFooterTabs: FooterTab[] = canViewEmployees
     ? ['Chats', 'Calls', 'Groups', 'Employees', 'Settings', 'You']
     : ['Chats', 'Calls', 'Groups', 'Settings', 'You'];
-  const chatItems = chatContacts.map(mapChatContactToChatItem);
-  const directChatContacts = chatContacts.filter((contact) => (contact.chatType || 'DIRECT') !== 'GROUP');
-  const groupChatContacts = chatContacts.filter((contact) => contact.chatType === 'GROUP');
-  const registeredCallContacts = directChatContacts.filter((contact) => contact.status !== 'INVITED' && contact.status !== 'DELETED');
-  const scheduleCallRecipientContacts = chatContacts.filter(isScheduleCallRecipientContact);
+  const chatItems = useMemo(() => chatContacts.map(mapChatContactToChatItem), [chatContacts]);
+  const directChatContacts = useMemo(
+    () => chatContacts.filter((contact) => (contact.chatType || 'DIRECT') !== 'GROUP'),
+    [chatContacts]
+  );
+  const groupChatContacts = useMemo(
+    () => chatContacts.filter((contact) => contact.chatType === 'GROUP'),
+    [chatContacts]
+  );
+  const registeredCallContacts = useMemo(
+    () => directChatContacts.filter((contact) => contact.status !== 'INVITED' && contact.status !== 'DELETED'),
+    [directChatContacts]
+  );
+  const scheduleCallRecipientContacts = useMemo(
+    () => chatContacts.filter(isScheduleCallRecipientContact),
+    [chatContacts]
+  );
   const currentUserDialIdentity = getCurrentUserDialIdentity(userProfile, verifiedAdmin.phoneNumber);
-  const activeVisibleConversationChatItems = chatItems.filter(shouldShowActiveChatInList);
-  const spamConversationChatItems = chatItems.filter(shouldShowTrashChatInList);
-  const activeConversationChatItems = activeVisibleConversationChatItems.filter((chat) => !chat.isArchived);
-  const archivedConversationChatItems = activeVisibleConversationChatItems.filter((chat) => chat.isArchived);
-  const unreadChatFilterCount = activeConversationChatItems.reduce((total, chat) => total + Math.max(chat.unreadCount || 0, 0), 0);
-  const unreadChatBadgeCount = activeConversationChatItems.filter((chat) => Math.max(chat.unreadCount || 0, 0) > 0).length;
-  const unseenCallCount = callHistory.filter((entry) => entry.unseen).length;
-  const groupChatFilterCount = activeConversationChatItems.filter((chat) => chat.chatType === 'GROUP').length;
+  const activeVisibleConversationChatItems = useMemo(
+    () => chatItems.filter(shouldShowActiveChatInList),
+    [chatItems]
+  );
+  const spamConversationChatItems = useMemo(
+    () => chatItems.filter(shouldShowTrashChatInList),
+    [chatItems]
+  );
+  const activeConversationChatItems = useMemo(
+    () => activeVisibleConversationChatItems.filter((chat) => !chat.isArchived),
+    [activeVisibleConversationChatItems]
+  );
+  const archivedConversationChatItems = useMemo(
+    () => activeVisibleConversationChatItems.filter((chat) => chat.isArchived),
+    [activeVisibleConversationChatItems]
+  );
+  const unreadChatFilterCount = useMemo(
+    () => activeConversationChatItems.reduce((total, chat) => total + Math.max(chat.unreadCount || 0, 0), 0),
+    [activeConversationChatItems]
+  );
+  const unreadChatBadgeCount = useMemo(
+    () => activeConversationChatItems.filter((chat) => Math.max(chat.unreadCount || 0, 0) > 0).length,
+    [activeConversationChatItems]
+  );
+  const unseenCallCount = useMemo(
+    () => callHistory.filter((entry) => entry.unseen).length,
+    [callHistory]
+  );
+  const groupChatFilterCount = useMemo(
+    () => activeConversationChatItems.filter((chat) => chat.chatType === 'GROUP').length,
+    [activeConversationChatItems]
+  );
   const archivedChatFilterCount = archivedConversationChatItems.length;
-  const archivedUnreadTotal = archivedConversationChatItems.reduce((total, chat) => total + Math.max(chat.unreadCount || 0, 0), 0);
+  const archivedUnreadTotal = useMemo(
+    () => archivedConversationChatItems.reduce((total, chat) => total + Math.max(chat.unreadCount || 0, 0), 0),
+    [archivedConversationChatItems]
+  );
   const archivedBadgeCount = chatArchiveSettings.archiveBadgeMode === 'UNREAD_COUNT' ? archivedUnreadTotal : 0;
   const selectedForwardMessageCount = Object.values(forwardSelectedMessageIds).filter(Boolean).length;
   const selectedForwardRecipientCount = Object.values(forwardRecipientIds).filter(Boolean).length;
-  const employeeItems = approvedEmployees.map((employee) =>
-    mapApprovedEmployeeToListItem(employee, employeePhoneDisplayById[employee.approvedPhoneId])
+  const employeeItems = useMemo(
+    () => approvedEmployees.map((employee) =>
+      mapApprovedEmployeeToListItem(employee, employeePhoneDisplayById[employee.approvedPhoneId])
+    ),
+    [approvedEmployees, employeePhoneDisplayById]
   );
   const isConversationSurfaceOpen = Boolean(selectedChat || isAiAssistantOpen);
   const isCompactAndroid = Platform.OS === 'android' && height < 720;
@@ -6884,7 +6928,9 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     nextMessages: ChatMessage[],
     chatType = getChatTypeForContactId(contactId)
   ) {
-    nextMessages.forEach((message) => {
+    const recentMessages = nextMessages.slice(-CHAT_AUTO_MEDIA_DOWNLOAD_RECENT_WINDOW);
+
+    recentMessages.forEach((message) => {
       const mediaItems = getMessageMediaItems(message);
 
       mediaItems.forEach((media, index) => {
@@ -6912,9 +6958,22 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     media: ChatMediaAttachment,
     mediaIndex?: number
   ) {
+    const localScope = getLocalChatScope();
+    const didUpdateCachedMessage = await updateCachedChatMessageMedia({
+      contactId,
+      media,
+      mediaIndex,
+      messageId,
+      ...localScope
+    }).catch(() => false);
+
+    if (didUpdateCachedMessage) {
+      return;
+    }
+
     const cachedConversation = await loadCachedChatConversation({
       contactId,
-      ...getLocalChatScope()
+      ...localScope
     }).catch(() => null);
 
     if (!cachedConversation) {
@@ -14629,14 +14688,15 @@ function MessageThread({
   const [isPrivacyInfoModalOpen, setIsPrivacyInfoModalOpen] = useState(false);
   const [activeAudioPlaybackId, setActiveAudioPlaybackId] = useState<string | null>(null);
   const canSend = canChat && draft.trim().length > 0 && !isSending && !isVoiceRecording;
-  const threadItems = buildMessageThreadItems(uniqueChatMessages(messages));
+  const threadMessages = useMemo(() => uniqueChatMessages(messages), [messages]);
+  const threadItems = useMemo(() => buildMessageThreadItems(threadMessages), [threadMessages]);
   const groupMemberByUid = useMemo(() => new Map(groupMembers.map((member) => [member.uid, member])), [groupMembers]);
   const searchMatches = useMemo(() => getChatSearchMatches({
     dateKey: searchDateKey,
-    messages,
+    messages: threadMessages,
     query: searchQuery,
     senderUid: isGroupChat ? searchSenderUid : null
-  }), [isGroupChat, messages, searchDateKey, searchQuery, searchSenderUid]);
+  }), [isGroupChat, searchDateKey, searchQuery, searchSenderUid, threadMessages]);
   const safeSearchMatchIndex = searchMatches.length
     ? Math.min(activeSearchMatchIndex, searchMatches.length - 1)
     : -1;
@@ -14667,7 +14727,7 @@ function MessageThread({
   const messageInputBoxHeight = Math.max(42, messageInputHeight + MESSAGE_INPUT_BOX_EXTRA_HEIGHT);
   const composerControlHeight = isVoiceRecording ? 42 : messageInputBoxHeight;
   const scrollToLatestButtonBottom = composerBottomPadding + composerControlHeight + (replyTarget ? 70 : 22);
-  const scrollViewRef = useRef<ScrollView | null>(null);
+  const messageListRef = useRef<FlatList<MessageThreadItem> | null>(null);
 
   function updateLatestVisibility(offsetY: number, viewportHeight: number, contentHeight: number) {
     const distanceFromBottom = contentHeight - (offsetY + viewportHeight);
@@ -14682,7 +14742,7 @@ function MessageThread({
   }
 
   function scrollToLatest(animated = true) {
-    scrollViewRef.current?.scrollToEnd({ animated });
+    messageListRef.current?.scrollToEnd({ animated });
     isAtLatestRef.current = true;
     setShowScrollToLatest(false);
     setScrollToLatestUnreadCount(0);
@@ -14699,9 +14759,9 @@ function MessageThread({
       return false;
     }
 
-    scrollViewRef.current?.scrollTo({
+    messageListRef.current?.scrollToOffset({
       animated,
-      y: Math.max(targetY - (isSearchOpen ? 84 : 18), 0)
+      offset: Math.max(targetY - (isSearchOpen ? 84 : 18), 0)
     });
 
     return true;
@@ -14777,7 +14837,7 @@ function MessageThread({
     if (targetMessageId) {
       const nextIndex = getChatSearchMatches({
         dateKey,
-        messages,
+        messages: threadMessages,
         query: searchQuery,
         senderUid: isGroupChat ? searchSenderUid : null
       }).findIndex((match) => match.messageId === targetMessageId);
@@ -15049,6 +15109,81 @@ function MessageThread({
     ));
   };
 
+  const renderThreadItem = useCallback(({ item }: { item: MessageThreadItem }) => {
+    if (item.type === 'date') {
+      return (
+        <View style={styles.messageDateRow}>
+          <Text style={styles.messageDateText}>{item.label}</Text>
+        </View>
+      );
+    }
+
+    return (
+      <MessageBubble
+        contactName={contactName}
+        contactProfilePhotoUrl={contactProfilePhotoUrl}
+        currentUid={currentUid}
+        highlighted={highlightedMessageId === item.message.messageId}
+        isGroupChat={isGroupChat}
+        isSelectable={isForwardMode}
+        isSelected={Boolean(selectedForwardMessageIds[item.message.messageId])}
+        message={item.message}
+        onActivateAudioPlayback={setActiveAudioPlaybackId}
+        onDeactivateAudioPlayback={(audioPlaybackId) => {
+          setActiveAudioPlaybackId((currentAudioPlaybackId) =>
+            currentAudioPlaybackId === audioPlaybackId ? null : currentAudioPlaybackId
+          );
+        }}
+        onForwardMessage={isForwardMode ? undefined : onForwardMessage}
+        onLayout={handleMessageLayout}
+        onLongPress={isForwardMode ? undefined : onMessageLongPress}
+        onOpenMedia={isForwardMode ? undefined : onOpenMedia}
+        onPrepareAttachment={isForwardMode ? undefined : onPrepareAttachment}
+        onReply={isForwardMode ? undefined : onMessageReply}
+        onReplyPreviewPress={isForwardMode ? undefined : handleReplyPreviewPress}
+        onToggleSelect={onToggleForwardMessage}
+        preparingVideoKey={preparingVideoKey}
+        activeAudioPlaybackId={activeAudioPlaybackId}
+        profilePhotoHeaders={profilePhotoHeaders}
+        reactions={messageReactions[item.message.messageId] || item.message.reactions || []}
+        searchQuery={isSearchOpen ? searchQuery : ''}
+        senderMember={isGroupChat ? groupMemberByUid.get(item.message.senderUid) || null : null}
+        starred={Boolean(starredMessageIds[item.message.messageId])}
+      />
+    );
+  }, [
+    activeAudioPlaybackId,
+    contactName,
+    contactProfilePhotoUrl,
+    currentUid,
+    groupMemberByUid,
+    highlightedMessageId,
+    isForwardMode,
+    isGroupChat,
+    isSearchOpen,
+    messageReactions,
+    onForwardMessage,
+    onMessageLongPress,
+    onMessageReply,
+    onOpenMedia,
+    onPrepareAttachment,
+    onToggleForwardMessage,
+    preparingVideoKey,
+    profilePhotoHeaders,
+    searchQuery,
+    selectedForwardMessageIds,
+    starredMessageIds
+  ]);
+
+  const renderEmptyThread = useCallback(() => (
+    !isSearchOpen && !hasKnownMessages ? (
+      <EmptyChatSecurityNotice
+        isGroupChat={isGroupChat}
+        onLearnMore={() => setIsPrivacyInfoModalOpen(true)}
+      />
+    ) : null
+  ), [hasKnownMessages, isGroupChat, isSearchOpen]);
+
   return (
     <View
       style={[
@@ -15068,13 +15203,18 @@ function MessageThread({
         />
       ) : null}
 
-      <ScrollView
+      <FlatList
         contentContainerStyle={[
           styles.messageListContent,
           isSearchOpen && styles.messageListContentSearching
         ]}
+        data={threadItems}
+        initialNumToRender={18}
+        keyExtractor={(item) => item.id}
         keyboardDismissMode={getKeyboardDismissMode()}
         keyboardShouldPersistTaps="always"
+        ListEmptyComponent={renderEmptyThread}
+        maxToRenderPerBatch={10}
         onContentSizeChange={() => {
           if (isSearchOpen) {
             if (activeSearchMatch) {
@@ -15094,59 +15234,15 @@ function MessageThread({
           );
         }}
         onScrollBeginDrag={() => Keyboard.dismiss()}
+        ref={messageListRef}
+        removeClippedSubviews={Platform.OS === 'android'}
+        renderItem={renderThreadItem}
         scrollEventThrottle={80}
-        ref={scrollViewRef}
         showsVerticalScrollIndicator={false}
         style={styles.messageList}
-      >
-        {!threadItems.length && !isSearchOpen && !hasKnownMessages ? (
-          <EmptyChatSecurityNotice
-            isGroupChat={isGroupChat}
-            onLearnMore={() => setIsPrivacyInfoModalOpen(true)}
-          />
-        ) : null}
-
-        {threadItems.map((item) => (
-          item.type === 'date' ? (
-            <View key={item.id} style={styles.messageDateRow}>
-              <Text style={styles.messageDateText}>{item.label}</Text>
-            </View>
-          ) : (
-            <MessageBubble
-              contactName={contactName}
-              contactProfilePhotoUrl={contactProfilePhotoUrl}
-              currentUid={currentUid}
-              isSelectable={isForwardMode}
-              isSelected={Boolean(selectedForwardMessageIds[item.message.messageId])}
-              key={item.id}
-              highlighted={highlightedMessageId === item.message.messageId}
-              message={item.message}
-              isGroupChat={isGroupChat}
-              onLayout={handleMessageLayout}
-              onForwardMessage={isForwardMode ? undefined : onForwardMessage}
-              onLongPress={isForwardMode ? undefined : onMessageLongPress}
-              onOpenMedia={isForwardMode ? undefined : onOpenMedia}
-              onPrepareAttachment={isForwardMode ? undefined : onPrepareAttachment}
-              preparingVideoKey={preparingVideoKey}
-              onReplyPreviewPress={isForwardMode ? undefined : handleReplyPreviewPress}
-              onReply={isForwardMode ? undefined : onMessageReply}
-              onToggleSelect={onToggleForwardMessage}
-              activeAudioPlaybackId={activeAudioPlaybackId}
-              onActivateAudioPlayback={setActiveAudioPlaybackId}
-              onDeactivateAudioPlayback={(audioPlaybackId) => {
-                setActiveAudioPlaybackId((currentAudioPlaybackId) =>
-                  currentAudioPlaybackId === audioPlaybackId ? null : currentAudioPlaybackId
-                );
-              }}
-              profilePhotoHeaders={profilePhotoHeaders}
-              reactions={messageReactions[item.message.messageId] || item.message.reactions || []}
-              searchQuery={isSearchOpen ? searchQuery : ''}
-              senderMember={isGroupChat ? groupMemberByUid.get(item.message.senderUid) || null : null}
-              starred={Boolean(starredMessageIds[item.message.messageId])}
-            />
-          )
-        ))}
-      </ScrollView>
+        updateCellsBatchingPeriod={50}
+        windowSize={9}
+      />
 
       {showScrollToLatest && !isForwardMode && !isSearchOpen ? (
         <Pressable

@@ -4,7 +4,7 @@ import * as Crypto from 'expo-crypto';
 import * as SecureStore from 'expo-secure-store';
 import * as SQLite from 'expo-sqlite';
 import nacl from 'tweetnacl';
-import type { ChatContact, ChatMessage } from './chatApi';
+import type { ChatContact, ChatMediaAttachment, ChatMessage } from './chatApi';
 
 interface EncryptedPayload {
   ciphertext: string;
@@ -191,6 +191,73 @@ export async function saveCachedChatConversation(input: {
     getConversationStorageKey(scope, input.contactId),
     await encryptJson(record)
   );
+}
+
+export async function updateCachedChatMessageMedia(input: {
+  contactId: string;
+  media: ChatMediaAttachment;
+  mediaIndex?: number;
+  messageId: string;
+  ownerUid: string;
+  tenantId: string;
+}): Promise<boolean> {
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope || !input.messageId) {
+    return false;
+  }
+
+  const db = await getLocalChatSqliteDatabase();
+  const row = await db.getFirstAsync<SqliteMessageRow>(
+    `SELECT payload
+     FROM local_messages
+     WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ? AND message_id = ?
+     LIMIT 1`,
+    [scope.ownerUid, scope.tenantId, input.contactId, input.messageId]
+  );
+
+  if (!row?.payload) {
+    return false;
+  }
+
+  const existingMessage = await decryptJson<ChatMessage>(row.payload).catch(() => null);
+
+  if (!existingMessage?.messageId) {
+    return false;
+  }
+
+  const nextMessage = applyCachedMediaUpdateToMessage(existingMessage, input.media, input.mediaIndex);
+  const nowIso = new Date().toISOString();
+  const payload = await encryptJson(nextMessage);
+
+  await db.withTransactionAsync(async () => {
+    await db.runAsync(
+      `UPDATE local_messages
+       SET sent_at_ms = ?, sender_uid = ?, is_mine = ?, delivery_status = ?, payload = ?, updated_at = ?
+       WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ? AND message_id = ?`,
+      [
+        getMessageSentAtMs(nextMessage),
+        nextMessage.senderUid,
+        nextMessage.isMine ? 1 : 0,
+        nextMessage.deliveryStatus || null,
+        payload,
+        nowIso,
+        scope.ownerUid,
+        scope.tenantId,
+        input.contactId,
+        input.messageId
+      ]
+    );
+
+    await db.runAsync(
+      `UPDATE local_conversations
+       SET updated_at = ?
+       WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?`,
+      [nowIso, scope.ownerUid, scope.tenantId, input.contactId]
+    );
+  });
+
+  return true;
 }
 
 export async function listCachedChatConversations(input: {
@@ -792,6 +859,61 @@ function getMessageSentAtMs(message: ChatMessage): number {
   const sentAtMs = Date.parse(message.sentAt);
 
   return Number.isFinite(sentAtMs) ? sentAtMs : Date.now();
+}
+
+function getCachedMessageMediaItems(message: ChatMessage): ChatMediaAttachment[] {
+  if (Array.isArray(message.mediaItems) && message.mediaItems.length > 0) {
+    return message.mediaItems.filter((media): media is ChatMediaAttachment => Boolean(media));
+  }
+
+  if (message.media) {
+    return [message.media];
+  }
+
+  if (message.image) {
+    return [message.image];
+  }
+
+  return [];
+}
+
+function toCachedChatImageAttachment(media: ChatMediaAttachment) {
+  return {
+    ...media,
+    contentType: 'image/jpeg' as const,
+    height: media.height || 1,
+    kind: 'image' as const,
+    width: media.width || 1
+  };
+}
+
+function applyCachedMediaUpdateToMessage(
+  message: ChatMessage,
+  media: ChatMediaAttachment,
+  mediaIndex?: number
+): ChatMessage {
+  const currentMediaItems = getCachedMessageMediaItems(message);
+
+  if (typeof mediaIndex === 'number' && currentMediaItems.length > 1) {
+    const nextMediaItems = currentMediaItems.map((mediaItem, index) =>
+      index === mediaIndex ? media : mediaItem
+    );
+    const primaryMedia = nextMediaItems[0] || media;
+
+    return {
+      ...message,
+      image: primaryMedia.kind === 'image' ? toCachedChatImageAttachment(primaryMedia) : null,
+      media: primaryMedia,
+      mediaItems: nextMediaItems
+    };
+  }
+
+  return {
+    ...message,
+    image: media.kind === 'image' ? toCachedChatImageAttachment(media) : null,
+    media,
+    mediaItems: currentMediaItems.length > 1 ? currentMediaItems : []
+  };
 }
 
 async function loadRawCachedChatConversation(input: {
