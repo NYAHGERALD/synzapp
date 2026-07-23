@@ -150,7 +150,6 @@ import {
   parseChatRealtimeEvent,
   sendRealtimePresenceHeartbeat,
   subscribeRealtimeConversation,
-  translateChatMessage,
   unsubscribeRealtimeConversation,
   updateChatArchiveSettings,
   sendChatMessage,
@@ -165,7 +164,8 @@ import {
   getCachedChatTranslation,
   getDownloadedTranslationLanguages,
   saveCachedChatTranslation,
-  saveDownloadedTranslationLanguage
+  saveDownloadedTranslationLanguage,
+  translateChatMessageOnDevice
 } from '../services/chatTranslation';
 import {
   ChatBackupPolicy,
@@ -7565,11 +7565,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         return;
       }
 
-      const idToken = await getIdToken();
-      const translation = await translateChatMessage({
-        chatType: activeChat.chatType,
-        contactId: activeChat.contactId,
-        idToken,
+      const translation = await translateChatMessageOnDevice({
         messageId: state.message.messageId,
         sourceLanguageCode: state.sourceLanguageCode,
         targetLanguageCode: state.targetLanguageCode,
@@ -17522,7 +17518,7 @@ function MessageTranslationModal({
                       >
                         <View style={styles.translationLanguageOptionText}>
                           <Text numberOfLines={1} style={styles.translationLanguageOptionName}>{option.label}</Text>
-                          <Text style={styles.translationLanguageOptionStatus}>Downloaded</Text>
+                          <Text style={styles.translationLanguageOptionStatus}>On this device</Text>
                         </View>
                         {isSelected ? <Feather color="#16A34A" name="check-circle" size={19} /> : null}
                       </Pressable>
@@ -17532,10 +17528,10 @@ function MessageTranslationModal({
 
                 {downloadableLanguages.length ? (
                   <View style={styles.translationLanguageSection}>
-                    <Text style={styles.translationLanguageSectionTitle}>Download more languages</Text>
+                    <Text style={styles.translationLanguageSectionTitle}>Enable more languages</Text>
                     {downloadableLanguages.slice(0, 10).map((option) => (
                       <Pressable
-                        accessibilityLabel={`Download ${option.label}`}
+                        accessibilityLabel={`Enable ${option.label}`}
                         accessibilityRole="button"
                         key={`download-${option.code}`}
                         onPress={() => onDownloadLanguage(option.code)}
@@ -17543,9 +17539,9 @@ function MessageTranslationModal({
                       >
                         <View style={styles.translationLanguageOptionText}>
                           <Text numberOfLines={1} style={styles.translationLanguageOptionName}>{option.label}</Text>
-                          <Text style={styles.translationLanguageOptionStatus}>Tap to add</Text>
+                          <Text style={styles.translationLanguageOptionStatus}>Tap to enable offline</Text>
                         </View>
-                        <Feather color="#2563EB" name="download-cloud" size={19} />
+                        <Feather color="#2563EB" name="plus-circle" size={19} />
                       </Pressable>
                     ))}
                   </View>
@@ -17584,7 +17580,7 @@ function MessageTranslationModal({
             </View>
 
             <Text style={styles.translationPrivacyText}>
-              Your Synzapp messages stay encrypted in chat. Translation runs only when you choose a message, and audit logs do not store the message text. Translations may not always be accurate.
+              Your Synzapp messages stay encrypted in chat. Translation runs on this device with Synzapp Offline AI, so message text is not sent to OpenAI or another cloud translation provider.
             </Text>
           </ScrollView>
         </View>
