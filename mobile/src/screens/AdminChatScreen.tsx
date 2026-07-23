@@ -150,6 +150,7 @@ import {
   parseChatRealtimeEvent,
   sendRealtimePresenceHeartbeat,
   subscribeRealtimeConversation,
+  translateChatMessage,
   unsubscribeRealtimeConversation,
   updateChatArchiveSettings,
   sendChatMessage,
@@ -159,6 +160,13 @@ import {
   updateChatNotificationSettings,
   updateChatTranscriptLanguage
 } from '../services/chatApi';
+import type { ChatMessageTranslation } from '../services/chatApi';
+import {
+  getCachedChatTranslation,
+  getDownloadedTranslationLanguages,
+  saveCachedChatTranslation,
+  saveDownloadedTranslationLanguage
+} from '../services/chatTranslation';
 import {
   ChatBackupPolicy,
   createEncryptedChatBackup,
@@ -211,7 +219,7 @@ import {
   type SynzappCallStoreData,
   type SynzappScheduledCall
 } from '../services/localCallStore';
-import { getCachedProfilePhotoUri } from '../services/profilePhotoCache';
+import { clearProfilePhotoCache, getCachedProfilePhotoUri } from '../services/profilePhotoCache';
 import { openChatAttachmentFile } from '../services/chatAttachmentOpener';
 import {
   pickNativeChatCameraMedia,
@@ -654,6 +662,15 @@ interface NativeOptionPickerState {
   title: string;
 }
 
+interface MessageTranslationModalState {
+  error: string | null;
+  isLoading: boolean;
+  message: ChatMessage;
+  sourceLanguageCode: ChatTranscriptLanguageCode;
+  targetLanguageCode: ChatTranscriptLanguageCode;
+  translation: ChatMessageTranslation | null;
+}
+
 interface ScheduleCallDraft {
   callType: SynzappCallMode;
   calendarAddedAt?: string | null;
@@ -934,6 +951,8 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const [preparingVideoKey, setPreparingVideoKey] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [messageActionTarget, setMessageActionTarget] = useState<ChatMessage | null>(null);
+  const [messageTranslationModal, setMessageTranslationModal] = useState<MessageTranslationModalState | null>(null);
+  const [downloadedTranslationLanguageCodes, setDownloadedTranslationLanguageCodes] = useState<ChatTranscriptLanguageCode[]>(['en-US', 'es-MX']);
   const [replyTarget, setReplyTarget] = useState<ChatMessage | null>(null);
   const [isForwardMode, setIsForwardMode] = useState(false);
   const [forwardSelectedMessageIds, setForwardSelectedMessageIds] = useState<Record<string, boolean>>({});
@@ -1801,6 +1820,22 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       setSettingsScreen('list');
     }
   }, [activeTab, canManageCompanyProfile, canManageDirectory, canManageGroups, canManageSecurity, canManageUsers, canViewEmployees, settingsScreen]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    void getDownloadedTranslationLanguages()
+      .then((languages) => {
+        if (isMounted) {
+          setDownloadedTranslationLanguageCodes(languages);
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   async function getIdToken(forceRefresh = false): Promise<string> {
     return verifiedAdmin.firebaseUser.getIdToken(forceRefresh);
@@ -7473,6 +7508,127 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     setMessageActionTarget(null);
   }
 
+  function handleOpenTranslateMessage(message: ChatMessage) {
+    const text = message.text.trim();
+
+    if (!text) {
+      Alert.alert('Nothing to translate', 'Select a text message to translate.');
+      setMessageActionTarget(null);
+      return;
+    }
+
+    const initialState: MessageTranslationModalState = {
+      error: null,
+      isLoading: false,
+      message,
+      sourceLanguageCode: 'en-US',
+      targetLanguageCode: 'es-MX',
+      translation: null
+    };
+
+    setMessageActionTarget(null);
+    setMessageTranslationModal(initialState);
+    void requestMessageTranslation(initialState);
+  }
+
+  async function requestMessageTranslation(state: MessageTranslationModalState) {
+    const activeChat = selectedChatRef.current;
+    const text = state.message.text.trim();
+
+    if (!activeChat || !text) {
+      return;
+    }
+
+    setMessageTranslationModal((currentState) =>
+      currentState?.message.messageId === state.message.messageId
+        ? { ...currentState, error: null, isLoading: true }
+        : currentState
+    );
+
+    try {
+      const cachedTranslation = await getCachedChatTranslation({
+        messageId: state.message.messageId,
+        sourceText: text,
+        targetLanguageCode: state.targetLanguageCode
+      });
+
+      if (
+        cachedTranslation &&
+        cachedTranslation.sourceLanguageCode === state.sourceLanguageCode &&
+        cachedTranslation.targetLanguageCode === state.targetLanguageCode
+      ) {
+        setMessageTranslationModal((currentState) =>
+          currentState?.message.messageId === state.message.messageId
+            ? { ...currentState, error: null, isLoading: false, translation: cachedTranslation }
+            : currentState
+        );
+        return;
+      }
+
+      const idToken = await getIdToken();
+      const translation = await translateChatMessage({
+        chatType: activeChat.chatType,
+        contactId: activeChat.contactId,
+        idToken,
+        messageId: state.message.messageId,
+        sourceLanguageCode: state.sourceLanguageCode,
+        targetLanguageCode: state.targetLanguageCode,
+        text
+      });
+
+      await saveCachedChatTranslation({
+        messageId: state.message.messageId,
+        sourceText: text,
+        translation
+      }).catch(() => undefined);
+
+      setMessageTranslationModal((currentState) =>
+        currentState?.message.messageId === state.message.messageId
+          ? { ...currentState, error: null, isLoading: false, translation }
+          : currentState
+      );
+    } catch (nextError) {
+      setMessageTranslationModal((currentState) =>
+        currentState?.message.messageId === state.message.messageId
+          ? {
+              ...currentState,
+              error: getErrorMessage(nextError, 'Unable to translate this message.'),
+              isLoading: false
+            }
+          : currentState
+      );
+    }
+  }
+
+  async function handleDownloadTranslationLanguage(code: ChatTranscriptLanguageCode) {
+    const languages = await saveDownloadedTranslationLanguage(code);
+
+    setDownloadedTranslationLanguageCodes(languages);
+  }
+
+  function handleChangeTranslationLanguages(input: {
+    sourceLanguageCode?: ChatTranscriptLanguageCode;
+    targetLanguageCode?: ChatTranscriptLanguageCode;
+  }) {
+    setMessageTranslationModal((currentState) => {
+      if (!currentState) {
+        return currentState;
+      }
+
+      const nextState: MessageTranslationModalState = {
+        ...currentState,
+        error: null,
+        sourceLanguageCode: input.sourceLanguageCode || currentState.sourceLanguageCode,
+        targetLanguageCode: input.targetLanguageCode || currentState.targetLanguageCode,
+        translation: null
+      };
+
+      void requestMessageTranslation(nextState);
+
+      return nextState;
+    });
+  }
+
   function handleReplyToMessage(message: ChatMessage) {
     setReplyTarget(message);
     setMessageActionTarget(null);
@@ -8732,7 +8888,10 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         confirmationText: organizationDeletionModal.confirmationText,
         idToken: organizationDeletionModal.verifiedIdToken
       });
-      await clearLocalChatDataForOwner({ ...getLocalChatScope() }).catch(() => undefined);
+      await Promise.all([
+        clearLocalChatDataForOwner({ ...getLocalChatScope() }).catch(() => undefined),
+        clearProfilePhotoCache().catch(() => undefined)
+      ]);
       clearRegisteredDeviceIdentityCache();
       setOrganizationDeletionModal(null);
       setOrganizationDeletionConfirmation(null);
@@ -10526,6 +10685,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         onReact={handleReactToMessage}
         onReply={handleReplyToMessage}
         onStar={handleToggleMessageStar}
+        onTranslate={handleOpenTranslateMessage}
         profilePhotoHeaders={profilePhotoHeaders}
         currentUserReactions={messageActionTarget
           ? getCurrentUserReactionEmojis(
@@ -10537,6 +10697,22 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           ? messageReactions[messageActionTarget.messageId] || messageActionTarget.reactions || []
           : []}
         starred={messageActionTarget ? Boolean(starredMessageIds[messageActionTarget.messageId]) : false}
+      />
+
+      <MessageTranslationModal
+        downloadedLanguageCodes={downloadedTranslationLanguageCodes}
+        languageOptions={chatTranscriptLanguageOptions}
+        onChangeLanguages={handleChangeTranslationLanguages}
+        onClose={() => setMessageTranslationModal(null)}
+        onDownloadLanguage={(code) => {
+          void handleDownloadTranslationLanguage(code);
+        }}
+        onRetry={() => {
+          if (messageTranslationModal) {
+            void requestMessageTranslation(messageTranslationModal);
+          }
+        }}
+        state={messageTranslationModal}
       />
 
       <MediaReviewModal
@@ -16889,6 +17065,7 @@ function MessageActionOverlay({
   onReact,
   onReply,
   onStar,
+  onTranslate,
   profilePhotoHeaders,
   reactions = [],
   starred
@@ -16907,6 +17084,7 @@ function MessageActionOverlay({
   onReact: (message: ChatMessage, reaction: string) => void;
   onReply: (message: ChatMessage) => void;
   onStar: (message: ChatMessage) => void;
+  onTranslate: (message: ChatMessage) => void;
   profilePhotoHeaders?: Record<string, string>;
   reactions?: ChatMessageReaction[];
   starred: boolean;
@@ -17088,6 +17266,7 @@ function MessageActionOverlay({
               <MessageActionRow icon="corner-up-left" label="Reply" onPress={() => onReply(message)} />
               <MessageActionRow icon="corner-up-right" label="Forward" onPress={() => onForward(message)} />
               <MessageActionRow icon="copy" label="Copy" onPress={() => onCopy(message)} />
+              <MessageActionRow icon="globe" label="Translate" onPress={() => onTranslate(message)} />
               <MessageActionRow icon="info" label="Info" onPress={() => onInfo(message)} />
               <MessageActionRow icon="star" label={starred ? 'Unstar' : 'Star'} onPress={() => onStar(message)} />
               <MessageActionRow destructive icon="trash-2" label="Delete" onPress={() => onDelete(message)} />
@@ -17192,6 +17371,228 @@ function MessageActionRow({
   );
 }
 
+function MessageTranslationModal({
+  downloadedLanguageCodes,
+  languageOptions,
+  onChangeLanguages,
+  onClose,
+  onDownloadLanguage,
+  onRetry,
+  state
+}: {
+  downloadedLanguageCodes: ChatTranscriptLanguageCode[];
+  languageOptions: TranscriptLanguageOption[];
+  onChangeLanguages: (input: {
+    sourceLanguageCode?: ChatTranscriptLanguageCode;
+    targetLanguageCode?: ChatTranscriptLanguageCode;
+  }) => void;
+  onClose: () => void;
+  onDownloadLanguage: (code: ChatTranscriptLanguageCode) => void;
+  onRetry: () => void;
+  state: MessageTranslationModalState | null;
+}) {
+  const insets = useSafeAreaInsets();
+  const [languagePickerMode, setLanguagePickerMode] = useState<'source' | 'target' | null>(null);
+
+  useEffect(() => {
+    if (!state) {
+      setLanguagePickerMode(null);
+    }
+  }, [state]);
+
+  if (!state) {
+    return null;
+  }
+
+  const installedLanguageCodes = new Set(downloadedLanguageCodes);
+  const sourceOption = getTranslationLanguageOption(languageOptions, state.sourceLanguageCode);
+  const targetOption = getTranslationLanguageOption(languageOptions, state.targetLanguageCode);
+  const pickerTitle = languagePickerMode === 'source' ? 'Translate from' : 'Translate to';
+  const availableLanguages = languageOptions.filter((option) =>
+    installedLanguageCodes.has(option.code) ||
+    option.code === state.sourceLanguageCode ||
+    option.code === state.targetLanguageCode
+  );
+  const downloadableLanguages = languageOptions.filter((option) => !installedLanguageCodes.has(option.code));
+
+  return (
+    <Modal animationType="slide" presentationStyle="overFullScreen" transparent visible onRequestClose={onClose}>
+      <View style={styles.translationModalRoot}>
+        <View style={[
+          styles.translationModalSheet,
+          {
+            paddingBottom: Math.max(insets.bottom, 16),
+            paddingTop: Math.max(insets.top, 14)
+          }
+        ]}>
+          <View style={styles.translationModalHeader}>
+            <View style={styles.translationModalHeaderSpacer} />
+            <Text style={styles.translationModalTitle}>Translation</Text>
+            <Pressable
+              accessibilityLabel="Close translation"
+              accessibilityRole="button"
+              onPress={onClose}
+              style={({ pressed }) => [styles.translationCloseButton, pressed && styles.pressed]}
+            >
+              <Feather color="#0F172A" name="x" size={28} />
+            </Pressable>
+          </View>
+
+          <ScrollView
+            bounces={false}
+            contentContainerStyle={styles.translationModalContent}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            <View style={styles.translationLanguageHeader}>
+              <Text style={styles.translationLanguageLabel}>Translate from</Text>
+              <Text style={styles.translationLanguageLabel}>Translate to</Text>
+            </View>
+
+            <View style={styles.translationLanguageRow}>
+              <Pressable
+                accessibilityLabel="Choose source language"
+                accessibilityRole="button"
+                onPress={() => setLanguagePickerMode('source')}
+                style={({ pressed }) => [styles.translationLanguagePill, pressed && styles.pressed]}
+              >
+                <Text numberOfLines={1} style={styles.translationLanguagePillText}>
+                  {getCompactLanguageLabel(sourceOption)}
+                </Text>
+              </Pressable>
+              <Pressable
+                accessibilityLabel="Swap translation languages"
+                accessibilityRole="button"
+                onPress={() => onChangeLanguages({
+                  sourceLanguageCode: state.targetLanguageCode,
+                  targetLanguageCode: state.sourceLanguageCode
+                })}
+                style={({ pressed }) => [styles.translationSwapButton, pressed && styles.pressed]}
+              >
+                <Feather color="#0F172A" name="repeat" size={21} />
+              </Pressable>
+              <Pressable
+                accessibilityLabel="Choose target language"
+                accessibilityRole="button"
+                onPress={() => setLanguagePickerMode('target')}
+                style={({ pressed }) => [styles.translationLanguagePill, pressed && styles.pressed]}
+              >
+                <Text numberOfLines={1} style={styles.translationLanguagePillText}>
+                  {getCompactLanguageLabel(targetOption)}
+                </Text>
+              </Pressable>
+            </View>
+
+            {languagePickerMode ? (
+              <View style={styles.translationLanguagePicker}>
+                <View style={styles.translationLanguagePickerHeader}>
+                  <Text style={styles.translationLanguagePickerTitle}>{pickerTitle}</Text>
+                  <Pressable
+                    accessibilityLabel="Close language picker"
+                    accessibilityRole="button"
+                    onPress={() => setLanguagePickerMode(null)}
+                    style={({ pressed }) => [styles.translationLanguagePickerClose, pressed && styles.pressed]}
+                  >
+                    <Feather color="#64748B" name="chevron-up" size={19} />
+                  </Pressable>
+                </View>
+
+                <View style={styles.translationLanguageSection}>
+                  <Text style={styles.translationLanguageSectionTitle}>Available on this device</Text>
+                  {availableLanguages.map((option) => {
+                    const isSelected = option.code === (
+                      languagePickerMode === 'source' ? state.sourceLanguageCode : state.targetLanguageCode
+                    );
+
+                    return (
+                      <Pressable
+                        accessibilityRole="button"
+                        key={`${languagePickerMode}-${option.code}`}
+                        onPress={() => {
+                          onChangeLanguages(languagePickerMode === 'source'
+                            ? { sourceLanguageCode: option.code }
+                            : { targetLanguageCode: option.code });
+                          setLanguagePickerMode(null);
+                        }}
+                        style={({ pressed }) => [
+                          styles.translationLanguageOption,
+                          isSelected && styles.translationLanguageOptionSelected,
+                          pressed && styles.pressed
+                        ]}
+                      >
+                        <View style={styles.translationLanguageOptionText}>
+                          <Text numberOfLines={1} style={styles.translationLanguageOptionName}>{option.label}</Text>
+                          <Text style={styles.translationLanguageOptionStatus}>Downloaded</Text>
+                        </View>
+                        {isSelected ? <Feather color="#16A34A" name="check-circle" size={19} /> : null}
+                      </Pressable>
+                    );
+                  })}
+                </View>
+
+                {downloadableLanguages.length ? (
+                  <View style={styles.translationLanguageSection}>
+                    <Text style={styles.translationLanguageSectionTitle}>Download more languages</Text>
+                    {downloadableLanguages.slice(0, 10).map((option) => (
+                      <Pressable
+                        accessibilityLabel={`Download ${option.label}`}
+                        accessibilityRole="button"
+                        key={`download-${option.code}`}
+                        onPress={() => onDownloadLanguage(option.code)}
+                        style={({ pressed }) => [styles.translationLanguageOption, pressed && styles.pressed]}
+                      >
+                        <View style={styles.translationLanguageOptionText}>
+                          <Text numberOfLines={1} style={styles.translationLanguageOptionName}>{option.label}</Text>
+                          <Text style={styles.translationLanguageOptionStatus}>Tap to add</Text>
+                        </View>
+                        <Feather color="#2563EB" name="download-cloud" size={19} />
+                      </Pressable>
+                    ))}
+                  </View>
+                ) : null}
+              </View>
+            ) : null}
+
+            <View style={styles.translationMessageCard}>
+              <Text style={styles.translationSectionLabel}>Original message</Text>
+              <Text style={styles.translationMessageText}>{state.message.text}</Text>
+              <View style={styles.translationDivider} />
+              <View style={styles.translationResultHeader}>
+                <Text style={styles.translationSectionLabel}>Translated message</Text>
+                {state.isLoading ? <ActivityIndicator color="#0F766E" size="small" /> : null}
+              </View>
+              {state.error ? (
+                <View style={styles.translationErrorBox}>
+                  <Text style={styles.translationErrorText}>{state.error}</Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={onRetry}
+                    style={({ pressed }) => [styles.translationRetryButton, pressed && styles.pressed]}
+                  >
+                    <Feather color="#FFFFFF" name="refresh-cw" size={15} />
+                    <Text style={styles.translationRetryText}>Retry</Text>
+                  </Pressable>
+                </View>
+              ) : (
+                <Text style={[
+                  styles.translationMessageText,
+                  !state.translation?.translatedText && styles.translationPendingText
+                ]}>
+                  {state.translation?.translatedText || 'Translating...'}
+                </Text>
+              )}
+            </View>
+
+            <Text style={styles.translationPrivacyText}>
+              Your Synzapp messages stay encrypted in chat. Translation runs only when you choose a message, and audit logs do not store the message text. Translations may not always be accurate.
+            </Text>
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 function NativeOptionPickerModal({ picker }: { picker: NativeOptionPickerState | null }) {
   if (Platform.OS === 'ios' || !picker) {
     return null;
@@ -17278,6 +17679,7 @@ function ForwardRecipientModal({
   selectedRecipientIds: Record<string, boolean>;
 }) {
   const [query, setQuery] = useState('');
+  const insets = useSafeAreaInsets();
   const safeQuery = query.trim().toLowerCase();
   const filteredContacts = safeQuery
     ? contacts.filter((contact) => [
@@ -17343,16 +17745,15 @@ function ForwardRecipientModal({
   }
 
   return (
-    <Modal animationType="slide" transparent visible onRequestClose={onCancel}>
+    <Modal animationType="slide" presentationStyle="overFullScreen" transparent visible onRequestClose={onCancel}>
       <View style={styles.forwardRecipientOverlay}>
-        <Pressable
-          accessibilityLabel="Close forward picker"
-          accessibilityRole="button"
-          onPress={onCancel}
-          style={styles.forwardRecipientBackdrop}
-        />
-
-        <View style={styles.forwardRecipientSheet}>
+        <View style={[
+          styles.forwardRecipientSheet,
+          {
+            paddingBottom: Math.max(insets.bottom, 10),
+            paddingTop: Math.max(insets.top, 10)
+          }
+        ]}>
           <View style={styles.forwardRecipientHeader}>
             <Pressable
               accessibilityLabel="Close"
@@ -26898,6 +27299,21 @@ function getErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+function getTranslationLanguageOption(
+  options: TranscriptLanguageOption[],
+  code: ChatTranscriptLanguageCode
+): TranscriptLanguageOption {
+  return options.find((option) => option.code === code) || {
+    code,
+    label: code,
+    status: 'available'
+  };
+}
+
+function getCompactLanguageLabel(option: TranscriptLanguageOption): string {
+  return option.label.replace(/\s*\([^)]*\)/g, '').trim() || option.label;
+}
+
 function createSynzappCallId(): string {
   const segment = (length: number) => Array.from({ length }, () =>
     Math.floor(Math.random() * 16).toString(16)
@@ -32926,6 +33342,233 @@ const styles = StyleSheet.create({
   messageActionLabelDestructive: {
     color: '#E11D48'
   },
+  translationModalRoot: {
+    backgroundColor: 'rgba(15, 23, 42, 0.22)',
+    flex: 1,
+    justifyContent: 'flex-start'
+  },
+  translationModalSheet: {
+    backgroundColor: '#F7F8FA',
+    borderBottomLeftRadius: 26,
+    borderBottomRightRadius: 26,
+    flex: 1,
+    shadowColor: '#0F172A',
+    shadowOffset: { height: 10, width: 0 },
+    shadowOpacity: 0.18,
+    shadowRadius: 24
+  },
+  translationModalHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    minHeight: 54,
+    paddingHorizontal: 16
+  },
+  translationModalHeaderSpacer: {
+    width: 48
+  },
+  translationModalTitle: {
+    color: '#111827',
+    flex: 1,
+    fontSize: 18,
+    fontWeight: '400',
+    lineHeight: 24,
+    textAlign: 'center'
+  },
+  translationCloseButton: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    height: 48,
+    justifyContent: 'center',
+    width: 48
+  },
+  translationModalContent: {
+    paddingBottom: 26,
+    paddingHorizontal: 16,
+    paddingTop: 22
+  },
+  translationLanguageHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+    paddingHorizontal: 18
+  },
+  translationLanguageLabel: {
+    color: '#8A94A6',
+    fontSize: 14,
+    fontWeight: '400',
+    lineHeight: 18
+  },
+  translationLanguageRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 14
+  },
+  translationLanguagePill: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    flex: 1,
+    justifyContent: 'center',
+    minHeight: 50,
+    paddingHorizontal: 16
+  },
+  translationLanguagePillText: {
+    color: '#111827',
+    fontSize: 16,
+    fontWeight: '400',
+    lineHeight: 21
+  },
+  translationSwapButton: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    height: 48,
+    justifyContent: 'center',
+    width: 48
+  },
+  translationLanguagePicker: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 22,
+    marginBottom: 14,
+    padding: 12
+  },
+  translationLanguagePickerHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 8
+  },
+  translationLanguagePickerTitle: {
+    color: '#111827',
+    fontSize: 15,
+    fontWeight: '400',
+    lineHeight: 20
+  },
+  translationLanguagePickerClose: {
+    alignItems: 'center',
+    borderRadius: 16,
+    height: 32,
+    justifyContent: 'center',
+    width: 32
+  },
+  translationLanguageSection: {
+    gap: 7,
+    marginTop: 6
+  },
+  translationLanguageSectionTitle: {
+    color: '#64748B',
+    fontSize: 12,
+    fontWeight: '400',
+    letterSpacing: 0.6,
+    lineHeight: 16,
+    textTransform: 'uppercase'
+  },
+  translationLanguageOption: {
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderColor: '#E2E8F0',
+    borderRadius: 16,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 12,
+    justifyContent: 'space-between',
+    minHeight: 56,
+    paddingHorizontal: 13,
+    paddingVertical: 9
+  },
+  translationLanguageOptionSelected: {
+    backgroundColor: '#ECFDF5',
+    borderColor: '#A7F3D0'
+  },
+  translationLanguageOptionText: {
+    flex: 1,
+    minWidth: 0
+  },
+  translationLanguageOptionName: {
+    color: '#0F172A',
+    fontSize: 14,
+    fontWeight: '400',
+    lineHeight: 18
+  },
+  translationLanguageOptionStatus: {
+    color: '#64748B',
+    fontSize: 12,
+    fontWeight: '400',
+    lineHeight: 16,
+    marginTop: 2
+  },
+  translationMessageCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 22,
+    paddingHorizontal: 16,
+    paddingVertical: 16
+  },
+  translationSectionLabel: {
+    color: '#8A94A6',
+    fontSize: 13,
+    fontWeight: '400',
+    lineHeight: 17,
+    marginBottom: 8
+  },
+  translationMessageText: {
+    color: '#111827',
+    fontSize: 16,
+    fontWeight: '400',
+    lineHeight: 23
+  },
+  translationPendingText: {
+    color: '#64748B'
+  },
+  translationDivider: {
+    backgroundColor: '#E5E7EB',
+    height: 1,
+    marginVertical: 16
+  },
+  translationResultHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between'
+  },
+  translationErrorBox: {
+    backgroundColor: '#FEF2F2',
+    borderColor: '#FECACA',
+    borderRadius: 16,
+    borderWidth: 1,
+    gap: 12,
+    padding: 12
+  },
+  translationErrorText: {
+    color: '#991B1B',
+    fontSize: 14,
+    fontWeight: '400',
+    lineHeight: 19
+  },
+  translationRetryButton: {
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    backgroundColor: '#2563EB',
+    borderRadius: 18,
+    flexDirection: 'row',
+    gap: 7,
+    minHeight: 36,
+    paddingHorizontal: 13
+  },
+  translationRetryText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '400',
+    lineHeight: 17
+  },
+  translationPrivacyText: {
+    color: '#7A8494',
+    fontSize: 13,
+    fontWeight: '400',
+    lineHeight: 19,
+    marginTop: 28,
+    paddingHorizontal: 16
+  },
   chatSearchModalRoot: {
     backgroundColor: 'rgba(15, 23, 42, 0.24)',
     flex: 1,
@@ -33074,21 +33717,17 @@ const styles = StyleSheet.create({
   forwardRecipientOverlay: {
     backgroundColor: 'rgba(15, 23, 42, 0.24)',
     flex: 1,
-    justifyContent: 'flex-end'
+    justifyContent: 'flex-start'
   },
   forwardRecipientBackdrop: {
     ...StyleSheet.absoluteFillObject
   },
   forwardRecipientSheet: {
     backgroundColor: '#F8FAFC',
-    borderTopLeftRadius: 30,
-    borderTopRightRadius: 30,
-    maxHeight: '86%',
-    minHeight: 430,
-    paddingBottom: 10,
+    flex: 1,
     paddingHorizontal: 14,
     shadowColor: '#0F172A',
-    shadowOffset: { height: -6, width: 0 },
+    shadowOffset: { height: 8, width: 0 },
     shadowOpacity: 0.16,
     shadowRadius: 18
   },
@@ -33140,7 +33779,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8
   },
   forwardRecipientList: {
-    flexGrow: 0,
+    flex: 1,
     marginTop: 14
   },
   forwardRecipientSection: {
@@ -33218,6 +33857,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginHorizontal: -14,
     paddingHorizontal: 18,
+    paddingBottom: 0,
     paddingTop: 10
   },
   forwardRecipientCount: {

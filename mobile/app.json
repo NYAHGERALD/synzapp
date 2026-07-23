@@ -27,6 +27,12 @@
         "NSBluetoothAlwaysUsageDescription": "Synzapp uses Bluetooth when you choose a headset for secure workplace calls.",
         "NSMicrophoneUsageDescription": "Synzapp uses the microphone when you choose to record a voice note or join a secure workplace call.",
         "NSPhotoLibraryUsageDescription": "Synzapp uses photos and videos you choose for your profile photo or chat messages.",
+        "NSLocalNetworkUsageDescription": "Synzapp connects to your local development server while testing local builds on your network.",
+        "NSBonjourServices": [
+          "_expo._tcp",
+          "_react-native-packager._tcp",
+          "_http._tcp"
+        ],
         "UIBackgroundModes": [
           "audio",
           "fetch",
@@ -123,9 +129,7 @@
       }
     },
     "owner": "geraldnyah",
-    "runtimeVersion": {
-      "policy": "appVersion"
-    },
+    "runtimeVersion": "0.1.0",
     "updates": {
       "url": "https://u.expo.dev/495fd669-3ddf-4062-adfd-5648dca501c8"
     }

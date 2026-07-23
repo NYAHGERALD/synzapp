@@ -81,6 +81,10 @@ import {
   type ChatTranscriptLanguageCode
 } from '../services/chatTranscriptLanguageService.js';
 import {
+  translateChatMessage,
+  type ChatTranslationLanguageCode
+} from '../services/chatTranslationService.js';
+import {
   getChatArchiveSettings,
   updateChatArchiveSettings
 } from '../services/chatArchiveSettingsService.js';
@@ -229,6 +233,13 @@ const chatTranscriptLanguageCodeSchema = z.enum([
 
 const chatTranscriptLanguageBodySchema = z.object({
   languageCode: chatTranscriptLanguageCodeSchema
+});
+
+const chatTranslationBodySchema = z.object({
+  messageId: z.string().trim().min(4).max(160),
+  sourceLanguageCode: chatTranscriptLanguageCodeSchema,
+  targetLanguageCode: chatTranscriptLanguageCodeSchema,
+  text: z.string().trim().min(1).max(4_000)
 });
 
 const chatPreferenceBodySchema = z.object({
@@ -1352,6 +1363,118 @@ profileRouter.put('/chat/conversations/:contactId/transcript-language', verifyAp
     await writeAuditEvent({
       action: 'DIRECT_CHAT_TRANSCRIPT_LANGUAGE_UPDATED',
       reason: error instanceof Error ? error.message : 'Transcript language update failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
+profileRouter.post('/chat/conversations/:contactId/messages/:messageId/translate', verifyAppCheck, async (req, res, next) => {
+  const contactId = Array.isArray(req.params.contactId)
+    ? req.params.contactId[0] || ''
+    : req.params.contactId || '';
+  const messageId = Array.isArray(req.params.messageId)
+    ? req.params.messageId[0] || ''
+    : req.params.messageId || '';
+
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    const body = chatTranslationBodySchema.parse({
+      ...req.body,
+      messageId
+    });
+
+    await getDirectChatContact(decodedToken, contactId);
+    const translation = await translateChatMessage(decodedToken, {
+      messageId: body.messageId,
+      sourceLanguageCode: body.sourceLanguageCode as ChatTranslationLanguageCode,
+      targetLanguageCode: body.targetLanguageCode as ChatTranslationLanguageCode,
+      text: body.text
+    });
+
+    await writeAuditEvent({
+      action: 'DIRECT_CHAT_MESSAGE_TRANSLATED',
+      metadata: {
+        contactId,
+        messageId,
+        sourceLanguageCode: translation.sourceLanguageCode,
+        targetLanguageCode: translation.targetLanguageCode,
+        textLength: body.text.length
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: activeDevice.tenantId,
+      uid: decodedToken.uid
+    });
+
+    res.json({ translation });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'DIRECT_CHAT_MESSAGE_TRANSLATED',
+      metadata: {
+        contactId,
+        messageId
+      },
+      reason: error instanceof Error ? error.message : 'Direct chat translation failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
+profileRouter.post('/chat/groups/:groupId/messages/:messageId/translate', verifyAppCheck, async (req, res, next) => {
+  const groupId = Array.isArray(req.params.groupId)
+    ? req.params.groupId[0] || ''
+    : req.params.groupId || '';
+  const messageId = Array.isArray(req.params.messageId)
+    ? req.params.messageId[0] || ''
+    : req.params.messageId || '';
+
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    const body = chatTranslationBodySchema.parse({
+      ...req.body,
+      messageId
+    });
+
+    await getGroupChatContact(decodedToken, groupId);
+    const translation = await translateChatMessage(decodedToken, {
+      messageId: body.messageId,
+      sourceLanguageCode: body.sourceLanguageCode as ChatTranslationLanguageCode,
+      targetLanguageCode: body.targetLanguageCode as ChatTranslationLanguageCode,
+      text: body.text
+    });
+
+    await writeAuditEvent({
+      action: 'GROUP_CHAT_MESSAGE_TRANSLATED',
+      metadata: {
+        groupId,
+        messageId,
+        sourceLanguageCode: translation.sourceLanguageCode,
+        targetLanguageCode: translation.targetLanguageCode,
+        textLength: body.text.length
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: activeDevice.tenantId,
+      uid: decodedToken.uid
+    });
+
+    res.json({ translation });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'GROUP_CHAT_MESSAGE_TRANSLATED',
+      metadata: {
+        groupId,
+        messageId
+      },
+      reason: error instanceof Error ? error.message : 'Group chat translation failed',
       req,
       status: 'FAILED'
     }).catch(() => undefined);

@@ -150,6 +150,14 @@ export interface ChatTranscriptLanguageSetting {
   updatedAt: string | null;
 }
 
+export interface ChatMessageTranslation {
+  detectedSourceLanguageCode: ChatTranscriptLanguageCode;
+  model: string;
+  sourceLanguageCode: ChatTranscriptLanguageCode;
+  targetLanguageCode: ChatTranscriptLanguageCode;
+  translatedText: string;
+}
+
 export interface ChatArchiveSettings {
   adminControls: {
     configureRetentionRequirements: boolean;
@@ -496,6 +504,56 @@ export async function updateChatNotificationSettings(input: {
   const body = await response.json() as { settings?: ChatNotificationSettings };
 
   return normalizeChatNotificationSettings(body.settings, input.contactId);
+}
+
+export async function translateChatMessage(input: {
+  chatType?: 'DIRECT' | 'GROUP';
+  contactId: string;
+  idToken: string;
+  messageId: string;
+  sourceLanguageCode: ChatTranscriptLanguageCode;
+  targetLanguageCode: ChatTranscriptLanguageCode;
+  text: string;
+}): Promise<ChatMessageTranslation> {
+  const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
+  const path = input.chatType === 'GROUP'
+    ? `/api/profile/chat/groups/${encodeURIComponent(input.contactId)}/messages/${encodeURIComponent(input.messageId)}/translate`
+    : `/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/messages/${encodeURIComponent(input.messageId)}/translate`;
+  const response = await fetch(`${getSynzappApiBaseUrl()}${path}`, {
+    body: JSON.stringify({
+      sourceLanguageCode: input.sourceLanguageCode,
+      targetLanguageCode: input.targetLanguageCode,
+      text: input.text
+    }),
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${input.idToken}`,
+      'Content-Type': 'application/json',
+      ...deviceHeaders
+    },
+    method: 'POST'
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  const body = await response.json() as { translation?: ChatMessageTranslation };
+  const translation = body.translation;
+
+  return {
+    detectedSourceLanguageCode: isChatTranscriptLanguageCode(translation?.detectedSourceLanguageCode)
+      ? translation.detectedSourceLanguageCode
+      : input.sourceLanguageCode,
+    model: typeof translation?.model === 'string' ? translation.model : 'translation',
+    sourceLanguageCode: isChatTranscriptLanguageCode(translation?.sourceLanguageCode)
+      ? translation.sourceLanguageCode
+      : input.sourceLanguageCode,
+    targetLanguageCode: isChatTranscriptLanguageCode(translation?.targetLanguageCode)
+      ? translation.targetLanguageCode
+      : input.targetLanguageCode,
+    translatedText: typeof translation?.translatedText === 'string' ? translation.translatedText : ''
+  };
 }
 
 export async function getDirectChatContactDetails(input: {

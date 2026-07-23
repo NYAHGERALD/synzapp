@@ -1,6 +1,7 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as SecureStore from 'expo-secure-store';
+import * as SQLite from 'expo-sqlite';
 import { Platform } from 'react-native';
 import { getRegisteredDeviceHeaders } from './deviceIdentity';
 
@@ -10,15 +11,25 @@ interface CachedProfilePhotoInput {
   profilePhotoUrl?: string | null;
 }
 
-const profilePhotoCacheDirectory = FileSystem.cacheDirectory
+const profilePhotoCacheDirectory = FileSystem.documentDirectory
+  ? `${FileSystem.documentDirectory}Synzapp/ProfilePhotos/`
+  : FileSystem.cacheDirectory
+    ? `${FileSystem.cacheDirectory}Synzapp/ProfilePhotos/`
+    : null;
+const legacyProfilePhotoCacheDirectory = FileSystem.cacheDirectory
   ? `${FileSystem.cacheDirectory}synzapp-profile-photos/`
   : null;
+const PROFILE_PHOTO_CACHE_DATABASE_NAME = 'synzapp-profile-photo-cache-v1.db';
 const IOS_SHARED_KEYCHAIN_ACCESS_GROUP = 'F9M458TK87.com.synzapp.mobile.shared';
 const NOTIFICATION_AVATAR_KEYCHAIN_SERVICE = 'synzapp.notification.avatar.v1';
 const NOTIFICATION_AVATAR_STORAGE_PREFIX = 'synzapp.notificationAvatar.v1:';
+const PROFILE_PHOTO_SIZE = 256;
+const PROFILE_PHOTO_QUALITY = 0.78;
+const PROFILE_PHOTO_CACHE_LIMIT = 1000;
 const NOTIFICATION_AVATAR_SIZE = 96;
 const NOTIFICATION_AVATAR_QUALITY = 0.68;
 const NOTIFICATION_AVATAR_MAX_BASE64_LENGTH = 85000;
+let profilePhotoDatabasePromise: Promise<SQLite.SQLiteDatabase> | null = null;
 const notificationAvatarSecureStoreOptions: SecureStore.SecureStoreOptions = {
   ...(Platform.OS === 'ios' ? { accessGroup: IOS_SHARED_KEYCHAIN_ACCESS_GROUP } : {}),
   keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
@@ -44,16 +55,36 @@ export async function getCachedProfilePhotoUri({
     return null;
   }
 
-  const fileUri = `${profilePhotoCacheDirectory}${sanitizeCacheKey(cacheKey)}.jpg`;
+  const safeCacheKey = sanitizeCacheKey(cacheKey);
+  const fileUri = `${profilePhotoCacheDirectory}${safeCacheKey}.jpg`;
   const existingFile = await FileSystem.getInfoAsync(fileUri);
 
   if (existingFile.exists) {
+    await recordProfilePhotoCacheHit({
+      cacheKey,
+      fileUri,
+      profilePhotoUrl,
+      sizeBytes: typeof existingFile.size === 'number' ? existingFile.size : null
+    });
     await cacheNotificationAvatarThumbnail(cacheKey, fileUri);
 
     return fileUri;
   }
 
   await FileSystem.makeDirectoryAsync(profilePhotoCacheDirectory, { intermediates: true }).catch(() => undefined);
+
+  const migratedUri = await migrateLegacyProfilePhotoCache({
+    cacheKey,
+    fileUri,
+    profilePhotoUrl,
+    safeCacheKey
+  });
+
+  if (migratedUri) {
+    await cacheNotificationAvatarThumbnail(cacheKey, migratedUri);
+
+    return migratedUri;
+  }
 
   const temporaryUri = `${fileUri}.download`;
 
@@ -74,9 +105,26 @@ export async function getCachedProfilePhotoUri({
       return null;
     }
 
+    const optimized = await ImageManipulator.manipulateAsync(
+      temporaryUri,
+      [{ resize: { height: PROFILE_PHOTO_SIZE, width: PROFILE_PHOTO_SIZE } }],
+      {
+        compress: PROFILE_PHOTO_QUALITY,
+        format: ImageManipulator.SaveFormat.JPEG
+      }
+    );
+    await FileSystem.deleteAsync(fileUri, { idempotent: true }).catch(() => undefined);
     await FileSystem.moveAsync({
-      from: temporaryUri,
+      from: optimized.uri,
       to: fileUri
+    });
+    const savedFile = await FileSystem.getInfoAsync(fileUri).catch(() => null);
+    await FileSystem.deleteAsync(temporaryUri, { idempotent: true }).catch(() => undefined);
+    await recordProfilePhotoCacheHit({
+      cacheKey,
+      fileUri,
+      profilePhotoUrl,
+      sizeBytes: savedFile?.exists && typeof savedFile.size === 'number' ? savedFile.size : null
     });
     await cacheNotificationAvatarThumbnail(cacheKey, fileUri);
 
@@ -85,6 +133,143 @@ export async function getCachedProfilePhotoUri({
     await FileSystem.deleteAsync(temporaryUri, { idempotent: true }).catch(() => undefined);
     return null;
   }
+}
+
+export async function clearProfilePhotoCache(): Promise<void> {
+  const db = await getProfilePhotoDatabase().catch(() => null);
+
+  if (profilePhotoCacheDirectory) {
+    await FileSystem.deleteAsync(profilePhotoCacheDirectory, { idempotent: true }).catch(() => undefined);
+  }
+
+  if (db) {
+    await db.runAsync('DELETE FROM profile_photo_cache').catch(() => undefined);
+  }
+}
+
+async function migrateLegacyProfilePhotoCache(input: {
+  cacheKey: string;
+  fileUri: string;
+  profilePhotoUrl: string;
+  safeCacheKey: string;
+}): Promise<string | null> {
+  if (!legacyProfilePhotoCacheDirectory || legacyProfilePhotoCacheDirectory === profilePhotoCacheDirectory) {
+    return null;
+  }
+
+  const legacyFileUri = `${legacyProfilePhotoCacheDirectory}${input.safeCacheKey}.jpg`;
+  const legacyFile = await FileSystem.getInfoAsync(legacyFileUri).catch(() => null);
+
+  if (!legacyFile?.exists) {
+    return null;
+  }
+
+  try {
+    await FileSystem.copyAsync({
+      from: legacyFileUri,
+      to: input.fileUri
+    });
+    await FileSystem.deleteAsync(legacyFileUri, { idempotent: true }).catch(() => undefined);
+    await recordProfilePhotoCacheHit({
+      cacheKey: input.cacheKey,
+      fileUri: input.fileUri,
+      profilePhotoUrl: input.profilePhotoUrl,
+      sizeBytes: typeof legacyFile.size === 'number' ? legacyFile.size : null
+    });
+
+    return input.fileUri;
+  } catch {
+    await FileSystem.deleteAsync(input.fileUri, { idempotent: true }).catch(() => undefined);
+    return null;
+  }
+}
+
+async function recordProfilePhotoCacheHit(input: {
+  cacheKey: string;
+  fileUri: string;
+  profilePhotoUrl: string;
+  sizeBytes: number | null;
+}): Promise<void> {
+  const db = await getProfilePhotoDatabase().catch(() => null);
+
+  if (!db) {
+    return;
+  }
+
+  const now = new Date().toISOString();
+
+  await db.runAsync(
+    `INSERT INTO profile_photo_cache (
+      cache_key,
+      remote_url,
+      local_uri,
+      size_bytes,
+      updated_at,
+      last_used_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(cache_key) DO UPDATE SET
+      remote_url = excluded.remote_url,
+      local_uri = excluded.local_uri,
+      size_bytes = excluded.size_bytes,
+      updated_at = excluded.updated_at,
+      last_used_at = excluded.last_used_at`,
+    [
+      input.cacheKey,
+      input.profilePhotoUrl,
+      input.fileUri,
+      input.sizeBytes,
+      now,
+      now
+    ]
+  );
+  await pruneProfilePhotoCache(db).catch(() => undefined);
+}
+
+async function getProfilePhotoDatabase(): Promise<SQLite.SQLiteDatabase> {
+  profilePhotoDatabasePromise ??= (async () => {
+    const db = await SQLite.openDatabaseAsync(PROFILE_PHOTO_CACHE_DATABASE_NAME);
+
+    await db.execAsync(`
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE IF NOT EXISTS profile_photo_cache (
+        cache_key TEXT PRIMARY KEY NOT NULL,
+        remote_url TEXT NOT NULL,
+        local_uri TEXT NOT NULL,
+        size_bytes INTEGER,
+        updated_at TEXT NOT NULL,
+        last_used_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_profile_photo_cache_last_used
+        ON profile_photo_cache(last_used_at);
+    `);
+
+    return db;
+  })();
+
+  return profilePhotoDatabasePromise;
+}
+
+async function pruneProfilePhotoCache(db: SQLite.SQLiteDatabase): Promise<void> {
+  const staleRows = await db.getAllAsync<{ cache_key: string; local_uri: string }>(
+    `SELECT cache_key, local_uri
+      FROM profile_photo_cache
+      ORDER BY last_used_at DESC
+      LIMIT -1 OFFSET ?`,
+    [PROFILE_PHOTO_CACHE_LIMIT]
+  );
+
+  if (!staleRows.length) {
+    return;
+  }
+
+  await Promise.all(staleRows.map((row) =>
+    FileSystem.deleteAsync(row.local_uri, { idempotent: true }).catch(() => undefined)
+  ));
+  await db.runAsync(
+    `DELETE FROM profile_photo_cache
+      WHERE cache_key IN (${staleRows.map(() => '?').join(',')})`,
+    staleRows.map((row) => row.cache_key)
+  );
 }
 
 function sanitizeCacheKey(cacheKey: string): string {
