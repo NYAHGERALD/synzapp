@@ -22,6 +22,7 @@ export interface ChatContact {
   isArchived?: boolean;
   isDepartmentDefault?: boolean;
   isFavorite?: boolean;
+  isPinned?: boolean;
   isSpam?: boolean;
   isOnline: boolean;
   lastMessageAt: string | null;
@@ -150,14 +151,6 @@ export interface ChatTranscriptLanguageSetting {
   updatedAt: string | null;
 }
 
-export interface ChatMessageTranslation {
-  detectedSourceLanguageCode: ChatTranscriptLanguageCode;
-  model: string;
-  sourceLanguageCode: ChatTranscriptLanguageCode;
-  targetLanguageCode: ChatTranscriptLanguageCode;
-  translatedText: string;
-}
-
 export interface ChatArchiveSettings {
   adminControls: {
     configureRetentionRequirements: boolean;
@@ -201,8 +194,10 @@ export type ChatMediaQualityMode = 'hd' | 'standard';
 export type ChatMediaTransferStatus = 'available' | 'downloading' | 'failed' | 'queued' | 'uploading';
 
 export interface ChatMediaAttachment {
+  chunkSizeBytes?: number;
   contentType: string;
   durationMs?: number;
+  encryptionMode?: 'chunked-secretbox-v1' | 'secretbox-v1';
   encryptedSizeBytes?: number;
   fileName: string;
   height?: number;
@@ -211,6 +206,8 @@ export interface ChatMediaAttachment {
   localUri?: string;
   mediaId?: string;
   nonce?: string;
+  partCount?: number;
+  partNonces?: string[];
   qualityMode?: ChatMediaQualityMode;
   sizeBytes: number;
   thumbnailContentType?: string;
@@ -406,6 +403,7 @@ export async function updateChatPreference(input: {
   idToken: string;
   isArchived?: boolean;
   isFavorite?: boolean;
+  isPinned?: boolean;
   isSpam?: boolean;
   permanentDelete?: boolean;
 }): Promise<ChatContact> {
@@ -418,6 +416,7 @@ export async function updateChatPreference(input: {
       clear: input.clear,
       isArchived: input.isArchived,
       isFavorite: input.isFavorite,
+      isPinned: input.isPinned,
       isSpam: input.isSpam,
       permanentDelete: input.permanentDelete
     }),
@@ -504,56 +503,6 @@ export async function updateChatNotificationSettings(input: {
   const body = await response.json() as { settings?: ChatNotificationSettings };
 
   return normalizeChatNotificationSettings(body.settings, input.contactId);
-}
-
-export async function translateChatMessage(input: {
-  chatType?: 'DIRECT' | 'GROUP';
-  contactId: string;
-  idToken: string;
-  messageId: string;
-  sourceLanguageCode: ChatTranscriptLanguageCode;
-  targetLanguageCode: ChatTranscriptLanguageCode;
-  text: string;
-}): Promise<ChatMessageTranslation> {
-  const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
-  const path = input.chatType === 'GROUP'
-    ? `/api/profile/chat/groups/${encodeURIComponent(input.contactId)}/messages/${encodeURIComponent(input.messageId)}/translate`
-    : `/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/messages/${encodeURIComponent(input.messageId)}/translate`;
-  const response = await fetch(`${getSynzappApiBaseUrl()}${path}`, {
-    body: JSON.stringify({
-      sourceLanguageCode: input.sourceLanguageCode,
-      targetLanguageCode: input.targetLanguageCode,
-      text: input.text
-    }),
-    headers: {
-      Accept: 'application/json',
-      Authorization: `Bearer ${input.idToken}`,
-      'Content-Type': 'application/json',
-      ...deviceHeaders
-    },
-    method: 'POST'
-  });
-
-  if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
-  }
-
-  const body = await response.json() as { translation?: ChatMessageTranslation };
-  const translation = body.translation;
-
-  return {
-    detectedSourceLanguageCode: isChatTranscriptLanguageCode(translation?.detectedSourceLanguageCode)
-      ? translation.detectedSourceLanguageCode
-      : input.sourceLanguageCode,
-    model: typeof translation?.model === 'string' ? translation.model : 'translation',
-    sourceLanguageCode: isChatTranscriptLanguageCode(translation?.sourceLanguageCode)
-      ? translation.sourceLanguageCode
-      : input.sourceLanguageCode,
-    targetLanguageCode: isChatTranscriptLanguageCode(translation?.targetLanguageCode)
-      ? translation.targetLanguageCode
-      : input.targetLanguageCode,
-    translatedText: typeof translation?.translatedText === 'string' ? translation.translatedText : ''
-  };
 }
 
 export async function getDirectChatContactDetails(input: {
@@ -1224,6 +1173,7 @@ function normalizeChatContact(contact: ChatContact): ChatContact {
     isArchived: contact.isArchived === true,
     isDepartmentDefault: contact.isDepartmentDefault === true,
     isFavorite: contact.isFavorite === true,
+    isPinned: contact.isPinned === true,
     isSpam: contact.isSpam === true,
     isOnline: contact.isOnline === true,
     lastSeenAt: typeof contact.lastSeenAt === 'string' ? contact.lastSeenAt : null,
@@ -1670,6 +1620,10 @@ function normalizeChatMediaAttachment(
   const mediaId = typeof media.mediaId === 'string' ? media.mediaId.trim() : '';
   const key = typeof media.key === 'string' ? media.key.trim() : '';
   const nonce = typeof media.nonce === 'string' ? media.nonce.trim() : '';
+  const encryptionMode = media.encryptionMode === 'chunked-secretbox-v1' ? 'chunked-secretbox-v1' : media.encryptionMode === 'secretbox-v1' ? 'secretbox-v1' : undefined;
+  const partNonces = Array.isArray(media.partNonces)
+    ? media.partNonces.filter((partNonce) => typeof partNonce === 'string' && partNonce.trim()).slice(0, 320)
+    : [];
   const qualityMode = media.qualityMode === 'hd' ? 'hd' : media.qualityMode === 'standard' ? 'standard' : undefined;
   const contentType = typeof media.contentType === 'string' && media.contentType.trim()
     ? media.contentType.trim().toLowerCase()
@@ -1695,8 +1649,10 @@ function normalizeChatMediaAttachment(
   }
 
   return {
+    chunkSizeBytes: Number.isFinite(media.chunkSizeBytes) ? Math.max(Math.round(media.chunkSizeBytes || 0), 0) : undefined,
     contentType,
     durationMs: Number.isFinite(media.durationMs) ? Math.max(Math.round(media.durationMs || 0), 0) : undefined,
+    encryptionMode,
     encryptedSizeBytes: Number.isFinite(media.encryptedSizeBytes) ? Math.max(Math.round(media.encryptedSizeBytes || 0), 0) : undefined,
     fileName,
     height: Number.isFinite(media.height) ? Math.max(Math.round(media.height || 0), 1) : undefined,
@@ -1705,6 +1661,8 @@ function normalizeChatMediaAttachment(
     localUri: localUri || (dataUrl || undefined),
     mediaId: mediaId || undefined,
     nonce: nonce || undefined,
+    partCount: Number.isFinite(media.partCount) ? Math.max(Math.round(media.partCount || 0), 0) : undefined,
+    partNonces: partNonces.length ? partNonces : undefined,
     qualityMode,
     sizeBytes: Number.isFinite(media.sizeBytes) ? Math.max(Math.round(media.sizeBytes || 0), 0) : 0,
     thumbnailContentType: thumbnailDataUrl

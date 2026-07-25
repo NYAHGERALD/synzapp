@@ -1,9 +1,0 @@
-{
-  "platforms": ["apple", "android"],
-  "apple": {
-    "modules": ["SynzappOfflineAiModule"]
-  },
-  "android": {
-    "modules": ["expo.modules.synzappofflineai.SynzappOfflineAiModule"]
-  }
-}

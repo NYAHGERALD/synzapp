@@ -16,6 +16,7 @@ import {
 } from 'expo-audio';
 import * as FileSystem from 'expo-file-system/legacy';
 import { VideoView, useVideoPlayer } from 'expo-video';
+import { BlurView } from 'expo-blur';
 import {
   ActionSheetIOS,
   ActivityIndicator,
@@ -50,7 +51,6 @@ import DateTimePicker, {
 import NetInfo, { type NetInfoState } from '@react-native-community/netinfo';
 import Feather from '@expo/vector-icons/Feather';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import EmojiPicker, { type EmojiType } from 'rn-emoji-keyboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { DismissibleError } from '../components/DismissibleError';
 import {
@@ -159,14 +159,6 @@ import {
   updateChatNotificationSettings,
   updateChatTranscriptLanguage
 } from '../services/chatApi';
-import type { ChatMessageTranslation } from '../services/chatApi';
-import {
-  getCachedChatTranslation,
-  getDownloadedTranslationLanguages,
-  saveCachedChatTranslation,
-  saveDownloadedTranslationLanguage,
-  translateChatMessageOnDevice
-} from '../services/chatTranslation';
 import {
   ChatBackupPolicy,
   createEncryptedChatBackup,
@@ -183,15 +175,13 @@ import {
 import {
   CurrentUserDevice,
   CurrentUserProfile,
-  CurrentDeviceSynzappAiStatus,
-  getCurrentDeviceSynzappAiStatus,
   getCurrentUserProfile,
   listCurrentUserDevices,
   revokeCurrentUserDevice,
-  updateCurrentDeviceSynzappAiStatus,
   updateCurrentUserProfilePhoto
 } from '../services/profileApi';
 import {
+  deleteCachedChatConversation,
   enqueuePendingChatMessage,
   clearLocalChatDataForOwner,
   hideCachedChatMessagesForMe,
@@ -201,6 +191,7 @@ import {
   loadCachedChatConversation,
   loadHiddenChatMessageIds,
   removePendingChatMessage,
+  removePendingChatMessagesForContact,
   saveCachedChatContacts,
   saveCachedChatConversation,
   updateCachedChatMessageMedia,
@@ -223,6 +214,7 @@ import {
 import { clearProfilePhotoCache, getCachedProfilePhotoUri } from '../services/profilePhotoCache';
 import { openChatAttachmentFile } from '../services/chatAttachmentOpener';
 import {
+  IPhonePhotoPreparationProgress,
   pickNativeChatCameraMedia,
   pickNativeChatFile,
   pickNativeChatLibraryMedia
@@ -235,26 +227,6 @@ import {
   LocalChatMediaInput,
   uploadEncryptedChatMedia
 } from '../services/chatMediaApi';
-import {
-  createOfflineAiAttachment,
-  createOfflineAiConversation,
-  createOfflineAiMessage,
-  deleteOfflineAiModel,
-  formatOfflineAiBytes,
-  generateOfflineAiResponse,
-  getOfflineAiConversationTitle,
-  installOfflineAiModel,
-  loadOfflineAiConversations,
-  loadOfflineAiState,
-  saveOfflineAiConversations,
-  synzappOfflineAiModel,
-  type OfflineAiAttachment,
-  type OfflineAiChatMessage,
-  type OfflineAiConversation,
-  type OfflineAiProfileContext,
-  type OfflineAiInstallProgress,
-  type OfflineAiModelState
-} from '../services/offlineAi';
 import { pickNativeProfilePhoto } from '../services/profilePhotoPicker';
 import {
   addChatPushNotificationListeners,
@@ -307,6 +279,7 @@ interface ChatItem {
   isArchived?: boolean;
   isDepartmentDefault?: boolean;
   isFavorite?: boolean;
+  isPinned?: boolean;
   isSpam?: boolean;
   isOnline: boolean;
   lastMessageAt: string | null;
@@ -447,7 +420,7 @@ const MESSAGE_INPUT_MAX_HEIGHT = 140;
 const MESSAGE_INPUT_LINE_HEIGHT = 20;
 const MESSAGE_INPUT_VERTICAL_PADDING = 16;
 const MESSAGE_INPUT_BOX_EXTRA_HEIGHT = 4;
-const CHAT_ROW_LEFT_ACTION_WIDTH = 112;
+const CHAT_ROW_LEFT_ACTION_WIDTH = 156;
 const CHAT_ROW_RIGHT_ACTION_WIDTH = 216;
 const CHAT_ROW_SWIPE_TRIGGER = 28;
 const SPAM_ROW_ACTION_WIDTH = 118;
@@ -695,20 +668,6 @@ interface NativeOptionPickerState {
   title: string;
 }
 
-interface MessageTranslationModalState {
-  error: string | null;
-  isLoading: boolean;
-  message: ChatMessage;
-  sourceLanguageCode: ChatTranscriptLanguageCode;
-  targetLanguageCode: ChatTranscriptLanguageCode;
-  translation: ChatMessageTranslation | null;
-}
-
-interface MessageTranslationAlertState {
-  message: string;
-  retryState: MessageTranslationModalState;
-}
-
 interface ScheduleCallDraft {
   callType: SynzappCallMode;
   calendarAddedAt?: string | null;
@@ -752,14 +711,6 @@ type WebRtcRuntime = {
 };
 
 const footerTabs: FooterTab[] = ['Chats', 'Calls', 'Groups', 'Employees', 'Settings', 'You'];
-const synzappAiSuggestions = [
-  'Draft a professional message',
-  'Summarize what I should do next',
-  'Help me brainstorm ideas',
-  'Plan a work conversation',
-  'Improve the tone of my writing',
-  'Prepare a quick checklist'
-];
 const chatNotificationMuteOptions: Array<{
   label: string;
   value: ChatNotificationMuteMode;
@@ -925,19 +876,6 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const [chatArchiveSettings, setChatArchiveSettings] = useState<ChatArchiveSettings>(defaultChatArchiveSettings);
   const [isLoadingArchiveSettings, setIsLoadingArchiveSettings] = useState(false);
   const [isSavingArchiveSettings, setIsSavingArchiveSettings] = useState(false);
-  const [isAiAssistantOpen, setIsAiAssistantOpen] = useState(false);
-  const [aiAssistantView, setAiAssistantView] = useState<'list' | 'thread'>('list');
-  const [aiAssistantDraft, setAiAssistantDraft] = useState('');
-  const [aiAssistantAttachments, setAiAssistantAttachments] = useState<OfflineAiAttachment[]>([]);
-  const [isPreparingAiAttachment, setIsPreparingAiAttachment] = useState(false);
-  const [offlineAiConversations, setOfflineAiConversations] = useState<OfflineAiConversation[]>([]);
-  const [activeOfflineAiConversationId, setActiveOfflineAiConversationId] = useState<string | null>(null);
-  const [offlineAiState, setOfflineAiState] = useState<OfflineAiModelState | null>(null);
-  const [offlineAiInstallProgress, setOfflineAiInstallProgress] = useState<OfflineAiInstallProgress | null>(null);
-  const [synzappAiDeviceStatus, setSynzappAiDeviceStatus] = useState<CurrentDeviceSynzappAiStatus | null>(null);
-  const [isOfflineAiModalOpen, setIsOfflineAiModalOpen] = useState(false);
-  const [isInstallingOfflineAi, setIsInstallingOfflineAi] = useState(false);
-  const [isOfflineAiResponding, setIsOfflineAiResponding] = useState(false);
   const [isScreenKeyboardVisible, setIsScreenKeyboardVisible] = useState(false);
   const [chatMoreActionTarget, setChatMoreActionTarget] = useState<ChatMoreActionTarget>(null);
   const [clearChatTarget, setClearChatTarget] = useState<ChatItem | null>(null);
@@ -989,9 +927,6 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const [preparingVideoKey, setPreparingVideoKey] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [messageActionTarget, setMessageActionTarget] = useState<ChatMessage | null>(null);
-  const [messageTranslationModal, setMessageTranslationModal] = useState<MessageTranslationModalState | null>(null);
-  const [messageTranslationAlert, setMessageTranslationAlert] = useState<MessageTranslationAlertState | null>(null);
-  const [downloadedTranslationLanguageCodes, setDownloadedTranslationLanguageCodes] = useState<ChatTranscriptLanguageCode[]>(['en-US', 'es-MX']);
   const [replyTarget, setReplyTarget] = useState<ChatMessage | null>(null);
   const [isForwardMode, setIsForwardMode] = useState(false);
   const [forwardSelectedMessageIds, setForwardSelectedMessageIds] = useState<Record<string, boolean>>({});
@@ -1080,6 +1015,8 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const [isDeletingOrganization, setIsDeletingOrganization] = useState(false);
   const [recoveryKeyDraft, setRecoveryKeyDraft] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [mediaPreparationProgress, setMediaPreparationProgress] = useState<IPhonePhotoPreparationProgress | null>(null);
+  const [mediaPreparationError, setMediaPreparationError] = useState<string | null>(null);
   const backupSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isBackupSyncingRef = useRef(false);
   const chatContactCacheTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1089,12 +1026,12 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const deviceIdentityRegistrationStartedRef = useRef(false);
   const activeLocalSendQueueIdsRef = useRef<Set<string>>(new Set());
   const pendingSyncContactIdsRef = useRef<Set<string>>(new Set());
+  const locallyDeletedChatContactIdsRef = useRef<Set<string>>(new Set());
   const activePushHydrationContactIdsRef = useRef<Set<string>>(new Set());
   const activeMediaDownloadPromisesRef = useRef<Map<string, Promise<string | null>>>(new Map());
   const autoMediaDownloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const chatMediaNetworkPolicyRef = useRef<ChatMediaNetworkPolicy>(chatMediaNetworkPolicy);
   const organizationDeletionProgressAnim = useRef(new Animated.Value(0)).current;
-  const hasPromptedOfflineAiInstallRef = useRef(false);
   const chatContactsRef = useRef<ChatContact[]>([]);
   const chatOpenRequestIdRef = useRef(0);
   const clearChatRequestIdRef = useRef(0);
@@ -1196,7 +1133,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     ),
     [approvedEmployees, employeePhoneDisplayById]
   );
-  const isConversationSurfaceOpen = Boolean(selectedChat || isAiAssistantOpen);
+  const isConversationSurfaceOpen = Boolean(selectedChat);
   const isCompactAndroid = Platform.OS === 'android' && height < 720;
   const footerHeight = isCompactAndroid ? 64 : 68;
   const footerTabHeight = isCompactAndroid ? 56 : 60;
@@ -1273,97 +1210,11 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const selectedGroupCallMemberCount = Object.values(selectedGroupCallMemberIds).filter(Boolean).length;
   const selectedGroupAddMemberCount = Object.values(selectedGroupAddMemberIds).filter(Boolean).length;
   const companyDisplayName = userProfile?.companyName || companyProfile?.companyName || 'Synzapp';
-  const activeOfflineAiConversation = offlineAiConversations.find((conversation) =>
-    conversation.id === activeOfflineAiConversationId
-  ) || null;
-  const isSynzappAiReadyForAskButton =
-    offlineAiState?.status === 'installed' &&
-    synzappAiDeviceStatus?.askButtonVisible === true;
-
   useEffect(() => {
     void configureSynzappNotificationHandling();
     void loadUserProfile(false);
     void loadArchiveSettings(false);
-    void refreshSynzappAiDeviceStatus(false);
   }, []);
-
-  useEffect(() => {
-    let isMounted = true;
-
-    loadOfflineAiState()
-      .then((state) => {
-        if (isMounted) {
-          setOfflineAiState(state);
-        }
-      })
-      .catch(() => undefined);
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    const localStatus = offlineAiState?.status;
-
-    if (!localStatus || isInstallingOfflineAi) {
-      return;
-    }
-
-    if (localStatus === 'installed' && synzappAiDeviceStatus?.status !== 'installed') {
-      void syncSynzappAiDeviceStatus('installed');
-      return;
-    }
-
-    if (localStatus !== 'installed' && synzappAiDeviceStatus?.status === 'installed') {
-      void syncSynzappAiDeviceStatus(localStatus);
-    }
-  }, [isInstallingOfflineAi, offlineAiState?.status, synzappAiDeviceStatus?.status]);
-
-  useEffect(() => {
-    let isMounted = true;
-    const tenantId = userProfile?.tenantId || verifiedAdmin.session.user.tenantId || '';
-
-    if (!tenantId) {
-      setOfflineAiConversations([]);
-      return () => {
-        isMounted = false;
-      };
-    }
-
-    loadOfflineAiConversations({
-      ownerUid: currentUid,
-      tenantId
-    })
-      .then((conversations) => {
-        if (isMounted) {
-          setOfflineAiConversations(conversations);
-        }
-      })
-      .catch((nextError) => {
-        console.warn('Synzapp AI history could not be loaded:', getErrorMessage(nextError, 'Unable to load Synzapp AI history.'));
-        if (isMounted) {
-          setOfflineAiConversations([]);
-        }
-      });
-
-    return () => {
-      isMounted = false;
-    };
-  }, [currentUid, userProfile?.tenantId, verifiedAdmin.session.user.tenantId]);
-
-  useEffect(() => {
-    if (!isAiAssistantOpen || hasPromptedOfflineAiInstallRef.current) {
-      return;
-    }
-
-    if (offlineAiState?.status === 'installed') {
-      return;
-    }
-
-    hasPromptedOfflineAiInstallRef.current = true;
-    setIsOfflineAiModalOpen(true);
-  }, [isAiAssistantOpen, offlineAiState?.status]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextState) => {
@@ -1930,22 +1781,6 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     }
   }, [activeTab, canManageCompanyProfile, canManageDirectory, canManageGroups, canManageSecurity, canManageUsers, canViewEmployees, settingsScreen]);
 
-  useEffect(() => {
-    let isMounted = true;
-
-    void getDownloadedTranslationLanguages()
-      .then((languages) => {
-        if (isMounted) {
-          setDownloadedTranslationLanguageCodes(languages);
-        }
-      })
-      .catch(() => undefined);
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
-
   async function getIdToken(forceRefresh = false): Promise<string> {
     return verifiedAdmin.firebaseUser.getIdToken(forceRefresh);
   }
@@ -2016,45 +1851,6 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       favoriteContactIds: callFavoriteContactIdsRef.current,
       history: callHistoryRef.current,
       scheduledCalls: nextScheduledCalls
-    });
-  }
-
-  function getOfflineAiScope(): { ownerUid: string; tenantId: string } | null {
-    const tenantId = getActiveTenantId();
-
-    if (!tenantId) {
-      return null;
-    }
-
-    return {
-      ownerUid: currentUid,
-      tenantId
-    };
-  }
-
-  function getOfflineAiProfileContext(): OfflineAiProfileContext {
-    return {
-      companyName: userProfile?.companyName || companyProfile?.companyName || null,
-      departmentName: userProfile?.departmentName || null,
-      displayName: userProfile?.displayName || null,
-      phoneFormatted: userProfile?.phoneFormatted || null,
-      roleName: userProfile?.roleName || null
-    };
-  }
-
-  async function persistOfflineAiConversations(nextConversations: OfflineAiConversation[]) {
-    const scope = getOfflineAiScope();
-
-    setOfflineAiConversations(nextConversations);
-
-    if (!scope) {
-      return;
-    }
-
-    await saveOfflineAiConversations({
-      conversations: nextConversations,
-      ownerUid: scope.ownerUid,
-      tenantId: scope.tenantId
     });
   }
 
@@ -2646,15 +2442,25 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         listCachedChatConversations({ ...getLocalChatScope() }).catch(() => []),
         listPendingChatMessages({ ...getLocalChatScope() }).catch(() => [])
       ]);
+      const locallyDeletedContactIds = locallyDeletedChatContactIdsRef.current;
+      const visibleCachedChatContacts = cachedChatContacts.filter((contact) =>
+        !locallyDeletedContactIds.has(contact.contactId)
+      );
+      const visibleCachedConversations = cachedConversations.filter((conversation) =>
+        !locallyDeletedContactIds.has(conversation.contactId)
+      );
+      const visiblePendingMessages = pendingMessages.filter((pendingMessage) =>
+        !locallyDeletedContactIds.has(pendingMessage.contactId)
+      );
       const cachedConversationContacts = buildLocalChatContactsFromCachedConversations(
-        cachedConversations,
-        pendingMessages,
-        new Set(cachedChatContacts
+        visibleCachedConversations,
+        visiblePendingMessages,
+        new Set(visibleCachedChatContacts
           .filter((contact) => contact.chatType === 'GROUP')
           .map((contact) => contact.contactId))
       );
       const cachedContacts = mergeLoadedChatContactsWithVisibleState(
-        cachedChatContacts,
+        visibleCachedChatContacts,
         cachedConversationContacts,
         { preserveMissing: true }
       );
@@ -2678,9 +2484,9 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       ]);
       const contacts = [...directContacts, ...groupContacts];
       const contactsWithLocalPreviews = applyLocalChatPreviewsToContacts(
-        contacts,
-        cachedConversations,
-        pendingMessages
+        contacts.filter((contact) => !locallyDeletedContactIds.has(contact.contactId)),
+        visibleCachedConversations,
+        visiblePendingMessages
       );
 
       const contactsWithCachedPhotos = await cacheChatContactPhotos(contactsWithLocalPreviews, idToken);
@@ -2743,6 +2549,45 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     ));
   }
 
+  async function purgeLocalChatThreadState(contactId: string, options: {
+    closeIfOpen?: boolean;
+    removeFromList?: boolean;
+  } = {}) {
+    const removedQueueIds = await removePendingChatMessagesForContact({
+      contactId,
+      ...getLocalChatScope()
+    }).catch(() => []);
+
+    removedQueueIds.forEach((queueId) => activeLocalSendQueueIdsRef.current.delete(queueId));
+
+    await deleteCachedChatConversation({
+      contactId,
+      ...getLocalChatScope()
+    }).catch(() => undefined);
+
+    if (options.removeFromList) {
+      setChatContacts((currentContacts) => currentContacts.filter((contact) => contact.contactId !== contactId));
+    }
+
+    if (options.closeIfOpen && selectedChatRef.current?.contactId === contactId) {
+      chatOpenRequestIdRef.current += 1;
+      selectedChatRef.current = null;
+      activeTrashSegmentIdRef.current = null;
+      setSelectedChat(null);
+      setActiveTrashSegmentId(null);
+      setMessages([]);
+      setMessageReactions({});
+      setReplyTarget(null);
+      setMessageDraft('');
+      resetForwardMode();
+    } else if (selectedChatRef.current?.contactId === contactId) {
+      setMessages([]);
+      setMessageReactions({});
+      setReplyTarget(null);
+      setMessageDraft('');
+    }
+  }
+
   async function updateChatPreferenceAndApply(
     chat: ChatItem,
     input: {
@@ -2750,18 +2595,30 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       failureMessage?: string;
       isArchived?: boolean;
       isFavorite?: boolean;
+      isPinned?: boolean;
       isSpam?: boolean;
       optimisticContact?: Partial<ChatContact>;
       permanentDelete?: boolean;
       removeFromList?: boolean;
     }
   ) {
-    if (!canUseChatListActions(chat)) {
+    const isListPreferenceOnly =
+      input.clear !== true &&
+      input.permanentDelete !== true &&
+      input.isArchived === undefined &&
+      input.isSpam === undefined &&
+      (
+        typeof input.isFavorite === 'boolean' ||
+        typeof input.isPinned === 'boolean'
+      );
+
+    if (!canUseChatListActions(chat) && !isListPreferenceOnly) {
       return;
     }
 
     const previousContacts = chatContactsRef.current;
     const existingContact = previousContacts.find((contact) => contact.contactId === chat.contactId);
+    const shouldPurgeThread = input.clear === true || input.permanentDelete === true || input.isSpam === true;
 
     if (existingContact && input.optimisticContact) {
       setChatContacts((currentContacts) => upsertChatContact(currentContacts, {
@@ -2779,41 +2636,41 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         idToken,
         isArchived: input.isArchived,
         isFavorite: input.isFavorite,
+        isPinned: input.isPinned,
         isSpam: input.isSpam,
         permanentDelete: input.permanentDelete
       });
       const cachedContact = await cacheChatContactPhoto(updatedContact, idToken);
+      const nextCachedContacts = input.removeFromList
+        ? previousContacts.filter((contact) => contact.contactId !== chat.contactId)
+        : upsertChatContact(previousContacts, cachedContact);
 
       setProfilePhotoAuthToken(idToken);
       setChatContacts((currentContacts) => input.removeFromList
         ? currentContacts.filter((contact) => contact.contactId !== chat.contactId)
         : upsertChatContact(currentContacts, cachedContact)
       );
+      await saveCachedChatContacts({
+        contacts: nextCachedContacts,
+        ...getLocalChatScope()
+      }).catch(() => undefined);
 
-      if (input.clear || input.permanentDelete || input.isSpam === true) {
-        const cachedConversation = await loadCachedChatConversation({
-          contactId: chat.contactId,
-          ...getLocalChatScope()
-        }).catch(() => null);
-        await saveCachedChatConversation({
-          contact: cachedContact,
-          contactId: chat.contactId,
-          hiddenMessageIds: [
-            ...(cachedConversation?.messages || []),
-            ...(selectedChatRef.current?.contactId === chat.contactId ? messagesRef.current : [])
-          ]
-            .filter((message) => message.messageId)
-            .map((message) => message.messageId),
-          messages: [],
-          ...getLocalChatScope()
-        }).catch(() => undefined);
+      if (shouldPurgeThread) {
+        locallyDeletedChatContactIdsRef.current.add(chat.contactId);
+        await purgeLocalChatThreadState(chat.contactId, {
+          closeIfOpen: input.permanentDelete === true || input.removeFromList === true,
+          removeFromList: input.removeFromList === true
+        });
 
         if (selectedChatRef.current?.contactId === chat.contactId) {
-          setMessages([]);
-          setSelectedChat(mapChatContactToChatItem(cachedContact));
+          const nextSelectedChat = mapChatContactToChatItem(cachedContact);
+
+          selectedChatRef.current = nextSelectedChat;
+          setSelectedChat(nextSelectedChat);
         }
       }
     } catch (nextError) {
+      locallyDeletedChatContactIdsRef.current.delete(chat.contactId);
       setChatContacts(previousContacts);
       const fallbackMessage = input.failureMessage || 'Unable to update this chat.';
       const nextMessage = getErrorMessage(nextError, fallbackMessage);
@@ -2841,7 +2698,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   }
 
   function handleToggleFavoriteChat(chat: ChatItem) {
-    if (!canUseChatListActions(chat)) {
+    if (!canSwipeChatRow(chat)) {
       return;
     }
 
@@ -2852,6 +2709,23 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       isFavorite: nextFavorite,
       optimisticContact: {
         isFavorite: nextFavorite
+      }
+    });
+    setChatMoreActionTarget(null);
+  }
+
+  function handleTogglePinChat(chat: ChatItem) {
+    if (!canSwipeChatRow(chat)) {
+      return;
+    }
+
+    const nextPinned = !chat.isPinned;
+
+    void updateChatPreferenceAndApply(chat, {
+      failureMessage: nextPinned ? 'Unable to pin this chat.' : 'Unable to unpin this chat.',
+      isPinned: nextPinned,
+      optimisticContact: {
+        isPinned: nextPinned
       }
     });
     setChatMoreActionTarget(null);
@@ -3234,6 +3108,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
                 clearedAt: new Date().toISOString(),
                 isArchived: false,
                 isFavorite: false,
+                isPinned: false,
                 isSpam: false,
                 lastMessageAt: null,
                 preview: '',
@@ -3279,6 +3154,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
                     clearedAt: new Date().toISOString(),
                     isArchived: false,
                     isFavorite: false,
+                    isPinned: false,
                     isSpam: false,
                     lastMessageAt: null,
                     preview: '',
@@ -3344,6 +3220,10 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     }
 
     if (event.type === 'chatContactUpdated') {
+      if (locallyDeletedChatContactIdsRef.current.has(event.contact.contactId)) {
+        return;
+      }
+
       const shouldMarkRead = selectedChatRef.current?.contactId === event.contact.contactId &&
         !activeTrashSegmentIdRef.current;
       const baseContact = shouldMarkRead
@@ -3432,6 +3312,10 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     }
 
     if (event.type === 'conversationMessages' || event.type === 'conversationEncryptedEnvelopes') {
+      if (locallyDeletedChatContactIdsRef.current.has(event.contactId)) {
+        return;
+      }
+
       if (selectedChatRef.current?.contactId !== event.contactId || activeTrashSegmentIdRef.current) {
         return;
       }
@@ -4568,6 +4452,11 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     const openRequestId = chatOpenRequestIdRef.current + 1;
     const trashSegmentId = options.trashSegmentId || null;
     const isTrashReadOnly = options.isTrashReadOnly === true;
+
+    if (!isTrashReadOnly && locallyDeletedChatContactIdsRef.current.has(chat.contactId)) {
+      setChatContacts((currentContacts) => currentContacts.filter((contact) => contact.contactId !== chat.contactId));
+      return;
+    }
 
     chatOpenRequestIdRef.current = openRequestId;
     selectedChatRef.current = chat;
@@ -5806,366 +5695,6 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     Alert.alert(title, 'This chats section is ready in the Chats tab and will connect to the chat management service when that service is enabled.');
   }
 
-  async function refreshOfflineAiState() {
-    const nextState = await loadOfflineAiState();
-    setOfflineAiState(nextState);
-
-    return nextState;
-  }
-
-  async function refreshSynzappAiDeviceStatus(showError = false) {
-    try {
-      const idToken = await getIdToken();
-      const nextStatus = await getCurrentDeviceSynzappAiStatus(idToken);
-
-      setSynzappAiDeviceStatus(nextStatus);
-
-      return nextStatus;
-    } catch (nextError) {
-      if (showError) {
-        setError(getErrorMessage(nextError, 'Unable to load Synzapp AI device status.'));
-      }
-
-      return null;
-    }
-  }
-
-  async function syncSynzappAiDeviceStatus(status: 'available' | 'downloading' | 'failed' | 'installed') {
-    try {
-      const idToken = await getIdToken();
-      const nextStatus = await updateCurrentDeviceSynzappAiStatus({
-        idToken,
-        modelId: status === 'installed' ? synzappOfflineAiModel.id : null,
-        status
-      });
-
-      setSynzappAiDeviceStatus(nextStatus);
-
-      return nextStatus;
-    } catch (nextError) {
-      console.warn('Synzapp AI device status sync failed:', getErrorMessage(nextError, 'Unable to sync Synzapp AI device status.'));
-      return null;
-    }
-  }
-
-  async function handleInstallOfflineAiModel() {
-    if (isInstallingOfflineAi) {
-      return;
-    }
-
-    setIsInstallingOfflineAi(true);
-    setOfflineAiInstallProgress(null);
-    setOfflineAiState((currentState) => ({
-      ...(currentState || {}),
-      downloadedBytes: 0,
-      errorMessage: undefined,
-      modelId: synzappOfflineAiModel.id,
-      progress: 0,
-      status: 'downloading',
-      totalBytes: synzappOfflineAiModel.sizeBytes,
-      updatedAt: new Date().toISOString()
-    }));
-    void syncSynzappAiDeviceStatus('downloading');
-
-    try {
-      const installedState = await installOfflineAiModel((progress) => {
-        setOfflineAiInstallProgress(progress);
-        setOfflineAiState((currentState) => ({
-          ...(currentState || {}),
-          downloadedBytes: progress.downloadedBytes,
-          errorMessage: undefined,
-          modelId: synzappOfflineAiModel.id,
-          progress: progress.progress,
-          status: 'downloading',
-          totalBytes: progress.totalBytes,
-          updatedAt: new Date().toISOString()
-        }));
-      });
-
-      setOfflineAiState(installedState);
-      setOfflineAiInstallProgress(null);
-      await syncSynzappAiDeviceStatus('installed');
-      setIsOfflineAiModalOpen(false);
-      Alert.alert(
-        'Synzapp AI is ready',
-        'Synzapp AI can now help on this device, even when internet is unavailable.'
-      );
-    } catch (nextError) {
-      setOfflineAiInstallProgress(null);
-      void syncSynzappAiDeviceStatus('failed');
-      setError(getErrorMessage(nextError, 'Unable to install Synzapp Offline AI.'));
-      void refreshOfflineAiState();
-    } finally {
-      setIsInstallingOfflineAi(false);
-    }
-  }
-
-  function handleRemoveOfflineAiModel() {
-    Alert.alert(
-      'Remove Synzapp AI?',
-      'This removes Synzapp AI offline support from this phone. You can install it again later.',
-      [
-        { style: 'cancel', text: 'Cancel' },
-        {
-          style: 'destructive',
-          text: 'Remove',
-          onPress: () => {
-            void deleteOfflineAiModel()
-              .then((nextState) => {
-                setOfflineAiState(nextState);
-                setOfflineAiInstallProgress(null);
-                void syncSynzappAiDeviceStatus('available');
-              })
-              .catch((nextError) => {
-                setError(getErrorMessage(nextError, 'Unable to remove Synzapp Offline AI.'));
-              });
-          }
-        }
-      ]
-    );
-  }
-
-  function handleOpenAskSynzappAi() {
-    Keyboard.dismiss();
-    setIsAiAssistantOpen(true);
-    setAiAssistantView('list');
-    void refreshOfflineAiState().then((state) => {
-      if (state.status !== 'installed') {
-        setIsOfflineAiModalOpen(true);
-      }
-    });
-  }
-
-  function handleCloseAskSynzappAi() {
-    Keyboard.dismiss();
-    setIsAiAssistantOpen(false);
-    setAiAssistantView('list');
-    setActiveOfflineAiConversationId(null);
-    setAiAssistantDraft('');
-    setAiAssistantAttachments([]);
-  }
-
-  function handleOpenOfflineAiConversation(conversation: OfflineAiConversation) {
-    Keyboard.dismiss();
-    setActiveOfflineAiConversationId(conversation.id);
-    setAiAssistantView('thread');
-    setAiAssistantDraft('');
-    setAiAssistantAttachments([]);
-  }
-
-  function handleDeleteOfflineAiConversation(conversation: OfflineAiConversation) {
-    Alert.alert(
-      'Delete AI conversation?',
-      `${conversation.title || 'This Synzapp AI conversation'} will be removed from your AI history on this device.`,
-      [
-        { style: 'cancel', text: 'Cancel' },
-        {
-          style: 'destructive',
-          text: 'Delete',
-          onPress: () => {
-            const nextConversations = offlineAiConversations.filter((currentConversation) =>
-              currentConversation.id !== conversation.id
-            );
-
-            if (activeOfflineAiConversationId === conversation.id) {
-              setActiveOfflineAiConversationId(null);
-              setAiAssistantView('list');
-            }
-
-            void persistOfflineAiConversations(nextConversations).catch((nextError) => {
-              Alert.alert('Synzapp AI', getErrorMessage(nextError, 'Unable to delete this Synzapp AI conversation.'));
-            });
-          }
-        }
-      ]
-    );
-  }
-
-  function handleStartNewOfflineAiConversation() {
-    const scope = getOfflineAiScope();
-
-    if (!scope) {
-      Alert.alert('Synzapp AI', 'Your company profile is still loading. Please try again in a moment.');
-      return;
-    }
-
-    const conversation = createOfflineAiConversation(scope);
-    const nextConversations = [conversation, ...offlineAiConversations];
-
-    setActiveOfflineAiConversationId(conversation.id);
-    setAiAssistantView('thread');
-    setAiAssistantDraft('');
-    setAiAssistantAttachments([]);
-    void persistOfflineAiConversations(nextConversations).catch((nextError) => {
-      Alert.alert('Synzapp AI', getErrorMessage(nextError, 'Unable to start a Synzapp AI chat.'));
-    });
-  }
-
-  function handleBackToOfflineAiList() {
-    Keyboard.dismiss();
-    setAiAssistantView('list');
-    setActiveOfflineAiConversationId(null);
-    setAiAssistantDraft('');
-    setAiAssistantAttachments([]);
-  }
-
-  async function handleAttachSynzappAiMedia() {
-    if (isPreparingAiAttachment || isOfflineAiResponding) {
-      return;
-    }
-
-    try {
-      setIsPreparingAiAttachment(true);
-      const localMediaItems = await pickNativeChatCameraMedia();
-
-      if (!localMediaItems?.length) {
-        return;
-      }
-
-      const nextAttachments = await Promise.all(
-        localMediaItems.map((localMedia) => createOfflineAiAttachment(localMedia))
-      );
-
-      setAiAssistantAttachments((currentAttachments) => [
-        ...currentAttachments,
-        ...nextAttachments
-      ].slice(0, 8));
-    } catch (nextError) {
-      Alert.alert('Synzapp AI', getErrorMessage(nextError, 'Unable to prepare this media for Synzapp AI.'));
-    } finally {
-      setIsPreparingAiAttachment(false);
-    }
-  }
-
-  async function handleAttachSynzappAiFile() {
-    if (isPreparingAiAttachment || isOfflineAiResponding) {
-      return;
-    }
-
-    try {
-      setIsPreparingAiAttachment(true);
-      const localMedia = await pickNativeChatFile();
-
-      if (!localMedia) {
-        return;
-      }
-
-      const nextAttachment = await createOfflineAiAttachment(localMedia);
-
-      setAiAssistantAttachments((currentAttachments) => [
-        ...currentAttachments,
-        nextAttachment
-      ].slice(0, 8));
-    } catch (nextError) {
-      Alert.alert('Synzapp AI', getErrorMessage(nextError, 'Unable to prepare this file for Synzapp AI.'));
-    } finally {
-      setIsPreparingAiAttachment(false);
-    }
-  }
-
-  function handleRemoveSynzappAiAttachment(attachmentId: string) {
-    setAiAssistantAttachments((currentAttachments) =>
-      currentAttachments.filter((attachment) => attachment.id !== attachmentId)
-    );
-  }
-
-  async function handleSendSynzappAiVoiceNote(localMedia: LocalChatMediaInput) {
-    try {
-      const attachment = await createOfflineAiAttachment(localMedia);
-
-      await handleSendAskSynzappAiPrompt({
-        extraAttachments: [attachment]
-      });
-    } catch (nextError) {
-      Alert.alert('Synzapp AI', getErrorMessage(nextError, 'Unable to prepare this voice note for Synzapp AI.'));
-    }
-  }
-
-  async function handleSendAskSynzappAiPrompt(input?: {
-    extraAttachments?: OfflineAiAttachment[];
-    promptOverride?: string;
-  }) {
-    const prompt = (input?.promptOverride ?? aiAssistantDraft).trim();
-    const attachments = [
-      ...aiAssistantAttachments,
-      ...(input?.extraAttachments || [])
-    ].slice(0, 8);
-
-    if ((!prompt && !attachments.length) || isOfflineAiResponding) {
-      return;
-    }
-
-    Keyboard.dismiss();
-
-    const currentOfflineAiState = await refreshOfflineAiState().catch(() => offlineAiState);
-
-    if (currentOfflineAiState?.status !== 'installed' || !currentOfflineAiState.localUri) {
-      setIsOfflineAiModalOpen(true);
-      return;
-    }
-
-    const scope = getOfflineAiScope();
-
-    if (!scope) {
-      Alert.alert('Synzapp AI', 'Your company profile is still loading. Please try again in a moment.');
-      return;
-    }
-
-    const existingConversation = activeOfflineAiConversation || createOfflineAiConversation(scope);
-    const userMessageText = prompt || getSynzappAiAttachmentMessageText(attachments);
-    const userMessage = createOfflineAiMessage({
-      attachments,
-      role: 'user',
-      status: 'seen',
-      text: userMessageText
-    });
-    const conversationWithUserMessage: OfflineAiConversation = {
-      ...existingConversation,
-      messages: [...existingConversation.messages, userMessage],
-      title: existingConversation.messages.length
-        ? existingConversation.title
-        : getOfflineAiConversationTitle(prompt || userMessageText),
-      updatedAt: userMessage.createdAt
-    };
-    const nextConversations = [
-      conversationWithUserMessage,
-      ...offlineAiConversations.filter((conversation) => conversation.id !== conversationWithUserMessage.id)
-    ];
-
-    setActiveOfflineAiConversationId(conversationWithUserMessage.id);
-    setAiAssistantView('thread');
-    setAiAssistantDraft('');
-    setAiAssistantAttachments([]);
-    setIsOfflineAiResponding(true);
-
-    try {
-      await persistOfflineAiConversations(nextConversations);
-
-      const response = await generateOfflineAiResponse(prompt || userMessageText, currentOfflineAiState.localUri, {
-        profile: getOfflineAiProfileContext(),
-        recentMessages: conversationWithUserMessage.messages
-      });
-      const assistantMessage = createOfflineAiMessage({
-        role: 'assistant',
-        text: response || 'I am here, but I could not complete that response. Please try again.'
-      });
-      const completedConversation: OfflineAiConversation = {
-        ...conversationWithUserMessage,
-        messages: [...conversationWithUserMessage.messages, assistantMessage],
-        updatedAt: assistantMessage.createdAt
-      };
-
-      await persistOfflineAiConversations([
-        completedConversation,
-        ...nextConversations.filter((conversation) => conversation.id !== completedConversation.id)
-      ]);
-    } catch (nextError) {
-      Alert.alert('Synzapp AI', getErrorMessage(nextError, 'Synzapp AI is not ready on this build yet.'));
-    } finally {
-      setIsOfflineAiResponding(false);
-    }
-  }
-
   function handleOpenCommonGroupFromContactInfo(groupContact: ChatContact) {
     setIsContactInfoModalOpen(false);
     void handleOpenChat(mapChatContactToChatItem(groupContact));
@@ -6660,6 +6189,10 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   }
 
   async function syncPendingMessagesForChat(contactId: string) {
+    if (locallyDeletedChatContactIdsRef.current.has(contactId)) {
+      return;
+    }
+
     if (pendingSyncContactIdsRef.current.has(contactId)) {
       return;
     }
@@ -6682,6 +6215,10 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       const idToken = await getIdToken();
 
       for (const pendingMessage of syncablePendingMessages) {
+        if (locallyDeletedChatContactIdsRef.current.has(contactId)) {
+          return;
+        }
+
         await updatePendingChatMessage({
           lastError: null,
           ...getLocalChatScope(),
@@ -6693,14 +6230,13 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           const pendingMedia = getMessageMedia(pendingMessage.message);
           const pendingMediaItems = getMessageMediaItems(pendingMessage.message);
           const sendMediaItems = pendingMediaItems.length > 1
-            ? await Promise.all(pendingMediaItems.map((mediaItem, index) => uploadMediaForMessage({
+            ? await uploadMediaItemsForMessage({
                 chatType: pendingMessage.chatType || 'DIRECT',
                 contactId,
                 idToken,
-                media: mediaItem,
-                mediaIndex: index,
+                mediaItems: pendingMediaItems,
                 messageId: pendingMessage.queueId
-              })))
+              })
             : [];
           const sendMedia = pendingMedia && !sendMediaItems.length
             ? await uploadMediaForMessage({
@@ -6728,6 +6264,10 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
             ...getLocalChatScope(),
             queueId: pendingMessage.queueId
           });
+
+          if (locallyDeletedChatContactIdsRef.current.has(contactId)) {
+            return;
+          }
 
           setProfilePhotoAuthToken(idToken);
           void updateSyncedPendingMessage({
@@ -6767,6 +6307,10 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     pendingQueueId: string;
     sentMessage: ChatMessage;
   }) {
+    if (locallyDeletedChatContactIdsRef.current.has(input.contactId)) {
+      return;
+    }
+
     const cachedConversation = await loadCachedChatConversation({
       contactId: input.contactId,
       ...getLocalChatScope()
@@ -6803,6 +6347,8 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
 
   function addVisibleLocalMessage(chat: ChatItem, message: ChatMessage) {
     const contactId = chat.contactId;
+
+    locallyDeletedChatContactIdsRef.current.delete(contactId);
 
     if (selectedChatRef.current?.contactId === contactId) {
       setMessages((currentMessages) => uniqueChatMessages([...currentMessages, message]));
@@ -6865,6 +6411,22 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           ? applyMediaUpdateToMessage(message, media, mediaIndex)
           : message
       )));
+      setMediaViewer((currentViewer) =>
+        currentViewer?.sourceMessage.messageId === messageId
+          ? {
+              ...currentViewer,
+              items: currentViewer.items.map((viewerMedia, index) => {
+                const isTargetIndex = typeof mediaIndex === 'number' ? index === mediaIndex : false;
+                const isTargetMedia = Boolean(media.mediaId && viewerMedia.mediaId === media.mediaId) ||
+                  Boolean(media.localUri && viewerMedia.localUri === media.localUri) ||
+                  (!media.mediaId && media.fileName === viewerMedia.fileName && media.kind === viewerMedia.kind);
+
+                return isTargetIndex || isTargetMedia ? mergeChatMessageMedia(viewerMedia, media) || media : viewerMedia;
+              }),
+              sourceMessage: applyMediaUpdateToMessage(currentViewer.sourceMessage, media, mediaIndex)
+            }
+          : currentViewer
+      );
     }
   }
 
@@ -6885,12 +6447,26 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     }
 
     const localMedia = toLocalChatMediaInput(input.media);
+    let lastProgressUpdateAt = 0;
+    let lastProgressValue = -1;
     const uploadedMedia = await uploadEncryptedChatMedia({
       chatType: input.chatType,
       contactId: input.contactId,
       idToken: input.idToken,
       media: localMedia,
       onProgress: (progress) => {
+        const now = Date.now();
+
+        if (
+          progress < 1 &&
+          now - lastProgressUpdateAt < 180 &&
+          Math.abs(progress - lastProgressValue) < 0.035
+        ) {
+          return;
+        }
+
+        lastProgressUpdateAt = now;
+        lastProgressValue = progress;
         updateVisibleMessageMedia(input.contactId, input.messageId, {
           ...input.media,
           transferProgress: progress,
@@ -6908,6 +6484,29 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     updateVisibleMessageMedia(input.contactId, input.messageId, availableMedia, input.mediaIndex);
 
     return availableMedia;
+  }
+
+  async function uploadMediaItemsForMessage(input: {
+    chatType: 'DIRECT' | 'GROUP';
+    contactId: string;
+    idToken: string;
+    mediaItems: ChatMediaAttachment[];
+    messageId: string;
+  }): Promise<ChatMediaAttachment[]> {
+    const uploadedItems: ChatMediaAttachment[] = [];
+
+    for (let index = 0; index < input.mediaItems.length; index += 1) {
+      uploadedItems.push(await uploadMediaForMessage({
+        chatType: input.chatType,
+        contactId: input.contactId,
+        idToken: input.idToken,
+        media: input.mediaItems[index],
+        mediaIndex: index,
+        messageId: input.messageId
+      }));
+    }
+
+    return uploadedItems;
   }
 
   async function downloadMediaForMessage(
@@ -7111,7 +6710,8 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     }
 
     try {
-      const localMediaItems = await pickNativeChatCameraMedia();
+      setMediaPreparationError(null);
+      const localMediaItems = await pickNativeChatCameraMedia(setMediaPreparationProgress);
 
       if (!localMediaItems?.length) {
         return;
@@ -7126,7 +6726,9 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       setMediaReviewCaption('');
       setMediaReviewQualityMode('standard');
     } catch (nextError) {
-      Alert.alert('Media not sent', getErrorMessage(nextError, 'Unable to prepare this media.'));
+      setMediaPreparationError(getErrorMessage(nextError, 'Unable to prepare this media.'));
+    } finally {
+      setMediaPreparationProgress(null);
     }
   }
 
@@ -7143,7 +6745,8 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     }
 
     try {
-      const localMediaItems = await pickNativeChatLibraryMedia();
+      setMediaPreparationError(null);
+      const localMediaItems = await pickNativeChatLibraryMedia(setMediaPreparationProgress);
 
       if (!localMediaItems?.length) {
         return;
@@ -7158,7 +6761,9 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       setMediaReviewCaption('');
       setMediaReviewQualityMode('standard');
     } catch (nextError) {
-      Alert.alert('Media not sent', getErrorMessage(nextError, 'Unable to prepare this media.'));
+      setMediaPreparationError(getErrorMessage(nextError, 'Unable to prepare this media.'));
+    } finally {
+      setMediaPreparationProgress(null);
     }
   }
 
@@ -7386,13 +6991,17 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     }
     setReplyTarget(null);
     addVisibleLocalMessage(activeChat, optimisticMessage);
-    void sendQueuedChatPayload({
-      activeChat,
-      media,
-      mediaItems,
-      pendingMessage,
-      replyReference,
-      text
+    InteractionManager.runAfterInteractions(() => {
+      setTimeout(() => {
+        void sendQueuedChatPayload({
+          activeChat,
+          media,
+          mediaItems,
+          pendingMessage,
+          replyReference,
+          text
+        });
+      }, 120);
     });
   }
 
@@ -7417,6 +7026,15 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       return;
     }
 
+    if (locallyDeletedChatContactIdsRef.current.has(activeChat.contactId)) {
+      await removePendingChatMessage({
+        ...getLocalChatScope(),
+        queueId: pendingMessage.queueId
+      }).catch(() => undefined);
+      removeVisibleLocalMessage(activeChat.contactId, pendingMessage.queueId);
+      return;
+    }
+
     activeLocalSendQueueIdsRef.current.add(pendingMessage.queueId);
 
     try {
@@ -7428,14 +7046,13 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       });
       const idToken = await getIdToken();
       const sendMediaItems = mediaItems.length > 1
-        ? await Promise.all(mediaItems.map((mediaItem, index) => uploadMediaForMessage({
+        ? await uploadMediaItemsForMessage({
             chatType: activeChat.chatType,
             contactId: activeChat.contactId,
             idToken,
-            media: mediaItem,
-            mediaIndex: index,
+            mediaItems,
             messageId: pendingMessage.queueId
-          })))
+          })
         : [];
       const sendMedia = media && !sendMediaItems.length
         ? await uploadMediaForMessage({
@@ -7463,6 +7080,11 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         ...getLocalChatScope(),
         queueId: pendingMessage.queueId
       });
+
+      if (locallyDeletedChatContactIdsRef.current.has(activeChat.contactId)) {
+        removeVisibleLocalMessage(activeChat.contactId, pendingMessage.queueId);
+        return;
+      }
 
       setProfilePhotoAuthToken(idToken);
       void updateSyncedPendingMessage({
@@ -7650,133 +7272,6 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     setMessageActionTarget(null);
   }
 
-  function handleOpenTranslateMessage(message: ChatMessage) {
-    const text = message.text.trim();
-
-    if (!text) {
-      Alert.alert('Nothing to translate', 'Select a text message to translate.');
-      setMessageActionTarget(null);
-      return;
-    }
-
-    const initialState: MessageTranslationModalState = {
-      error: null,
-      isLoading: false,
-      message,
-      sourceLanguageCode: 'en-US',
-      targetLanguageCode: 'es-MX',
-      translation: null
-    };
-
-    setMessageActionTarget(null);
-    setMessageTranslationModal(initialState);
-    void requestMessageTranslation(initialState);
-  }
-
-  async function requestMessageTranslation(state: MessageTranslationModalState) {
-    const activeChat = selectedChatRef.current;
-    const text = state.message.text.trim();
-
-    if (!activeChat || !text) {
-      return;
-    }
-
-    setMessageTranslationModal((currentState) =>
-      currentState?.message.messageId === state.message.messageId
-        ? { ...currentState, error: null, isLoading: true }
-        : currentState
-    );
-
-    try {
-      const cachedTranslation = await getCachedChatTranslation({
-        messageId: state.message.messageId,
-        sourceText: text,
-        targetLanguageCode: state.targetLanguageCode
-      });
-
-      if (
-        cachedTranslation &&
-        cachedTranslation.sourceLanguageCode === state.sourceLanguageCode &&
-        cachedTranslation.targetLanguageCode === state.targetLanguageCode
-      ) {
-        setMessageTranslationModal((currentState) =>
-          currentState?.message.messageId === state.message.messageId
-            ? { ...currentState, error: null, isLoading: false, translation: cachedTranslation }
-            : currentState
-        );
-        return;
-      }
-
-      const translation = await translateChatMessageOnDevice({
-        messageId: state.message.messageId,
-        sourceLanguageCode: state.sourceLanguageCode,
-        targetLanguageCode: state.targetLanguageCode,
-        text
-      });
-
-      await saveCachedChatTranslation({
-        messageId: state.message.messageId,
-        sourceText: text,
-        translation
-      }).catch(() => undefined);
-
-      setMessageTranslationModal((currentState) =>
-        currentState?.message.messageId === state.message.messageId
-          ? { ...currentState, error: null, isLoading: false, translation }
-          : currentState
-      );
-    } catch (nextError) {
-      const errorMessage = getErrorMessage(nextError, 'Unable to translate this message.');
-
-      setMessageTranslationModal((currentState) =>
-        currentState?.message.messageId === state.message.messageId
-          ? {
-              ...currentState,
-              error: null,
-              isLoading: false
-            }
-          : currentState
-      );
-      setMessageTranslationAlert({
-        message: errorMessage,
-        retryState: {
-          ...state,
-          error: null,
-          isLoading: false
-        }
-      });
-    }
-  }
-
-  async function handleDownloadTranslationLanguage(code: ChatTranscriptLanguageCode) {
-    const languages = await saveDownloadedTranslationLanguage(code);
-
-    setDownloadedTranslationLanguageCodes(languages);
-  }
-
-  function handleChangeTranslationLanguages(input: {
-    sourceLanguageCode?: ChatTranscriptLanguageCode;
-    targetLanguageCode?: ChatTranscriptLanguageCode;
-  }) {
-    setMessageTranslationModal((currentState) => {
-      if (!currentState) {
-        return currentState;
-      }
-
-      const nextState: MessageTranslationModalState = {
-        ...currentState,
-        error: null,
-        sourceLanguageCode: input.sourceLanguageCode || currentState.sourceLanguageCode,
-        targetLanguageCode: input.targetLanguageCode || currentState.targetLanguageCode,
-        translation: null
-      };
-
-      void requestMessageTranslation(nextState);
-
-      return nextState;
-    });
-  }
-
   function handleReplyToMessage(message: ChatMessage) {
     setReplyTarget(message);
     setMessageActionTarget(null);
@@ -7807,7 +7302,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     void handleOpenFileAttachment(message, activeIndex);
   }
 
-  async function handleOpenVideoAttachment(message: ChatMessage, activeIndex: number) {
+  function handleOpenVideoAttachment(message: ChatMessage, activeIndex: number) {
     const activeChat = selectedChatRef.current;
     const allMediaItems = getMessageMediaItems(message);
     const selectedMedia = allMediaItems[activeIndex] || allMediaItems[0] || getMessageMedia(message);
@@ -7816,60 +7311,24 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       return;
     }
 
-    const videoPreparationKey = getMediaPreparationKey(message.messageId, selectedMedia, activeIndex);
-    setPreparingVideoKey(videoPreparationKey);
+    handleOpenMediaViewer(message, activeIndex);
 
-    try {
-      let localUri = getMediaLocalUri(selectedMedia);
-
-      if (!localUri) {
-        if (!activeChat || !selectedMedia.mediaId || !selectedMedia.key || !selectedMedia.nonce) {
-          throw new Error('This video is not available yet.');
-        }
-
-        localUri = await downloadMediaForMessage(
-          activeChat.contactId,
-          activeChat.chatType,
-          message.messageId,
-          selectedMedia,
-          activeIndex
-        ) || '';
-      }
-
-      if (!localUri) {
-        throw new Error('This video could not be downloaded.');
-      }
-
-      const mediaItems = allMediaItems.filter((media) =>
-        media.kind === 'image' || media.kind === 'video'
-      );
-      const viewerIndex = Math.max(0, mediaItems.findIndex((media) =>
-        media === selectedMedia ||
-        Boolean(media.mediaId && media.mediaId === selectedMedia.mediaId) ||
-        Boolean(media.localUri && media.localUri === selectedMedia.localUri)
-      ));
-      const preparedItems = mediaItems.map((media, index) =>
-        index === viewerIndex
-          ? {
-              ...media,
-              localUri,
-              transferProgress: 1,
-              transferStatus: 'available' as const
-            }
-          : media
-      );
-
-      setMediaViewer({
-        activeIndex: Math.max(0, Math.min(viewerIndex, preparedItems.length - 1)),
-        items: preparedItems,
-        sourceMessage: message,
-        title: activeChat?.title || 'Video'
-      });
-    } catch (nextError) {
-      Alert.alert('Video unavailable', getErrorMessage(nextError, 'Unable to open this video.'));
-    } finally {
-      setPreparingVideoKey((currentKey) => currentKey === videoPreparationKey ? null : currentKey);
+    if (getMediaLocalUri(selectedMedia) || !activeChat || !selectedMedia.mediaId || !selectedMedia.key || !selectedMedia.nonce) {
+      return;
     }
+
+    const videoPreparationKey = getMediaPreparationKey(message.messageId, selectedMedia, activeIndex);
+
+    setPreparingVideoKey(videoPreparationKey);
+    void downloadMediaForMessage(
+      activeChat.contactId,
+      activeChat.chatType,
+      message.messageId,
+      selectedMedia,
+      activeIndex
+    ).finally(() => {
+      setPreparingVideoKey((currentKey) => currentKey === videoPreparationKey ? null : currentKey);
+    });
   }
 
   async function handleShareMediaAttachment(media: ChatMediaAttachment, message?: ChatMessage): Promise<void> {
@@ -8082,14 +7541,19 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
 
         for (const message of selectedMessages) {
           const sourceMediaItems = getMessageMediaItems(message);
-          const forwardMediaItems = sourceMediaItems.length > 1
-            ? await Promise.all(sourceMediaItems.map((sourceMedia) => uploadEncryptedChatMedia({
+          const forwardMediaItems: ChatMediaAttachment[] = [];
+
+          if (sourceMediaItems.length > 1) {
+            for (const sourceMedia of sourceMediaItems) {
+              forwardMediaItems.push(await uploadEncryptedChatMedia({
                 chatType: recipient.chatType,
                 contactId: recipient.contactId,
                 idToken,
                 media: toLocalChatMediaInput(sourceMedia)
-              })))
-            : [];
+              }));
+            }
+          }
+
           const sourceMedia = sourceMediaItems[0] || getMessageMedia(message);
           const forwardMedia = sourceMedia && !forwardMediaItems.length
             ? await uploadEncryptedChatMedia({
@@ -8309,7 +7773,6 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     setError(null);
     setSelectedChat(null);
     setActiveTrashSegmentId(null);
-    setIsAiAssistantOpen(false);
     setIsSpamScreenOpen(false);
     setIsArchiveScreenOpen(false);
     setIsArchiveEditMenuOpen(false);
@@ -10234,7 +9697,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           }}
           profilePhotoHeaders={profilePhotoHeaders}
         />
-      ) : isAiAssistantOpen ? null : activeTab === 'Settings' && settingsScreen === 'directory' ? (
+      ) : activeTab === 'Settings' && settingsScreen === 'directory' ? (
         <DirectoryHeader
           filter={directoryFilter}
           onBack={() => setSettingsScreen('list')}
@@ -10311,7 +9774,6 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       )}
 
       {!selectedChat &&
-      !isAiAssistantOpen &&
       activeTab !== 'You' &&
       !(activeTab === 'Chats' && (isSpamScreenOpen || isArchiveScreenOpen)) ? (
         <Text style={[styles.title, { color: appTheme.colors.ink }]}>
@@ -10383,7 +9845,6 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           onReactMessage={handleReactToMessage}
           onMessageReply={handleReplyToMessage}
           onStarMessage={handleToggleMessageStar}
-          onTranslateMessage={handleOpenTranslateMessage}
           onPickFile={() => {
             void handlePickChatFile();
           }}
@@ -10404,38 +9865,6 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           selectedForwardMessageIds={forwardSelectedMessageIds}
           starredMessageIds={starredMessageIds}
         />
-      ) : isAiAssistantOpen ? (
-        aiAssistantView === 'thread' ? (
-          <SynzappAiChatThreadScreen
-            attachments={aiAssistantAttachments}
-            bottomInset={conversationBottomInset}
-            conversation={activeOfflineAiConversation}
-            draft={aiAssistantDraft}
-            isCompactAndroid={isCompactAndroid}
-            isGenerating={isOfflineAiResponding}
-            isPreparingAttachment={isPreparingAiAttachment}
-            onBack={handleBackToOfflineAiList}
-            onDraftChange={setAiAssistantDraft}
-            onPickFile={handleAttachSynzappAiFile}
-            onPickMedia={handleAttachSynzappAiMedia}
-            onRemoveAttachment={handleRemoveSynzappAiAttachment}
-            onSend={handleSendAskSynzappAiPrompt}
-            onSendVoiceNote={handleSendSynzappAiVoiceNote}
-            onUseSuggestion={setAiAssistantDraft}
-            profileName={userProfile?.displayName || ''}
-          />
-        ) : (
-          <SynzappAiChatListScreen
-            bottomInset={conversationBottomInset}
-            conversations={offlineAiConversations}
-            isCompactAndroid={isCompactAndroid}
-            onBack={handleCloseAskSynzappAi}
-            onDeleteConversation={handleDeleteOfflineAiConversation}
-            onNewChat={handleStartNewOfflineAiConversation}
-            onOpenConversation={handleOpenOfflineAiConversation}
-            profileName={userProfile?.displayName || ''}
-          />
-        )
       ) : (
         <ScrollView
           contentContainerStyle={[styles.tabContent, { paddingBottom: tabContentBottomPadding }]}
@@ -10468,6 +9897,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
                   void handleOpenChat(chat);
                 }}
                 onSearchChange={setChatSearch}
+                onTogglePinChat={handleTogglePinChat}
                 onToggleFavoriteChat={handleToggleFavoriteChat}
                 onToggleSelection={toggleArchivedChatSelection}
                 onUnarchiveSelected={() => {
@@ -10500,6 +9930,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
                 onArchiveChat={handleArchiveChat}
                 onMoreChat={setChatMoreActionTarget}
                 onToggleFavoriteChat={handleToggleFavoriteChat}
+                onTogglePinChat={handleTogglePinChat}
                 onOpenArchived={handleOpenArchivedScreen}
                 onOpenChat={(chat) => {
                   void handleOpenChat(chat);
@@ -10582,10 +10013,8 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
               onOpenGroups={handleOpenGroupsSettings}
               onOpenKeyResults={handleOpenKeyResultsSettings}
               onOpenMyDevices={handleOpenMyDevicesSettings}
-              onOpenOfflineAi={() => setIsOfflineAiModalOpen(true)}
               onOpenRolePermissions={handleOpenRolePermissions}
               onOpenSecurity={handleOpenSecuritySettings}
-              offlineAiState={offlineAiState}
               themePreference={appTheme.preference}
             />
           ) : null}
@@ -10742,7 +10171,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         </ScrollView>
       )}
 
-      {!isAiAssistantOpen && activeTab === 'Settings' && (settingsScreen === 'directory' || settingsScreen === 'groups') ? (
+      {activeTab === 'Settings' && (settingsScreen === 'directory' || settingsScreen === 'groups') ? (
         <Pressable
           accessibilityLabel={
             settingsScreen === 'groups'
@@ -10761,28 +10190,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         </Pressable>
       ) : null}
 
-      {!selectedChat &&
-      !isAiAssistantOpen &&
-      activeTab === 'Chats' &&
-      isSynzappAiReadyForAskButton &&
-      !isSpamScreenOpen &&
-      !isArchiveScreenOpen &&
-      !isScreenKeyboardVisible ? (
-        <Pressable
-          accessibilityLabel="Ask Synzapp AI"
-          accessibilityRole="button"
-          onPress={handleOpenAskSynzappAi}
-          style={({ pressed }) => [
-            styles.askFloatingButton,
-            { bottom: askButtonBottom },
-            pressed && styles.pressed
-          ]}
-        >
-          <Text style={styles.askFloatingText}>Ask</Text>
-        </Pressable>
-      ) : null}
-
-      {!selectedChat && !isAiAssistantOpen && !isScreenKeyboardVisible ? (
+      {!selectedChat && !isScreenKeyboardVisible ? (
         <View style={[
         styles.footer,
         {
@@ -10823,29 +10231,6 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         onToggleSpeaker={toggleSynzappCallSpeaker}
         onToggleVideo={toggleSynzappCallVideo}
         profilePhotoHeaders={profilePhotoHeaders}
-      />
-
-      <MessageTranslationModal
-        downloadedLanguageCodes={downloadedTranslationLanguageCodes}
-        languageOptions={chatTranscriptLanguageOptions}
-        onChangeLanguages={handleChangeTranslationLanguages}
-        onClose={() => setMessageTranslationModal(null)}
-        onDownloadLanguage={(code) => {
-          void handleDownloadTranslationLanguage(code);
-        }}
-        state={messageTranslationModal}
-      />
-
-      <MessageTranslationErrorModal
-        alert={messageTranslationAlert}
-        onClose={() => setMessageTranslationAlert(null)}
-        onRetry={() => {
-          if (messageTranslationAlert) {
-            const retryState = messageTranslationAlert.retryState;
-            setMessageTranslationAlert(null);
-            void requestMessageTranslation(retryState);
-          }
-        }}
       />
 
       <MediaReviewModal
@@ -11253,6 +10638,11 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       />
 
       <NativeOptionPickerModal picker={nativeOptionPicker} />
+      <MediaPreparationStatusModal
+        error={mediaPreparationError}
+        onDismissError={() => setMediaPreparationError(null)}
+        progress={mediaPreparationProgress}
+      />
       <CompanyCalendarYearDatePickerModal
         date={companyCalendarYearPickerDate}
         isOpen={isCompanyCalendarYearPickerOpen}
@@ -11384,21 +10774,6 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         visible={isThemePreferenceModalOpen}
       />
 
-      <OfflineAiInstallModal
-        isInstalling={isInstallingOfflineAi}
-        isOpen={isOfflineAiModalOpen}
-        onClose={() => {
-          if (!isInstallingOfflineAi) {
-            setIsOfflineAiModalOpen(false);
-          }
-        }}
-        onInstall={handleInstallOfflineAiModel}
-        onRemove={handleRemoveOfflineAiModel}
-        onRunInBackground={() => setIsOfflineAiModalOpen(false)}
-        progress={offlineAiInstallProgress}
-        state={offlineAiState}
-      />
-
       <ChatMoreActionsModal
         chat={chatMoreActionTarget}
         onArchive={handleArchiveChat}
@@ -11407,6 +10782,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         onDelete={(chat) => handleClearChat(chat, 'delete')}
         onOpenInfo={handleOpenChatInfoFromMore}
         onToggleFavorite={handleToggleFavoriteChat}
+        onTogglePin={handleTogglePinChat}
       />
     </View>
   );
@@ -11837,1443 +11213,6 @@ function MainNavigationModal({
         </View>
       </View>
     </Modal>
-  );
-}
-
-function OfflineAiInstallModal({
-  isInstalling,
-  isOpen,
-  onClose,
-  onInstall,
-  onRemove,
-  onRunInBackground,
-  progress,
-  state
-}: {
-  isInstalling: boolean;
-  isOpen: boolean;
-  onClose: () => void;
-  onInstall: () => void;
-  onRemove: () => void;
-  onRunInBackground: () => void;
-  progress: OfflineAiInstallProgress | null;
-  state: OfflineAiModelState | null;
-}) {
-  const appTheme = useAppTheme();
-  const spinValue = useRef(new Animated.Value(0)).current;
-  const effectiveProgress = progress || (state?.status === 'downloading'
-    ? {
-        downloadedBytes: state.downloadedBytes,
-        progress: state.progress,
-        totalBytes: state.totalBytes
-      }
-    : null);
-  const progressFraction = effectiveProgress
-    ? Math.max(0, Math.min(effectiveProgress.progress, 1))
-    : 0;
-  const progressPercent = Math.round(progressFraction * 100);
-  const isInstalled = state?.status === 'installed';
-  const isFailed = state?.status === 'failed';
-  const downloadedLabel = effectiveProgress
-    ? `${formatOfflineAiBytes(effectiveProgress.downloadedBytes)} of ${formatOfflineAiBytes(effectiveProgress.totalBytes)}`
-    : formatOfflineAiBytes(synzappOfflineAiModel.sizeBytes);
-
-  useEffect(() => {
-    if (!isOpen) {
-      return undefined;
-    }
-
-    spinValue.setValue(0);
-    const spinAnimation = Animated.loop(
-      Animated.timing(spinValue, {
-        duration: 2600,
-        easing: Easing.linear,
-        toValue: 1,
-        useNativeDriver: true
-      })
-    );
-
-    spinAnimation.start();
-
-    return () => {
-      spinAnimation.stop();
-    };
-  }, [isOpen, spinValue]);
-
-  const rotation = spinValue.interpolate({
-    inputRange: [0, 1],
-    outputRange: ['0deg', '360deg']
-  });
-
-  return (
-    <Modal
-      animationType="fade"
-      onRequestClose={isInstalling ? onRunInBackground : onClose}
-      transparent
-      visible={isOpen}
-    >
-      <View style={[styles.offlineAiOverlay, { backgroundColor: appTheme.colors.overlay }]}>
-        <View style={[
-          styles.offlineAiCard,
-          {
-            backgroundColor: appTheme.colors.surfaceElevated,
-            borderColor: appTheme.colors.border
-          }
-        ]}>
-          {!isInstalling ? (
-            <Pressable
-              accessibilityLabel="Close offline AI setup"
-              accessibilityRole="button"
-              onPress={onClose}
-              style={({ pressed }) => [
-                styles.offlineAiClose,
-                { backgroundColor: appTheme.colors.surface },
-                pressed && styles.pressed
-              ]}
-            >
-              <Feather color={appTheme.colors.mutedStrong} name="x" size={22} />
-            </Pressable>
-          ) : null}
-
-          <View style={styles.offlineAiHeader}>
-            <View style={[styles.offlineAiMarkShell, { backgroundColor: appTheme.colors.primarySoft }]}>
-              <SynzappAiMark size={64} spin={rotation} />
-            </View>
-            <Text style={[styles.offlineAiTitle, { color: appTheme.colors.ink }]}>
-              {isInstalled ? 'Synzapp AI is ready' : 'Install Synzapp AI'}
-            </Text>
-            <Text style={[styles.offlineAiBody, { color: appTheme.colors.mutedStrong }]}>
-              Set up a secure offline assistant on this device so Synzapp AI can help with writing, planning, and summaries even when internet is unavailable.
-            </Text>
-          </View>
-
-          <View style={[styles.offlineAiInfoPanel, { backgroundColor: appTheme.colors.surface }]}>
-            <OfflineAiInfoRow
-              label="Storage"
-              value={`${formatOfflineAiBytes(synzappOfflineAiModel.sizeBytes)} on this device`}
-            />
-            <OfflineAiInfoRow
-              label="Availability"
-              value="Works offline after installation"
-            />
-            <OfflineAiInfoRow
-              label="Privacy"
-              value="Prompts and responses remain on this device."
-            />
-            <OfflineAiInfoRow
-              label="Network"
-              value="Use Wi-Fi for the first download."
-            />
-          </View>
-
-          {effectiveProgress ? (
-            <View style={styles.offlineAiProgressBlock}>
-              <View style={styles.offlineAiProgressHeader}>
-                <Text style={[styles.offlineAiProgressText, { color: appTheme.colors.ink }]}>Downloading Synzapp AI</Text>
-                <Text style={[styles.offlineAiProgressText, { color: appTheme.colors.muted }]}>{progressPercent}%</Text>
-              </View>
-              <View style={[styles.offlineAiProgressTrack, { backgroundColor: appTheme.colors.divider }]}>
-                <View
-                  style={[
-                    styles.offlineAiProgressFill,
-                    {
-                      backgroundColor: appTheme.colors.primary,
-                      width: `${progressPercent}%`
-                    }
-                  ]}
-                />
-              </View>
-              <Text style={[styles.offlineAiDownloadedText, { color: appTheme.colors.muted }]}>{downloadedLabel}</Text>
-            </View>
-          ) : null}
-
-          {isFailed && state?.errorMessage ? (
-            <Text style={[
-              styles.offlineAiFailureText,
-              {
-                backgroundColor: appTheme.colors.amberSoft,
-                color: appTheme.colors.amber
-              }
-            ]}>
-              {state.errorMessage}
-            </Text>
-          ) : null}
-
-          <View style={styles.offlineAiActions}>
-            {isInstalled ? (
-              <>
-                <Pressable
-                  accessibilityLabel="Remove Synzapp AI offline support"
-                  accessibilityRole="button"
-                  disabled={isInstalling}
-                  onPress={onRemove}
-                  style={({ pressed }) => [
-                    styles.offlineAiSecondaryButton,
-                    { backgroundColor: appTheme.colors.surface },
-                    pressed && styles.pressed,
-                    isInstalling && styles.disabled
-                  ]}
-                >
-                  <Text style={[styles.offlineAiSecondaryText, { color: appTheme.colors.destructive }]}>Remove</Text>
-                </Pressable>
-                <Pressable
-                  accessibilityLabel="Done"
-                  accessibilityRole="button"
-                  onPress={onClose}
-                  style={({ pressed }) => [
-                    styles.offlineAiPrimaryButton,
-                    { backgroundColor: appTheme.colors.primary },
-                    pressed && styles.pressed
-                  ]}
-                >
-                  <Text style={styles.offlineAiPrimaryText}>Done</Text>
-                </Pressable>
-              </>
-            ) : (
-              <>
-                <Pressable
-                  accessibilityLabel={isInstalling ? 'Run Synzapp AI installation in background' : 'Not now'}
-                  accessibilityRole="button"
-                  onPress={isInstalling ? onRunInBackground : onClose}
-                  style={({ pressed }) => [
-                    styles.offlineAiSecondaryButton,
-                    { backgroundColor: appTheme.colors.surface },
-                    pressed && styles.pressed
-                  ]}
-                >
-                  <Text style={[styles.offlineAiSecondaryText, { color: isInstalling ? appTheme.colors.primary : appTheme.colors.ink }]}>
-                    {isInstalling ? 'Run in background' : 'Not now'}
-                  </Text>
-                </Pressable>
-                <Pressable
-                  accessibilityLabel={isInstalling ? 'Installing Synzapp AI' : 'Install offline AI'}
-                  accessibilityRole="button"
-                  disabled={isInstalling}
-                  onPress={onInstall}
-                  style={({ pressed }) => [
-                    styles.offlineAiPrimaryButton,
-                    { backgroundColor: appTheme.colors.primary },
-                    pressed && !isInstalling && styles.pressed,
-                    isInstalling && styles.disabled
-                  ]}
-                >
-                  {isInstalling ? (
-                    <ActivityIndicator color="#FFFFFF" size="small" />
-                  ) : (
-                    <Text style={styles.offlineAiPrimaryText}>Install</Text>
-                  )}
-                </Pressable>
-              </>
-            )}
-          </View>
-        </View>
-      </View>
-    </Modal>
-  );
-}
-
-function OfflineAiInfoRow({
-  label,
-  value
-}: {
-  label: string;
-  value: string;
-}) {
-  const appTheme = useAppTheme();
-
-  return (
-    <View style={[styles.offlineAiInfoRow, { borderBottomColor: appTheme.colors.divider }]}>
-      <Text style={[styles.offlineAiInfoLabel, { color: appTheme.colors.muted }]}>{label}</Text>
-      <Text style={[styles.offlineAiInfoValue, { color: appTheme.colors.ink }]}>{value}</Text>
-    </View>
-  );
-}
-
-function getOfflineAiStatusCopy(state: OfflineAiModelState | null): { body: string; title: string } {
-  if (state?.status === 'installed') {
-    return {
-      body: `${formatOfflineAiBytes(state.downloadedBytes)} installed on this device.`,
-      title: 'Offline AI ready'
-    };
-  }
-
-  if (state?.status === 'downloading') {
-    return {
-      body: 'Synzapp AI is downloading to this device.',
-      title: 'Downloading Synzapp AI'
-    };
-  }
-
-  if (state?.status === 'failed') {
-    return {
-      body: state.errorMessage || 'Synzapp AI needs to be installed again.',
-      title: 'Offline AI needs attention'
-    };
-  }
-
-  return {
-    body: `Download ${formatOfflineAiBytes(synzappOfflineAiModel.sizeBytes)} once for private on-device AI.`,
-    title: 'Install offline AI'
-  };
-}
-
-function SynzappAiChatListScreen({
-  bottomInset,
-  conversations,
-  isCompactAndroid,
-  onBack,
-  onDeleteConversation,
-  onNewChat,
-  onOpenConversation,
-  profileName
-}: {
-  bottomInset: number;
-  conversations: OfflineAiConversation[];
-  isCompactAndroid: boolean;
-  onBack: () => void;
-  onDeleteConversation: (conversation: OfflineAiConversation) => void;
-  onNewChat: () => void;
-  onOpenConversation: (conversation: OfflineAiConversation) => void;
-  profileName: string;
-}) {
-  const spinValue = useRef(new Animated.Value(0)).current;
-  const pulseValue = useRef(new Animated.Value(0)).current;
-  const appTheme = useAppTheme();
-  const safeFirstName = profileName.trim().split(/\s+/)[0] || '';
-  const greeting = safeFirstName ? `Hello, ${safeFirstName}` : 'Hello';
-
-  useEffect(() => {
-    spinValue.setValue(0);
-    pulseValue.setValue(0);
-
-    const spinAnimation = Animated.loop(
-      Animated.timing(spinValue, {
-        duration: 3200,
-        easing: Easing.linear,
-        toValue: 1,
-        useNativeDriver: true
-      })
-    );
-    const pulseAnimation = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseValue, {
-          duration: 1200,
-          easing: Easing.inOut(Easing.ease),
-          toValue: 1,
-          useNativeDriver: true
-        }),
-        Animated.timing(pulseValue, {
-          duration: 1200,
-          easing: Easing.inOut(Easing.ease),
-          toValue: 0,
-          useNativeDriver: true
-        })
-      ])
-    );
-
-    spinAnimation.start();
-    pulseAnimation.start();
-
-    return () => {
-      spinAnimation.stop();
-      pulseAnimation.stop();
-    };
-  }, [pulseValue, spinValue]);
-
-  const rotation = spinValue.interpolate({
-    inputRange: [0, 1],
-    outputRange: ['0deg', '360deg']
-  });
-  const haloScale = pulseValue.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0.94, 1.08]
-  });
-  const haloOpacity = pulseValue.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0.28, 0.48]
-  });
-  const listBottomPadding = Math.max(bottomInset + (isCompactAndroid ? 18 : 24), 28);
-
-  return (
-    <View style={[styles.aiScreen, { backgroundColor: appTheme.colors.screen }]}>
-      <View style={[
-        styles.aiHeader,
-        {
-          backgroundColor: appTheme.colors.surfaceElevated,
-          borderBottomColor: appTheme.colors.divider
-        }
-      ]}>
-        <Pressable
-          accessibilityLabel="Back to chats"
-          accessibilityRole="button"
-          onPress={onBack}
-          style={({ pressed }) => [
-            styles.aiHeaderButton,
-            { backgroundColor: appTheme.colors.surfaceElevated },
-            pressed && styles.pressed
-          ]}
-        >
-          <Text style={[styles.backButtonText, { color: appTheme.colors.primary }]}>‹</Text>
-        </Pressable>
-        <View style={styles.aiHeaderTitleRow}>
-          <SynzappAiMark size={30} spin={rotation} />
-          <View style={styles.aiHeaderTitleText}>
-            <Text numberOfLines={1} style={[styles.aiHeaderTitle, { color: appTheme.colors.ink }]}>Synzapp AI</Text>
-            <Text numberOfLines={1} style={[styles.aiHeaderSubtitle, { color: appTheme.colors.muted }]}>Private assistant preview</Text>
-          </View>
-        </View>
-        <Pressable
-          accessibilityLabel="Start new Synzapp AI chat"
-          accessibilityRole="button"
-          onPress={onNewChat}
-          style={({ pressed }) => [
-            styles.aiHeaderButton,
-            { backgroundColor: appTheme.colors.surfaceElevated },
-            pressed && styles.pressed
-          ]}
-        >
-          <Feather color={appTheme.colors.primary} name="plus" size={23} />
-        </Pressable>
-      </View>
-
-      <ScrollView
-        contentContainerStyle={[
-          styles.aiScrollContent,
-          { paddingBottom: listBottomPadding }
-        ]}
-        showsVerticalScrollIndicator={false}
-        style={styles.aiScroll}
-      >
-        {conversations.length ? (
-          <View style={styles.aiHistoryList}>
-            {conversations.map((conversation) => (
-              <SynzappAiHistoryRow
-                conversation={conversation}
-                key={conversation.id}
-                onDelete={() => onDeleteConversation(conversation)}
-                onOpen={() => onOpenConversation(conversation)}
-                spin={rotation}
-              />
-            ))}
-          </View>
-        ) : (
-          <View style={styles.aiEmptyHistory}>
-            <View style={styles.aiHeroMarkWrap}>
-              <Animated.View
-                pointerEvents="none"
-                style={[
-                  styles.aiHeroHalo,
-                  {
-                    opacity: haloOpacity,
-                    transform: [{ scale: haloScale }]
-                  }
-                ]}
-              />
-              <SynzappAiMark size={92} spin={rotation} />
-            </View>
-            <Text style={[styles.aiGreeting, { color: appTheme.colors.ink }]}>{greeting}</Text>
-            <Text style={[styles.aiPrompt, { color: appTheme.colors.mutedStrong }]}>
-              Start a private Synzapp AI chat for writing, planning, summaries, and workplace ideas.
-            </Text>
-            <Pressable
-              accessibilityLabel="Start a new Synzapp AI chat"
-              accessibilityRole="button"
-              onPress={onNewChat}
-              style={({ pressed }) => [
-                styles.aiStartChatButton,
-                { backgroundColor: appTheme.colors.primary },
-                pressed && styles.pressed
-              ]}
-            >
-              <Feather color="#FFFFFF" name="plus" size={18} />
-              <Text style={styles.aiStartChatText}>New AI chat</Text>
-            </Pressable>
-          </View>
-        )}
-      </ScrollView>
-    </View>
-  );
-}
-
-function SynzappAiHistoryRow({
-  conversation,
-  onDelete,
-  onOpen,
-  spin
-}: {
-  conversation: OfflineAiConversation;
-  onDelete: () => void;
-  onOpen: () => void;
-  spin: Animated.AnimatedInterpolation<string>;
-}) {
-  const appTheme = useAppTheme();
-  const translateX = useRef(new Animated.Value(0)).current;
-  const offsetRef = useRef(0);
-
-  const closeSwipe = () => {
-    offsetRef.current = 0;
-    Animated.spring(translateX, {
-      damping: 20,
-      mass: 0.75,
-      stiffness: 170,
-      toValue: 0,
-      useNativeDriver: true
-    }).start();
-  };
-
-  const snapSwipe = (toValue: number) => {
-    offsetRef.current = toValue;
-    Animated.spring(translateX, {
-      damping: 20,
-      mass: 0.75,
-      stiffness: 170,
-      toValue,
-      useNativeDriver: true
-    }).start();
-  };
-
-  const panResponder = useMemo(() => PanResponder.create({
-    onMoveShouldSetPanResponder: (_event, gestureState) =>
-      Math.abs(gestureState.dx) > 4 &&
-      Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.08,
-    onMoveShouldSetPanResponderCapture: (_event, gestureState) =>
-      Math.abs(gestureState.dx) > 6 &&
-      Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.08,
-    onPanResponderGrant: () => {
-      translateX.stopAnimation((value) => {
-        offsetRef.current = value;
-      });
-    },
-    onPanResponderMove: (_event, gestureState) => {
-      const nextValue = Math.max(
-        -AI_HISTORY_ROW_ACTION_WIDTH,
-        Math.min(0, offsetRef.current + gestureState.dx)
-      );
-
-      translateX.setValue(nextValue);
-    },
-    onPanResponderRelease: (_event, gestureState) => {
-      const intendedDelete = gestureState.dx <= -CHAT_ROW_SWIPE_TRIGGER || gestureState.vx <= -0.18;
-
-      if (intendedDelete) {
-        snapSwipe(-AI_HISTORY_ROW_ACTION_WIDTH);
-        return;
-      }
-
-      closeSwipe();
-    },
-    onPanResponderTerminate: closeSwipe,
-    onPanResponderTerminationRequest: () => false,
-    onStartShouldSetPanResponder: () => false
-  }), [translateX]);
-
-  useEffect(() => {
-    closeSwipe();
-  }, [conversation.id]);
-
-  const runDelete = () => {
-    closeSwipe();
-    onDelete();
-  };
-
-  return (
-    <View style={[styles.aiHistorySwipeShell, { backgroundColor: appTheme.colors.screen }]}>
-      <View style={styles.aiHistorySwipeRightActions}>
-        <Pressable
-          accessibilityLabel={`Delete ${conversation.title}`}
-          accessibilityRole="button"
-          onPress={runDelete}
-          style={({ pressed }) => [
-            styles.aiHistorySwipeAction,
-            pressed && styles.pressed
-          ]}
-        >
-          <Feather color="#FFFFFF" name="trash-2" size={20} />
-          <Text style={styles.chatSwipeActionText}>Delete</Text>
-        </Pressable>
-      </View>
-
-      <Animated.View
-        style={[
-          styles.chatSwipeContent,
-          { backgroundColor: appTheme.colors.screen },
-          { transform: [{ translateX }] }
-        ]}
-        {...panResponder.panHandlers}
-      >
-        <Pressable
-          accessibilityLabel={`Open ${conversation.title}`}
-          accessibilityRole="button"
-          onPress={() => {
-            if (offsetRef.current !== 0) {
-              closeSwipe();
-              return;
-            }
-
-            onOpen();
-          }}
-          style={({ pressed }) => [
-            styles.aiHistoryRow,
-            {
-              backgroundColor: appTheme.colors.screen,
-              borderBottomColor: appTheme.colors.divider
-            },
-            pressed && styles.pressed
-          ]}
-        >
-          <View style={[styles.aiHistoryIcon, { backgroundColor: appTheme.colors.primarySoft }]}>
-            <SynzappAiMark size={30} spin={spin} />
-          </View>
-          <View style={styles.aiHistoryText}>
-            <View style={styles.aiHistoryTitleRow}>
-              <Text numberOfLines={1} style={[styles.aiHistoryTitle, { color: appTheme.colors.ink }]}>
-                {conversation.title}
-              </Text>
-              <Text style={[styles.aiHistoryTime, { color: appTheme.colors.muted }]}>
-                {formatChatListTime(conversation.updatedAt)}
-              </Text>
-            </View>
-            <Text numberOfLines={2} style={[styles.aiHistoryPreview, { color: appTheme.colors.muted }]}>
-              {getOfflineAiConversationPreview(conversation)}
-            </Text>
-          </View>
-        </Pressable>
-      </Animated.View>
-    </View>
-  );
-}
-
-function SynzappAiChatThreadScreen({
-  attachments,
-  bottomInset,
-  conversation,
-  draft,
-  isCompactAndroid,
-  isGenerating,
-  isPreparingAttachment,
-  onBack,
-  onDraftChange,
-  onPickFile,
-  onPickMedia,
-  onRemoveAttachment,
-  onSend,
-  onSendVoiceNote,
-  onUseSuggestion,
-  profileName
-}: {
-  attachments: OfflineAiAttachment[];
-  bottomInset: number;
-  conversation: OfflineAiConversation | null;
-  draft: string;
-  isCompactAndroid: boolean;
-  isGenerating: boolean;
-  isPreparingAttachment: boolean;
-  onBack: () => void;
-  onDraftChange: (value: string) => void;
-  onPickFile: () => void | Promise<void>;
-  onPickMedia: () => void | Promise<void>;
-  onRemoveAttachment: (attachmentId: string) => void;
-  onSend: () => void | Promise<void>;
-  onSendVoiceNote: (media: LocalChatMediaInput) => void | Promise<void>;
-  onUseSuggestion: (value: string) => void;
-  profileName: string;
-}) {
-  const spinValue = useRef(new Animated.Value(0)).current;
-  const pulseValue = useRef(new Animated.Value(0)).current;
-  const appTheme = useAppTheme();
-  const recorder = useAudioRecorder(VOICE_NOTE_RECORDING_OPTIONS);
-  const recorderState = useAudioRecorderState(recorder, 250);
-  const safeFirstName = profileName.trim().split(/\s+/)[0] || '';
-  const greeting = safeFirstName ? `Hello, ${safeFirstName}` : 'Hello';
-  const [isVoiceRecording, setIsVoiceRecording] = useState(false);
-  const [isVoiceRecorderBusy, setIsVoiceRecorderBusy] = useState(false);
-  const [isKeyboardVisible, setIsKeyboardVisible] = useState(false);
-  const [messageInputHeight, setMessageInputHeight] = useState(MESSAGE_INPUT_MIN_HEIGHT);
-  const [messageInputWidth, setMessageInputWidth] = useState(0);
-  const inputRef = useRef<TextInput | null>(null);
-  const scrollViewRef = useRef<ScrollView | null>(null);
-  const activeVoiceRecordingUriRef = useRef<string | null>(null);
-  const canSend = (draft.trim().length > 0 || attachments.length > 0) &&
-    !isGenerating &&
-    !isPreparingAttachment &&
-    !isVoiceRecording;
-  const isComposerBusy = isGenerating || isPreparingAttachment || isVoiceRecorderBusy;
-
-  useEffect(() => {
-    spinValue.setValue(0);
-    pulseValue.setValue(0);
-
-    const spinAnimation = Animated.loop(
-      Animated.timing(spinValue, {
-        duration: 3200,
-        easing: Easing.linear,
-        toValue: 1,
-        useNativeDriver: true
-      })
-    );
-    const pulseAnimation = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseValue, {
-          duration: 1200,
-          easing: Easing.inOut(Easing.ease),
-          toValue: 1,
-          useNativeDriver: true
-        }),
-        Animated.timing(pulseValue, {
-          duration: 1200,
-          easing: Easing.inOut(Easing.ease),
-          toValue: 0,
-          useNativeDriver: true
-        })
-      ])
-    );
-
-    spinAnimation.start();
-    pulseAnimation.start();
-
-    return () => {
-      spinAnimation.stop();
-      pulseAnimation.stop();
-    };
-  }, [pulseValue, spinValue]);
-
-  useEffect(() => {
-    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
-    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
-    const showSubscription = Keyboard.addListener(showEvent, () => setIsKeyboardVisible(true));
-    const hideSubscription = Keyboard.addListener(hideEvent, () => setIsKeyboardVisible(false));
-
-    return () => {
-      showSubscription.remove();
-      hideSubscription.remove();
-    };
-  }, []);
-
-  useEffect(() => () => {
-    if (safeIsAudioRecorderRecording(recorder)) {
-      void safeStopAudioRecorder(recorder);
-    }
-
-    void setAudioModeAsync(CHAT_AUDIO_PLAYBACK_MODE).catch(() => undefined);
-  }, [recorder]);
-
-  useEffect(() => {
-    if (recorder.uri || recorderState.url) {
-      activeVoiceRecordingUriRef.current = recorder.uri || recorderState.url;
-    }
-  }, [recorder.uri, recorderState.url]);
-
-  useEffect(() => {
-    if (draft.length === 0) {
-      setMessageInputHeight(MESSAGE_INPUT_MIN_HEIGHT);
-    }
-  }, [draft.length]);
-
-  const rotation = spinValue.interpolate({
-    inputRange: [0, 1],
-    outputRange: ['0deg', '360deg']
-  });
-  const haloScale = pulseValue.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0.94, 1.08]
-  });
-  const haloOpacity = pulseValue.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0.28, 0.48]
-  });
-  const composerBottomPadding = isKeyboardVisible
-    ? 6
-    : Math.max(bottomInset + 6, isCompactAndroid ? 10 : 12);
-  const messages = conversation?.messages || [];
-  const title = conversation?.messages.length ? conversation.title : 'Synzapp AI';
-  const messageInputBoxHeight = Math.max(42, messageInputHeight + MESSAGE_INPUT_BOX_EXTRA_HEIGHT);
-
-  function updateMessageInputHeight(nextHeight: number) {
-    setMessageInputHeight((currentHeight) => (
-      Math.abs(currentHeight - nextHeight) > 1 ? nextHeight : currentHeight
-    ));
-  }
-
-  function scrollToLatest(animated = true) {
-    scrollViewRef.current?.scrollToEnd({ animated });
-  }
-
-  async function handleStartVoiceRecording() {
-    if (isComposerBusy) {
-      return;
-    }
-
-    try {
-      setIsVoiceRecorderBusy(true);
-      const permission = await requestRecordingPermissionsAsync();
-
-      if (!permission.granted) {
-        Alert.alert('Microphone access needed', 'Please allow microphone access to record a voice note.');
-        return;
-      }
-
-      await setAudioModeAsync(CHAT_AUDIO_RECORDING_MODE);
-      await recorder.prepareToRecordAsync(VOICE_NOTE_RECORDING_OPTIONS);
-      recorder.record();
-      activeVoiceRecordingUriRef.current = recorder.uri || recorderState.url || null;
-      setIsVoiceRecording(true);
-      Keyboard.dismiss();
-    } catch (error) {
-      await setAudioModeAsync(CHAT_AUDIO_PLAYBACK_MODE).catch(() => undefined);
-      Alert.alert('Voice note unavailable', getErrorMessage(error, 'Unable to start recording.'));
-    } finally {
-      setIsVoiceRecorderBusy(false);
-    }
-  }
-
-  async function handleCancelVoiceRecording() {
-    if (!isVoiceRecording || isVoiceRecorderBusy) {
-      return;
-    }
-
-    try {
-      setIsVoiceRecorderBusy(true);
-
-      if (safeIsAudioRecorderRecording(recorder)) {
-        await safeStopAudioRecorder(recorder);
-      }
-
-      const recordedUri = recorder.uri || recorderState.url || activeVoiceRecordingUriRef.current;
-
-      if (recordedUri) {
-        await FileSystem.deleteAsync(recordedUri, { idempotent: true }).catch(() => undefined);
-      }
-    } catch {
-      // Cancel should stay quiet; the user is leaving the recording flow.
-    } finally {
-      activeVoiceRecordingUriRef.current = null;
-      setIsVoiceRecording(false);
-      setIsVoiceRecorderBusy(false);
-      await setAudioModeAsync(CHAT_AUDIO_PLAYBACK_MODE).catch(() => undefined);
-    }
-  }
-
-  async function handleStopAndSendVoiceRecording() {
-    if (!isVoiceRecording || isVoiceRecorderBusy) {
-      return;
-    }
-
-    try {
-      setIsVoiceRecorderBusy(true);
-      const durationMs = Math.max(
-        recorderState.durationMillis || 0,
-        Math.round((recorder.currentTime || 0) * 1000)
-      );
-
-      if (safeIsAudioRecorderRecording(recorder)) {
-        await safeStopAudioRecorder(recorder);
-      }
-
-      await setAudioModeAsync(CHAT_AUDIO_PLAYBACK_MODE).catch(() => undefined);
-
-      const recordedUri = recorder.uri || recorderState.url || activeVoiceRecordingUriRef.current;
-      activeVoiceRecordingUriRef.current = null;
-      setIsVoiceRecording(false);
-
-      if (!recordedUri) {
-        throw new Error('Recording could not be saved.');
-      }
-
-      if (durationMs < VOICE_NOTE_MIN_DURATION_MS) {
-        await FileSystem.deleteAsync(recordedUri, { idempotent: true }).catch(() => undefined);
-        Alert.alert('Voice note too short', 'Please record a longer voice note.');
-        return;
-      }
-
-      await onSendVoiceNote({
-        contentType: getVoiceNoteContentType(recordedUri),
-        durationMs,
-        fileName: buildVoiceNoteFileName(recordedUri),
-        kind: 'audio',
-        sizeBytes: await getLocalFileSize(recordedUri),
-        uri: recordedUri
-      });
-    } catch (error) {
-      activeVoiceRecordingUriRef.current = null;
-      setIsVoiceRecording(false);
-      await setAudioModeAsync(CHAT_AUDIO_PLAYBACK_MODE).catch(() => undefined);
-      Alert.alert('Voice note not sent', getErrorMessage(error, 'Unable to prepare this voice note.'));
-    } finally {
-      setIsVoiceRecorderBusy(false);
-    }
-  }
-
-  function handleComposerActionPress() {
-    if (canSend) {
-      void onSend();
-      return;
-    }
-
-    if (isVoiceRecording) {
-      void handleStopAndSendVoiceRecording();
-      return;
-    }
-
-    void handleStartVoiceRecording();
-  }
-
-  useEffect(() => {
-    setTimeout(() => scrollToLatest(messages.length > 0), 60);
-  }, [attachments.length, isGenerating, messages.length]);
-
-  return (
-    <View style={[styles.aiScreen, { backgroundColor: appTheme.colors.screen }]}>
-      <View style={[
-        styles.aiHeader,
-        {
-          backgroundColor: appTheme.colors.surfaceElevated,
-          borderBottomColor: appTheme.colors.divider
-        }
-      ]}>
-        <Pressable
-          accessibilityLabel="Back to Synzapp AI chats"
-          accessibilityRole="button"
-          onPress={onBack}
-          style={({ pressed }) => [
-            styles.aiHeaderButton,
-            { backgroundColor: appTheme.colors.surfaceElevated },
-            pressed && styles.pressed
-          ]}
-        >
-          <Text style={[styles.backButtonText, { color: appTheme.colors.primary }]}>‹</Text>
-        </Pressable>
-        <View style={styles.aiHeaderTitleRow}>
-          <SynzappAiMark size={30} spin={rotation} />
-          <View style={styles.aiHeaderTitleText}>
-            <Text numberOfLines={1} style={[styles.aiHeaderTitle, { color: appTheme.colors.ink }]}>{title}</Text>
-            <Text numberOfLines={1} style={[styles.aiHeaderSubtitle, { color: appTheme.colors.muted }]}>
-              {isGenerating ? 'Synzapp Typing......' : 'Private offline assistant'}
-            </Text>
-          </View>
-        </View>
-        <View style={[styles.aiHeaderButton, { backgroundColor: appTheme.colors.surfaceElevated }]}>
-          <Feather color={appTheme.colors.primary} name="lock" size={20} />
-        </View>
-      </View>
-
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={styles.aiKeyboardAvoidingView}
-      >
-        <ScrollView
-          contentContainerStyle={[
-            styles.aiThreadContent,
-            messages.length === 0 && styles.aiThreadEmptyContent
-          ]}
-          keyboardDismissMode={getKeyboardDismissMode()}
-          keyboardShouldPersistTaps="handled"
-          onContentSizeChange={() => {
-            setTimeout(() => scrollToLatest(messages.length > 0), 20);
-          }}
-          onScrollBeginDrag={() => Keyboard.dismiss()}
-          ref={scrollViewRef}
-          showsVerticalScrollIndicator={false}
-          style={styles.aiScroll}
-        >
-          {messages.length ? (
-            <>
-              {messages.map((message) => (
-                <SynzappAiMessageBubble key={message.id} message={message} />
-              ))}
-              {isGenerating ? <SynzappAiTypingBubble /> : null}
-            </>
-          ) : (
-            <View style={styles.aiHero}>
-              <View style={styles.aiHeroMarkWrap}>
-                <Animated.View
-                  pointerEvents="none"
-                  style={[
-                    styles.aiHeroHalo,
-                    {
-                      opacity: haloOpacity,
-                      transform: [{ scale: haloScale }]
-                    }
-                  ]}
-                />
-                <SynzappAiMark size={92} spin={rotation} />
-              </View>
-              <Text style={[styles.aiGreeting, { color: appTheme.colors.ink }]}>{greeting}</Text>
-              <Text style={[styles.aiPrompt, { color: appTheme.colors.mutedStrong }]}>
-                I am your private Synzapp AI assistant. Ask me to help draft, plan, summarize, or think through work.
-              </Text>
-
-              <View style={styles.aiSuggestionList}>
-                {synzappAiSuggestions.map((suggestion) => (
-                  <Pressable
-                    accessibilityLabel={suggestion}
-                    accessibilityRole="button"
-                    key={suggestion}
-                    onPress={() => onUseSuggestion(suggestion)}
-                    style={({ pressed }) => [
-                      styles.aiSuggestionRow,
-                      {
-                        backgroundColor: appTheme.colors.surfaceElevated,
-                        borderColor: appTheme.colors.divider
-                      },
-                      pressed && styles.pressed
-                    ]}
-                  >
-                    <Feather color={appTheme.colors.muted} name="file-text" size={17} />
-                    <Text numberOfLines={1} style={[styles.aiSuggestionText, { color: appTheme.colors.ink }]}>{suggestion}</Text>
-                  </Pressable>
-                ))}
-              </View>
-            </View>
-          )}
-        </ScrollView>
-
-        <View style={[
-          styles.aiComposer,
-          {
-            backgroundColor: appTheme.colors.screen,
-            borderTopColor: appTheme.colors.divider,
-            paddingBottom: composerBottomPadding
-          }
-        ]}>
-          <View style={styles.messageComposerMain}>
-            {attachments.length ? (
-              <SynzappAiAttachmentTray
-                attachments={attachments}
-                onRemoveAttachment={onRemoveAttachment}
-              />
-            ) : null}
-
-            {isVoiceRecording ? (
-              <View style={styles.voiceRecordingBox}>
-                <Pressable
-                  accessibilityLabel="Cancel voice note"
-                  accessibilityRole="button"
-                  disabled={isVoiceRecorderBusy}
-                  onPress={() => {
-                    void handleCancelVoiceRecording();
-                  }}
-                  style={({ pressed }) => [
-                    styles.voiceRecordingCancelButton,
-                    pressed && styles.pressed,
-                    isVoiceRecorderBusy && styles.disabled
-                  ]}
-                >
-                  <Feather color="#EF4444" name="trash-2" size={19} />
-                </Pressable>
-                <View style={styles.voiceRecordingDot} />
-                <Text numberOfLines={1} style={styles.voiceRecordingText}>
-                  {formatMediaDuration(recorderState.durationMillis)}
-                </Text>
-                <Text numberOfLines={1} style={styles.voiceRecordingHint}>
-                  Recording
-                </Text>
-              </View>
-            ) : (
-              <View style={[
-                styles.messageInputBox,
-                { backgroundColor: appTheme.colors.composer },
-                { height: messageInputBoxHeight }
-              ]}>
-                <Pressable
-                  accessibilityLabel={isKeyboardVisible ? 'Close keyboard' : 'Open emoji'}
-                  accessibilityRole="button"
-                  onPress={isKeyboardVisible ? () => Keyboard.dismiss() : undefined}
-                  style={({ pressed }) => [styles.messageComposerIconButton, pressed && styles.pressed]}
-                >
-                  <Ionicons
-                    color="#8B95A5"
-                    name={isKeyboardVisible ? 'chevron-down' : 'happy-outline'}
-                    size={isKeyboardVisible ? 22 : 23}
-                  />
-                </Pressable>
-                <TextInput
-                  multiline
-                  onChangeText={(value) => {
-                    onDraftChange(value);
-                    updateMessageInputHeight(estimateMessageInputHeight(value, messageInputWidth));
-                  }}
-                  onContentSizeChange={(event) => {
-                    const contentHeight = Math.ceil(event.nativeEvent.contentSize.height);
-                    const estimatedHeight = estimateMessageInputHeight(draft, messageInputWidth);
-                    const nextHeight = clampMessageInputHeight(
-                      Math.max(contentHeight, estimatedHeight)
-                    );
-
-                    updateMessageInputHeight(nextHeight);
-                  }}
-                  onLayout={(event) => {
-                    const nextWidth = Math.ceil(event.nativeEvent.layout.width);
-                    setMessageInputWidth((currentWidth) => (
-                      Math.abs(currentWidth - nextWidth) > 1 ? nextWidth : currentWidth
-                    ));
-                    if (draft.length > 0) {
-                      updateMessageInputHeight(estimateMessageInputHeight(draft, nextWidth));
-                    }
-                  }}
-                  placeholder="Ask Synzapp AI"
-                  placeholderTextColor={appTheme.colors.muted}
-                  ref={inputRef}
-                  returnKeyType="default"
-                  scrollEnabled={messageInputHeight >= MESSAGE_INPUT_MAX_HEIGHT}
-                  style={[
-                    styles.messageInput,
-                    {
-                      color: appTheme.colors.ink,
-                      height: messageInputHeight
-                    }
-                  ]}
-                  value={draft}
-                />
-                <Pressable
-                  accessibilityLabel="Attach file"
-                  accessibilityRole="button"
-                  disabled={isComposerBusy}
-                  onPress={() => {
-                    void onPickFile();
-                  }}
-                  style={({ pressed }) => [styles.messageComposerIconButton, pressed && styles.pressed]}
-                >
-                  <Feather color="#8B95A5" name="paperclip" size={19} />
-                </Pressable>
-                <Pressable
-                  accessibilityLabel="Open camera"
-                  accessibilityRole="button"
-                  disabled={isComposerBusy}
-                  onPress={() => {
-                    void onPickMedia();
-                  }}
-                  style={({ pressed }) => [styles.messageComposerIconButton, pressed && styles.pressed]}
-                >
-                  <Ionicons color="#8B95A5" name="camera" size={20} />
-                </Pressable>
-              </View>
-            )}
-          </View>
-
-          <Pressable
-            accessibilityLabel={canSend ? 'Send AI prompt' : isVoiceRecording ? 'Send voice note' : 'Record voice message'}
-            accessibilityRole="button"
-            disabled={isGenerating || isVoiceRecorderBusy || isPreparingAttachment}
-            onPress={handleComposerActionPress}
-            style={({ pressed }) => [
-              styles.messageSendButton,
-              isVoiceRecording && styles.voiceRecordingSendButton,
-              pressed && styles.pressed,
-              (isComposerBusy && !isVoiceRecording) && styles.disabled
-            ]}
-          >
-            {isComposerBusy && !isVoiceRecording ? (
-              <ActivityIndicator color="#FFFFFF" size="small" />
-            ) : (
-              <Ionicons
-                color="#FFFFFF"
-                name={canSend || isVoiceRecording ? 'send' : 'mic'}
-                size={canSend || isVoiceRecording ? 20 : 22}
-              />
-            )}
-          </Pressable>
-        </View>
-      </KeyboardAvoidingView>
-    </View>
-  );
-}
-
-function SynzappAiMessageBubble({ message }: { message: OfflineAiChatMessage }) {
-  const appTheme = useAppTheme();
-  const isUser = message.role === 'user';
-  const bubbleBackground = isUser
-    ? appTheme.colors.primary
-    : appTheme.colors.surfaceElevated;
-  const bubbleTextColor = isUser
-    ? '#FFFFFF'
-    : appTheme.colors.ink;
-  const bubbleMetaColor = isUser
-    ? 'rgba(255, 255, 255, 0.72)'
-    : appTheme.colors.muted;
-
-  return (
-    <View style={[
-      styles.aiChatBubbleRow,
-      isUser ? styles.aiChatBubbleRowMine : styles.aiChatBubbleRowTheirs
-    ]}>
-      <View style={[
-        styles.aiChatBubble,
-        isUser ? styles.aiChatBubbleMine : styles.aiChatBubbleTheirs,
-        {
-          backgroundColor: bubbleBackground,
-          borderColor: isUser ? bubbleBackground : appTheme.colors.divider
-        }
-      ]}>
-        {message.attachments?.length ? (
-          <View style={styles.aiMessageAttachmentList}>
-            {message.attachments.map((attachment) => (
-              <SynzappAiAttachmentCard
-                attachment={attachment}
-                isUser={isUser}
-                key={attachment.id}
-              />
-            ))}
-          </View>
-        ) : null}
-        {message.text ? (
-          <Text style={[styles.aiChatBubbleText, { color: bubbleTextColor }]}>{message.text}</Text>
-        ) : null}
-        <View style={styles.aiChatBubbleMetaRow}>
-          <Text style={[styles.aiChatBubbleTime, { color: bubbleMetaColor }]}>
-            {formatMessageTime(message.createdAt)}
-          </Text>
-          {isUser ? (
-            <Text style={[styles.aiChatBubbleSeen, { color: '#7DD3FC' }]}>Seen</Text>
-          ) : null}
-        </View>
-      </View>
-    </View>
-  );
-}
-
-function SynzappAiAttachmentTray({
-  attachments,
-  onRemoveAttachment
-}: {
-  attachments: OfflineAiAttachment[];
-  onRemoveAttachment: (attachmentId: string) => void;
-}) {
-  const appTheme = useAppTheme();
-
-  return (
-    <ScrollView
-      contentContainerStyle={styles.aiAttachmentTrayContent}
-      horizontal
-      keyboardShouldPersistTaps="handled"
-      showsHorizontalScrollIndicator={false}
-      style={[
-        styles.aiAttachmentTray,
-        {
-          backgroundColor: appTheme.colors.composer,
-          borderColor: appTheme.colors.divider
-        }
-      ]}
-    >
-      {attachments.map((attachment) => (
-        <View
-          key={attachment.id}
-          style={[
-            styles.aiAttachmentChip,
-            {
-              backgroundColor: appTheme.colors.surface,
-              borderColor: appTheme.colors.divider
-            }
-          ]}
-        >
-          <Feather
-            color={appTheme.colors.primary}
-            name={getSynzappAiAttachmentIconName(attachment)}
-            size={16}
-          />
-          <View style={styles.aiAttachmentChipText}>
-            <Text numberOfLines={1} style={[styles.aiAttachmentChipName, { color: appTheme.colors.ink }]}>
-              {attachment.fileName}
-            </Text>
-            <Text numberOfLines={1} style={[styles.aiAttachmentChipMeta, { color: appTheme.colors.muted }]}>
-              {getSynzappAiAttachmentMeta(attachment)}
-            </Text>
-          </View>
-          <Pressable
-            accessibilityLabel={`Remove ${attachment.fileName}`}
-            accessibilityRole="button"
-            onPress={() => onRemoveAttachment(attachment.id)}
-            style={({ pressed }) => [styles.aiAttachmentChipRemove, pressed && styles.pressed]}
-          >
-            <Feather color={appTheme.colors.muted} name="x" size={15} />
-          </Pressable>
-        </View>
-      ))}
-    </ScrollView>
-  );
-}
-
-function SynzappAiAttachmentCard({
-  attachment,
-  isUser
-}: {
-  attachment: OfflineAiAttachment;
-  isUser: boolean;
-}) {
-  const appTheme = useAppTheme();
-  const iconColor = isUser ? '#FFFFFF' : appTheme.colors.primary;
-  const titleColor = isUser ? '#FFFFFF' : appTheme.colors.ink;
-  const metaColor = isUser ? 'rgba(255, 255, 255, 0.72)' : appTheme.colors.muted;
-  const backgroundColor = isUser ? 'rgba(255, 255, 255, 0.13)' : appTheme.colors.surface;
-  const borderColor = isUser ? 'rgba(255, 255, 255, 0.18)' : appTheme.colors.divider;
-
-  return (
-    <View style={[
-      styles.aiMessageAttachmentCard,
-      {
-        backgroundColor,
-        borderColor
-      }
-    ]}>
-      <Feather color={iconColor} name={getSynzappAiAttachmentIconName(attachment)} size={18} />
-      <View style={styles.aiMessageAttachmentText}>
-        <Text numberOfLines={1} style={[styles.aiMessageAttachmentName, { color: titleColor }]}>
-          {attachment.fileName}
-        </Text>
-        <Text numberOfLines={1} style={[styles.aiMessageAttachmentMeta, { color: metaColor }]}>
-          {getSynzappAiAttachmentMeta(attachment)}
-        </Text>
-      </View>
-    </View>
-  );
-}
-
-function SynzappAiTypingBubble() {
-  const appTheme = useAppTheme();
-
-  return (
-    <View style={[styles.aiChatBubbleRow, styles.aiChatBubbleRowTheirs]}>
-      <View style={[
-        styles.aiTypingBubble,
-        {
-          backgroundColor: appTheme.colors.surfaceElevated,
-          borderColor: appTheme.colors.divider
-        }
-      ]}>
-        <ActivityIndicator color={appTheme.colors.primary} size="small" />
-        <Text style={[styles.aiTypingText, { color: appTheme.colors.mutedStrong }]}>Synzapp Typing......</Text>
-      </View>
-    </View>
-  );
-}
-
-function getOfflineAiConversationPreview(conversation: OfflineAiConversation): string {
-  const lastMessage = conversation.messages[conversation.messages.length - 1];
-
-  if (!lastMessage) {
-    return 'No messages yet';
-  }
-
-  if (lastMessage.attachments?.length && !lastMessage.text) {
-    return getSynzappAiAttachmentMessageText(lastMessage.attachments);
-  }
-
-  return lastMessage.role === 'user'
-    ? lastMessage.text
-    : `Synzapp AI: ${lastMessage.text}`;
-}
-
-function getSynzappAiAttachmentMessageText(attachments: OfflineAiAttachment[]): string {
-  if (attachments.length > 1) {
-    return `${attachments.length} attachments`;
-  }
-
-  const attachment = attachments[0];
-
-  if (!attachment) {
-    return 'Attachment';
-  }
-
-  if (attachment.kind === 'image') {
-    return 'Photo';
-  }
-
-  if (attachment.kind === 'video') {
-    return 'Video';
-  }
-
-  if (attachment.kind === 'audio') {
-    return 'Voice note';
-  }
-
-  return attachment.fileName || 'File';
-}
-
-function getSynzappAiAttachmentIconName(attachment: OfflineAiAttachment): keyof typeof Feather.glyphMap {
-  if (attachment.kind === 'image') {
-    return 'image';
-  }
-
-  if (attachment.kind === 'video') {
-    return 'video';
-  }
-
-  if (attachment.kind === 'audio') {
-    return 'mic';
-  }
-
-  return 'file-text';
-}
-
-function getSynzappAiAttachmentMeta(attachment: OfflineAiAttachment): string {
-  const kindLabel = attachment.kind === 'image'
-    ? 'Photo'
-    : attachment.kind === 'video'
-      ? 'Video'
-      : attachment.kind === 'audio'
-        ? 'Voice note'
-        : getReadableFileExtension(attachment.fileName) || 'File';
-  const durationLabel = attachment.durationMs ? ` • ${formatMediaDuration(attachment.durationMs)}` : '';
-  const textLabel = attachment.textPreview ? ' • text ready' : '';
-
-  return `${kindLabel}${durationLabel} • ${formatByteCount(attachment.sizeBytes)}${textLabel}`;
-}
-
-function SynzappAiMark({
-  size,
-  spin
-}: {
-  size: number;
-  spin: Animated.AnimatedInterpolation<string>;
-}) {
-  const petalSize = size * 0.24;
-  const radius = size * 0.29;
-  const centerSize = size * 0.18;
-
-  return (
-    <Animated.View
-      style={[
-        styles.aiMark,
-        {
-          height: size,
-          transform: [{ rotate: spin }],
-          width: size
-        }
-      ]}
-    >
-      {[0, 1, 2, 3, 4, 5].map((index) => {
-        const angle = (Math.PI * 2 * index) / 6;
-
-        return (
-          <View
-            key={index}
-            style={[
-              styles.aiMarkPetal,
-              {
-                backgroundColor: getAiPetalColor(index),
-                borderRadius: petalSize / 2,
-                height: petalSize,
-                left: (size / 2) + Math.cos(angle) * radius - (petalSize / 2),
-                top: (size / 2) + Math.sin(angle) * radius - (petalSize / 2),
-                transform: [{ rotate: `${index * 28}deg` }],
-                width: petalSize
-              }
-            ]}
-          />
-        );
-      })}
-      <View
-        style={[
-          styles.aiMarkCenter,
-          {
-            borderRadius: centerSize / 2,
-            height: centerSize,
-            left: (size - centerSize) / 2,
-            top: (size - centerSize) / 2,
-            width: centerSize
-          }
-        ]}
-      />
-    </Animated.View>
   );
 }
 
@@ -14679,7 +12618,6 @@ function MessageThread({
   onReactMessage,
   onMessageReply,
   onStarMessage,
-  onTranslateMessage,
   onPickFile,
   onPickMedia,
   onPickMediaLibrary,
@@ -14722,7 +12660,6 @@ function MessageThread({
   onReactMessage: (message: ChatMessage, reaction: string) => void;
   onMessageReply: (message: ChatMessage) => void;
   onStarMessage: (message: ChatMessage) => void;
-  onTranslateMessage: (message: ChatMessage) => void;
   onPickFile: () => void;
   onPickMedia: () => void;
   onPickMediaLibrary: () => void;
@@ -15635,7 +13572,6 @@ function MessageThread({
         }}
         onReply={(message) => handleThreadAction(onMessageReply, message)}
         onStar={(message) => handleThreadAction(onStarMessage, message)}
-        onTranslate={(message) => handleThreadAction(onTranslateMessage, message)}
         starred={messageActionTarget ? Boolean(starredMessageIds[messageActionTarget.messageId]) : false}
       />
 
@@ -16632,21 +14568,13 @@ function MessageMediaPreview({
           </>
         ) : null}
         {transferLabel ? (
-          <View style={styles.messageMediaProgressOverlay}>
-            <View style={styles.messageMediaProgressCircle}>
-              {isTransferActive ? (
-                <ActivityIndicator color="#FFFFFF" size="small" />
-              ) : (
-                <Feather color="#FFFFFF" name={media.transferStatus === 'failed' ? 'alert-circle' : 'check'} size={17} />
-              )}
-              {isTransferActive && transferProgress > 0 ? (
-                <Text style={styles.messageMediaProgressPercent}>
-                  {Math.round(transferProgress * 100)}
-                </Text>
-              ) : null}
-            </View>
-            <Text style={styles.messageMediaProgressLabel}>{transferLabel}</Text>
-          </View>
+          <MessageMediaTransferOverlay
+            isActive={isTransferActive}
+            isVideo={media.kind === 'video'}
+            label={transferLabel}
+            progress={transferProgress}
+            status={media.transferStatus || null}
+          />
         ) : null}
       </Pressable>
       );
@@ -16858,22 +14786,57 @@ function MessageMediaAlbumPreview({
       })}
 
       {transferLabel ? (
-        <View style={styles.messageMediaProgressOverlay}>
-          <View style={styles.messageAlbumProgressPill}>
-            {isTransferActive ? (
-              <ActivityIndicator color="#475569" size="small" />
-            ) : (
-              <Feather color="#475569" name="download" size={17} />
-            )}
-            <View>
-              <Text style={styles.messageAlbumProgressTitle}>{formatByteCount(getMediaItemsSize(mediaItems))}</Text>
-              <Text style={styles.messageAlbumProgressSubtitle}>
-                {transferLabel}{isTransferActive && transferProgress > 0 ? ` ${Math.round(transferProgress * 100)}%` : ''}
-              </Text>
-            </View>
-          </View>
-        </View>
+        <MessageMediaTransferOverlay
+          isActive={isTransferActive}
+          isVideo={mediaItems.some((media) => media.kind === 'video')}
+          label={transferLabel}
+          progress={transferProgress}
+          status={mediaItems.find((media) => media.transferStatus)?.transferStatus || null}
+        />
       ) : null}
+    </View>
+  );
+}
+
+function MessageMediaTransferOverlay({
+  isActive,
+  isVideo,
+  label,
+  progress,
+  status
+}: {
+  isActive: boolean;
+  isVideo: boolean;
+  label: string;
+  progress: number;
+  status: ChatMediaAttachment['transferStatus'] | null;
+}) {
+  const safeProgress = Math.max(0, Math.min(progress || 0, 1));
+  const progressValue = Math.max(1, Math.round(safeProgress * 100));
+  const shouldShowPercent = isActive && safeProgress > 0;
+  const iconName: FeatherIconName = status === 'failed'
+    ? 'alert-circle'
+    : isActive && isVideo
+      ? 'square'
+      : isActive
+        ? 'loader'
+        : status === 'available'
+          ? 'check'
+          : 'download';
+
+  return (
+    <View style={styles.messageMediaProgressOverlay}>
+      <View style={styles.messageMediaProgressCircle}>
+        {isActive && !isVideo ? (
+          <ActivityIndicator color="#64748B" size="small" />
+        ) : (
+          <Feather color="#64748B" name={iconName} size={isActive && isVideo ? 15 : 18} />
+        )}
+        {shouldShowPercent ? (
+          <Text style={styles.messageMediaProgressPercent}>{progressValue}</Text>
+        ) : null}
+      </View>
+      <Text style={styles.messageMediaProgressLabel}>{label}</Text>
     </View>
   );
 }
@@ -16922,15 +14885,16 @@ function MessageBubble({
   const reactionBadgeScale = useRef(new Animated.Value(reactionBadgeLabel ? 1 : 0.82)).current;
   const swipeTranslateX = useRef(new Animated.Value(0)).current;
   const isDark = appTheme.isDark;
-  const sentBubbleColor = isDark ? '#005C4B' : '#0F766E';
+  const sentBubbleColor = isDark ? '#005C4B' : '#D9FDD3';
   const receivedBubbleColor = isDark ? '#1F1F1F' : appTheme.colors.surfaceElevated;
   const bubbleColor = message.isMine ? sentBubbleColor : receivedBubbleColor;
-  const bubbleTextColor = message.isMine || isDark ? '#FFFFFF' : appTheme.colors.ink;
-  const bubbleMetaColor = message.isMine || isDark ? 'rgba(255, 255, 255, 0.68)' : appTheme.colors.muted;
-  const bubbleForwardedColor = message.isMine || isDark ? 'rgba(255, 255, 255, 0.72)' : appTheme.colors.muted;
-  const bubbleReadStatusColor = message.isMine || isDark ? '#7DD3FC' : '#2563EB';
-  const bubbleDeliveredStatusColor = message.isMine || isDark ? '#A7F3D0' : '#F97316';
-  const bubbleQueuedStatusColor = message.isMine || isDark ? '#FCA5A5' : '#DC2626';
+  const isLightMineBubble = message.isMine && !isDark;
+  const bubbleTextColor = isLightMineBubble ? '#111827' : message.isMine || isDark ? '#FFFFFF' : appTheme.colors.ink;
+  const bubbleMetaColor = isLightMineBubble ? 'rgba(17, 24, 39, 0.56)' : message.isMine || isDark ? 'rgba(255, 255, 255, 0.68)' : appTheme.colors.muted;
+  const bubbleForwardedColor = isLightMineBubble ? 'rgba(17, 24, 39, 0.58)' : message.isMine || isDark ? 'rgba(255, 255, 255, 0.72)' : appTheme.colors.muted;
+  const bubbleReadStatusColor = message.isMine ? '#0EA5E9' : '#2563EB';
+  const bubbleDeliveredStatusColor = message.isMine ? '#059669' : '#F97316';
+  const bubbleQueuedStatusColor = message.isMine ? '#DC2626' : '#DC2626';
   const panResponder = useMemo(() => PanResponder.create({
     onMoveShouldSetPanResponder: (_event, gestureState) =>
       !isSelectable &&
@@ -17318,7 +15282,6 @@ function MessageActionOverlay({
   onReact,
   onReply,
   onStar,
-  onTranslate,
   starred
 }: {
   contactName: string;
@@ -17332,29 +15295,34 @@ function MessageActionOverlay({
   onReact: (message: ChatMessage, reaction: string) => void;
   onReply: (message: ChatMessage) => void;
   onStar: (message: ChatMessage) => void;
-  onTranslate: (message: ChatMessage) => void;
   starred: boolean;
 }) {
-  const [isEmojiPickerOpen, setIsEmojiPickerOpen] = useState(false);
-
-  useEffect(() => {
-    setIsEmojiPickerOpen(false);
-  }, [message?.messageId]);
-
   if (!message) {
     return null;
   }
 
   const messagePreview = getChatMessagePreview(message) || 'Message';
   const messageAuthor = message.isMine ? 'You' : contactName || 'Contact';
-  const openEmojiPicker = () => {
-    Keyboard.dismiss();
-    setIsEmojiPickerOpen(true);
-  };
+  const previewBubbleColor = message.isMine ? '#DCFCE7' : '#FFFFFF';
+  const previewTextColor = '#0F172A';
+  const visualMedia = getMessageMediaItems(message).find((media) =>
+    media.kind === 'image' || media.kind === 'video'
+  ) || null;
+  const visualMediaPreviewUri = getMediaPreviewUri(visualMedia);
+  const visualMediaLabel = visualMedia?.kind === 'video' ? 'Video' : visualMedia?.kind === 'image' ? 'Photo' : '';
+  const captionText = message.text.trim();
 
   return (
-    <Modal animationType="none" transparent visible onRequestClose={onDismiss}>
+    <Modal
+      animationType="none"
+      hardwareAccelerated
+      onRequestClose={onDismiss}
+      statusBarTranslucent
+      transparent
+      visible
+    >
       <View style={styles.messageActionOverlay}>
+        <BlurView intensity={34} style={styles.messageActionBlurBackdrop} tint="light" />
         <View style={styles.messageActionFastBackdrop} />
         <Pressable
           accessibilityLabel="Close message actions"
@@ -17399,21 +15367,67 @@ function MessageActionOverlay({
                     </Pressable>
                   );
                 })}
-
                 <Pressable
-                  accessibilityLabel="Open all reactions"
+                  accessibilityLabel="More reactions"
                   accessibilityRole="button"
-                  onPress={openEmojiPicker}
-                  style={({ pressed }) => [styles.messageReactionMoreButton, pressed && styles.pressed]}
+                  onPress={onDismiss}
+                  style={({ pressed }) => [
+                    styles.messageReactionMoreButton,
+                    pressed && styles.messageReactionButtonPressed
+                  ]}
                 >
                   <Feather color="#64748B" name="plus" size={20} />
                 </Pressable>
               </ScrollView>
             </View>
 
-            <View style={styles.messageActionPreviewCard}>
-              <Text numberOfLines={1} style={styles.messageActionPreviewAuthor}>{messageAuthor}</Text>
-              <Text numberOfLines={2} style={styles.messageActionPreviewText}>{messagePreview}</Text>
+            <View
+              style={[
+                styles.messageActionPreviewCard,
+                message.isMine ? styles.messageActionPreviewCardMine : styles.messageActionPreviewCardTheirs,
+                { backgroundColor: previewBubbleColor }
+              ]}
+            >
+              {!message.isMine ? (
+                <Text numberOfLines={1} style={styles.messageActionPreviewAuthor}>{messageAuthor}</Text>
+              ) : null}
+              {visualMedia ? (
+                <View style={styles.messageActionMediaPreviewFrame}>
+                  {visualMediaPreviewUri ? (
+                    <Image
+                      resizeMode="cover"
+                      source={{ uri: visualMediaPreviewUri }}
+                      style={styles.messageActionMediaPreviewImage}
+                    />
+                  ) : (
+                    <View style={styles.messageActionMediaPreviewPlaceholder}>
+                      <Ionicons
+                        color="#94A3B8"
+                        name={visualMedia.kind === 'video' ? 'play-circle-outline' : 'image-outline'}
+                        size={32}
+                      />
+                    </View>
+                  )}
+                  {visualMedia.kind === 'video' ? (
+                    <View style={styles.messageActionMediaPreviewPlay}>
+                      <Ionicons color="#FFFFFF" name="play" size={22} />
+                    </View>
+                  ) : null}
+                  <View style={styles.messageActionMediaPreviewBadge}>
+                    <Feather
+                      color="#FFFFFF"
+                      name={visualMedia.kind === 'video' ? 'video' : 'image'}
+                      size={11}
+                    />
+                    <Text style={styles.messageActionMediaPreviewBadgeText}>
+                      {visualMedia.kind === 'video' ? formatMediaDuration(visualMedia.durationMs) : visualMediaLabel}
+                    </Text>
+                  </View>
+                </View>
+              ) : null}
+              <Text numberOfLines={visualMedia ? 2 : 3} style={[styles.messageActionPreviewText, { color: previewTextColor }]}>
+                {visualMedia ? captionText || visualMediaLabel : messagePreview}
+              </Text>
               <Text numberOfLines={1} style={styles.messageActionPreviewMeta}>{formatMessageTime(message.sentAt)}</Text>
             </View>
 
@@ -17421,78 +15435,14 @@ function MessageActionOverlay({
               <MessageActionRow icon="corner-up-left" label="Reply" onPress={() => onReply(message)} />
               <MessageActionRow icon="corner-up-right" label="Forward" onPress={() => onForward(message)} />
               <MessageActionRow icon="copy" label="Copy" onPress={() => onCopy(message)} />
-              <MessageActionRow icon="globe" label="Translate" onPress={() => onTranslate(message)} />
               <MessageActionRow icon="info" label="Info" onPress={() => onInfo(message)} />
               <MessageActionRow icon="star" label={starred ? 'Unstar' : 'Star'} onPress={() => onStar(message)} />
               <MessageActionRow destructive icon="trash-2" label="Delete" onPress={() => onDelete(message)} />
-              <View style={styles.messageActionSeparator} />
-              <MessageActionRow icon="smile" label="More..." onPress={openEmojiPicker} />
+              <View style={styles.messageActionDivider} />
+              <MessageActionRow icon="more-horizontal" label="More..." onPress={onDismiss} />
             </View>
           </View>
         </View>
-
-        {isEmojiPickerOpen ? (
-          <EmojiPicker
-            allowMultipleSelections={false}
-            categoryPosition="bottom"
-            defaultHeight="55%"
-            emojiSize={28}
-            enableRecentlyUsed
-            enableSearchBar
-            expandable
-            onClose={() => setIsEmojiPickerOpen(false)}
-            onEmojiSelected={(emoji: EmojiType) => {
-              setIsEmojiPickerOpen(false);
-              onReact(message, emoji.emoji);
-            }}
-            open={isEmojiPickerOpen}
-            selectedEmojis={currentUserReactions}
-            styles={{
-              category: {
-                container: styles.emojiKeyboardCategoryContainer,
-                icon: styles.emojiKeyboardCategoryIcon
-              },
-              container: styles.emojiKeyboardContainer,
-              emoji: {
-                selected: styles.emojiKeyboardSelectedEmoji
-              },
-              header: styles.emojiKeyboardHeader,
-              knob: styles.emojiKeyboardKnob,
-              searchBar: {
-                container: styles.emojiKeyboardSearchContainer,
-                text: styles.emojiKeyboardSearchText
-              }
-            }}
-            theme={{
-              backdrop: 'rgba(15, 23, 42, 0.18)',
-              category: {
-                container: '#F1F5F9',
-                containerActive: '#E2E8F0',
-                icon: '#64748B',
-                iconActive: colors.primary
-              },
-              container: '#FFFFFF',
-              customButton: {
-                background: '#F1F5F9',
-                backgroundPressed: '#E2E8F0',
-                icon: '#64748B',
-                iconPressed: colors.primary
-              },
-              emoji: {
-                selected: '#DDF6EF'
-              },
-              header: '#64748B',
-              knob: '#A8B0BC',
-              search: {
-                background: '#F8FAFC',
-                icon: '#64748B',
-                placeholder: '#64748B',
-                text: colors.ink
-              },
-              skinTonesContainer: '#F1F5F9'
-            }}
-          />
-        ) : null}
       </View>
     </Modal>
   );
@@ -17509,8 +15459,6 @@ function MessageActionRow({
   label: string;
   onPress: () => void;
 }) {
-  const appTheme = useAppTheme();
-
   return (
     <Pressable
       accessibilityRole="button"
@@ -17523,262 +15471,6 @@ function MessageActionRow({
         destructive && styles.messageActionLabelDestructive
       ]}>{label}</Text>
     </Pressable>
-  );
-}
-
-function MessageTranslationModal({
-  downloadedLanguageCodes,
-  languageOptions,
-  onChangeLanguages,
-  onClose,
-  onDownloadLanguage,
-  state
-}: {
-  downloadedLanguageCodes: ChatTranscriptLanguageCode[];
-  languageOptions: TranscriptLanguageOption[];
-  onChangeLanguages: (input: {
-    sourceLanguageCode?: ChatTranscriptLanguageCode;
-    targetLanguageCode?: ChatTranscriptLanguageCode;
-  }) => void;
-  onClose: () => void;
-  onDownloadLanguage: (code: ChatTranscriptLanguageCode) => void;
-  state: MessageTranslationModalState | null;
-}) {
-  const insets = useSafeAreaInsets();
-  const [languagePickerMode, setLanguagePickerMode] = useState<'source' | 'target' | null>(null);
-
-  useEffect(() => {
-    if (!state) {
-      setLanguagePickerMode(null);
-    }
-  }, [state]);
-
-  if (!state) {
-    return null;
-  }
-
-  const installedLanguageCodes = new Set(downloadedLanguageCodes);
-  const sourceOption = getTranslationLanguageOption(languageOptions, state.sourceLanguageCode);
-  const targetOption = getTranslationLanguageOption(languageOptions, state.targetLanguageCode);
-  const pickerTitle = languagePickerMode === 'source' ? 'Translate from' : 'Translate to';
-  const availableLanguages = languageOptions.filter((option) =>
-    installedLanguageCodes.has(option.code) ||
-    option.code === state.sourceLanguageCode ||
-    option.code === state.targetLanguageCode
-  );
-  const downloadableLanguages = languageOptions.filter((option) => !installedLanguageCodes.has(option.code));
-
-  return (
-    <Modal animationType="slide" presentationStyle="overFullScreen" transparent visible onRequestClose={onClose}>
-      <View style={styles.translationModalRoot}>
-        <View style={[
-          styles.translationModalSheet,
-          {
-            paddingBottom: Math.max(insets.bottom, 16),
-            paddingTop: Math.max(insets.top, 14)
-          }
-        ]}>
-          <View style={styles.translationModalHeader}>
-            <View style={styles.translationModalHeaderSpacer} />
-            <Text style={styles.translationModalTitle}>Translation</Text>
-            <Pressable
-              accessibilityLabel="Close translation"
-              accessibilityRole="button"
-              onPress={onClose}
-              style={({ pressed }) => [styles.translationCloseButton, pressed && styles.pressed]}
-            >
-              <Feather color="#0F172A" name="x" size={28} />
-            </Pressable>
-          </View>
-
-          <ScrollView
-            bounces={false}
-            contentContainerStyle={styles.translationModalContent}
-            keyboardShouldPersistTaps="handled"
-            showsVerticalScrollIndicator={false}
-          >
-            <View style={styles.translationLanguageHeader}>
-              <Text style={styles.translationLanguageLabel}>Translate from</Text>
-              <Text style={styles.translationLanguageLabel}>Translate to</Text>
-            </View>
-
-            <View style={styles.translationLanguageRow}>
-              <Pressable
-                accessibilityLabel="Choose source language"
-                accessibilityRole="button"
-                onPress={() => setLanguagePickerMode('source')}
-                style={({ pressed }) => [styles.translationLanguagePill, pressed && styles.pressed]}
-              >
-                <Text numberOfLines={1} style={styles.translationLanguagePillText}>
-                  {getCompactLanguageLabel(sourceOption)}
-                </Text>
-              </Pressable>
-              <Pressable
-                accessibilityLabel="Swap translation languages"
-                accessibilityRole="button"
-                onPress={() => onChangeLanguages({
-                  sourceLanguageCode: state.targetLanguageCode,
-                  targetLanguageCode: state.sourceLanguageCode
-                })}
-                style={({ pressed }) => [styles.translationSwapButton, pressed && styles.pressed]}
-              >
-                <Feather color="#0F172A" name="repeat" size={21} />
-              </Pressable>
-              <Pressable
-                accessibilityLabel="Choose target language"
-                accessibilityRole="button"
-                onPress={() => setLanguagePickerMode('target')}
-                style={({ pressed }) => [styles.translationLanguagePill, pressed && styles.pressed]}
-              >
-                <Text numberOfLines={1} style={styles.translationLanguagePillText}>
-                  {getCompactLanguageLabel(targetOption)}
-                </Text>
-              </Pressable>
-            </View>
-
-            {languagePickerMode ? (
-              <View style={styles.translationLanguagePicker}>
-                <View style={styles.translationLanguagePickerHeader}>
-                  <Text style={styles.translationLanguagePickerTitle}>{pickerTitle}</Text>
-                  <Pressable
-                    accessibilityLabel="Close language picker"
-                    accessibilityRole="button"
-                    onPress={() => setLanguagePickerMode(null)}
-                    style={({ pressed }) => [styles.translationLanguagePickerClose, pressed && styles.pressed]}
-                  >
-                    <Feather color="#64748B" name="chevron-up" size={19} />
-                  </Pressable>
-                </View>
-
-                <View style={styles.translationLanguageSection}>
-                  <Text style={styles.translationLanguageSectionTitle}>Available on this device</Text>
-                  {availableLanguages.map((option) => {
-                    const isSelected = option.code === (
-                      languagePickerMode === 'source' ? state.sourceLanguageCode : state.targetLanguageCode
-                    );
-
-                    return (
-                      <Pressable
-                        accessibilityRole="button"
-                        key={`${languagePickerMode}-${option.code}`}
-                        onPress={() => {
-                          onChangeLanguages(languagePickerMode === 'source'
-                            ? { sourceLanguageCode: option.code }
-                            : { targetLanguageCode: option.code });
-                          setLanguagePickerMode(null);
-                        }}
-                        style={({ pressed }) => [
-                          styles.translationLanguageOption,
-                          isSelected && styles.translationLanguageOptionSelected,
-                          pressed && styles.pressed
-                        ]}
-                      >
-                        <View style={styles.translationLanguageOptionText}>
-                          <Text numberOfLines={1} style={styles.translationLanguageOptionName}>{option.label}</Text>
-                          <Text style={styles.translationLanguageOptionStatus}>On this device</Text>
-                        </View>
-                        {isSelected ? <Feather color="#16A34A" name="check-circle" size={19} /> : null}
-                      </Pressable>
-                    );
-                  })}
-                </View>
-
-                {downloadableLanguages.length ? (
-                  <View style={styles.translationLanguageSection}>
-                    <Text style={styles.translationLanguageSectionTitle}>Enable more languages</Text>
-                    {downloadableLanguages.slice(0, 10).map((option) => (
-                      <Pressable
-                        accessibilityLabel={`Enable ${option.label}`}
-                        accessibilityRole="button"
-                        key={`download-${option.code}`}
-                        onPress={() => onDownloadLanguage(option.code)}
-                        style={({ pressed }) => [styles.translationLanguageOption, pressed && styles.pressed]}
-                      >
-                        <View style={styles.translationLanguageOptionText}>
-                          <Text numberOfLines={1} style={styles.translationLanguageOptionName}>{option.label}</Text>
-                          <Text style={styles.translationLanguageOptionStatus}>Tap to enable offline</Text>
-                        </View>
-                        <Feather color="#2563EB" name="plus-circle" size={19} />
-                      </Pressable>
-                    ))}
-                  </View>
-                ) : null}
-              </View>
-            ) : null}
-
-            <View style={styles.translationMessageCard}>
-              <Text style={styles.translationSectionLabel}>Original message</Text>
-              <Text style={styles.translationMessageText}>{state.message.text}</Text>
-              <View style={styles.translationDivider} />
-              <View style={styles.translationResultHeader}>
-                <Text style={styles.translationSectionLabel}>Translated message</Text>
-                {state.isLoading ? <ActivityIndicator color="#0F766E" size="small" /> : null}
-              </View>
-              <Text style={[
-                styles.translationMessageText,
-                !state.translation?.translatedText && styles.translationPendingText
-              ]}>
-                {state.translation?.translatedText || (state.isLoading ? 'Translating...' : 'Translation unavailable')}
-              </Text>
-            </View>
-
-            <Text style={styles.translationPrivacyText}>
-              Your Synzapp messages stay encrypted in chat. Translation runs on this device with Synzapp Offline AI, so message text is not sent to OpenAI or another cloud translation provider.
-            </Text>
-          </ScrollView>
-        </View>
-      </View>
-    </Modal>
-  );
-}
-
-function MessageTranslationErrorModal({
-  alert,
-  onClose,
-  onRetry
-}: {
-  alert: MessageTranslationAlertState | null;
-  onClose: () => void;
-  onRetry: () => void;
-}) {
-  if (!alert) {
-    return null;
-  }
-
-  return (
-    <Modal animationType="fade" presentationStyle="overFullScreen" transparent visible onRequestClose={onClose}>
-      <View style={styles.translationAlertRoot}>
-        <View style={styles.translationAlertCard}>
-          <View style={styles.translationAlertIcon}>
-            <Feather color="#DC2626" name="alert-triangle" size={24} />
-          </View>
-          <View style={styles.translationAlertContent}>
-            <Text style={styles.translationAlertEyebrow}>Translation needs attention</Text>
-            <Text style={styles.translationAlertTitle}>Unable to translate this message</Text>
-            <Text style={styles.translationAlertMessage}>{alert.message}</Text>
-            <View style={styles.translationAlertActions}>
-              <Pressable
-                accessibilityLabel="Close translation alert"
-                accessibilityRole="button"
-                onPress={onClose}
-                style={({ pressed }) => [styles.translationAlertSecondaryButton, pressed && styles.pressed]}
-              >
-                <Text style={styles.translationAlertSecondaryText}>Close</Text>
-              </Pressable>
-              <Pressable
-                accessibilityLabel="Retry translation"
-                accessibilityRole="button"
-                onPress={onRetry}
-                style={({ pressed }) => [styles.translationAlertPrimaryButton, pressed && styles.pressed]}
-              >
-                <Feather color="#FFFFFF" name="refresh-cw" size={15} />
-                <Text style={styles.translationAlertPrimaryText}>Retry</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      </View>
-    </Modal>
   );
 }
 
@@ -17840,6 +15532,79 @@ function NativeOptionPickerModal({ picker }: { picker: NativeOptionPickerState |
           >
             <Text style={styles.nativeOptionCancelText}>Cancel</Text>
           </Pressable>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function MediaPreparationStatusModal({
+  error,
+  onDismissError,
+  progress
+}: {
+  error: string | null;
+  onDismissError: () => void;
+  progress: IPhonePhotoPreparationProgress | null;
+}) {
+  const isPreparing = Boolean(progress);
+  const isVisible = isPreparing || Boolean(error);
+  const clampedProgress = Math.max(0.05, Math.min(progress?.progress || 0, 1));
+
+  return (
+    <Modal
+      animationType="fade"
+      hardwareAccelerated
+      onRequestClose={error ? onDismissError : undefined}
+      statusBarTranslucent
+      transparent
+      visible={isVisible}
+    >
+      <View style={styles.mediaPreparationModalRoot}>
+        <View accessibilityViewIsModal style={styles.mediaPreparationCard}>
+          <View style={[
+            styles.mediaPreparationIcon,
+            error ? styles.mediaPreparationIconError : styles.mediaPreparationIconActive
+          ]}>
+            {error ? (
+              <Feather color="#B91C1C" name="alert-triangle" size={22} />
+            ) : (
+              <ActivityIndicator color="#0F766E" size="small" />
+            )}
+          </View>
+          <View style={styles.mediaPreparationContent}>
+            <Text style={styles.mediaPreparationEyebrow}>
+              {error ? 'Media needs attention' : 'Preparing iPhone photo'}
+            </Text>
+            <Text style={styles.mediaPreparationTitle}>
+              {error ? 'Unable to prepare this photo' : 'Converting photo for secure sending'}
+            </Text>
+            <Text style={styles.mediaPreparationBody}>
+              {error || `${progress?.fileName || 'iPhone photo'} is being prepared as a secure JPEG copy.`}
+            </Text>
+            {error ? (
+              <Pressable
+                accessibilityRole="button"
+                onPress={onDismissError}
+                style={({ pressed }) => [
+                  styles.mediaPreparationButton,
+                  pressed && styles.pressed
+                ]}
+              >
+                <Text style={styles.mediaPreparationButtonText}>OK</Text>
+              </Pressable>
+            ) : (
+              <View style={styles.mediaPreparationProgressBlock}>
+                <View style={styles.mediaPreparationProgressTrack}>
+                  <View style={[
+                    styles.mediaPreparationProgressFill,
+                    { width: `${Math.round(clampedProgress * 100)}%` }
+                  ]} />
+                </View>
+                <Text style={styles.mediaPreparationProgressText}>{Math.round(clampedProgress * 100)}%</Text>
+              </View>
+            )}
+          </View>
         </View>
       </View>
     </Modal>
@@ -18402,6 +16167,7 @@ function ChatsTab({
   onOpenSpam,
   onSearchChange,
   onToggleFavoriteChat,
+  onTogglePinChat,
   profilePhotoHeaders,
   search,
   spamCount,
@@ -18422,6 +16188,7 @@ function ChatsTab({
   onOpenSpam: () => void;
   onSearchChange: (value: string) => void;
   onToggleFavoriteChat: (chat: ChatItem) => void;
+  onTogglePinChat: (chat: ChatItem) => void;
   profilePhotoHeaders?: Record<string, string>;
   search: string;
   spamCount: number;
@@ -18437,7 +16204,7 @@ function ChatsTab({
       ]}>
         <ChatSearchBar
           onChangeText={onSearchChange}
-          placeholder="Ask Synzapp AI or search"
+          placeholder="Search chats"
           value={search}
         />
 
@@ -18527,6 +16294,7 @@ function ChatsTab({
           onMore={() => onMoreChat(chat)}
           onOpen={() => onOpenChat(chat)}
           onToggleFavorite={() => onToggleFavoriteChat(chat)}
+          onTogglePin={() => onTogglePinChat(chat)}
           profilePhotoHeaders={profilePhotoHeaders}
         />
       ))}
@@ -19733,6 +17501,7 @@ function ArchivedChatsScreen({
   onOpenChat,
   onSearchChange,
   onToggleFavoriteChat,
+  onTogglePinChat,
   onToggleSelection,
   onUnarchiveSelected,
   profilePhotoHeaders,
@@ -19751,6 +17520,7 @@ function ArchivedChatsScreen({
   onOpenChat: (chat: ChatItem) => void;
   onSearchChange: (value: string) => void;
   onToggleFavoriteChat: (chat: ChatItem) => void;
+  onTogglePinChat: (chat: ChatItem) => void;
   onToggleSelection: (chat: ChatItem) => void;
   onUnarchiveSelected: () => void;
   profilePhotoHeaders?: Record<string, string>;
@@ -19805,6 +17575,7 @@ function ArchivedChatsScreen({
             onMore={() => onMoreChat(chat)}
             onOpen={() => onOpenChat(chat)}
             onToggleFavorite={() => onToggleFavoriteChat(chat)}
+            onTogglePin={() => onTogglePinChat(chat)}
             profilePhotoHeaders={profilePhotoHeaders}
           />
         )
@@ -19874,6 +17645,9 @@ function ArchiveSelectableChatRow({
       <View style={styles.chatMeta}>
         {chat.lastMessageAt ? (
           <Text style={styles.chatTime}>{formatChatListTime(chat.lastMessageAt)}</Text>
+        ) : null}
+        {chat.isPinned ? (
+          <Feather color={colors.muted} name="map-pin" size={14} />
         ) : null}
         {chat.unreadCount > 0 ? (
           <View style={styles.unreadBadge}>
@@ -23459,10 +21233,8 @@ function SettingsList({
   onOpenGroups,
   onOpenKeyResults,
   onOpenMyDevices,
-  onOpenOfflineAi,
   onOpenRolePermissions,
   onOpenSecurity,
-  offlineAiState,
   themePreference
 }: {
   canManageCompanyProfile: boolean;
@@ -23478,10 +21250,8 @@ function SettingsList({
   onOpenGroups: () => void;
   onOpenKeyResults: () => void;
   onOpenMyDevices: () => void;
-  onOpenOfflineAi: () => void;
   onOpenRolePermissions: () => void;
   onOpenSecurity: () => void;
-  offlineAiState: OfflineAiModelState | null;
   themePreference: AppThemePreference;
 }) {
   const preferenceItems: SettingsListEntry[] = [
@@ -23568,12 +21338,6 @@ function SettingsList({
       onPress: onOpenChatBackup,
       subtitle: 'Encrypted chat history',
       title: 'Chat backup'
-    },
-    {
-      icon: 'cpu',
-      onPress: onOpenOfflineAi,
-      subtitle: getSettingsOfflineAiSubtitle(offlineAiState),
-      title: 'Synzapp AI'
     }
   ];
 
@@ -23584,24 +21348,6 @@ function SettingsList({
       <SettingsListCard items={deviceItems} />
     </View>
   );
-}
-
-function getSettingsOfflineAiSubtitle(state: OfflineAiModelState | null): string {
-  if (state?.status === 'installed') {
-    return `Offline AI ready - ${formatOfflineAiBytes(state.downloadedBytes)} on this device`;
-  }
-
-  if (state?.status === 'downloading') {
-    const progressPercent = Math.round(Math.max(0, Math.min(state.progress || 0, 1)) * 100);
-
-    return `Installing on this device - ${progressPercent}%`;
-  }
-
-  if (state?.status === 'failed') {
-    return 'Install needs attention';
-  }
-
-  return `Install secure offline AI - ${formatOfflineAiBytes(synzappOfflineAiModel.sizeBytes)}`;
 }
 
 function SettingsListCard({ items }: { items: SettingsListEntry[] }) {
@@ -25398,6 +23144,7 @@ function ChatRow({
   onMore,
   onOpen,
   onToggleFavorite,
+  onTogglePin,
   profilePhotoHeaders
 }: {
   chat: ChatItem;
@@ -25405,12 +23152,17 @@ function ChatRow({
   onMore: () => void;
   onOpen: () => void;
   onToggleFavorite: () => void;
+  onTogglePin: () => void;
   profilePhotoHeaders?: Record<string, string>;
 }) {
   const appTheme = useAppTheme();
   const translateX = useRef(new Animated.Value(0)).current;
   const offsetRef = useRef(0);
-  const canSwipe = canUseChatListActions(chat);
+  const canSwipe = canSwipeChatRow(chat);
+  const canUseLifecycleActions = canUseChatListActions(chat);
+  const rightSwipeWidth = canUseLifecycleActions
+    ? CHAT_ROW_RIGHT_ACTION_WIDTH
+    : CHAT_ROW_RIGHT_ACTION_WIDTH / 2;
 
   const closeSwipe = () => {
     offsetRef.current = 0;
@@ -25450,7 +23202,7 @@ function ChatRow({
     },
     onPanResponderMove: (_event, gestureState) => {
       const nextValue = Math.max(
-        -CHAT_ROW_RIGHT_ACTION_WIDTH,
+        -rightSwipeWidth,
         Math.min(CHAT_ROW_LEFT_ACTION_WIDTH, offsetRef.current + gestureState.dx)
       );
 
@@ -25461,7 +23213,7 @@ function ChatRow({
       const intendedRight = gestureState.dx >= CHAT_ROW_SWIPE_TRIGGER || gestureState.vx >= 0.18;
 
       if (intendedLeft) {
-        snapSwipe(-CHAT_ROW_RIGHT_ACTION_WIDTH);
+        snapSwipe(-rightSwipeWidth);
         return;
       }
 
@@ -25475,11 +23227,11 @@ function ChatRow({
     onPanResponderTerminate: closeSwipe,
     onPanResponderTerminationRequest: () => false,
     onStartShouldSetPanResponder: () => false
-  }), [canSwipe, translateX]);
+  }), [canSwipe, rightSwipeWidth, translateX]);
 
   useEffect(() => {
     closeSwipe();
-  }, [chat.contactId, chat.isArchived, chat.isFavorite]);
+  }, [chat.contactId, chat.isArchived, chat.isFavorite, chat.isPinned]);
 
   const runSwipeAction = (action: () => void) => {
     closeSwipe();
@@ -25502,29 +23254,45 @@ function ChatRow({
             <Feather color="#FFFFFF" name="star" size={21} />
             <Text style={styles.chatSwipeActionText}>{chat.isFavorite ? 'Saved' : 'Favorite'}</Text>
           </Pressable>
+          <Pressable
+            accessibilityLabel={chat.isPinned ? 'Unpin chat' : 'Pin chat'}
+            accessibilityRole="button"
+            onPress={() => runSwipeAction(onTogglePin)}
+            style={({ pressed }) => [styles.chatSwipeAction, styles.chatSwipePinAction, pressed && styles.pressed]}
+          >
+            <Feather color="#FFFFFF" name="map-pin" size={20} />
+            <Text style={styles.chatSwipeActionText}>{chat.isPinned ? 'Pinned' : 'Pin'}</Text>
+          </Pressable>
         </View>
       ) : null}
 
       {canSwipe ? (
-        <View style={styles.chatSwipeRightActions}>
+        <View style={[styles.chatSwipeRightActions, { width: rightSwipeWidth }]}>
           <Pressable
             accessibilityLabel="More chat actions"
             accessibilityRole="button"
             onPress={() => runSwipeAction(onMore)}
-            style={({ pressed }) => [styles.chatSwipeAction, styles.chatSwipeMoreAction, pressed && styles.pressed]}
+            style={({ pressed }) => [
+              styles.chatSwipeAction,
+              styles.chatSwipeMoreAction,
+              !canUseLifecycleActions && { width: rightSwipeWidth },
+              pressed && styles.pressed
+            ]}
           >
             <Feather color="#FFFFFF" name="more-horizontal" size={21} />
             <Text style={styles.chatSwipeActionText}>More</Text>
           </Pressable>
-          <Pressable
-            accessibilityLabel={chat.isArchived ? 'Unarchive chat' : 'Archive chat'}
-            accessibilityRole="button"
-            onPress={() => runSwipeAction(onArchive)}
-            style={({ pressed }) => [styles.chatSwipeAction, styles.chatSwipeArchiveAction, pressed && styles.pressed]}
-          >
-            <Feather color="#FFFFFF" name={chat.isArchived ? 'inbox' : 'archive'} size={20} />
-            <Text style={styles.chatSwipeActionText}>{chat.isArchived ? 'Unarchive' : 'Archive'}</Text>
-          </Pressable>
+          {canUseLifecycleActions ? (
+            <Pressable
+              accessibilityLabel={chat.isArchived ? 'Unarchive chat' : 'Archive chat'}
+              accessibilityRole="button"
+              onPress={() => runSwipeAction(onArchive)}
+              style={({ pressed }) => [styles.chatSwipeAction, styles.chatSwipeArchiveAction, pressed && styles.pressed]}
+            >
+              <Feather color="#FFFFFF" name={chat.isArchived ? 'inbox' : 'archive'} size={20} />
+              <Text style={styles.chatSwipeActionText}>{chat.isArchived ? 'Unarchive' : 'Archive'}</Text>
+            </Pressable>
+          ) : null}
         </View>
       ) : null}
 
@@ -25593,6 +23361,9 @@ function ChatRow({
               <Text style={[styles.chatTime, { color: appTheme.colors.muted }]}>
                 {formatChatListTime(chat.lastMessageAt)}
               </Text>
+            ) : null}
+            {chat.isPinned ? (
+              <Feather color={appTheme.colors.muted} name="map-pin" size={14} />
             ) : null}
             {chat.unreadCount > 0 ? (
               <View style={styles.unreadBadge}>
@@ -26091,7 +23862,8 @@ function ChatMoreActionsModal({
   onClose,
   onDelete,
   onOpenInfo,
-  onToggleFavorite
+  onToggleFavorite,
+  onTogglePin
 }: {
   chat: ChatItem | null;
   onArchive: (chat: ChatItem) => void;
@@ -26100,12 +23872,14 @@ function ChatMoreActionsModal({
   onDelete: (chat: ChatItem) => void;
   onOpenInfo: (chat: ChatItem) => void;
   onToggleFavorite: (chat: ChatItem) => void;
+  onTogglePin: (chat: ChatItem) => void;
 }) {
   if (!chat) {
     return null;
   }
 
   const infoLabel = chat.chatType === 'GROUP' ? 'Group info' : 'Contact Info';
+  const canUseLifecycleActions = canUseChatListActions(chat);
 
   return (
     <Modal
@@ -26147,24 +23921,33 @@ function ChatMoreActionsModal({
               onPress={() => onToggleFavorite(chat)}
             />
             <ChatMoreActionRow
-              icon={chat.isArchived ? 'inbox' : 'archive'}
-              label={chat.isArchived ? 'Unarchive chat' : 'Archive chat'}
-              onPress={() => {
-                onArchive(chat);
-                onClose();
-              }}
+              icon="map-pin"
+              label={chat.isPinned ? 'Unpin chat' : 'Pin chat'}
+              onPress={() => onTogglePin(chat)}
             />
-            <ChatMoreActionRow
-              icon="trash"
-              label="Clear Chat"
-              onPress={() => onClear(chat)}
-            />
-            <ChatMoreActionRow
-              destructive
-              icon="trash-2"
-              label="Delete"
-              onPress={() => onDelete(chat)}
-            />
+            {canUseLifecycleActions ? (
+              <>
+                <ChatMoreActionRow
+                  icon={chat.isArchived ? 'inbox' : 'archive'}
+                  label={chat.isArchived ? 'Unarchive chat' : 'Archive chat'}
+                  onPress={() => {
+                    onArchive(chat);
+                    onClose();
+                  }}
+                />
+                <ChatMoreActionRow
+                  icon="trash"
+                  label="Clear Chat"
+                  onPress={() => onClear(chat)}
+                />
+                <ChatMoreActionRow
+                  destructive
+                  icon="trash-2"
+                  label="Delete"
+                  onPress={() => onDelete(chat)}
+                />
+              </>
+            ) : null}
           </View>
         </View>
       </View>
@@ -27488,17 +25271,6 @@ function getErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
-function getTranslationLanguageOption(
-  options: TranscriptLanguageOption[],
-  code: ChatTranscriptLanguageCode
-): TranscriptLanguageOption {
-  return options.find((option) => option.code === code) || {
-    code,
-    label: code,
-    status: 'available'
-  };
-}
-
 function getCompactLanguageLabel(option: TranscriptLanguageOption): string {
   return option.label.replace(/\s*\([^)]*\)/g, '').trim() || option.label;
 }
@@ -27879,27 +25651,9 @@ function applyMediaReviewQualityMode(
   media: LocalChatMediaInput,
   qualityMode: ChatMediaQualityMode
 ): LocalChatMediaInput {
-  if (
-    qualityMode === 'hd' &&
-    media.originalUri &&
-    media.originalSizeBytes &&
-    media.originalSizeBytes > 0 &&
-    media.originalSizeBytes <= CHAT_MEDIA_LIMITS[media.kind]
-  ) {
-    return {
-      ...media,
-      contentType: media.originalContentType || media.contentType,
-      height: media.originalHeight || media.height,
-      qualityMode: 'hd',
-      sizeBytes: media.originalSizeBytes,
-      uri: media.originalUri,
-      width: media.originalWidth || media.width
-    };
-  }
-
   return {
     ...media,
-    qualityMode: 'standard'
+    qualityMode
   };
 }
 
@@ -28784,6 +26538,7 @@ function mapChatContactToChatItem(contact: ChatContact): ChatItem {
     isArchived: visibleContact.isArchived === true,
     isDepartmentDefault: visibleContact.isDepartmentDefault === true,
     isFavorite: visibleContact.isFavorite === true,
+    isPinned: visibleContact.isPinned === true,
     isSpam: visibleContact.isSpam === true,
     isOnline: visibleContact.isOnline === true,
     lastMessageAt: visibleContact.lastMessageAt,
@@ -28817,6 +26572,7 @@ function mapChatItemToChatContact(chat: ChatItem): ChatContact {
     isArchived: chat.isArchived === true,
     isDepartmentDefault: chat.isDepartmentDefault === true,
     isFavorite: chat.isFavorite === true,
+    isPinned: chat.isPinned === true,
     isSpam: chat.isSpam === true,
     isOnline: chat.isOnline === true,
     lastMessageAt: chat.lastMessageAt,
@@ -29281,6 +27037,10 @@ function canUseChatListActions(chat: ChatItem): boolean {
 
   return chat.isDepartmentDefault !== true &&
     chat.memberPolicy !== 'DEPARTMENT_PLUS_EXPLICIT';
+}
+
+function canSwipeChatRow(chat: ChatItem): boolean {
+  return chat.status !== 'DELETED' && chat.isSpam !== true;
 }
 
 function filterChatItems(chats: ChatItem[], search: string): ChatItem[] {
@@ -29859,6 +27619,7 @@ function getChatContactListFingerprint(contact: ChatContact): string {
     isArchived: contact.isArchived === true,
     isDepartmentDefault: contact.isDepartmentDefault === true,
     isFavorite: contact.isFavorite === true,
+    isPinned: contact.isPinned === true,
     isSpam: contact.isSpam === true,
     isOnline: contact.isOnline === true,
     lastMessageAt: contact.lastMessageAt || null,
@@ -29898,6 +27659,14 @@ function getChatContactListFingerprint(contact: ChatContact): string {
 }
 
 function compareChatContacts(first: ChatContact, second: ChatContact): number {
+  if (first.isPinned === true && second.isPinned !== true) {
+    return -1;
+  }
+
+  if (second.isPinned === true && first.isPinned !== true) {
+    return 1;
+  }
+
   if (first.lastMessageAt && second.lastMessageAt) {
     return second.lastMessageAt.localeCompare(first.lastMessageAt);
   }
@@ -33188,25 +30957,30 @@ const styles = StyleSheet.create({
   messageMediaProgressOverlay: {
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
-    backgroundColor: 'rgba(15, 23, 42, 0.28)',
+    backgroundColor: 'rgba(15, 23, 42, 0.06)',
     justifyContent: 'center'
   },
   messageMediaProgressCircle: {
     alignItems: 'center',
-    backgroundColor: 'rgba(15, 23, 42, 0.58)',
-    borderColor: 'rgba(255, 255, 255, 0.72)',
-    borderRadius: 25,
-    borderWidth: 1.4,
-    height: 50,
+    backgroundColor: 'rgba(255, 255, 255, 0.94)',
+    borderColor: 'rgba(255, 255, 255, 0.95)',
+    borderRadius: 32,
+    borderWidth: 5,
+    elevation: 7,
+    height: 64,
     justifyContent: 'center',
-    width: 50
+    shadowColor: '#0F172A',
+    shadowOffset: { height: 5, width: 0 },
+    shadowOpacity: 0.24,
+    shadowRadius: 12,
+    width: 64
   },
   messageMediaProgressPercent: {
-    color: '#FFFFFF',
-    fontSize: 10,
+    color: '#64748B',
+    fontSize: 11,
     fontWeight: '400',
     lineHeight: 13,
-    marginTop: 1
+    marginTop: -1
   },
   messageMediaProgressLabel: {
     color: '#FFFFFF',
@@ -33214,33 +30988,6 @@ const styles = StyleSheet.create({
     fontWeight: '400',
     lineHeight: 16,
     marginTop: 6
-  },
-  messageAlbumProgressPill: {
-    alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.9)',
-    borderRadius: 24,
-    elevation: 3,
-    flexDirection: 'row',
-    gap: 10,
-    minHeight: 48,
-    minWidth: 132,
-    paddingHorizontal: 14,
-    shadowColor: '#0F172A',
-    shadowOffset: { height: 2, width: 0 },
-    shadowOpacity: 0.16,
-    shadowRadius: 5
-  },
-  messageAlbumProgressTitle: {
-    color: '#475569',
-    fontSize: 13,
-    fontWeight: '400',
-    lineHeight: 16
-  },
-  messageAlbumProgressSubtitle: {
-    color: '#64748B',
-    fontSize: 11,
-    fontWeight: '400',
-    lineHeight: 14
   },
   messageAttachmentCard: {
     alignItems: 'center',
@@ -33387,12 +31134,15 @@ const styles = StyleSheet.create({
     lineHeight: 19
   },
   messageActionOverlay: {
-    backgroundColor: 'rgba(15, 23, 42, 0.12)',
+    backgroundColor: 'rgba(15, 23, 42, 0.06)',
     flex: 1
+  },
+  messageActionBlurBackdrop: {
+    ...StyleSheet.absoluteFillObject
   },
   messageActionFastBackdrop: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(226, 232, 240, 0.72)'
+    backgroundColor: 'rgba(248, 250, 252, 0.58)'
   },
   messageActionDismiss: {
     ...StyleSheet.absoluteFillObject
@@ -33400,11 +31150,11 @@ const styles = StyleSheet.create({
   messageActionContent: {
     flex: 1,
     justifyContent: 'center',
-    paddingHorizontal: 18
+    paddingHorizontal: 14
   },
   messageActionStack: {
-    gap: 10,
-    maxWidth: 292
+    gap: 8,
+    maxWidth: 288
   },
   messageActionStackMine: {
     alignItems: 'flex-end',
@@ -33418,35 +31168,35 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     alignSelf: 'center',
     backgroundColor: '#FFFFFF',
-    borderRadius: 24,
-    elevation: 8,
-    height: 42,
+    borderRadius: 999,
+    elevation: 10,
+    height: 46,
     maxWidth: '100%',
     overflow: 'hidden',
-    paddingHorizontal: 8,
-    paddingVertical: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
     shadowColor: '#0F172A',
     shadowOffset: { height: 6, width: 0 },
-    shadowOpacity: 0.18,
-    shadowRadius: 16
+    shadowOpacity: 0.16,
+    shadowRadius: 18
   },
   messageReactionStripScroll: {
     flexGrow: 0,
-    height: 30,
-    maxHeight: 30
+    height: 32,
+    maxHeight: 32
   },
   messageReactionStripContent: {
     alignItems: 'center',
     flexDirection: 'row',
-    gap: 2,
-    height: 30
+    gap: 4,
+    height: 32
   },
   messageReactionButton: {
     alignItems: 'center',
-    borderRadius: 16,
-    height: 30,
+    borderRadius: 18,
+    height: 32,
     justifyContent: 'center',
-    width: 30
+    width: 32
   },
   messageReactionButtonActive: {
     backgroundColor: '#E0F2FE'
@@ -33454,31 +31204,36 @@ const styles = StyleSheet.create({
   messageReactionButtonPressed: {
     backgroundColor: '#DDF6EF'
   },
-  messageReactionButtonText: {
-    fontSize: 23,
-    lineHeight: 29
-  },
   messageReactionMoreButton: {
     alignItems: 'center',
     backgroundColor: '#F1F5F9',
-    borderRadius: 15,
-    height: 30,
+    borderRadius: 18,
+    height: 32,
     justifyContent: 'center',
-    width: 30
+    width: 32
+  },
+  messageReactionButtonText: {
+    fontSize: 24,
+    lineHeight: 30
   },
   messageActionPreviewCard: {
     alignSelf: 'stretch',
-    backgroundColor: 'rgba(255, 255, 255, 0.96)',
-    borderRadius: 18,
+    borderRadius: 14,
     elevation: 6,
-    maxWidth: 292,
-    minWidth: 220,
+    maxWidth: 288,
+    minWidth: 218,
     paddingHorizontal: 14,
-    paddingVertical: 12,
+    paddingVertical: 10,
     shadowColor: '#0F172A',
     shadowOffset: { height: 5, width: 0 },
-    shadowOpacity: 0.12,
+    shadowOpacity: 0.10,
     shadowRadius: 14
+  },
+  messageActionPreviewCardMine: {
+    borderBottomRightRadius: 5
+  },
+  messageActionPreviewCardTheirs: {
+    borderBottomLeftRadius: 5
   },
   messageActionPreviewAuthor: {
     color: '#0F766E',
@@ -33487,11 +31242,62 @@ const styles = StyleSheet.create({
     lineHeight: 16
   },
   messageActionPreviewText: {
-    color: colors.ink,
     fontSize: 14,
     fontWeight: '400',
     lineHeight: 19,
-    marginTop: 3
+    marginTop: 2
+  },
+  messageActionMediaPreviewFrame: {
+    alignSelf: 'stretch',
+    backgroundColor: '#E2E8F0',
+    borderRadius: 11,
+    height: 132,
+    marginBottom: 8,
+    marginTop: 2,
+    overflow: 'hidden',
+    position: 'relative'
+  },
+  messageActionMediaPreviewImage: {
+    height: '100%',
+    width: '100%'
+  },
+  messageActionMediaPreviewPlaceholder: {
+    alignItems: 'center',
+    flex: 1,
+    justifyContent: 'center'
+  },
+  messageActionMediaPreviewPlay: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(15, 23, 42, 0.58)',
+    borderColor: 'rgba(255, 255, 255, 0.72)',
+    borderRadius: 24,
+    borderWidth: 1,
+    height: 48,
+    justifyContent: 'center',
+    left: '50%',
+    marginLeft: -24,
+    marginTop: -24,
+    position: 'absolute',
+    top: '50%',
+    width: 48
+  },
+  messageActionMediaPreviewBadge: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(15, 23, 42, 0.68)',
+    borderRadius: 12,
+    bottom: 7,
+    flexDirection: 'row',
+    gap: 4,
+    minHeight: 22,
+    paddingHorizontal: 7,
+    position: 'absolute',
+    right: 7
+  },
+  messageActionMediaPreviewBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '400',
+    lineHeight: 14
   },
   messageActionPreviewMeta: {
     color: '#64748B',
@@ -33504,55 +31310,20 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255, 255, 255, 0.96)',
     borderRadius: 22,
     elevation: 10,
-    minWidth: 190,
+    minWidth: 214,
     overflow: 'hidden',
-    paddingVertical: 8,
+    paddingVertical: 10,
     shadowColor: '#0F172A',
     shadowOffset: { height: 8, width: 0 },
     shadowOpacity: 0.16,
     shadowRadius: 20
   },
-  emojiKeyboardContainer: {
-    backgroundColor: '#FFFFFF',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24
-  },
-  emojiKeyboardHeader: {
-    color: '#7A8494',
-    fontSize: 13,
-    fontWeight: '400',
-    lineHeight: 18
-  },
-  emojiKeyboardSelectedEmoji: {
-    backgroundColor: '#DDF6EF'
-  },
-  emojiKeyboardKnob: {
-    backgroundColor: '#A8B0BC'
-  },
-  emojiKeyboardSearchContainer: {
-    backgroundColor: '#F3F4F6',
-    borderColor: '#E5E7EB',
-    borderRadius: 20,
-    borderWidth: 1,
-    minHeight: 38
-  },
-  emojiKeyboardSearchText: {
-    color: colors.ink,
-    fontSize: 16,
-    fontWeight: '400'
-  },
-  emojiKeyboardCategoryContainer: {
-    borderRadius: 18
-  },
-  emojiKeyboardCategoryIcon: {
-    fontWeight: '400'
-  },
   messageActionRow: {
     alignItems: 'center',
     flexDirection: 'row',
     gap: 13,
-    minHeight: 44,
-    paddingHorizontal: 18
+    minHeight: 43,
+    paddingHorizontal: 20
   },
   messageActionRowPressed: {
     backgroundColor: '#F8FAFC'
@@ -33566,298 +31337,11 @@ const styles = StyleSheet.create({
   messageActionLabelDestructive: {
     color: '#E11D48'
   },
-  translationModalRoot: {
-    backgroundColor: 'rgba(15, 23, 42, 0.22)',
-    flex: 1,
-    justifyContent: 'flex-start'
-  },
-  translationModalSheet: {
-    backgroundColor: '#F7F8FA',
-    borderBottomLeftRadius: 26,
-    borderBottomRightRadius: 26,
-    flex: 1,
-    shadowColor: '#0F172A',
-    shadowOffset: { height: 10, width: 0 },
-    shadowOpacity: 0.18,
-    shadowRadius: 24
-  },
-  translationModalHeader: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    minHeight: 54,
-    paddingHorizontal: 16
-  },
-  translationModalHeaderSpacer: {
-    width: 48
-  },
-  translationModalTitle: {
-    color: '#111827',
-    flex: 1,
-    fontSize: 18,
-    fontWeight: '400',
-    lineHeight: 24,
-    textAlign: 'center'
-  },
-  translationCloseButton: {
-    alignItems: 'center',
-    backgroundColor: '#FFFFFF',
-    borderRadius: 24,
-    height: 48,
-    justifyContent: 'center',
-    width: 48
-  },
-  translationModalContent: {
-    paddingBottom: 26,
-    paddingHorizontal: 16,
-    paddingTop: 22
-  },
-  translationLanguageHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 10,
-    paddingHorizontal: 18
-  },
-  translationLanguageLabel: {
-    color: '#8A94A6',
-    fontSize: 14,
-    fontWeight: '400',
-    lineHeight: 18
-  },
-  translationLanguageRow: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: 10,
-    marginBottom: 14
-  },
-  translationLanguagePill: {
-    alignItems: 'center',
-    backgroundColor: '#FFFFFF',
-    borderRadius: 24,
-    flex: 1,
-    justifyContent: 'center',
-    minHeight: 50,
-    paddingHorizontal: 16
-  },
-  translationLanguagePillText: {
-    color: '#111827',
-    fontSize: 16,
-    fontWeight: '400',
-    lineHeight: 21
-  },
-  translationSwapButton: {
-    alignItems: 'center',
-    backgroundColor: '#FFFFFF',
-    borderRadius: 24,
-    height: 48,
-    justifyContent: 'center',
-    width: 48
-  },
-  translationLanguagePicker: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 22,
-    marginBottom: 14,
-    padding: 12
-  },
-  translationLanguagePickerHeader: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 8
-  },
-  translationLanguagePickerTitle: {
-    color: '#111827',
-    fontSize: 15,
-    fontWeight: '400',
-    lineHeight: 20
-  },
-  translationLanguagePickerClose: {
-    alignItems: 'center',
-    borderRadius: 16,
-    height: 32,
-    justifyContent: 'center',
-    width: 32
-  },
-  translationLanguageSection: {
-    gap: 7,
-    marginTop: 6
-  },
-  translationLanguageSectionTitle: {
-    color: '#64748B',
-    fontSize: 12,
-    fontWeight: '400',
-    letterSpacing: 0.6,
-    lineHeight: 16,
-    textTransform: 'uppercase'
-  },
-  translationLanguageOption: {
-    alignItems: 'center',
-    backgroundColor: '#F8FAFC',
-    borderColor: '#E2E8F0',
-    borderRadius: 16,
-    borderWidth: 1,
-    flexDirection: 'row',
-    gap: 12,
-    justifyContent: 'space-between',
-    minHeight: 56,
-    paddingHorizontal: 13,
-    paddingVertical: 9
-  },
-  translationLanguageOptionSelected: {
-    backgroundColor: '#ECFDF5',
-    borderColor: '#A7F3D0'
-  },
-  translationLanguageOptionText: {
-    flex: 1,
-    minWidth: 0
-  },
-  translationLanguageOptionName: {
-    color: '#0F172A',
-    fontSize: 14,
-    fontWeight: '400',
-    lineHeight: 18
-  },
-  translationLanguageOptionStatus: {
-    color: '#64748B',
-    fontSize: 12,
-    fontWeight: '400',
-    lineHeight: 16,
-    marginTop: 2
-  },
-  translationMessageCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 22,
-    paddingHorizontal: 16,
-    paddingVertical: 16
-  },
-  translationSectionLabel: {
-    color: '#8A94A6',
-    fontSize: 13,
-    fontWeight: '400',
-    lineHeight: 17,
-    marginBottom: 8
-  },
-  translationMessageText: {
-    color: '#111827',
-    fontSize: 16,
-    fontWeight: '400',
-    lineHeight: 23
-  },
-  translationPendingText: {
-    color: '#64748B'
-  },
-  translationDivider: {
-    backgroundColor: '#E5E7EB',
-    height: 1,
-    marginVertical: 16
-  },
-  translationResultHeader: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    justifyContent: 'space-between'
-  },
-  translationAlertRoot: {
-    alignItems: 'center',
-    backgroundColor: 'rgba(15, 23, 42, 0.42)',
-    flex: 1,
-    justifyContent: 'center',
-    padding: 22
-  },
-  translationAlertCard: {
-    backgroundColor: '#FFFFFF',
-    borderColor: '#FECACA',
-    borderRadius: 24,
-    borderWidth: 1,
-    flexDirection: 'row',
-    gap: 16,
-    maxWidth: 520,
-    padding: 18,
-    shadowColor: '#0F172A',
-    shadowOffset: { width: 0, height: 20 },
-    shadowOpacity: 0.2,
-    shadowRadius: 34,
-    width: '100%'
-  },
-  translationAlertIcon: {
-    alignItems: 'center',
-    backgroundColor: '#FEF2F2',
-    borderColor: '#FECACA',
-    borderRadius: 14,
-    borderWidth: 1,
-    height: 46,
-    justifyContent: 'center',
-    width: 46
-  },
-  translationAlertContent: {
-    flex: 1,
-    gap: 8
-  },
-  translationAlertEyebrow: {
-    color: '#B91C1C',
-    fontSize: 11,
-    fontWeight: '400',
-    letterSpacing: 1.2,
-    lineHeight: 15,
-    textTransform: 'uppercase'
-  },
-  translationAlertTitle: {
-    color: '#0F172A',
-    fontSize: 18,
-    fontWeight: '400',
-    lineHeight: 24
-  },
-  translationAlertMessage: {
-    color: '#334155',
-    fontSize: 14,
-    fontWeight: '400',
-    lineHeight: 20
-  },
-  translationAlertActions: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: 10,
-    justifyContent: 'flex-end',
-    marginTop: 10
-  },
-  translationAlertSecondaryButton: {
-    alignItems: 'center',
-    backgroundColor: '#FFFFFF',
-    borderColor: '#CBD5E1',
-    borderRadius: 12,
-    borderWidth: 1,
-    minHeight: 42,
-    minWidth: 92,
-    justifyContent: 'center',
-    paddingHorizontal: 16
-  },
-  translationAlertSecondaryText: {
-    color: '#0F172A',
-    fontSize: 14,
-    fontWeight: '400',
-    lineHeight: 18
-  },
-  translationAlertPrimaryButton: {
-    alignItems: 'center',
-    backgroundColor: '#2563EB',
-    borderRadius: 12,
-    flexDirection: 'row',
-    gap: 8,
-    minHeight: 42,
-    justifyContent: 'center',
-    paddingHorizontal: 16
-  },
-  translationAlertPrimaryText: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    fontWeight: '400',
-    lineHeight: 18
-  },
-  translationPrivacyText: {
-    color: '#7A8494',
-    fontSize: 13,
-    fontWeight: '400',
-    lineHeight: 19,
-    marginTop: 28,
-    paddingHorizontal: 16
+  messageActionDivider: {
+    backgroundColor: '#E2E8F0',
+    height: StyleSheet.hairlineWidth,
+    marginHorizontal: 20,
+    marginVertical: 6
   },
   chatSearchModalRoot: {
     backgroundColor: 'rgba(15, 23, 42, 0.24)',
@@ -33997,12 +31481,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '400',
     lineHeight: 16
-  },
-  messageActionSeparator: {
-    backgroundColor: '#E5E7EB',
-    height: StyleSheet.hairlineWidth,
-    marginHorizontal: 18,
-    marginVertical: 5
   },
   forwardRecipientOverlay: {
     backgroundColor: 'rgba(15, 23, 42, 0.24)',
@@ -35039,7 +32517,11 @@ const styles = StyleSheet.create({
   },
   chatSwipeFavoriteAction: {
     backgroundColor: '#16A34A',
-    width: CHAT_ROW_LEFT_ACTION_WIDTH
+    width: CHAT_ROW_LEFT_ACTION_WIDTH / 2
+  },
+  chatSwipePinAction: {
+    backgroundColor: '#737373',
+    width: CHAT_ROW_LEFT_ACTION_WIDTH / 2
   },
   chatSwipeMoreAction: {
     backgroundColor: '#737373'
@@ -36833,147 +34315,6 @@ const styles = StyleSheet.create({
     gap: 14,
     paddingTop: 6
   },
-  offlineAiOverlay: {
-    alignItems: 'center',
-    flex: 1,
-    justifyContent: 'center',
-    padding: 20
-  },
-  offlineAiCard: {
-    borderRadius: 26,
-    borderWidth: StyleSheet.hairlineWidth,
-    gap: 14,
-    maxWidth: 430,
-    padding: 22,
-    position: 'relative',
-    width: '100%'
-  },
-  offlineAiClose: {
-    alignItems: 'center',
-    borderRadius: 18,
-    height: 36,
-    justifyContent: 'center',
-    position: 'absolute',
-    right: 14,
-    top: 14,
-    width: 36,
-    zIndex: 2
-  },
-  offlineAiHeader: {
-    alignItems: 'center',
-    paddingTop: 6
-  },
-  offlineAiMarkShell: {
-    alignItems: 'center',
-    borderRadius: 42,
-    height: 84,
-    justifyContent: 'center',
-    width: 84
-  },
-  offlineAiTitle: {
-    fontSize: 21,
-    fontWeight: '800',
-    lineHeight: 27,
-    marginTop: 12,
-    paddingHorizontal: 36,
-    textAlign: 'center'
-  },
-  offlineAiBody: {
-    fontSize: 14,
-    fontWeight: '400',
-    lineHeight: 20,
-    marginTop: 8,
-    textAlign: 'center'
-  },
-  offlineAiInfoPanel: {
-    borderRadius: 16,
-    overflow: 'hidden'
-  },
-  offlineAiInfoRow: {
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    gap: 4,
-    paddingHorizontal: 13,
-    paddingVertical: 11
-  },
-  offlineAiInfoLabel: {
-    fontSize: 12,
-    fontWeight: '700',
-    lineHeight: 16,
-    textTransform: 'uppercase'
-  },
-  offlineAiInfoValue: {
-    fontSize: 14,
-    fontWeight: '500',
-    lineHeight: 19
-  },
-  offlineAiProgressBlock: {
-    gap: 7
-  },
-  offlineAiProgressHeader: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    justifyContent: 'space-between'
-  },
-  offlineAiProgressText: {
-    fontSize: 13,
-    fontWeight: '700',
-    lineHeight: 18
-  },
-  offlineAiProgressTrack: {
-    borderRadius: 999,
-    height: 10,
-    overflow: 'hidden',
-    width: '100%'
-  },
-  offlineAiProgressFill: {
-    borderRadius: 999,
-    height: '100%'
-  },
-  offlineAiDownloadedText: {
-    fontSize: 12,
-    fontWeight: '500',
-    lineHeight: 16
-  },
-  offlineAiFailureText: {
-    borderRadius: 12,
-    fontSize: 13,
-    fontWeight: '600',
-    lineHeight: 18,
-    paddingHorizontal: 12,
-    paddingVertical: 10
-  },
-  offlineAiActions: {
-    flexDirection: 'row',
-    gap: 10,
-    justifyContent: 'flex-end'
-  },
-  offlineAiSecondaryButton: {
-    alignItems: 'center',
-    borderRadius: 999,
-    flex: 1,
-    justifyContent: 'center',
-    minHeight: 46,
-    paddingHorizontal: 14
-  },
-  offlineAiSecondaryText: {
-    fontSize: 15,
-    fontWeight: '700',
-    lineHeight: 19
-  },
-  offlineAiPrimaryButton: {
-    alignItems: 'center',
-    borderRadius: 999,
-    flex: 1,
-    justifyContent: 'center',
-    minHeight: 46,
-    paddingHorizontal: 14
-  },
-  offlineAiPrimaryText: {
-    color: '#FFFFFF',
-    fontSize: 15,
-    fontWeight: '800',
-    lineHeight: 19
-  },
   organizationDeletionOverlay: {
     alignItems: 'center',
     backgroundColor: 'rgba(15, 23, 42, 0.34)',
@@ -37883,6 +35224,110 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '400',
     lineHeight: 21
+  },
+  mediaPreparationModalRoot: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(15, 23, 42, 0.34)',
+    flex: 1,
+    justifyContent: 'center',
+    paddingHorizontal: 22
+  },
+  mediaPreparationCard: {
+    backgroundColor: '#FFFFFF',
+    borderColor: 'rgba(15, 118, 110, 0.18)',
+    borderRadius: 24,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 16,
+    maxWidth: 520,
+    padding: 18,
+    shadowColor: '#0F172A',
+    shadowOffset: { height: 18, width: 0 },
+    shadowOpacity: 0.2,
+    shadowRadius: 34,
+    width: '100%'
+  },
+  mediaPreparationIcon: {
+    alignItems: 'center',
+    borderRadius: 16,
+    borderWidth: 1,
+    height: 50,
+    justifyContent: 'center',
+    width: 50
+  },
+  mediaPreparationIconActive: {
+    backgroundColor: '#ECFDF5',
+    borderColor: '#99F6E4'
+  },
+  mediaPreparationIconError: {
+    backgroundColor: '#FEF2F2',
+    borderColor: '#FECACA'
+  },
+  mediaPreparationContent: {
+    flex: 1,
+    gap: 8
+  },
+  mediaPreparationEyebrow: {
+    color: '#0F766E',
+    fontSize: 11,
+    fontWeight: '400',
+    letterSpacing: 1.4,
+    lineHeight: 15,
+    textTransform: 'uppercase'
+  },
+  mediaPreparationTitle: {
+    color: colors.ink,
+    fontSize: 18,
+    fontWeight: '400',
+    lineHeight: 24
+  },
+  mediaPreparationBody: {
+    color: '#475569',
+    fontSize: 14,
+    fontWeight: '400',
+    lineHeight: 20
+  },
+  mediaPreparationProgressBlock: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 4
+  },
+  mediaPreparationProgressTrack: {
+    backgroundColor: '#E2E8F0',
+    borderRadius: 999,
+    flex: 1,
+    height: 8,
+    overflow: 'hidden'
+  },
+  mediaPreparationProgressFill: {
+    backgroundColor: '#0F766E',
+    borderRadius: 999,
+    height: '100%'
+  },
+  mediaPreparationProgressText: {
+    color: '#64748B',
+    fontSize: 12,
+    fontWeight: '400',
+    lineHeight: 16,
+    minWidth: 34,
+    textAlign: 'right'
+  },
+  mediaPreparationButton: {
+    alignItems: 'center',
+    alignSelf: 'flex-end',
+    backgroundColor: '#2563EB',
+    borderRadius: 14,
+    justifyContent: 'center',
+    minHeight: 42,
+    minWidth: 92,
+    paddingHorizontal: 18
+  },
+  mediaPreparationButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '400',
+    lineHeight: 18
   },
   androidModalScreen: {
     backgroundColor: '#FFFFFF',

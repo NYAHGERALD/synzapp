@@ -20,6 +20,7 @@ export interface ChatUserPreference {
   contactId: string;
   isArchived: boolean;
   isFavorite: boolean;
+  isPinned: boolean;
   isSpam: boolean;
   spammedAtMs: number | null;
   tenantId: string;
@@ -31,6 +32,7 @@ export interface UpdateChatUserPreferenceInput {
   clear?: boolean;
   isArchived?: boolean;
   isFavorite?: boolean;
+  isPinned?: boolean;
   isSpam?: boolean;
   permanentDelete?: boolean;
   trashSegmentEndAtMs?: number | null;
@@ -43,6 +45,7 @@ interface ChatUserPreferenceRecord {
   contactId?: string;
   isArchived?: boolean;
   isFavorite?: boolean;
+  isPinned?: boolean;
   isSpam?: boolean;
   spammedAtMs?: number | null;
   tenantId?: string;
@@ -70,6 +73,7 @@ export function getDefaultChatUserPreference(
     contactId,
     isArchived: false,
     isFavorite: false,
+    isPinned: false,
     isSpam: false,
     spammedAtMs: null,
     tenantId,
@@ -162,6 +166,10 @@ export async function updateChatUserPreference(
     update.isFavorite = input.isFavorite;
   }
 
+  if (typeof input.isPinned === 'boolean') {
+    update.isPinned = input.isPinned;
+  }
+
   if (typeof input.isSpam === 'boolean') {
     const trashedAtMs = Date.now();
 
@@ -209,6 +217,7 @@ export async function updateChatUserPreference(
     update.archivedAtMs = null;
     update.isArchived = false;
     update.isFavorite = false;
+    update.isPinned = false;
     update.isSpam = false;
     update.permanentlyDeletedAt = fieldValue.serverTimestamp();
     update.permanentlyDeletedAtMs = deletedAtMs;
@@ -293,6 +302,7 @@ function normalizeChatUserPreference(
     contactId,
     isArchived: record?.isArchived === true,
     isFavorite: record?.isFavorite === true,
+    isPinned: record?.isPinned === true,
     isSpam: isLegacyTrashActive,
     spammedAtMs,
     tenantId,

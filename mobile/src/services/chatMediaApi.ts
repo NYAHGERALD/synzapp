@@ -11,14 +11,20 @@ export type ChatMediaQualityMode = 'hd' | 'standard';
 export const CHAT_MEDIA_LIMITS: Record<ChatMediaKind, number> = {
   audio: 16 * 1024 * 1024,
   file: 100 * 1024 * 1024,
-  image: 8 * 1024 * 1024,
+  image: 100 * 1024 * 1024,
   video: 250 * 1024 * 1024
 };
 
 interface MediaUploadSession {
+  chunkCount?: number;
+  chunkSizeBytes?: number;
   expiresAt: string;
   maxEncryptedSizeBytes: number;
   mediaId: string;
+  partUploadUrls?: Array<{
+    partIndex: number;
+    uploadUrl: string;
+  }>;
   uploadUrl: string;
 }
 
@@ -58,6 +64,8 @@ const chatMediaCacheDirectory = FileSystem.documentDirectory
   : FileSystem.cacheDirectory
     ? `${FileSystem.cacheDirectory}Synzapp/Media/`
     : null;
+const CHAT_MEDIA_CHUNK_UPLOAD_THRESHOLD_BYTES = 8 * 1024 * 1024;
+const CHAT_MEDIA_CHUNK_SIZE_BYTES = 1024 * 1024;
 
 export async function cacheLocalChatMedia(media: LocalChatMediaInput): Promise<LocalChatMediaInput> {
   ensureMediaSize(media.kind, media.sizeBytes);
@@ -113,6 +121,28 @@ export async function uploadEncryptedChatMedia(input: {
   const localMedia = await cacheLocalChatMedia(input.media);
 
   ensureMediaSize(localMedia.kind, localMedia.sizeBytes);
+
+  if (localMedia.sizeBytes > CHAT_MEDIA_CHUNK_UPLOAD_THRESHOLD_BYTES) {
+    return uploadChunkedEncryptedChatMedia({
+      ...input,
+      media: localMedia
+    });
+  }
+
+  return uploadSingleEncryptedChatMedia({
+    ...input,
+    media: localMedia
+  });
+}
+
+async function uploadSingleEncryptedChatMedia(input: {
+  chatType?: 'DIRECT' | 'GROUP';
+  contactId: string;
+  idToken: string;
+  media: LocalChatMediaInput;
+  onProgress?: (progress: number) => void;
+}): Promise<ChatMediaAttachment> {
+  const localMedia = input.media;
   input.onProgress?.(0.08);
   const encryptedMedia = await encryptLocalMediaFile(localMedia.uri);
 
@@ -148,10 +178,117 @@ export async function uploadEncryptedChatMedia(input: {
     fileName: localMedia.fileName,
     height: localMedia.height,
     key: encryptedMedia.key,
+    encryptionMode: 'secretbox-v1',
     kind: localMedia.kind,
     localUri: localMedia.uri,
     mediaId: session.mediaId,
     nonce: encryptedMedia.nonce,
+    qualityMode: localMedia.qualityMode,
+    sizeBytes: localMedia.sizeBytes,
+    thumbnailContentType: localMedia.thumbnailContentType,
+    thumbnailDataUrl: localMedia.thumbnailDataUrl,
+    thumbnailHeight: localMedia.thumbnailHeight,
+    thumbnailWidth: localMedia.thumbnailWidth,
+    transferProgress: 0.92,
+    transferStatus: 'uploading',
+    width: localMedia.width
+  };
+}
+
+async function uploadChunkedEncryptedChatMedia(input: {
+  chatType?: 'DIRECT' | 'GROUP';
+  contactId: string;
+  idToken: string;
+  media: LocalChatMediaInput;
+  onProgress?: (progress: number) => void;
+}): Promise<ChatMediaAttachment> {
+  const localMedia = input.media;
+  const chunkSizeBytes = CHAT_MEDIA_CHUNK_SIZE_BYTES;
+  const partCount = Math.ceil(localMedia.sizeBytes / chunkSizeBytes);
+  const encryptedSizeBytes = localMedia.sizeBytes + partCount * nacl.secretbox.overheadLength;
+  const keyBytes = Crypto.getRandomBytes(nacl.secretbox.keyLength);
+  const session = await createMediaUploadSession({
+    chatType: input.chatType,
+    chunkCount: partCount,
+    chunkSizeBytes,
+    contactId: input.contactId,
+    contentType: localMedia.contentType,
+    encryptedSizeBytes,
+    fileName: localMedia.fileName,
+    idToken: input.idToken,
+    kind: localMedia.kind,
+    originalSizeBytes: localMedia.sizeBytes
+  });
+  const partUploadUrls = session.partUploadUrls || [];
+
+  if (partUploadUrls.length !== partCount) {
+    throw new Error('Secure chunked media upload is not available yet. Please wait for the backend deployment to finish, then try again.');
+  }
+
+  input.onProgress?.(0.04);
+
+  const partNonces: string[] = [];
+  let uploadedBytes = 0;
+
+  for (let partIndex = 0; partIndex < partCount; partIndex += 1) {
+    await yieldToMediaUi();
+
+    const partStart = partIndex * chunkSizeBytes;
+    const partLength = Math.min(chunkSizeBytes, localMedia.sizeBytes - partStart);
+    const partSession = partUploadUrls.find((part) => part.partIndex === partIndex);
+
+    if (!partSession) {
+      throw new Error('Media upload session is missing a chunk.');
+    }
+
+    const encryptedPart = await encryptLocalMediaChunk({
+      keyBytes,
+      length: partLength,
+      partIndex,
+      position: partStart,
+      sourceUri: localMedia.uri
+    });
+
+    partNonces.push(encryptedPart.nonce);
+    await yieldToMediaUi();
+
+    await uploadEncryptedFile({
+      encryptedFileUri: encryptedPart.encryptedFileUri,
+      onProgress: (progress) => {
+        const uploadedPartBytes = progress * partLength;
+        input.onProgress?.(0.04 + ((uploadedBytes + uploadedPartBytes) / Math.max(localMedia.sizeBytes, 1)) * 0.82);
+      },
+      uploadUrl: partSession.uploadUrl
+    });
+
+    uploadedBytes += partLength;
+    input.onProgress?.(0.04 + (uploadedBytes / Math.max(localMedia.sizeBytes, 1)) * 0.82);
+    await FileSystem.deleteAsync(encryptedPart.encryptedFileUri, { idempotent: true }).catch(() => undefined);
+    await yieldToMediaUi();
+  }
+
+  await completeMediaUpload({
+    chatType: input.chatType,
+    contactId: input.contactId,
+    idToken: input.idToken,
+    mediaId: session.mediaId
+  });
+  input.onProgress?.(0.92);
+
+  return {
+    chunkSizeBytes,
+    contentType: localMedia.contentType,
+    durationMs: localMedia.durationMs,
+    encryptedSizeBytes,
+    encryptionMode: 'chunked-secretbox-v1',
+    fileName: localMedia.fileName,
+    height: localMedia.height,
+    key: fromByteArray(keyBytes),
+    kind: localMedia.kind,
+    localUri: localMedia.uri,
+    mediaId: session.mediaId,
+    partCount,
+    partNonces,
     qualityMode: localMedia.qualityMode,
     sizeBytes: localMedia.sizeBytes,
     thumbnailContentType: localMedia.thumbnailContentType,
@@ -254,18 +391,9 @@ export async function downloadAndDecryptChatMedia(input: {
     throw new Error('Unable to download this media.');
   }
 
-  const encryptedBase64 = await FileSystem.readAsStringAsync(encryptedUri, {
-    encoding: FileSystem.EncodingType.Base64
-  });
-  const plaintext = nacl.secretbox.open(
-    toByteArray(encryptedBase64),
-    toByteArray(input.media.nonce),
-    toByteArray(input.media.key)
-  );
-
-  if (!plaintext) {
-    throw new Error('Unable to decrypt this media.');
-  }
+  const plaintext = input.media.encryptionMode === 'chunked-secretbox-v1'
+    ? await decryptChunkedMediaFile(encryptedUri, input.media)
+    : await decryptSinglePartMediaFile(encryptedUri, input.media);
 
   await FileSystem.deleteAsync(plainTemporaryUri, { idempotent: true }).catch(() => undefined);
   await FileSystem.writeAsStringAsync(plainTemporaryUri, fromByteArray(plaintext), {
@@ -280,6 +408,78 @@ export async function downloadAndDecryptChatMedia(input: {
   input.onProgress?.(1);
 
   return plainUri;
+}
+
+async function decryptSinglePartMediaFile(
+  encryptedUri: string,
+  media: ChatMediaAttachment
+): Promise<Uint8Array> {
+  if (!media.key || !media.nonce) {
+    throw new Error('This media message cannot be decrypted.');
+  }
+
+  const encryptedBase64 = await FileSystem.readAsStringAsync(encryptedUri, {
+    encoding: FileSystem.EncodingType.Base64
+  });
+  const plaintext = nacl.secretbox.open(
+    toByteArray(encryptedBase64),
+    toByteArray(media.nonce),
+    toByteArray(media.key)
+  );
+
+  if (!plaintext) {
+    throw new Error('Unable to decrypt this media.');
+  }
+
+  return plaintext;
+}
+
+async function decryptChunkedMediaFile(
+  encryptedUri: string,
+  media: ChatMediaAttachment
+): Promise<Uint8Array> {
+  if (
+    !media.key ||
+    !media.chunkSizeBytes ||
+    !media.partCount ||
+    !Array.isArray(media.partNonces) ||
+    media.partNonces.length !== media.partCount
+  ) {
+    throw new Error('This media message cannot be decrypted.');
+  }
+
+  const keyBytes = toByteArray(media.key);
+  const chunks: Uint8Array[] = [];
+  let encryptedPosition = 0;
+  let totalPlaintextBytes = 0;
+
+  for (let partIndex = 0; partIndex < media.partCount; partIndex += 1) {
+    const plainPartLength = Math.min(
+      media.chunkSizeBytes,
+      Math.max(media.sizeBytes - partIndex * media.chunkSizeBytes, 0)
+    );
+    const encryptedPartLength = plainPartLength + nacl.secretbox.overheadLength;
+    const encryptedBase64 = await FileSystem.readAsStringAsync(encryptedUri, {
+      encoding: FileSystem.EncodingType.Base64,
+      length: encryptedPartLength,
+      position: encryptedPosition
+    });
+    const plaintext = nacl.secretbox.open(
+      toByteArray(encryptedBase64),
+      toByteArray(media.partNonces[partIndex]),
+      keyBytes
+    );
+
+    if (!plaintext) {
+      throw new Error('Unable to decrypt this media.');
+    }
+
+    chunks.push(plaintext);
+    totalPlaintextBytes += plaintext.length;
+    encryptedPosition += encryptedPartLength;
+  }
+
+  return concatUint8Arrays(chunks, totalPlaintextBytes);
 }
 
 function ensureMediaSize(kind: ChatMediaKind, sizeBytes: number): void {
@@ -298,6 +498,8 @@ function ensureMediaSize(kind: ChatMediaKind, sizeBytes: number): void {
 
 async function createMediaUploadSession(input: {
   chatType?: 'DIRECT' | 'GROUP';
+  chunkCount?: number;
+  chunkSizeBytes?: number;
   contactId: string;
   contentType: string;
   encryptedSizeBytes: number;
@@ -313,6 +515,8 @@ async function createMediaUploadSession(input: {
     `${getSynzappApiBaseUrl()}${path}`,
     {
       body: JSON.stringify({
+        chunkCount: input.chunkCount,
+        chunkSizeBytes: input.chunkSizeBytes,
         contentType: input.contentType,
         encryptedSizeBytes: input.encryptedSizeBytes,
         fileName: input.fileName,
@@ -421,6 +625,46 @@ async function encryptLocalMediaFile(uri: string): Promise<{
   };
 }
 
+async function encryptLocalMediaChunk(input: {
+  keyBytes: Uint8Array;
+  length: number;
+  partIndex: number;
+  position: number;
+  sourceUri: string;
+}): Promise<{
+  encryptedFileUri: string;
+  encryptedSizeBytes: number;
+  nonce: string;
+}> {
+  const base64 = await FileSystem.readAsStringAsync(input.sourceUri, {
+    encoding: FileSystem.EncodingType.Base64,
+    length: input.length,
+    position: input.position
+  });
+  const nonceBytes = Crypto.getRandomBytes(nacl.secretbox.nonceLength);
+  const encryptedBytes = nacl.secretbox(toByteArray(base64), nonceBytes, input.keyBytes);
+  const encryptedFileUri = getMediaCacheFileUri(`upload_part_${Date.now()}_${input.partIndex}_${randomHex(5)}.bin`);
+
+  await ensureMediaCacheDirectory();
+  await FileSystem.writeAsStringAsync(encryptedFileUri, fromByteArray(encryptedBytes), {
+    encoding: FileSystem.EncodingType.Base64
+  });
+
+  return {
+    encryptedFileUri,
+    encryptedSizeBytes: encryptedBytes.length,
+    nonce: fromByteArray(nonceBytes)
+  };
+}
+
+function yieldToMediaUi(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => {
+      setTimeout(resolve, 0);
+    });
+  });
+}
+
 async function uploadEncryptedFile(input: {
   encryptedFileUri: string;
   onProgress?: (progress: number) => void;
@@ -513,6 +757,24 @@ function getFileExtension(media: ChatMediaAttachment): string {
   }
 
   if (media.kind === 'image') {
+    const contentType = media.contentType.trim().toLowerCase();
+
+    if (contentType === 'image/png') {
+      return 'png';
+    }
+
+    if (contentType === 'image/webp') {
+      return 'webp';
+    }
+
+    if (contentType === 'image/heic') {
+      return 'heic';
+    }
+
+    if (contentType === 'image/heif') {
+      return 'heif';
+    }
+
     return 'jpg';
   }
 
@@ -531,6 +793,18 @@ function randomHex(byteCount: number): string {
   return Array.from(Crypto.getRandomBytes(byteCount))
     .map((byte) => byte.toString(16).padStart(2, '0'))
     .join('');
+}
+
+function concatUint8Arrays(chunks: Uint8Array[], totalLength: number): Uint8Array {
+  const output = new Uint8Array(totalLength);
+  let offset = 0;
+
+  chunks.forEach((chunk) => {
+    output.set(chunk, offset);
+    offset += chunk.length;
+  });
+
+  return output;
 }
 
 async function getResponseErrorMessage(response: Response): Promise<string> {

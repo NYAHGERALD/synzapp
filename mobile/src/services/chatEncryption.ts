@@ -518,6 +518,10 @@ function normalizeMediaAttachment(media?: Partial<ChatMediaAttachment> | null): 
   const mediaId = typeof media.mediaId === 'string' ? media.mediaId.trim() : '';
   const key = typeof media.key === 'string' ? media.key.trim() : '';
   const nonce = typeof media.nonce === 'string' ? media.nonce.trim() : '';
+  const encryptionMode = media.encryptionMode === 'chunked-secretbox-v1' ? 'chunked-secretbox-v1' : media.encryptionMode === 'secretbox-v1' ? 'secretbox-v1' : undefined;
+  const partNonces = Array.isArray(media.partNonces)
+    ? media.partNonces.filter((partNonce) => typeof partNonce === 'string' && partNonce.trim()).slice(0, 320)
+    : [];
   const contentType = typeof media.contentType === 'string' ? media.contentType.trim().toLowerCase() : '';
   const fileName = typeof media.fileName === 'string' ? media.fileName.trim().slice(0, 180) : '';
   const qualityMode = media.qualityMode === 'hd' ? 'hd' : media.qualityMode === 'standard' ? 'standard' : undefined;
@@ -531,8 +535,10 @@ function normalizeMediaAttachment(media?: Partial<ChatMediaAttachment> | null): 
   }
 
   return {
+    chunkSizeBytes: Number.isFinite(media.chunkSizeBytes) ? Math.max(Math.round(media.chunkSizeBytes || 0), 0) : undefined,
     contentType,
     durationMs: Number.isFinite(media.durationMs) ? Math.max(Math.round(media.durationMs || 0), 0) : undefined,
+    encryptionMode,
     encryptedSizeBytes: Number.isFinite(media.encryptedSizeBytes) ? Math.max(Math.round(media.encryptedSizeBytes || 0), 0) : undefined,
     fileName,
     height: Number.isFinite(media.height) ? Math.max(Math.round(media.height || 0), 1) : undefined,
@@ -540,6 +546,8 @@ function normalizeMediaAttachment(media?: Partial<ChatMediaAttachment> | null): 
     kind,
     mediaId,
     nonce,
+    partCount: Number.isFinite(media.partCount) ? Math.max(Math.round(media.partCount || 0), 0) : undefined,
+    partNonces: partNonces.length ? partNonces : undefined,
     qualityMode,
     sizeBytes: Number.isFinite(media.sizeBytes) ? Math.max(Math.round(media.sizeBytes || 0), 0) : 0,
     thumbnailContentType: thumbnailDataUrl

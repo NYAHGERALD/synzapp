@@ -189,8 +189,10 @@ const groupChatMemberBodySchema = z.object({
 });
 
 const encryptedMediaUploadBodySchema = z.object({
+  chunkCount: z.number().int().min(2).max(320).optional(),
+  chunkSizeBytes: z.number().int().min(512 * 1024).max(8 * 1024 * 1024).optional(),
   contentType: z.string().trim().min(3).max(120),
-  encryptedSizeBytes: z.number().int().min(1).max(120 * 1024 * 1024),
+  encryptedSizeBytes: z.number().int().min(1).max(260 * 1024 * 1024),
   fileName: z.string().trim().min(1).max(180),
   kind: z.enum(['audio', 'file', 'image', 'video']),
   originalSizeBytes: z.number().int().min(0).max(250 * 1024 * 1024).optional()
@@ -246,6 +248,7 @@ const chatPreferenceBodySchema = z.object({
   clear: z.boolean().optional(),
   isArchived: z.boolean().optional(),
   isFavorite: z.boolean().optional(),
+  isPinned: z.boolean().optional(),
   isSpam: z.boolean().optional(),
   permanentDelete: z.boolean().optional()
 }).refine(
@@ -253,6 +256,7 @@ const chatPreferenceBodySchema = z.object({
     typeof value.clear === 'boolean' ||
     typeof value.isArchived === 'boolean' ||
     typeof value.isFavorite === 'boolean' ||
+    typeof value.isPinned === 'boolean' ||
     typeof value.isSpam === 'boolean' ||
     typeof value.permanentDelete === 'boolean',
   'At least one chat preference is required.'
@@ -293,6 +297,7 @@ function getChatPreferenceAuditMetadata(
     [idField]: idValue,
     ...(body.isArchived !== undefined ? { isArchived: body.isArchived } : {}),
     ...(body.isFavorite !== undefined ? { isFavorite: body.isFavorite } : {}),
+    ...(body.isPinned !== undefined ? { isPinned: body.isPinned } : {}),
     ...(body.isSpam !== undefined ? { isSpam: body.isSpam } : {}),
     ...(body.permanentDelete !== undefined ? { permanentDelete: body.permanentDelete === true } : {})
   };

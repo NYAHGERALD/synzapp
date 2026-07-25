@@ -100,7 +100,6 @@
           "photosPermission": "Synzapp uses photos and videos you choose for your profile photo or chat messages."
         }
       ],
-      "react-native-compressor",
       "expo-secure-store",
       "expo-audio",
       "@react-native-firebase/app",

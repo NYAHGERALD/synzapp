@@ -193,6 +193,37 @@ export async function saveCachedChatConversation(input: {
   );
 }
 
+export async function deleteCachedChatConversation(input: {
+  contactId: string;
+  ownerUid: string;
+  tenantId: string;
+}): Promise<void> {
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    return;
+  }
+
+  await AsyncStorage.removeItem(getConversationStorageKey(scope, input.contactId)).catch(() => undefined);
+
+  const db = await getLocalChatSqliteDatabase().catch(() => null);
+
+  if (!db) {
+    return;
+  }
+
+  await db.withTransactionAsync(async () => {
+    await db.runAsync(
+      'DELETE FROM local_messages WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?',
+      [scope.ownerUid, scope.tenantId, input.contactId]
+    );
+    await db.runAsync(
+      'DELETE FROM local_conversations WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?',
+      [scope.ownerUid, scope.tenantId, input.contactId]
+    );
+  });
+}
+
 export async function updateCachedChatMessageMedia(input: {
   contactId: string;
   media: ChatMediaAttachment;
@@ -536,6 +567,34 @@ export async function removePendingChatMessage(input: {
     scope,
     currentMessages.filter((message) => message.queueId !== input.queueId)
   );
+}
+
+export async function removePendingChatMessagesForContact(input: {
+  contactId: string;
+  ownerUid: string;
+  tenantId: string;
+}): Promise<string[]> {
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    return [];
+  }
+
+  const currentMessages = await listPendingChatMessages(scope);
+  const removedQueueIds = currentMessages
+    .filter((message) => message.contactId === input.contactId)
+    .map((message) => message.queueId);
+
+  if (!removedQueueIds.length) {
+    return [];
+  }
+
+  await savePendingChatMessages(
+    scope,
+    currentMessages.filter((message) => message.contactId !== input.contactId)
+  );
+
+  return removedQueueIds;
 }
 
 export async function updatePendingChatMessage(input: {

@@ -9,6 +9,8 @@ import { getGroupChatMediaContext } from './groupChatService.js';
 export type ChatMediaKind = 'audio' | 'file' | 'image' | 'video';
 
 export interface CreateEncryptedChatMediaUploadInput {
+  chunkCount?: number;
+  chunkSizeBytes?: number;
   contentType: string;
   encryptedSizeBytes: number;
   fileName: string;
@@ -17,9 +19,15 @@ export interface CreateEncryptedChatMediaUploadInput {
 }
 
 export interface EncryptedChatMediaUploadSession {
+  chunkCount?: number;
+  chunkSizeBytes?: number;
   expiresAt: string;
   maxEncryptedSizeBytes: number;
   mediaId: string;
+  partUploadUrls?: Array<{
+    partIndex: number;
+    uploadUrl: string;
+  }>;
   uploadUrl: string;
 }
 
@@ -42,6 +50,8 @@ interface ChatMediaRecord {
   fileName?: string;
   groupId?: string;
   kind?: ChatMediaKind;
+  partCount?: number;
+  partPaths?: string[];
   participantIds?: string[];
   recipientUid?: string;
   retentionPolicy?: 'DIRECT_TEMPORARY' | 'DURABLE_GROUP_HISTORY';
@@ -67,9 +77,11 @@ const CHAT_MEDIA_SIGNED_URL_TTL_MS = 15 * 60 * 1000;
 const CHAT_MEDIA_LIMITS: Record<ChatMediaKind, number> = {
   audio: 16 * 1024 * 1024,
   file: 100 * 1024 * 1024,
-  image: 8 * 1024 * 1024,
-  video: 250 * 1024 * 1024
+  image: 100 * 1024 * 1024,
+  video: 260 * 1024 * 1024
 };
+const CHAT_MEDIA_CHUNK_SIZE_BYTES = 4 * 1024 * 1024;
+const CHAT_MEDIA_MAX_CHUNK_COUNT = 320;
 
 export async function createEncryptedChatMediaUploadSession(
   decodedToken: DecodedIdToken,
@@ -91,6 +103,23 @@ export async function createEncryptedChatMediaUploadSession(
     throw validationError(getMediaTooLargeMessage(kind));
   }
 
+  const chunkCount = typeof input.chunkCount === 'number' ? Math.ceil(input.chunkCount) : 0;
+  const chunkSizeBytes = typeof input.chunkSizeBytes === 'number'
+    ? Math.ceil(input.chunkSizeBytes)
+    : CHAT_MEDIA_CHUNK_SIZE_BYTES;
+  const isChunkedUpload = chunkCount > 1;
+
+  if (isChunkedUpload) {
+    if (
+      chunkCount < 2 ||
+      chunkCount > CHAT_MEDIA_MAX_CHUNK_COUNT ||
+      chunkSizeBytes < 512 * 1024 ||
+      chunkSizeBytes > 8 * 1024 * 1024
+    ) {
+      throw validationError('Media chunk upload request is not valid.');
+    }
+  }
+
   const contentType = normalizeContentType(input.contentType, kind);
   const fileName = sanitizeFileName(input.fileName, kind);
   const mediaId = `media_${Date.now()}_${randomUUID().replace(/-/g, '').slice(0, 18)}`;
@@ -104,6 +133,9 @@ export async function createEncryptedChatMediaUploadSession(
     'encryptedAttachments',
     mediaId
   ].join('/');
+  const partPaths = isChunkedUpload
+    ? Array.from({ length: chunkCount }, (_value, index) => `${storagePath}.parts/part_${String(index).padStart(4, '0')}`)
+    : [];
   const expiresAtMs = Date.now() + CHAT_MEDIA_TTL_MS;
 
   await context.chatRef.collection('mediaAttachments').doc(mediaId).set({
@@ -117,6 +149,8 @@ export async function createEncryptedChatMediaUploadSession(
     groupId: context.chatType === 'GROUP' ? context.chatId : null,
     kind,
     originalSizeBytes: input.originalSizeBytes || null,
+    partCount: isChunkedUpload ? chunkCount : null,
+    partPaths: isChunkedUpload ? partPaths : [],
     participantIds: context.participantIds,
     recipientUid: context.chatType === 'DIRECT'
       ? context.participantIds.find((uid) => uid !== decodedToken.uid) || null
@@ -133,11 +167,23 @@ export async function createEncryptedChatMediaUploadSession(
     contentType: 'application/octet-stream',
     expiresAtMs: Date.now() + CHAT_MEDIA_SIGNED_URL_TTL_MS
   });
+  const partUploadUrls = isChunkedUpload
+    ? await Promise.all(partPaths.map(async (partPath, partIndex) => ({
+        partIndex,
+        uploadUrl: await getSignedStorageUrl(partPath, 'write', {
+          contentType: 'application/octet-stream',
+          expiresAtMs: Date.now() + CHAT_MEDIA_SIGNED_URL_TTL_MS
+        })
+      })))
+    : undefined;
 
   return {
+    chunkCount: isChunkedUpload ? chunkCount : undefined,
+    chunkSizeBytes: isChunkedUpload ? chunkSizeBytes : undefined,
     expiresAt: new Date(Date.now() + CHAT_MEDIA_SIGNED_URL_TTL_MS).toISOString(),
     maxEncryptedSizeBytes,
     mediaId,
+    partUploadUrls,
     uploadUrl
   };
 }
@@ -156,6 +202,10 @@ export async function markEncryptedChatMediaUploaded(
 
   if (!record.storagePath) {
     throw notFoundError('Media was not found.');
+  }
+
+  if (Array.isArray(record.partPaths) && record.partPaths.length > 1) {
+    await composeUploadedMediaParts(record.partPaths, record.storagePath);
   }
 
   const [exists] = await storageBucket.file(record.storagePath).exists();
@@ -187,6 +237,47 @@ export async function markEncryptedChatMediaUploaded(
     mediaId,
     status: 'AVAILABLE'
   };
+}
+
+async function composeUploadedMediaParts(partPaths: string[], destinationPath: string): Promise<void> {
+  const safePartPaths = partPaths.filter((partPath) => typeof partPath === 'string' && partPath.trim());
+
+  if (safePartPaths.length < 2 || safePartPaths.length > CHAT_MEDIA_MAX_CHUNK_COUNT) {
+    throw validationError('Encrypted media upload is incomplete.');
+  }
+
+  const existenceResults = await Promise.all(safePartPaths.map((partPath) =>
+    storageBucket.file(partPath).exists()
+  ));
+  const missingPartIndex = existenceResults.findIndex(([exists]) => !exists);
+
+  if (missingPartIndex >= 0) {
+    throw validationError('Encrypted media upload has not finished yet.');
+  }
+
+  let sourcePaths = safePartPaths;
+  let round = 0;
+
+  while (sourcePaths.length > 32) {
+    const nextRoundPaths: string[] = [];
+
+    for (let index = 0; index < sourcePaths.length; index += 32) {
+      const batch = sourcePaths.slice(index, index + 32);
+      const intermediatePath = `${destinationPath}.compose/round_${round}_part_${nextRoundPaths.length}`;
+
+      await storageBucket.combine(batch.map((partPath) => storageBucket.file(partPath)), storageBucket.file(intermediatePath));
+      nextRoundPaths.push(intermediatePath);
+    }
+
+    sourcePaths = nextRoundPaths;
+    round += 1;
+  }
+
+  await storageBucket.combine(sourcePaths.map((partPath) => storageBucket.file(partPath)), storageBucket.file(destinationPath));
+
+  await Promise.all(safePartPaths.map((partPath) =>
+    storageBucket.file(partPath).delete({ ignoreNotFound: true }).catch(() => undefined)
+  ));
 }
 
 export async function createEncryptedChatMediaDownloadSession(
@@ -315,7 +406,7 @@ async function getSignedStorageUrl(
 function normalizeContentType(contentType: string, kind: ChatMediaKind): string {
   const safeContentType = contentType.trim().toLowerCase();
 
-  if (kind === 'image' && /^image\/(jpeg|jpg|png|webp)$/.test(safeContentType)) {
+  if (kind === 'image' && /^image\/(jpeg|jpg|png|webp|heic|heif)$/.test(safeContentType)) {
     return safeContentType === 'image/jpg' ? 'image/jpeg' : safeContentType;
   }
 
@@ -340,7 +431,7 @@ function normalizeContentType(contentType: string, kind: ChatMediaKind): string 
 
 function sanitizeFileName(fileName: string, kind: ChatMediaKind): string {
   const fallbackName = kind === 'image'
-    ? 'photo.jpg'
+    ? getDefaultImageFileNameForContentType(fileName)
     : kind === 'video'
       ? 'video.mp4'
       : kind === 'audio'
@@ -353,6 +444,28 @@ function sanitizeFileName(fileName: string, kind: ChatMediaKind): string {
     .slice(0, 120);
 
   return safeName || fallbackName;
+}
+
+function getDefaultImageFileNameForContentType(fileName: string): string {
+  const safeExtension = fileName.split('.').pop()?.trim().toLowerCase();
+
+  if (safeExtension === 'png') {
+    return 'photo.png';
+  }
+
+  if (safeExtension === 'webp') {
+    return 'photo.webp';
+  }
+
+  if (safeExtension === 'heic') {
+    return 'photo.heic';
+  }
+
+  if (safeExtension === 'heif') {
+    return 'photo.heif';
+  }
+
+  return 'photo.jpg';
 }
 
 function getMediaTooLargeMessage(kind: ChatMediaKind): string {

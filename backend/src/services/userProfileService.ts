@@ -80,6 +80,7 @@ export interface ChatContact {
   initials: string;
   isArchived: boolean;
   isFavorite: boolean;
+  isPinned: boolean;
   isSpam: boolean;
   isOnline: boolean;
   lastMessageAt: string | null;
@@ -1062,6 +1063,7 @@ function buildChatContact(
     initials: getInitials(displayName),
     isArchived,
     isFavorite: effectivePreference.isFavorite,
+    isPinned: effectivePreference.isPinned,
     isSpam: effectivePreference.isSpam,
     isOnline: presence.isOnline,
     lastMessageAt: visibleLastMessageSentAtMs ? new Date(visibleLastMessageSentAtMs).toISOString() : null,

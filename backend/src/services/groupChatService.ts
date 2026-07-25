@@ -59,6 +59,7 @@ export interface GroupChatContact {
   isArchived: boolean;
   isDepartmentDefault: boolean;
   isFavorite: boolean;
+  isPinned: boolean;
   isSpam: boolean;
   isOnline: boolean;
   lastMessageAt: string | null;
@@ -1265,7 +1266,10 @@ export async function updateGroupChatPreferenceForCurrentUser(
 ): Promise<GroupChatContact> {
   const context = await getGroupChatContext(decodedToken, groupId);
 
-  if (context.group.isDepartmentDefault === true || context.group.memberPolicy === 'DEPARTMENT_PLUS_EXPLICIT') {
+  if (
+    (context.group.isDepartmentDefault === true || context.group.memberPolicy === 'DEPARTMENT_PLUS_EXPLICIT') &&
+    isManagedDepartmentGroupLifecyclePreference(input)
+  ) {
     throw authorizationError('Department group chats cannot be archived, cleared, or deleted.');
   }
 
@@ -1322,6 +1326,13 @@ export async function updateGroupChatPreferenceForCurrentUser(
     preference,
     archiveSettings
   );
+}
+
+function isManagedDepartmentGroupLifecyclePreference(input: UpdateChatUserPreferenceInput): boolean {
+  return input.clear === true ||
+    input.permanentDelete === true ||
+    typeof input.isArchived === 'boolean' ||
+    typeof input.isSpam === 'boolean';
 }
 
 export async function getGroupChatMessageReactions(
@@ -2151,6 +2162,7 @@ function buildGroupChatContact(
     isArchived,
     isDepartmentDefault: group.isDepartmentDefault === true,
     isFavorite: effectivePreference.isFavorite,
+    isPinned: effectivePreference.isPinned,
     isSpam: effectivePreference.isSpam,
     isOnline: false,
     lastMessageAt: visibleLastMessageSentAtMs ? new Date(visibleLastMessageSentAtMs).toISOString() : null,

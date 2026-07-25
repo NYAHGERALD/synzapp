@@ -9,10 +9,7 @@ import {
   type LocalChatMediaInput
 } from './chatMediaApi';
 
-const CHAT_IMAGE_MAX_WIDTH = 1280;
-const CHAT_IMAGE_QUALITY = 0.7;
 const CHAT_LIBRARY_SELECTION_LIMIT = 10;
-const CHAT_IMAGE_RETRY_WIDTHS = [1280, 1080, 960, 720];
 const CHAT_MEDIA_THUMBNAIL_WIDTHS = [360, 280, 220];
 const CHAT_MEDIA_THUMBNAIL_MAX_BASE64_BYTES = 120 * 1024;
 
@@ -23,8 +20,13 @@ interface PreparedMediaThumbnail {
   width: number;
 }
 
+export interface IPhonePhotoPreparationProgress {
+  fileName: string;
+  progress: number;
+}
+
 export async function pickNativeChatCameraMedia(
-  onProgress?: (progress: number) => void,
+  onIphonePhotoProgress?: (progress: IPhonePhotoPreparationProgress) => void,
   qualityMode: ChatMediaQualityMode = 'standard'
 ): Promise<LocalChatMediaInput[] | null> {
   const result = await launchCamera(ImagePicker.MediaTypeOptions.All).catch((error) => {
@@ -35,11 +37,11 @@ export async function pickNativeChatCameraMedia(
     return null;
   }
 
-  return prepareCameraMediaAssets(result.assets.slice(0, CHAT_LIBRARY_SELECTION_LIMIT), onProgress, qualityMode);
+  return prepareCameraMediaAssets(result.assets.slice(0, CHAT_LIBRARY_SELECTION_LIMIT), onIphonePhotoProgress, qualityMode);
 }
 
 export async function pickNativeChatLibraryMedia(
-  onProgress?: (progress: number) => void,
+  onIphonePhotoProgress?: (progress: IPhonePhotoPreparationProgress) => void,
   qualityMode: ChatMediaQualityMode = 'standard'
 ): Promise<LocalChatMediaInput[] | null> {
   const result = await launchLibrary().catch((error) => {
@@ -50,7 +52,7 @@ export async function pickNativeChatLibraryMedia(
     return null;
   }
 
-  return prepareCameraMediaAssets(result.assets.slice(0, CHAT_LIBRARY_SELECTION_LIMIT), onProgress, qualityMode);
+  return prepareCameraMediaAssets(result.assets.slice(0, CHAT_LIBRARY_SELECTION_LIMIT), onIphonePhotoProgress, qualityMode);
 }
 
 export async function pickNativeChatFile(): Promise<LocalChatMediaInput | null> {
@@ -78,62 +80,15 @@ export async function pickNativeChatFile(): Promise<LocalChatMediaInput | null> 
 
 async function prepareImageMedia(
   asset: ImagePicker.ImagePickerAsset,
+  onIphonePhotoProgress: ((progress: IPhonePhotoPreparationProgress) => void) | undefined,
   qualityMode: ChatMediaQualityMode
 ): Promise<LocalChatMediaInput> {
-  const originalImageMedia = await buildOriginalImageMediaIfSendable(asset);
-
-  if (qualityMode === 'hd' && originalImageMedia) {
-    return {
-      ...originalImageMedia,
-      qualityMode
-    };
-  }
-
-  const sourceWidth = asset.width || CHAT_IMAGE_MAX_WIDTH;
-  const targetWidths = uniqueNumbers(
-    CHAT_IMAGE_RETRY_WIDTHS.map((width) => Math.min(Math.max(sourceWidth, 1), width))
-  );
-  let lastError: unknown = null;
-
-  for (const targetWidth of targetWidths) {
-    try {
-      const optimized = await ImageManipulator.manipulateAsync(
-        asset.uri,
-        [{ resize: { width: targetWidth } }],
-        {
-          base64: false,
-          compress: targetWidth >= CHAT_IMAGE_MAX_WIDTH ? CHAT_IMAGE_QUALITY : 0.66,
-          format: ImageManipulator.SaveFormat.JPEG
-        }
-      );
-
-      return await attachMediaThumbnail({
-        contentType: 'image/jpeg',
-        fileName: getAssetFileName(asset, 'photo.jpg'),
-        height: optimized.height,
-        kind: 'image',
-        originalContentType: originalImageMedia?.contentType || getAssetImageContentType(asset) || undefined,
-        originalHeight: asset.height || originalImageMedia?.height,
-        originalSizeBytes: originalImageMedia?.sizeBytes,
-        originalUri: originalImageMedia?.uri || asset.uri,
-        originalWidth: asset.width || originalImageMedia?.width,
-        qualityMode: 'standard',
-        sizeBytes: await getFileSize(optimized.uri),
-        uri: optimized.uri,
-        width: optimized.width
-      }, optimized.uri);
-    } catch (error) {
-      lastError = error;
-      await waitForImageManipulatorRecovery();
-    }
-  }
-
-  return buildOriginalImageMediaFallback(asset, lastError, qualityMode);
+  return buildOriginalImageMedia(asset, onIphonePhotoProgress, qualityMode);
 }
 
 async function prepareCameraMediaAssets(
   assets: ImagePicker.ImagePickerAsset[],
-  onProgress?: (progress: number) => void,
+  onIphonePhotoProgress?: (progress: IPhonePhotoPreparationProgress) => void,
   qualityMode: ChatMediaQualityMode = 'standard'
 ): Promise<LocalChatMediaInput[]> {
   const preparedMedia: LocalChatMediaInput[] = [];
@@ -141,9 +96,7 @@ async function prepareCameraMediaAssets(
   for (let index = 0; index < assets.length; index += 1) {
     const asset = assets[index];
 
-    preparedMedia.push(await prepareCameraMediaAsset(asset, onProgress, qualityMode));
-    onProgress?.((index + 1) / Math.max(assets.length, 1));
-    await waitForImageManipulatorRecovery();
+    preparedMedia.push(await prepareCameraMediaAsset(asset, onIphonePhotoProgress, qualityMode));
   }
 
   return preparedMedia;
@@ -151,16 +104,16 @@ async function prepareCameraMediaAssets(
 
 async function prepareCameraMediaAsset(
   asset: ImagePicker.ImagePickerAsset,
-  onProgress?: (progress: number) => void,
+  onIphonePhotoProgress?: (progress: IPhonePhotoPreparationProgress) => void,
   qualityMode: ChatMediaQualityMode = 'standard'
 ): Promise<LocalChatMediaInput> {
   const assetType = asset.type === 'video' ? 'video' : 'image';
 
   if (assetType === 'video') {
-    return prepareVideoMedia(asset, onProgress, qualityMode);
+    return prepareVideoMedia(asset, undefined, qualityMode);
   }
 
-  return prepareImageMedia(asset, qualityMode);
+  return prepareImageMedia(asset, onIphonePhotoProgress, qualityMode);
 }
 
 async function prepareVideoMedia(
@@ -201,18 +154,22 @@ async function prepareVideoMedia(
   }, asset.uri);
 }
 
-async function buildOriginalImageMediaFallback(
+async function buildOriginalImageMedia(
   asset: ImagePicker.ImagePickerAsset,
-  lastError: unknown,
+  onIphonePhotoProgress: ((progress: IPhonePhotoPreparationProgress) => void) | undefined,
   qualityMode: ChatMediaQualityMode
 ): Promise<LocalChatMediaInput> {
   const contentType = getAssetImageContentType(asset);
   const sizeBytes = await getFileSize(asset.uri);
 
+  if (contentType && isIphonePhotoContentType(contentType)) {
+    return convertIphonePhotoToJpegMedia(asset, contentType, onIphonePhotoProgress, qualityMode);
+  }
+
   if (contentType && sizeBytes > 0 && sizeBytes <= CHAT_MEDIA_LIMITS.image) {
     return attachMediaThumbnail({
       contentType,
-      fileName: getAssetFileName(asset, contentType === 'image/png' ? 'photo.png' : 'photo.jpg'),
+      fileName: getAssetFileName(asset, getDefaultImageFileName(contentType)),
       height: asset.height || undefined,
       kind: 'image',
       originalContentType: contentType,
@@ -227,43 +184,60 @@ async function buildOriginalImageMediaFallback(
     }, asset.uri);
   }
 
-  if (isImageManipulatorContextError(lastError)) {
-    throw new Error('This photo could not be prepared. Please try again with fewer photos or choose a smaller image.');
+  if (sizeBytes > CHAT_MEDIA_LIMITS.image) {
+    throw new Error(`This photo is ${formatPickerByteCount(sizeBytes)}. Synzapp currently allows photos up to ${formatPickerByteCount(CHAT_MEDIA_LIMITS.image)}.`);
   }
 
   throw new Error('Unable to prepare this photo. Please choose another image.');
 }
 
-async function buildOriginalImageMediaIfSendable(
-  asset: ImagePicker.ImagePickerAsset
-): Promise<LocalChatMediaInput | null> {
-  const contentType = getAssetImageContentType(asset);
+async function convertIphonePhotoToJpegMedia(
+  asset: ImagePicker.ImagePickerAsset,
+  originalContentType: string,
+  onIphonePhotoProgress: ((progress: IPhonePhotoPreparationProgress) => void) | undefined,
+  qualityMode: ChatMediaQualityMode
+): Promise<LocalChatMediaInput> {
+  const originalSizeBytes = asset.fileSize || await getFileSize(asset.uri);
+  const fileName = getPreparedIphonePhotoFileName(asset);
 
-  if (!contentType) {
-    return null;
+  onIphonePhotoProgress?.({ fileName, progress: 0.12 });
+
+  const converted = await ImageManipulator.manipulateAsync(
+    asset.uri,
+    [],
+    {
+      compress: 0.94,
+      format: ImageManipulator.SaveFormat.JPEG
+    }
+  );
+
+  onIphonePhotoProgress?.({ fileName, progress: 0.62 });
+
+  const sizeBytes = await getFileSize(converted.uri);
+
+  if (sizeBytes > CHAT_MEDIA_LIMITS.image) {
+    throw new Error(`This photo is ${formatPickerByteCount(sizeBytes)} after preparing. Synzapp currently allows photos up to ${formatPickerByteCount(CHAT_MEDIA_LIMITS.image)}.`);
   }
 
-  const sizeBytes = asset.fileSize || await getFileSize(asset.uri);
-
-  if (sizeBytes <= 0 || sizeBytes > CHAT_MEDIA_LIMITS.image) {
-    return null;
-  }
-
-  return attachMediaThumbnail({
-    contentType,
-    fileName: getAssetFileName(asset, contentType === 'image/png' ? 'photo.png' : 'photo.jpg'),
-    height: asset.height || undefined,
+  const media = await attachMediaThumbnail({
+    contentType: 'image/jpeg',
+    fileName,
+    height: converted.height || asset.height || undefined,
     kind: 'image',
-    originalContentType: contentType,
+    originalContentType,
     originalHeight: asset.height || undefined,
-    originalSizeBytes: sizeBytes,
+    originalSizeBytes: originalSizeBytes > 0 ? originalSizeBytes : undefined,
     originalUri: asset.uri,
     originalWidth: asset.width || undefined,
-    qualityMode: 'hd',
-    sizeBytes,
-    uri: asset.uri,
-    width: asset.width || undefined
-  }, asset.uri);
+    qualityMode,
+    sizeBytes: sizeBytes > 0 ? sizeBytes : 1,
+    uri: converted.uri,
+    width: converted.width || asset.width || undefined
+  }, converted.uri);
+
+  onIphonePhotoProgress?.({ fileName, progress: 1 });
+
+  return media;
 }
 
 async function attachMediaThumbnail(
@@ -366,6 +340,14 @@ function getAssetImageContentType(asset: ImagePicker.ImagePickerAsset): string |
     return 'image/webp';
   }
 
+  if (extension === 'heic') {
+    return 'image/heic';
+  }
+
+  if (extension === 'heif') {
+    return 'image/heif';
+  }
+
   return null;
 }
 
@@ -391,12 +373,47 @@ function normalizeSupportedImageContentType(contentType?: string | null): string
   if (
     safeContentType === 'image/jpeg' ||
     safeContentType === 'image/png' ||
-    safeContentType === 'image/webp'
+    safeContentType === 'image/webp' ||
+    safeContentType === 'image/heic' ||
+    safeContentType === 'image/heif'
   ) {
     return safeContentType;
   }
 
   return null;
+}
+
+function isIphonePhotoContentType(contentType: string): boolean {
+  const safeContentType = contentType.trim().toLowerCase();
+
+  return safeContentType === 'image/heic' || safeContentType === 'image/heif';
+}
+
+function getPreparedIphonePhotoFileName(asset: ImagePicker.ImagePickerAsset): string {
+  const originalFileName = getAssetFileName(asset, 'photo.heic').trim();
+  const baseName = originalFileName.replace(/\.[^.]+$/, '').trim() || 'photo';
+
+  return `${baseName}.jpg`;
+}
+
+function getDefaultImageFileName(contentType: string): string {
+  if (contentType === 'image/png') {
+    return 'photo.png';
+  }
+
+  if (contentType === 'image/webp') {
+    return 'photo.webp';
+  }
+
+  if (contentType === 'image/heic') {
+    return 'photo.heic';
+  }
+
+  if (contentType === 'image/heif') {
+    return 'photo.heif';
+  }
+
+  return 'photo.jpg';
 }
 
 function getAssetVideoContentType(asset: ImagePicker.ImagePickerAsset): 'video/mp4' | 'video/quicktime' {
@@ -412,15 +429,6 @@ function getAssetVideoContentType(asset: ImagePicker.ImagePickerAsset): 'video/m
   return fileNameExtension === 'mp4' || uriExtension === 'mp4'
     ? 'video/mp4'
     : 'video/quicktime';
-}
-
-function isImageManipulatorContextError(error: unknown): boolean {
-  return error instanceof Error &&
-    /renderAsync|image context|context has been lost|manipulat/i.test(error.message);
-}
-
-function uniqueNumbers(values: number[]): number[] {
-  return Array.from(new Set(values.map((value) => Math.max(Math.round(value), 1))));
 }
 
 function waitForImageManipulatorRecovery(): Promise<void> {
@@ -460,8 +468,7 @@ async function launchCamera(mediaTypes: ImagePicker.MediaTypeOptions) {
   return ImagePicker.launchCameraAsync({
     allowsEditing: false,
     mediaTypes,
-    quality: 0.9,
-    videoMaxDuration: 180
+    quality: 1
   });
 }
 
@@ -478,9 +485,8 @@ async function launchLibrary() {
     mediaTypes: ImagePicker.MediaTypeOptions.All,
     orderedSelection: true,
     preferredAssetRepresentationMode: ImagePicker.UIImagePickerPreferredAssetRepresentationMode.Current,
-    quality: CHAT_IMAGE_QUALITY,
-    selectionLimit: CHAT_LIBRARY_SELECTION_LIMIT,
-    videoMaxDuration: 180
+    quality: 1,
+    selectionLimit: CHAT_LIBRARY_SELECTION_LIMIT
   });
 }
 
