@@ -127,6 +127,7 @@ Implementation requirement:
 - Backend must validate that the offer starts with `v=0`, contains an audio media section, normalizes line endings, and forwards raw SDP to the OpenAI Realtime Translation SDP exchange.
 - Backend logs may include audit-safe diagnostics such as SDP length and a short hash, but must never log raw SDP, transcripts, translated speech, or the OpenAI root key.
 - User-facing errors must stay actionable and must not expose provider-internal SDP parser text.
+- The backend must expose an admin-only provider diagnostic that mints a short-lived realtime translation credential and proves the provider accepts it before mobile live audio testing begins. The diagnostic must return readiness status only, never secrets.
 
 ### Realtime Path
 
@@ -273,6 +274,7 @@ Audit events should include:
 - Summary generated.
 - Meeting ended.
 - Meeting deleted.
+- Realtime provider diagnostic run.
 - Retention policy changed.
 
 Deleting an interpreter session is a controlled soft delete:

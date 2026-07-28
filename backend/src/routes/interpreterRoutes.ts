@@ -16,6 +16,7 @@ import {
   listInterpreterParticipants,
   listInterpreterSummaries,
   listInterpreterSupportedLanguages,
+  runInterpreterRealtimeProviderDiagnostic,
   startInterpreterMeeting,
   updateInterpreterMeetingInvitations
 } from '../services/interpreterService.js';
@@ -39,6 +40,10 @@ const createMeetingBodySchema = z.object({
 });
 
 const realtimeSessionBodySchema = z.object({
+  targetLanguageCode: languageCodeSchema.nullable().optional()
+});
+
+const realtimeDiagnosticBodySchema = z.object({
   targetLanguageCode: languageCodeSchema.nullable().optional()
 });
 
@@ -182,6 +187,18 @@ interpreterRouter.post('/meetings/:meetingId/realtime-client-secret', verifyAppC
     const meetingId = meetingIdSchema.parse(req.params.meetingId);
     const body = realtimeSessionBodySchema.parse(req.body);
     const result = await createInterpreterRealtimeClientSecret(decodedToken, meetingId, body.targetLanguageCode);
+
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+interpreterRouter.post('/realtime-diagnostics', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const body = realtimeDiagnosticBodySchema.parse(req.body || {});
+    const result = await runInterpreterRealtimeProviderDiagnostic(decodedToken, body);
 
     res.json(result);
   } catch (error) {

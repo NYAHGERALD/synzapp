@@ -106,6 +106,15 @@ describe('interpreter enterprise controls', () => {
     assert.match(interpreterService, /deletedAtIso/);
     assert.match(interpreterService, /End this live interpreter session before deleting it\./);
   });
+
+  it('provides an admin-only realtime provider diagnostic before live testing on devices', () => {
+    assert.match(interpreterRoutes, /interpreterRouter\.post\('\/realtime-diagnostics'/);
+    assert.match(interpreterService, /runInterpreterRealtimeProviderDiagnostic/);
+    assert.match(interpreterService, /canRunInterpreterProviderDiagnostic/);
+    assert.match(interpreterService, /INTERPRETER_REALTIME_PROVIDER_DIAGNOSTIC/);
+    assert.match(interpreterService, /expectedInvalidOfferResponse/);
+    assert.doesNotMatch(interpreterService, /metadata:\s*\{[^}]*clientSecret/s);
+  });
 });
 
 function getRouteBlocks(

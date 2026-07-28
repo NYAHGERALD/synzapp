@@ -9,6 +9,7 @@
   "scripts": {
     "audit:security": "npm audit --audit-level=moderate",
     "build": "tsc --project tsconfig.json",
+    "diagnose:interpreter": "node scripts/diagnoseInterpreterRealtime.mjs",
     "dev": "tsx watch src/server.ts",
     "emulators:rails": "firebase emulators:exec --config ../firebase.json --project synzapp-rules-test --only firestore,storage \"node --import tsx --test test/railsServiceEmulator.test.ts\"",
     "emulators:rules": "firebase emulators:exec --config ../firebase.json --project synzapp-rules-test --only firestore,storage \"npm run test:rules\"",

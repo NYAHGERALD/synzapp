@@ -81,6 +81,17 @@ export interface InterpreterRealtimeSdpAnswerResponse {
   targetLanguage: InterpreterLanguage;
 }
 
+export interface InterpreterRealtimeProviderDiagnosticResponse {
+  checkedAtIso: string;
+  credentialAccepted: boolean;
+  expectedInvalidOfferResponse: boolean;
+  model: string;
+  providerMessage: string;
+  providerReachable: boolean;
+  providerStatus: number;
+  targetLanguage: InterpreterLanguage;
+}
+
 export interface CreateInterpreterMeetingInput {
   autoDetectSourceLanguage: boolean;
   invitedUserIds?: string[];
@@ -204,6 +215,18 @@ export async function createInterpreterRealtimeSdpAnswer(
   );
 
   return response.json() as Promise<InterpreterRealtimeSdpAnswerResponse>;
+}
+
+export async function runInterpreterRealtimeProviderDiagnostic(
+  idToken: string,
+  targetLanguageCode?: string | null
+) {
+  const response = await interpreterFetch(idToken, '/realtime-diagnostics', {
+    body: JSON.stringify({ targetLanguageCode: targetLanguageCode || null }),
+    method: 'POST'
+  });
+
+  return response.json() as Promise<InterpreterRealtimeProviderDiagnosticResponse>;
 }
 
 export async function addInterpreterTranscriptSegment(

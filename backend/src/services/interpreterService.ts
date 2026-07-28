@@ -57,6 +57,10 @@ export interface InterpreterRealtimeSdpAnswerInput {
   targetLanguageCode: string;
 }
 
+export interface InterpreterRealtimeProviderDiagnosticInput {
+  targetLanguageCode?: string | null;
+}
+
 interface OrganizationRecord {
   status?: string;
   tenantId?: string;
@@ -625,6 +629,59 @@ export async function createInterpreterRealtimeSdpAnswer(
   };
 }
 
+export async function runInterpreterRealtimeProviderDiagnostic(
+  decodedToken: DecodedIdToken,
+  input: InterpreterRealtimeProviderDiagnosticInput = {}
+) {
+  const context = await getAuthorizedInterpreterContext(decodedToken);
+
+  if (!canRunInterpreterProviderDiagnostic(context)) {
+    throw authorizationError('Only an authorized administrator can run interpreter provider diagnostics.');
+  }
+
+  const nowIso = new Date().toISOString();
+  const targetLanguage = getSupportedLanguage(input.targetLanguageCode || 'es-MX');
+  const session = await requestOpenAiInterpreterRealtimeSession(context, targetLanguage);
+  const response = await fetch('https://api.openai.com/v1/realtime/translations/calls', {
+    body: getDiagnosticRealtimeOfferSdp(),
+    headers: {
+      Authorization: `Bearer ${session.clientSecret}`,
+      'Content-Type': 'application/sdp',
+      'OpenAI-Safety-Identifier': session.safetyIdentifier
+    },
+    method: 'POST',
+    signal: AbortSignal.timeout(env.openAiRequestTimeoutMs)
+  });
+  const responseText = await response.text().catch(() => '');
+  const providerMessage = getOpenAiErrorMessage(responseText);
+  const credentialAccepted = response.status === 400 &&
+    /invalid.*sdp|invalid.*offer|invalid_offer/i.test(responseText);
+
+  await writeInterpreterAuditEvent({
+    context,
+    meetingId: 'provider-diagnostic',
+    metadata: {
+      checkedAtIso: nowIso,
+      credentialAccepted,
+      providerStatus: response.status,
+      targetLanguageCode: targetLanguage.code
+    },
+    summary: 'Ran interpreter realtime provider diagnostic.',
+    type: 'INTERPRETER_REALTIME_PROVIDER_DIAGNOSTIC'
+  });
+
+  return {
+    checkedAtIso: nowIso,
+    credentialAccepted,
+    expectedInvalidOfferResponse: credentialAccepted,
+    model: session.realtimeModel,
+    providerMessage: credentialAccepted ? 'Realtime credential was accepted by the provider.' : sanitizeProviderDiagnosticMessage(response.status, providerMessage),
+    providerReachable: response.status < 500,
+    providerStatus: response.status,
+    targetLanguage
+  };
+}
+
 async function createOpenAiInterpreterRealtimeSession(
   context: AuthorizedInterpreterContext,
   meeting: InterpreterMeetingRecord,
@@ -651,6 +708,30 @@ async function createOpenAiInterpreterRealtimeSession(
   }
 
   assertRateLimit(`interpreter:realtime:${context.uid}`, 60_000, 60);
+
+  const session = await requestOpenAiInterpreterRealtimeSession(context, targetLanguage);
+
+  await writeInterpreterAuditEvent({
+    context,
+    meetingId: meeting.meetingId,
+    metadata: {
+      model: session.realtimeModel,
+      targetLanguageCode: targetLanguage.code
+    },
+    summary: `Prepared realtime interpreter session for "${meeting.meetingName}".`,
+    type: 'INTERPRETER_REALTIME_SESSION_PREPARED'
+  });
+
+  return session;
+}
+
+async function requestOpenAiInterpreterRealtimeSession(
+  context: AuthorizedInterpreterContext,
+  targetLanguage: InterpreterLanguage
+) {
+  if (!env.openAiApiKey) {
+    throw validationError('Interpreter AI is not configured on the backend.');
+  }
 
   const safetyIdentifier = createSafetyIdentifier(context.tenantId, context.uid);
   const realtimeModel = env.openAiInterpreterRealtimeModel.trim();
@@ -692,17 +773,6 @@ async function createOpenAiInterpreterRealtimeSession(
     console.warn('OpenAI interpreter realtime session did not return a client secret.');
     throw serviceError('Interpreter realtime session could not be prepared.');
   }
-
-  await writeInterpreterAuditEvent({
-    context,
-    meetingId: meeting.meetingId,
-    metadata: {
-      model: realtimeModel,
-      targetLanguageCode: targetLanguage.code
-    },
-    summary: `Prepared realtime interpreter session for "${meeting.meetingName}".`,
-    type: 'INTERPRETER_REALTIME_SESSION_PREPARED'
-  });
 
   return {
     clientSecret,
@@ -1085,6 +1155,23 @@ function canManageInterpreterMeeting(
     context.permissions.includes('tenant.update');
 }
 
+function canRunInterpreterProviderDiagnostic(context: AuthorizedInterpreterContext): boolean {
+  return context.role === 'ORG_ADMIN' ||
+    context.role === 'SYSTEM_ADMIN' ||
+    context.permissions.includes('interpreter.manage') ||
+    context.permissions.includes('tenant.update');
+}
+
+function getSupportedLanguage(languageCode: string): InterpreterLanguage {
+  const language = LANGUAGE_BY_CODE.get(languageCode);
+
+  if (!language) {
+    throw validationError('The selected interpreter language is not supported yet.');
+  }
+
+  return language;
+}
+
 function sortRecordsByIso<T extends { createdAtIso?: unknown }>(records: T[], direction: 'asc' | 'desc'): T[] {
   return [...records].sort(compareRecordsByIso(direction));
 }
@@ -1460,6 +1547,39 @@ function sanitizeRealtimeSdpExchangeError(detail: string): string {
   }
 
   return `Interpreter realtime audio offer was rejected: ${detail}`;
+}
+
+function sanitizeProviderDiagnosticMessage(status: number, providerMessage: string): string {
+  if (status === 401) {
+    return 'Realtime credentials were rejected by the provider.';
+  }
+
+  if (status === 403) {
+    return 'Realtime translation access is not enabled for this AI project.';
+  }
+
+  if (status === 429) {
+    return 'Realtime translation is rate limited or out of quota.';
+  }
+
+  if (status >= 500) {
+    return 'Realtime translation provider is temporarily unavailable.';
+  }
+
+  return providerMessage || 'Realtime translation provider check did not pass.';
+}
+
+function getDiagnosticRealtimeOfferSdp(): string {
+  return [
+    'v=0',
+    'o=- 46117317 2 IN IP4 127.0.0.1',
+    's=-',
+    't=0 0',
+    'm=audio 9 UDP/TLS/RTP/SAVPF 111',
+    'c=IN IP4 0.0.0.0',
+    'a=rtpmap:111 opus/48000/2',
+    ''
+  ].join('\r\n');
 }
 
 function getOpenAiErrorMessage(errorText: string): string {
