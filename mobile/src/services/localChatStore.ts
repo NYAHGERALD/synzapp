@@ -599,6 +599,7 @@ export async function removePendingChatMessagesForContact(input: {
 
 export async function updatePendingChatMessage(input: {
   lastError?: string | null;
+  message?: ChatMessage;
   ownerUid: string;
   queueId: string;
   status: PendingChatMessage['status'];
@@ -621,6 +622,7 @@ export async function updatePendingChatMessage(input: {
       ...message,
       attempts: input.status === 'sending' ? message.attempts + 1 : message.attempts,
       lastError: input.lastError === undefined ? message.lastError : input.lastError,
+      message: input.message || message.message,
       status: input.status
     };
 

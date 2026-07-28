@@ -25,6 +25,59 @@ export interface IPhonePhotoPreparationProgress {
   progress: number;
 }
 
+export function needsIphonePhotoSendPreparation(media: LocalChatMediaInput): boolean {
+  return media.kind === 'image' && isIphonePhotoContentType(media.contentType);
+}
+
+export async function prepareIphonePhotoMediaForSend(
+  media: LocalChatMediaInput,
+  onIphonePhotoProgress?: (progress: IPhonePhotoPreparationProgress) => void
+): Promise<LocalChatMediaInput> {
+  if (!needsIphonePhotoSendPreparation(media)) {
+    return media;
+  }
+
+  const fileName = getPreparedIphonePhotoFileNameFromName(media.fileName);
+
+  onIphonePhotoProgress?.({ fileName, progress: 0.12 });
+
+  const converted = await ImageManipulator.manipulateAsync(
+    media.uri,
+    [],
+    {
+      compress: 0.94,
+      format: ImageManipulator.SaveFormat.JPEG
+    }
+  );
+
+  onIphonePhotoProgress?.({ fileName, progress: 0.62 });
+
+  const sizeBytes = await getFileSize(converted.uri);
+
+  if (sizeBytes > CHAT_MEDIA_LIMITS.image) {
+    throw new Error(`This photo is ${formatPickerByteCount(sizeBytes)} after preparing. Synzapp currently allows photos up to ${formatPickerByteCount(CHAT_MEDIA_LIMITS.image)}.`);
+  }
+
+  const preparedMedia = await attachMediaThumbnail({
+    ...media,
+    contentType: 'image/jpeg',
+    fileName,
+    height: converted.height || media.height,
+    originalContentType: media.originalContentType || media.contentType,
+    originalHeight: media.originalHeight || media.height,
+    originalSizeBytes: media.originalSizeBytes || media.sizeBytes,
+    originalUri: converted.uri,
+    originalWidth: media.originalWidth || media.width,
+    sizeBytes: sizeBytes > 0 ? sizeBytes : 1,
+    uri: converted.uri,
+    width: converted.width || media.width
+  }, converted.uri);
+
+  onIphonePhotoProgress?.({ fileName, progress: 1 });
+
+  return preparedMedia;
+}
+
 export async function pickNativeChatCameraMedia(
   onIphonePhotoProgress?: (progress: IPhonePhotoPreparationProgress) => void,
   qualityMode: ChatMediaQualityMode = 'standard'
@@ -80,10 +133,10 @@ export async function pickNativeChatFile(): Promise<LocalChatMediaInput | null> 
 
 async function prepareImageMedia(
   asset: ImagePicker.ImagePickerAsset,
-  onIphonePhotoProgress: ((progress: IPhonePhotoPreparationProgress) => void) | undefined,
+  _onIphonePhotoProgress: ((progress: IPhonePhotoPreparationProgress) => void) | undefined,
   qualityMode: ChatMediaQualityMode
 ): Promise<LocalChatMediaInput> {
-  return buildOriginalImageMedia(asset, onIphonePhotoProgress, qualityMode);
+  return buildOriginalImageMedia(asset, qualityMode);
 }
 
 async function prepareCameraMediaAssets(
@@ -156,14 +209,31 @@ async function prepareVideoMedia(
 
 async function buildOriginalImageMedia(
   asset: ImagePicker.ImagePickerAsset,
-  onIphonePhotoProgress: ((progress: IPhonePhotoPreparationProgress) => void) | undefined,
   qualityMode: ChatMediaQualityMode
 ): Promise<LocalChatMediaInput> {
   const contentType = getAssetImageContentType(asset);
   const sizeBytes = await getFileSize(asset.uri);
 
   if (contentType && isIphonePhotoContentType(contentType)) {
-    return convertIphonePhotoToJpegMedia(asset, contentType, onIphonePhotoProgress, qualityMode);
+    if (sizeBytes > CHAT_MEDIA_LIMITS.image) {
+      throw new Error(`This photo is ${formatPickerByteCount(sizeBytes)}. Synzapp currently allows photos up to ${formatPickerByteCount(CHAT_MEDIA_LIMITS.image)}.`);
+    }
+
+    return {
+      contentType,
+      fileName: getAssetFileName(asset, getDefaultImageFileName(contentType)),
+      height: asset.height || undefined,
+      kind: 'image',
+      originalContentType: contentType,
+      originalHeight: asset.height || undefined,
+      originalSizeBytes: sizeBytes > 0 ? sizeBytes : undefined,
+      originalUri: asset.uri,
+      originalWidth: asset.width || undefined,
+      qualityMode,
+      sizeBytes: sizeBytes > 0 ? sizeBytes : 1,
+      uri: asset.uri,
+      width: asset.width || undefined
+    };
   }
 
   if (contentType && sizeBytes > 0 && sizeBytes <= CHAT_MEDIA_LIMITS.image) {
@@ -191,53 +261,11 @@ async function buildOriginalImageMedia(
   throw new Error('Unable to prepare this photo. Please choose another image.');
 }
 
-async function convertIphonePhotoToJpegMedia(
-  asset: ImagePicker.ImagePickerAsset,
-  originalContentType: string,
-  onIphonePhotoProgress: ((progress: IPhonePhotoPreparationProgress) => void) | undefined,
-  qualityMode: ChatMediaQualityMode
-): Promise<LocalChatMediaInput> {
-  const originalSizeBytes = asset.fileSize || await getFileSize(asset.uri);
-  const fileName = getPreparedIphonePhotoFileName(asset);
+function getPreparedIphonePhotoFileNameFromName(fileName: string): string {
+  const originalFileName = (fileName || 'photo.heic').trim();
+  const baseName = originalFileName.replace(/\.[^.]+$/, '').trim() || 'photo';
 
-  onIphonePhotoProgress?.({ fileName, progress: 0.12 });
-
-  const converted = await ImageManipulator.manipulateAsync(
-    asset.uri,
-    [],
-    {
-      compress: 0.94,
-      format: ImageManipulator.SaveFormat.JPEG
-    }
-  );
-
-  onIphonePhotoProgress?.({ fileName, progress: 0.62 });
-
-  const sizeBytes = await getFileSize(converted.uri);
-
-  if (sizeBytes > CHAT_MEDIA_LIMITS.image) {
-    throw new Error(`This photo is ${formatPickerByteCount(sizeBytes)} after preparing. Synzapp currently allows photos up to ${formatPickerByteCount(CHAT_MEDIA_LIMITS.image)}.`);
-  }
-
-  const media = await attachMediaThumbnail({
-    contentType: 'image/jpeg',
-    fileName,
-    height: converted.height || asset.height || undefined,
-    kind: 'image',
-    originalContentType,
-    originalHeight: asset.height || undefined,
-    originalSizeBytes: originalSizeBytes > 0 ? originalSizeBytes : undefined,
-    originalUri: asset.uri,
-    originalWidth: asset.width || undefined,
-    qualityMode,
-    sizeBytes: sizeBytes > 0 ? sizeBytes : 1,
-    uri: converted.uri,
-    width: converted.width || asset.width || undefined
-  }, converted.uri);
-
-  onIphonePhotoProgress?.({ fileName, progress: 1 });
-
-  return media;
+  return `${baseName}.jpg`;
 }
 
 async function attachMediaThumbnail(
@@ -387,13 +415,6 @@ function isIphonePhotoContentType(contentType: string): boolean {
   const safeContentType = contentType.trim().toLowerCase();
 
   return safeContentType === 'image/heic' || safeContentType === 'image/heif';
-}
-
-function getPreparedIphonePhotoFileName(asset: ImagePicker.ImagePickerAsset): string {
-  const originalFileName = getAssetFileName(asset, 'photo.heic').trim();
-  const baseName = originalFileName.replace(/\.[^.]+$/, '').trim() || 'photo';
-
-  return `${baseName}.jpg`;
 }
 
 function getDefaultImageFileName(contentType: string): string {

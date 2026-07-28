@@ -19,6 +19,13 @@ import DateTimePicker, {
   type DateTimePickerEvent
 } from '@react-native-community/datetimepicker';
 import Ionicons from '@expo/vector-icons/Ionicons';
+import {
+  setAudioModeAsync,
+  type AudioMode,
+  useAudioPlayer,
+  useAudioPlayerStatus
+} from 'expo-audio';
+import * as FileSystem from 'expo-file-system/legacy';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAppTheme } from '../theme/AppThemeProvider';
 import type { AppColors } from '../theme/colors';
@@ -26,15 +33,18 @@ import {
   addInterpreterTranscriptSegment,
   addInterpreterTranslationSegment,
   createInterpreterMeeting,
-  createInterpreterRealtimeSdpAnswer,
+  createInterpreterRealtimeClientSecret,
   createInterpreterSummary,
+  createInterpreterSummaryAudio,
   deleteInterpreterMeeting,
   endInterpreterMeeting,
+  exchangeInterpreterRealtimeSdpWithClientSecret,
   getInterpreterMeeting,
   InterpreterLanguage,
   InterpreterMeeting,
   InterpreterMeetingDetails,
   InterpreterParticipant,
+  InterpreterSummaryAudio,
   InterpreterMeetingType,
   listInterpreterMeetings,
   listInterpreterParticipants,
@@ -60,6 +70,15 @@ interface InterpreterScreenProps {
 const DEFAULT_LANGUAGE_CODES = ['en-US', 'es-MX'];
 const REMINDER_LEAD_MINUTES = [5, 10, 15, 30, 60, 120, 1440];
 const REMINDER_FREQUENCIES: Array<InterpreterCreateDraft['reminderFrequency']> = ['once', 'daily', 'weekly'];
+const INTERPRETER_SUMMARY_AUDIO_MODE: AudioMode = {
+  allowsBackgroundRecording: false,
+  allowsRecording: false,
+  interruptionMode: 'duckOthers',
+  playsInSilentMode: true,
+  shouldPlayInBackground: false,
+  shouldRouteThroughEarpiece: false
+};
+const INTERPRETER_SUMMARY_AUDIO_CACHE_DIR = `${FileSystem.cacheDirectory || ''}synzapp-interpreter-summaries/`;
 
 type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
 
@@ -70,6 +89,11 @@ type InterpreterLanguageSessionState = {
 };
 
 type InterpreterLiveMode = 'idle' | 'connecting' | 'listening' | 'responding' | 'interrupted';
+
+type InterpreterSummaryCreateResult = {
+  summary: InterpreterMeetingDetails['summaries'][number];
+  summaryAudioByLanguage?: Record<string, InterpreterSummaryAudio>;
+};
 
 export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
   const appTheme = useAppTheme();
@@ -202,10 +226,8 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
       const started = meeting.status === 'LIVE'
         ? { meeting }
         : await startInterpreterMeeting(idToken, meeting.meetingId);
-      const realtime = await createInterpreterRealtimeSdpAnswer(idToken, meeting.meetingId, {
-        offerSdp,
-        targetLanguageCode
-      });
+      const realtime = await createInterpreterRealtimeClientSecret(idToken, meeting.meetingId, targetLanguageCode);
+      const answerSdp = await exchangeInterpreterRealtimeSdpWithClientSecret(realtime.clientSecret, offerSdp);
 
       setSelectedMeetingDetails((currentDetails) => currentDetails
         ? {
@@ -217,7 +239,7 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
         currentMeeting.meetingId === started.meeting.meetingId ? started.meeting : currentMeeting
       ));
 
-      return realtime.answerSdp;
+      return answerSdp;
     } catch (error) {
       throw error;
     } finally {
@@ -316,7 +338,7 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
     const meeting = selectedMeetingDetails?.meeting;
 
     if (!meeting) {
-      return;
+      return null;
     }
 
     setIsBusy(true);
@@ -331,8 +353,11 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
             summaries: [result.summary, ...currentDetails.summaries]
           }
         : currentDetails);
+
+      return result;
     } catch (error) {
       showInterpreterError(getErrorMessage(error));
+      return null;
     } finally {
       setIsBusy(false);
     }
@@ -425,7 +450,7 @@ interface InterpreterRoomProps {
   isBusy: boolean;
   onAddDemoTranscript: (text: string, targetLanguageCode: string) => Promise<void>;
   onBack: () => void;
-  onCreateSummary: (languageCodes: string[]) => Promise<void>;
+  onCreateSummary: (languageCodes: string[]) => Promise<InterpreterSummaryCreateResult | null>;
   onEndMeeting: () => Promise<void>;
   onError: (message: string, title?: string) => void;
   onCreateRealtimeSdpAnswer: (targetLanguageCode: string, offerSdp: string) => Promise<string | null>;
@@ -574,9 +599,17 @@ function InterpreterRoom({
   const [selectedLanguageCode, setSelectedLanguageCode] = useState(details.meeting.interpreterLanguages[0]?.code || 'en-US');
   const [respondingLanguageCode, setRespondingLanguageCode] = useState<string | null>(null);
   const [invitedUserIds, setInvitedUserIds] = useState<string[]>(details.meeting.invitedUserIds || []);
+  const [summaryAudioSourceUri, setSummaryAudioSourceUri] = useState<string | null>(null);
+  const [summaryAudioCache, setSummaryAudioCache] = useState<Record<string, string>>({});
+  const [activeSummaryAudioKey, setActiveSummaryAudioKey] = useState<string | null>(null);
+  const [preparingSummaryAudioKey, setPreparingSummaryAudioKey] = useState<string | null>(null);
   const realtimeSessionPoolRef = useRef<Record<string, InterpreterRealtimeSession>>({});
   const pulseAnim = useRef(new Animated.Value(0)).current;
   const [languageSessionState, setLanguageSessionState] = useState<Record<string, InterpreterLanguageSessionState>>({});
+  const summaryAudioPlayer = useAudioPlayer(summaryAudioSourceUri ? { uri: summaryAudioSourceUri } : null, {
+    updateInterval: 250
+  });
+  const summaryAudioStatus = useAudioPlayerStatus(summaryAudioPlayer);
   const latestTranslation = [...details.translations].reverse()
     .find((translation) => translation.targetLanguageCode === selectedLanguageCode);
   const selectedLanguageSession = languageSessionState[selectedLanguageCode];
@@ -586,6 +619,16 @@ function InterpreterRoom({
   useEffect(() => () => {
     closeRealtimeSessionPool(false);
   }, []);
+
+  useEffect(() => () => {
+    safePauseAudioPlayer(summaryAudioPlayer);
+  }, [summaryAudioPlayer]);
+
+  useEffect(() => {
+    if (summaryAudioStatus.didJustFinish) {
+      setActiveSummaryAudioKey(null);
+    }
+  }, [summaryAudioStatus.didJustFinish]);
 
   useEffect(() => {
     const animation = Animated.loop(
@@ -860,6 +903,75 @@ function InterpreterRoom({
         ...patch
       }
     }));
+  }
+
+  async function playInterpreterSummaryAudioPayload(
+    summaryId: string,
+    audio: InterpreterSummaryAudio
+  ) {
+    const audioKey = getInterpreterSummaryAudioKey(summaryId, audio.languageCode);
+    const cachedUri = summaryAudioCache[audioKey] || await cacheInterpreterSummaryAudio(summaryId, audio);
+
+    setSummaryAudioCache((currentCache) => ({
+      ...currentCache,
+      [audioKey]: cachedUri
+    }));
+
+    if (cachedUri !== summaryAudioSourceUri) {
+      setSummaryAudioSourceUri(cachedUri);
+      safeReplaceAudioPlayerSource(summaryAudioPlayer, cachedUri);
+    }
+
+    await summaryAudioPlayer.seekTo(0).catch(() => undefined);
+    await setAudioModeAsync(INTERPRETER_SUMMARY_AUDIO_MODE).catch(() => undefined);
+    setActiveSummaryAudioKey(audioKey);
+    safePlayAudioPlayer(summaryAudioPlayer);
+  }
+
+  async function handlePlayInterpreterSummary(
+    summary: InterpreterMeetingDetails['summaries'][number],
+    languageCode: string
+  ) {
+    const audioKey = getInterpreterSummaryAudioKey(summary.summaryId, languageCode);
+
+    if (activeSummaryAudioKey === audioKey && summaryAudioStatus.playing) {
+      safePauseAudioPlayer(summaryAudioPlayer);
+      setActiveSummaryAudioKey(null);
+      return;
+    }
+
+    try {
+      setPreparingSummaryAudioKey(audioKey);
+
+      const cachedUri = summaryAudioCache[audioKey];
+
+      if (cachedUri) {
+        if (cachedUri !== summaryAudioSourceUri) {
+          setSummaryAudioSourceUri(cachedUri);
+          safeReplaceAudioPlayerSource(summaryAudioPlayer, cachedUri);
+        }
+
+        await summaryAudioPlayer.seekTo(0).catch(() => undefined);
+        await setAudioModeAsync(INTERPRETER_SUMMARY_AUDIO_MODE).catch(() => undefined);
+        setActiveSummaryAudioKey(audioKey);
+        safePlayAudioPlayer(summaryAudioPlayer);
+        return;
+      }
+
+      const idToken = await getIdToken();
+      const result = await createInterpreterSummaryAudio(
+        idToken,
+        details.meeting.meetingId,
+        summary.summaryId,
+        languageCode
+      );
+
+      await playInterpreterSummaryAudioPayload(summary.summaryId, result.audio);
+    } catch (error) {
+      onError(getErrorMessage(error), 'Spoken summary needs attention');
+    } finally {
+      setPreparingSummaryAudioKey(null);
+    }
   }
 
   return (
@@ -1151,14 +1263,48 @@ function InterpreterRoom({
           </Pressable>
         </View>
         {details.summaries[0] ? (
-          details.meeting.interpreterLanguages.map((language) => (
-            <View key={language.code} style={styles.summaryBlock}>
-              <Text style={styles.summaryLanguage}>{language.label}</Text>
-              <Text style={styles.mutedText}>
-                {details.summaries[0]?.summaryTextByLanguage?.[language.code] || 'No summary for this language yet.'}
-              </Text>
-            </View>
-          ))
+          details.meeting.interpreterLanguages.map((language) => {
+            const summary = details.summaries[0];
+            const audioKey = getInterpreterSummaryAudioKey(summary.summaryId, language.code);
+            const isPreparingAudio = preparingSummaryAudioKey === audioKey;
+            const isPlayingAudio = activeSummaryAudioKey === audioKey && summaryAudioStatus.playing;
+
+            return (
+              <View key={language.code} style={styles.summaryBlock}>
+                <View style={styles.summaryActionRow}>
+                  <Text style={styles.summaryLanguage}>{language.label}</Text>
+                  <Pressable
+                    disabled={isPreparingAudio}
+                    onPress={() => void handlePlayInterpreterSummary(summary, language.code)}
+                    style={({ pressed }) => [
+                      styles.summaryPlayButton,
+                      isPlayingAudio && styles.summaryPlayButtonActive,
+                      pressed && styles.pressed
+                    ]}
+                  >
+                    {isPreparingAudio ? (
+                      <ActivityIndicator color={appTheme.colors.primary} size="small" />
+                    ) : (
+                      <Ionicons
+                        color={isPlayingAudio ? '#fff' : appTheme.colors.primary}
+                        name={isPlayingAudio ? 'pause' : 'volume-high-outline'}
+                        size={17}
+                      />
+                    )}
+                    <Text style={[
+                      styles.summaryPlayButtonText,
+                      isPlayingAudio && styles.summaryPlayButtonTextActive
+                    ]}>
+                      {isPlayingAudio ? 'Playing' : 'Listen'}
+                    </Text>
+                  </Pressable>
+                </View>
+                <Text style={styles.mutedText}>
+                  {summary.summaryTextByLanguage?.[language.code] || 'No summary for this language yet.'}
+                </Text>
+              </View>
+            );
+          })
         ) : (
           <Text style={styles.mutedText}>No summary has been created yet.</Text>
         )}
@@ -1170,8 +1316,29 @@ function InterpreterRoom({
         onClose={() => setIsSummaryModalOpen(false)}
         onError={onError}
         onSubmit={async (languageCodes) => {
-          await onCreateSummary(languageCodes);
+          const result = await onCreateSummary(languageCodes);
           setIsSummaryModalOpen(false);
+
+          if (!result) {
+            return;
+          }
+
+          const firstAudio = languageCodes
+            .map((languageCode) => result.summaryAudioByLanguage?.[languageCode])
+            .find((audio): audio is InterpreterSummaryAudio => Boolean(audio));
+
+          if (firstAudio) {
+            await playInterpreterSummaryAudioPayload(result.summary.summaryId, firstAudio);
+            return;
+          }
+
+          const replayLanguageCode = languageCodes.find((languageCode) =>
+            result.summary.languageCodes.includes(languageCode)
+          );
+
+          if (replayLanguageCode) {
+            await handlePlayInterpreterSummary(result.summary, replayLanguageCode);
+          }
         }}
       />
       <InterpreterLiveRoomModal
@@ -2049,7 +2216,7 @@ function InterpreterSummaryLanguageModal({
             style={({ pressed }) => [styles.primaryButtonWide, isBusy && styles.disabledButton, pressed && styles.pressed]}
           >
             {isBusy ? <ActivityIndicator color="#fff" /> : <Ionicons color="#fff" name="document-text-outline" size={20} />}
-            <Text style={styles.primaryButtonText}>Create summary</Text>
+            <Text style={styles.primaryButtonText}>Create and listen</Text>
           </Pressable>
         </View>
       </View>
@@ -2441,6 +2608,60 @@ function formatReminderFrequency(frequency: InterpreterCreateDraft['reminderFreq
   }
 
   return 'None';
+}
+
+function getInterpreterSummaryAudioKey(summaryId: string, languageCode: string): string {
+  return `${summaryId}:${languageCode}`;
+}
+
+async function cacheInterpreterSummaryAudio(
+  summaryId: string,
+  audio: InterpreterSummaryAudio
+): Promise<string> {
+  if (!FileSystem.cacheDirectory) {
+    throw new Error('Spoken summary playback is not available on this device.');
+  }
+
+  await FileSystem.makeDirectoryAsync(INTERPRETER_SUMMARY_AUDIO_CACHE_DIR, {
+    intermediates: true
+  }).catch(() => undefined);
+
+  const safeSummaryId = summaryId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
+  const safeLanguageCode = audio.languageCode.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 24);
+  const fileUri = `${INTERPRETER_SUMMARY_AUDIO_CACHE_DIR}${safeSummaryId}-${safeLanguageCode}.mp3`;
+
+  await FileSystem.writeAsStringAsync(fileUri, audio.audioBase64, {
+    encoding: FileSystem.EncodingType.Base64
+  });
+
+  return fileUri;
+}
+
+function safePauseAudioPlayer(player: { pause: () => void }): void {
+  try {
+    player.pause();
+  } catch {
+    // The native audio object can be released during fast modal or route transitions.
+  }
+}
+
+function safePlayAudioPlayer(player: { play: () => void }): void {
+  try {
+    player.play();
+  } catch (error) {
+    throw error instanceof Error ? error : new Error('Unable to play this spoken summary.');
+  }
+}
+
+function safeReplaceAudioPlayerSource(
+  player: { replace: (source: { uri: string }) => void },
+  uri: string
+): void {
+  try {
+    player.replace({ uri });
+  } catch (error) {
+    throw error instanceof Error ? error : new Error('Unable to load this spoken summary.');
+  }
 }
 
 function getErrorMessage(error: unknown): string {
@@ -3442,6 +3663,12 @@ function createStyles(colors: AppColors) {
       gap: 4,
       paddingTop: 10
     },
+    summaryActionRow: {
+      alignItems: 'center',
+      flexDirection: 'row',
+      gap: 10,
+      justifyContent: 'space-between'
+    },
     summaryButton: {
       backgroundColor: colors.primarySoft,
       borderColor: colors.primary,
@@ -3457,6 +3684,25 @@ function createStyles(colors: AppColors) {
     summaryLanguage: {
       color: colors.ink,
       fontSize: 14
+    },
+    summaryPlayButton: {
+      alignItems: 'center',
+      backgroundColor: colors.primarySoft,
+      borderRadius: 999,
+      flexDirection: 'row',
+      gap: 6,
+      minHeight: 34,
+      paddingHorizontal: 12
+    },
+    summaryPlayButtonActive: {
+      backgroundColor: colors.primary
+    },
+    summaryPlayButtonText: {
+      color: colors.primary,
+      fontSize: 12
+    },
+    summaryPlayButtonTextActive: {
+      color: '#fff'
     },
     summaryLanguageIcon: {
       alignItems: 'center',

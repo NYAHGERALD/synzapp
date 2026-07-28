@@ -60,6 +60,15 @@ export interface InterpreterSummary {
   summaryTextByLanguage: Record<string, string>;
 }
 
+export interface InterpreterSummaryAudio {
+  audioBase64: string;
+  contentType: string;
+  format: 'mp3';
+  languageCode: string;
+  model: string;
+  voice: string;
+}
+
 export interface InterpreterMeetingDetails {
   auditEvents: unknown[];
   meeting: InterpreterMeeting;
@@ -217,6 +226,31 @@ export async function createInterpreterRealtimeSdpAnswer(
   return response.json() as Promise<InterpreterRealtimeSdpAnswerResponse>;
 }
 
+export async function exchangeInterpreterRealtimeSdpWithClientSecret(
+  clientSecret: string,
+  offerSdp: string
+): Promise<string> {
+  const response = await fetch('https://api.openai.com/v1/realtime/translations/calls', {
+    body: offerSdp,
+    headers: {
+      Authorization: `Bearer ${clientSecret}`,
+      'Content-Type': 'application/sdp'
+    },
+    method: 'POST'
+  });
+  const responseText = await response.text();
+
+  if (!response.ok) {
+    throw new Error(getRealtimeSdpExchangeMessage(response.status, responseText));
+  }
+
+  if (!responseText.trim()) {
+    throw new Error('Interpreter realtime audio answer was empty.');
+  }
+
+  return responseText;
+}
+
 export async function runInterpreterRealtimeProviderDiagnostic(
   idToken: string,
   targetLanguageCode?: string | null
@@ -271,7 +305,28 @@ export async function createInterpreterSummary(
     method: 'POST'
   });
 
-  return response.json() as Promise<{ summary: InterpreterSummary }>;
+  return response.json() as Promise<{
+    summary: InterpreterSummary;
+    summaryAudioByLanguage?: Record<string, InterpreterSummaryAudio>;
+  }>;
+}
+
+export async function createInterpreterSummaryAudio(
+  idToken: string,
+  meetingId: string,
+  summaryId: string,
+  languageCode: string
+) {
+  const response = await interpreterFetch(
+    idToken,
+    `/meetings/${encodeURIComponent(meetingId)}/summaries/${encodeURIComponent(summaryId)}/audio`,
+    {
+      body: JSON.stringify({ languageCode }),
+      method: 'POST'
+    }
+  );
+
+  return response.json() as Promise<{ audio: InterpreterSummaryAudio }>;
 }
 
 async function interpreterFetch(
@@ -310,4 +365,55 @@ async function getResponseErrorMessage(response: Response): Promise<string> {
   }
 
   return 'Interpreter service is not available right now.';
+}
+
+function getRealtimeSdpExchangeMessage(status: number, responseText: string): string {
+  const providerMessage = getProviderErrorMessage(responseText);
+
+  if (status === 400) {
+    return providerMessage && /sdp|offer|parse|unmarshal/i.test(providerMessage)
+      ? 'Interpreter realtime audio could not read a valid microphone connection. Close the live interpreter and start it again.'
+      : providerMessage || 'Interpreter realtime audio offer was rejected by the AI provider.';
+  }
+
+  if (status === 401 || status === 403) {
+    return providerMessage || 'Interpreter realtime authorization was rejected during audio setup.';
+  }
+
+  if (status === 404) {
+    return 'Interpreter realtime audio endpoint is not available for this AI project.';
+  }
+
+  if (status === 408 || status === 504) {
+    return 'Interpreter realtime audio setup timed out. Please try again.';
+  }
+
+  if (status === 429) {
+    return 'Interpreter realtime audio setup is rate limited or out of quota.';
+  }
+
+  if (status >= 500) {
+    return 'Interpreter realtime audio provider is temporarily unavailable.';
+  }
+
+  return providerMessage || 'Interpreter realtime audio could not be prepared.';
+}
+
+function getProviderErrorMessage(responseText: string): string {
+  if (!responseText.trim()) {
+    return '';
+  }
+
+  try {
+    const parsed = JSON.parse(responseText) as { error?: { message?: unknown }; message?: unknown };
+    const message = typeof parsed.error?.message === 'string'
+      ? parsed.error.message
+      : typeof parsed.message === 'string'
+        ? parsed.message
+        : '';
+
+    return message.slice(0, 220);
+  } catch {
+    return responseText.slice(0, 220);
+  }
 }

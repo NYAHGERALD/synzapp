@@ -9,6 +9,7 @@ import {
   createInterpreterRealtimeClientSecret,
   createInterpreterRealtimeSdpAnswer,
   createInterpreterSummary,
+  createInterpreterSummaryAudio,
   deleteInterpreterMeeting,
   endInterpreterMeeting,
   getInterpreterMeeting,
@@ -73,6 +74,10 @@ const translationBodySchema = z.object({
 
 const summaryBodySchema = z.object({
   languageCodes: z.array(languageCodeSchema).min(1).max(10)
+});
+
+const summaryAudioBodySchema = z.object({
+  languageCode: languageCodeSchema
 });
 
 const invitationsBodySchema = z.object({
@@ -270,6 +275,24 @@ interpreterRouter.post('/meetings/:meetingId/summaries', verifyAppCheck, async (
     const result = await createInterpreterSummary(decodedToken, {
       languageCodes: body.languageCodes,
       meetingId
+    });
+
+    res.status(201).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+interpreterRouter.post('/meetings/:meetingId/summaries/:summaryId/audio', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const meetingId = meetingIdSchema.parse(req.params.meetingId);
+    const summaryId = meetingIdSchema.parse(req.params.summaryId);
+    const body = summaryAudioBodySchema.parse(req.body);
+    const result = await createInterpreterSummaryAudio(decodedToken, {
+      languageCode: body.languageCode,
+      meetingId,
+      summaryId
     });
 
     res.status(201).json(result);

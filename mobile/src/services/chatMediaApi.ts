@@ -64,8 +64,8 @@ const chatMediaCacheDirectory = FileSystem.documentDirectory
   : FileSystem.cacheDirectory
     ? `${FileSystem.cacheDirectory}Synzapp/Media/`
     : null;
-const CHAT_MEDIA_CHUNK_UPLOAD_THRESHOLD_BYTES = 8 * 1024 * 1024;
-const CHAT_MEDIA_CHUNK_SIZE_BYTES = 1024 * 1024;
+const CHAT_MEDIA_CHUNK_UPLOAD_THRESHOLD_BYTES = 512 * 1024;
+const CHAT_MEDIA_CHUNK_SIZE_BYTES = 512 * 1024;
 
 export async function cacheLocalChatMedia(media: LocalChatMediaInput): Promise<LocalChatMediaInput> {
   ensureMediaSize(media.kind, media.sizeBytes);
@@ -343,6 +343,7 @@ export async function downloadAndDecryptChatMedia(input: {
   media: ChatMediaAttachment;
   onProgress?: (progress: number) => void;
 }): Promise<string> {
+  const mediaId = input.media.mediaId;
   if (input.media.localUri) {
     const localUri = await getExistingLocalMediaUri(input.media.localUri);
 
@@ -351,7 +352,14 @@ export async function downloadAndDecryptChatMedia(input: {
     }
   }
 
-  if (!input.media.mediaId || !input.media.key || !input.media.nonce) {
+  const hasSinglePartEncryption = input.media.encryptionMode !== 'chunked-secretbox-v1' &&
+    Boolean(mediaId && input.media.key && input.media.nonce);
+  const hasChunkedEncryption = input.media.encryptionMode === 'chunked-secretbox-v1' &&
+    Boolean(mediaId && input.media.key && input.media.chunkSizeBytes && input.media.partCount) &&
+    Array.isArray(input.media.partNonces) &&
+    input.media.partNonces.length === input.media.partCount;
+
+  if (!mediaId || (!hasSinglePartEncryption && !hasChunkedEncryption)) {
     throw new Error('This media message cannot be downloaded.');
   }
 
@@ -371,7 +379,7 @@ export async function downloadAndDecryptChatMedia(input: {
     chatType: input.chatType,
     contactId: input.contactId,
     idToken: input.idToken,
-    mediaId: input.media.mediaId
+    mediaId
   });
 
   await FileSystem.deleteAsync(encryptedUri, { idempotent: true }).catch(() => undefined);

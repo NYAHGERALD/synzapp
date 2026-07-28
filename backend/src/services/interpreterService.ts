@@ -47,6 +47,21 @@ export interface InterpreterSummaryInput {
   meetingId: string;
 }
 
+export interface InterpreterSummaryAudioInput {
+  languageCode: string;
+  meetingId: string;
+  summaryId: string;
+}
+
+export interface InterpreterSummaryAudio {
+  audioBase64: string;
+  contentType: string;
+  format: 'mp3';
+  languageCode: string;
+  model: string;
+  voice: string;
+}
+
 export interface UpdateInterpreterInvitationsInput {
   invitedUserIds: string[];
   meetingId: string;
@@ -118,6 +133,18 @@ interface InterpreterMeetingRecord {
   tenantId: string;
   updatedAt?: FirebaseFirestore.FieldValue;
   updatedAtIso: string;
+}
+
+interface InterpreterSummaryRecord {
+  createdAtIso: string;
+  createdByDisplayName?: string;
+  createdByUid?: string;
+  languageCodes: string[];
+  meetingId: string;
+  model?: string;
+  summaryId: string;
+  summaryTextByLanguage: Record<string, string>;
+  tenantId: string;
 }
 
 interface InterpreterParticipant {
@@ -787,6 +814,7 @@ export async function createInterpreterSummary(
   input: InterpreterSummaryInput
 ) {
   const context = await getAuthorizedInterpreterContext(decodedToken);
+  assertRateLimit(`interpreter:summary:${context.uid}`, 60_000, 10);
   const meeting = await readAccessibleMeeting(context, input.meetingId);
 
   if (!env.interpreterSummaryEnabled) {
@@ -832,7 +860,13 @@ export async function createInterpreterSummary(
     summaryId,
     summaryTextByLanguage,
     tenantId: context.tenantId
-  });
+  }) as InterpreterSummaryRecord & { createdAt: FirebaseFirestore.FieldValue };
+  const summaryAudioByLanguage = await buildInterpreterSummaryAudioByLanguage(
+    meeting,
+    summary,
+    languageCodes,
+    context
+  );
 
   await context.organizationRef
     .collection(INTERPRETER_MEETINGS_COLLECTION)
@@ -843,12 +877,76 @@ export async function createInterpreterSummary(
   await writeInterpreterAuditEvent({
     context,
     meetingId: input.meetingId,
-    metadata: { languageCodes, model: env.openAiInterpreterSummaryModel },
+    metadata: {
+      audioLanguageCodes: Object.keys(summaryAudioByLanguage),
+      languageCodes,
+      model: env.openAiInterpreterSummaryModel,
+      speechModel: env.openAiInterpreterSummaryTtsModel,
+      speechVoice: env.openAiInterpreterSummaryTtsVoice
+    },
     summary: `Created interpreter meeting summary for "${meeting.meetingName}".`,
     type: 'INTERPRETER_SUMMARY_CREATED'
   });
 
-  return { summary };
+  return { summary, summaryAudioByLanguage };
+}
+
+export async function createInterpreterSummaryAudio(
+  decodedToken: DecodedIdToken,
+  input: InterpreterSummaryAudioInput
+) {
+  const context = await getAuthorizedInterpreterContext(decodedToken);
+  assertRateLimit(`interpreter:summary-audio:${context.uid}`, 60_000, 20);
+  const meeting = await readAccessibleMeeting(context, input.meetingId);
+
+  if (!env.interpreterSummaryEnabled) {
+    throw validationError('Interpreter summaries are disabled for this organization.');
+  }
+
+  const language = getSupportedLanguage(input.languageCode);
+  const summarySnapshot = await context.organizationRef
+    .collection(INTERPRETER_MEETINGS_COLLECTION)
+    .doc(input.meetingId)
+    .collection(SUMMARY_COLLECTION)
+    .doc(safeDocumentId(input.summaryId))
+    .get();
+
+  if (!summarySnapshot.exists) {
+    throw notFoundError('Interpreter summary was not found.');
+  }
+
+  const summary = normalizeInterpreterSummaryRecord(summarySnapshot.data() as Partial<InterpreterSummaryRecord>);
+
+  if (!summary || summary.meetingId !== input.meetingId || summary.tenantId !== context.tenantId) {
+    throw notFoundError('Interpreter summary was not found.');
+  }
+
+  if (!summary.languageCodes.includes(language.code)) {
+    throw validationError('That summary language is not available for this meeting summary.');
+  }
+
+  const audio = await requestOpenAiSummarySpeechAudio({
+    context,
+    language,
+    meeting,
+    summary,
+    summaryText: summary.summaryTextByLanguage[language.code] || ''
+  });
+
+  await writeInterpreterAuditEvent({
+    context,
+    meetingId: input.meetingId,
+    metadata: {
+      languageCode: language.code,
+      speechModel: env.openAiInterpreterSummaryTtsModel,
+      speechVoice: env.openAiInterpreterSummaryTtsVoice,
+      summaryId: summary.summaryId
+    },
+    summary: `Created spoken interpreter meeting summary for "${meeting.meetingName}".`,
+    type: 'INTERPRETER_SUMMARY_AUDIO_CREATED'
+  });
+
+  return { audio };
 }
 
 let reminderWorkerTimer: NodeJS.Timeout | null = null;
@@ -1123,6 +1221,126 @@ async function requestOpenAiMeetingSummary(
   }
 }
 
+async function buildInterpreterSummaryAudioByLanguage(
+  meeting: InterpreterMeetingRecord,
+  summary: InterpreterSummaryRecord,
+  languageCodes: string[],
+  context: AuthorizedInterpreterContext
+): Promise<Record<string, InterpreterSummaryAudio>> {
+  if (!env.openAiApiKey || !env.interpreterSummaryAudioEnabled) {
+    return {};
+  }
+
+  const audioEntries = await Promise.all(languageCodes.map(async (languageCode) => {
+    const language = getSupportedLanguage(languageCode);
+    const summaryText = summary.summaryTextByLanguage[language.code] || '';
+
+    if (!summaryText.trim()) {
+      return null;
+    }
+
+    try {
+      const audio = await requestOpenAiSummarySpeechAudio({
+        context,
+        language,
+        meeting,
+        summary,
+        summaryText
+      });
+
+      return [language.code, audio] as const;
+    } catch (error) {
+      console.warn('OpenAI interpreter summary speech failed:', {
+        languageCode: language.code,
+        meetingId: meeting.meetingId,
+        message: error instanceof Error ? error.message : 'Unknown summary speech error',
+        summaryId: summary.summaryId
+      });
+
+      return null;
+    }
+  }));
+
+  return Object.fromEntries(audioEntries.filter((entry): entry is readonly [string, InterpreterSummaryAudio] =>
+    Boolean(entry)
+  ));
+}
+
+async function requestOpenAiSummarySpeechAudio({
+  context,
+  language,
+  meeting,
+  summary,
+  summaryText
+}: {
+  context: AuthorizedInterpreterContext;
+  language: InterpreterLanguage;
+  meeting: InterpreterMeetingRecord;
+  summary: InterpreterSummaryRecord;
+  summaryText: string;
+}): Promise<InterpreterSummaryAudio> {
+  if (!env.openAiApiKey) {
+    throw serviceError('Interpreter spoken summary is not configured on the backend.');
+  }
+
+  if (!env.interpreterSummaryAudioEnabled) {
+    throw validationError('Interpreter spoken summaries are disabled for this organization.');
+  }
+
+  const cleanSummaryText = summaryText.trim();
+
+  if (!cleanSummaryText) {
+    throw validationError('There is no summary text to speak in this language yet.');
+  }
+
+  const response = await fetch('https://api.openai.com/v1/audio/speech', {
+    body: JSON.stringify({
+      input: [
+        `Speak this Synzapp interpreter meeting summary in ${language.label}.`,
+        'Use clear, calm, simple workplace language.',
+        'Do not add new facts.',
+        `Meeting name: ${meeting.meetingName}.`,
+        '',
+        cleanSummaryText
+      ].join('\n'),
+      model: env.openAiInterpreterSummaryTtsModel,
+      response_format: 'mp3',
+      voice: env.openAiInterpreterSummaryTtsVoice
+    }),
+    headers: {
+      Authorization: `Bearer ${env.openAiApiKey}`,
+      'Content-Type': 'application/json',
+      'OpenAI-Safety-Identifier': createSafetyIdentifier(context.tenantId, context.uid)
+    },
+    method: 'POST',
+    signal: AbortSignal.timeout(env.openAiRequestTimeoutMs)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    console.warn('OpenAI interpreter summary speech failed:', {
+      error: errorText.slice(0, 300),
+      languageCode: language.code,
+      model: env.openAiInterpreterSummaryTtsModel,
+      status: response.status,
+      summaryId: summary.summaryId
+    });
+    throw serviceError('Interpreter spoken summary could not be created.');
+  }
+
+  const audioBuffer = Buffer.from(await response.arrayBuffer());
+  const contentType = response.headers.get('content-type') || 'audio/mpeg';
+
+  return {
+    audioBase64: audioBuffer.toString('base64'),
+    contentType,
+    format: 'mp3',
+    languageCode: language.code,
+    model: env.openAiInterpreterSummaryTtsModel,
+    voice: env.openAiInterpreterSummaryTtsVoice
+  };
+}
+
 async function readAccessibleMeeting(
   context: AuthorizedInterpreterContext,
   meetingId: string
@@ -1281,6 +1499,28 @@ function normalizeMeetingRecord(meeting: Partial<InterpreterMeetingRecord>): Int
     status: meeting.status || 'LIVE',
     updatedAtIso: meeting.updatedAtIso || meeting.createdAtIso || new Date(0).toISOString()
   } as InterpreterMeetingRecord;
+}
+
+function normalizeInterpreterSummaryRecord(summary: Partial<InterpreterSummaryRecord>): InterpreterSummaryRecord | null {
+  if (!summary.summaryId || !summary.meetingId || !summary.tenantId) {
+    return null;
+  }
+
+  return {
+    ...summary,
+    createdAtIso: summary.createdAtIso || new Date(0).toISOString(),
+    meetingId: summary.meetingId,
+    summaryId: summary.summaryId,
+    tenantId: summary.tenantId,
+    languageCodes: Array.isArray(summary.languageCodes)
+      ? summary.languageCodes.filter((languageCode) => typeof languageCode === 'string')
+      : [],
+    summaryTextByLanguage: typeof summary.summaryTextByLanguage === 'object' && summary.summaryTextByLanguage
+      ? Object.fromEntries(Object.entries(summary.summaryTextByLanguage).filter((entry): entry is [string, string] =>
+          typeof entry[0] === 'string' && typeof entry[1] === 'string'
+        ))
+      : {}
+  };
 }
 
 async function getAuthorizedInterpreterContext(decodedToken: DecodedIdToken): Promise<AuthorizedInterpreterContext> {

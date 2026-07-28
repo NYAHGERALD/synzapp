@@ -34,6 +34,19 @@ describe('interpreter enterprise controls', () => {
     assert.match(interpreterRoutes, /listInterpreterSummaries/);
   });
 
+  it('creates spoken summaries through a secured backend audio endpoint', () => {
+    assert.match(
+      interpreterRoutes,
+      /interpreterRouter\.post\('\/meetings\/:meetingId\/summaries\/:summaryId\/audio'/,
+      'Interpreter spoken summary audio needs a dedicated authenticated endpoint.'
+    );
+    assert.match(interpreterService, /createInterpreterSummaryAudio/);
+    assert.match(interpreterService, /https:\/\/api\.openai\.com\/v1\/audio\/speech/);
+    assert.match(interpreterService, /OPENAI_INTERPRETER_SUMMARY_TTS_MODEL|openAiInterpreterSummaryTtsModel/);
+    assert.match(interpreterService, /INTERPRETER_SUMMARY_AUDIO_CREATED/);
+    assert.doesNotMatch(interpreterService, /metadata:\s*\{[^}]*audioBase64/s);
+  });
+
   it('supports controlled participant discovery and meeting invitation updates', () => {
     assert.match(
       interpreterRoutes,

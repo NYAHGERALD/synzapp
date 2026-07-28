@@ -522,6 +522,8 @@ function normalizeMediaAttachment(media?: Partial<ChatMediaAttachment> | null): 
   const partNonces = Array.isArray(media.partNonces)
     ? media.partNonces.filter((partNonce) => typeof partNonce === 'string' && partNonce.trim()).slice(0, 320)
     : [];
+  const chunkSizeBytes = Number.isFinite(media.chunkSizeBytes) ? Math.max(Math.round(media.chunkSizeBytes || 0), 0) : undefined;
+  const partCount = Number.isFinite(media.partCount) ? Math.max(Math.round(media.partCount || 0), 0) : undefined;
   const contentType = typeof media.contentType === 'string' ? media.contentType.trim().toLowerCase() : '';
   const fileName = typeof media.fileName === 'string' ? media.fileName.trim().slice(0, 180) : '';
   const qualityMode = media.qualityMode === 'hd' ? 'hd' : media.qualityMode === 'standard' ? 'standard' : undefined;
@@ -529,13 +531,18 @@ function normalizeMediaAttachment(media?: Partial<ChatMediaAttachment> | null): 
   const thumbnailContentType = typeof media.thumbnailContentType === 'string'
     ? media.thumbnailContentType.trim().toLowerCase()
     : '';
+  const hasSinglePartEncryption = encryptionMode !== 'chunked-secretbox-v1' && Boolean(nonce);
+  const hasChunkedEncryption = encryptionMode === 'chunked-secretbox-v1' &&
+    Boolean(chunkSizeBytes) &&
+    Boolean(partCount) &&
+    partNonces.length === partCount;
 
-  if (!kind || !mediaId || !key || !nonce || !contentType || !fileName) {
+  if (!kind || !mediaId || !key || !contentType || !fileName || (!hasSinglePartEncryption && !hasChunkedEncryption)) {
     return null;
   }
 
   return {
-    chunkSizeBytes: Number.isFinite(media.chunkSizeBytes) ? Math.max(Math.round(media.chunkSizeBytes || 0), 0) : undefined,
+    chunkSizeBytes,
     contentType,
     durationMs: Number.isFinite(media.durationMs) ? Math.max(Math.round(media.durationMs || 0), 0) : undefined,
     encryptionMode,
@@ -545,8 +552,8 @@ function normalizeMediaAttachment(media?: Partial<ChatMediaAttachment> | null): 
     key,
     kind,
     mediaId,
-    nonce,
-    partCount: Number.isFinite(media.partCount) ? Math.max(Math.round(media.partCount || 0), 0) : undefined,
+    nonce: nonce || undefined,
+    partCount,
     partNonces: partNonces.length ? partNonces : undefined,
     qualityMode,
     sizeBytes: Number.isFinite(media.sizeBytes) ? Math.max(Math.round(media.sizeBytes || 0), 0) : 0,

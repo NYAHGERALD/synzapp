@@ -15,6 +15,7 @@ import {
   useAudioRecorderState
 } from 'expo-audio';
 import * as FileSystem from 'expo-file-system/legacy';
+import * as ImageManipulator from 'expo-image-manipulator';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { BlurView } from 'expo-blur';
 import {
@@ -51,6 +52,8 @@ import DateTimePicker, {
 import NetInfo, { type NetInfoState } from '@react-native-community/netinfo';
 import Feather from '@expo/vector-icons/Feather';
 import Ionicons from '@expo/vector-icons/Ionicons';
+import Svg, { Path } from 'react-native-svg';
+import { captureRef } from 'react-native-view-shot';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { DismissibleError } from '../components/DismissibleError';
 import {
@@ -213,6 +216,7 @@ import {
 } from '../services/localCallStore';
 import { clearProfilePhotoCache, getCachedProfilePhotoUri } from '../services/profilePhotoCache';
 import { openChatAttachmentFile } from '../services/chatAttachmentOpener';
+import { openNativePhotoEditor } from '../services/nativePhotoEditor';
 import {
   IPhonePhotoPreparationProgress,
   pickNativeChatCameraMedia,
@@ -367,6 +371,58 @@ interface MediaViewerState {
   items: ChatMediaAttachment[];
   sourceMessage: ChatMessage;
   title: string;
+}
+
+interface SentPhotoEditorState {
+  displayUri: string;
+  fileName: string;
+  height?: number;
+  message: ChatMessage;
+  sourceUri: string;
+  width?: number;
+}
+
+interface SentPhotoEditorResult {
+  caption: string;
+  height?: number;
+  uri: string;
+  width?: number;
+}
+
+interface PhotoEditorCrashBoundaryProps {
+  children: React.ReactNode;
+  onCrash: (message: string) => void;
+  resetKey: string;
+}
+
+interface PhotoEditorCrashBoundaryState {
+  didCrash: boolean;
+}
+
+class PhotoEditorCrashBoundary extends React.Component<PhotoEditorCrashBoundaryProps, PhotoEditorCrashBoundaryState> {
+  state: PhotoEditorCrashBoundaryState = { didCrash: false };
+
+  static getDerivedStateFromError(): PhotoEditorCrashBoundaryState {
+    return { didCrash: true };
+  }
+
+  componentDidCatch(error: Error) {
+    this.props.onCrash(getErrorMessage(error, 'Unable to open the photo editor.'));
+  }
+
+  componentDidUpdate(previousProps: PhotoEditorCrashBoundaryProps) {
+    if (previousProps.resetKey !== this.props.resetKey && this.state.didCrash) {
+      this.setState({ didCrash: false });
+    }
+  }
+
+  render() {
+    if (this.state.didCrash) {
+      return null;
+    }
+
+    return this.props.children;
+  }
 }
 
 interface AudioAttachmentPreviewState {
@@ -925,6 +981,9 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   );
   const [audioAttachmentPreview, setAudioAttachmentPreview] = useState<AudioAttachmentPreviewState | null>(null);
   const [mediaViewer, setMediaViewer] = useState<MediaViewerState | null>(null);
+  const [sentPhotoEditor, setSentPhotoEditor] = useState<SentPhotoEditorState | null>(null);
+  const [isSendingSentPhotoEdit, setIsSendingSentPhotoEdit] = useState(false);
+  const [isOpeningNativePhotoEditor, setIsOpeningNativePhotoEditor] = useState(false);
   const [preparingVideoKey, setPreparingVideoKey] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [messageActionTarget, setMessageActionTarget] = useState<ChatMessage | null>(null);
@@ -982,6 +1041,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const [isSavingGroup, setIsSavingGroup] = useState(false);
   const [isSavingRolePermissions, setIsSavingRolePermissions] = useState(false);
   const [isLoadingUserProfile, setIsLoadingUserProfile] = useState(false);
+  const [isSigningOut, setIsSigningOut] = useState(false);
   const [isSyncingChatBackup, setIsSyncingChatBackup] = useState(false);
   const [isSavingUserPhoto, setIsSavingUserPhoto] = useState(false);
   const [isSavingRecord, setIsSavingRecord] = useState(false);
@@ -6206,6 +6266,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         ...getLocalChatScope()
       });
       const syncablePendingMessages = pendingMessages.filter((pendingMessage) =>
+        pendingMessage.status !== 'failed' &&
         !activeLocalSendQueueIdsRef.current.has(pendingMessage.queueId)
       );
 
@@ -6278,11 +6339,17 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
             sentMessage: result.message
           });
         } catch (syncError) {
+          const isRetryableNetworkFailure = isNetworkUnavailableError(syncError);
+          const failedMessage = isRetryableNetworkFailure
+            ? pendingMessage.message
+            : markChatMessageSendFailed(pendingMessage.message);
+
           await updatePendingChatMessage({
             lastError: getErrorMessage(syncError, 'Unable to sync queued message.'),
+            message: failedMessage,
             ...getLocalChatScope(),
             queueId: pendingMessage.queueId,
-            status: 'failed'
+            status: isRetryableNetworkFailure ? 'pending' : 'failed'
           });
         }
       }
@@ -6439,7 +6506,14 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     mediaIndex?: number;
     messageId: string;
   }): Promise<ChatMediaAttachment> {
-    if (input.media.mediaId && input.media.key && input.media.nonce) {
+    const hasUploadedSinglePartMedia = input.media.encryptionMode !== 'chunked-secretbox-v1' &&
+      Boolean(input.media.mediaId && input.media.key && input.media.nonce);
+    const hasUploadedChunkedMedia = input.media.encryptionMode === 'chunked-secretbox-v1' &&
+      Boolean(input.media.mediaId && input.media.key && input.media.chunkSizeBytes && input.media.partCount) &&
+      Array.isArray(input.media.partNonces) &&
+      input.media.partNonces.length === input.media.partCount;
+
+    if (hasUploadedSinglePartMedia || hasUploadedChunkedMedia) {
       return {
         ...input.media,
         transferProgress: 1,
@@ -6497,6 +6571,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     const uploadedItems: ChatMediaAttachment[] = [];
 
     for (let index = 0; index < input.mediaItems.length; index += 1) {
+      await yieldToChatUi();
       uploadedItems.push(await uploadMediaForMessage({
         chatType: input.chatType,
         contactId: input.contactId,
@@ -6505,6 +6580,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         mediaIndex: index,
         messageId: input.messageId
       }));
+      await yieldToChatUi();
     }
 
     return uploadedItems;
@@ -6801,7 +6877,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     });
   }
 
-  function handleSendMediaReview() {
+  async function handleSendMediaReview() {
     if (!selectedChat || !mediaReviewItems.length || isSendingMediaReview || activeTrashSegmentIdRef.current) {
       return;
     }
@@ -6822,30 +6898,34 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     setMediaReviewActiveIndex(0);
     setMediaReviewCaption('');
     setMediaReviewQualityMode('standard');
-    setIsSendingMediaReview(false);
     setError(null);
 
-    if (itemsToSend.length > 1) {
+    const preparedItems = itemsToSend.map((item) =>
+      applyMediaReviewQualityMode(item.media, mediaReviewQualityMode)
+    );
+
+    setMediaPreparationProgress(null);
+    setIsSendingMediaReview(false);
+
+    if (preparedItems.length > 1) {
       void queueAndSendChatPayload({
         activeChat,
         clearDraft: false,
         media: null,
-        mediaItems: itemsToSend.map((item) => buildLocalChatMediaAttachment(
-          applyMediaReviewQualityMode(item.media, mediaReviewQualityMode)
-        )),
+        mediaItems: preparedItems.map(buildLocalChatMediaAttachment),
         replyReference,
         text: caption
       });
       return;
     }
 
-    const item = itemsToSend[0];
+    const mediaToSend = preparedItems[0];
 
-    if (item) {
+    if (mediaToSend) {
       void queueAndSendChatPayload({
         activeChat,
         clearDraft: false,
-        media: buildLocalChatMediaAttachment(applyMediaReviewQualityMode(item.media, mediaReviewQualityMode)),
+        media: buildLocalChatMediaAttachment(mediaToSend),
         mediaItems: [],
         replyReference,
         text: caption
@@ -7118,18 +7198,24 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           lastError: getErrorMessage(nextError, 'Network unavailable.'),
           ...getLocalChatScope(),
           queueId: pendingMessage.queueId,
-          status: 'failed'
+          status: 'pending'
         });
         replaceVisibleLocalMessage(activeChat, pendingMessage.queueId, pendingMessage.message);
         return;
       }
 
-      await removePendingChatMessage({
+      const sendErrorMessage = getErrorMessage(nextError, 'Unable to send message.');
+      const failedMessage = markChatMessageSendFailed(pendingMessage.message);
+
+      await updatePendingChatMessage({
+        lastError: sendErrorMessage,
+        message: failedMessage,
         ...getLocalChatScope(),
-        queueId: pendingMessage.queueId
+        queueId: pendingMessage.queueId,
+        status: 'failed'
       }).catch(() => undefined);
-      removeVisibleLocalMessage(activeChat.contactId, pendingMessage.queueId);
-      setError(getErrorMessage(nextError, 'Unable to send message.'));
+      replaceVisibleLocalMessage(activeChat, pendingMessage.queueId, failedMessage);
+      setError(sendErrorMessage);
     } finally {
       activeLocalSendQueueIdsRef.current.delete(pendingMessage.queueId);
     }
@@ -7387,6 +7473,124 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
     });
   }
 
+  async function handleOpenSentPhotoEditor(media: ChatMediaAttachment, message: ChatMessage): Promise<void> {
+    if (!selectedChat || isOpeningNativePhotoEditor || isSendingSentPhotoEdit || activeTrashSegmentIdRef.current) {
+      return;
+    }
+
+    if (media.kind !== 'image') {
+      setError('Only photos can be edited from this editor.');
+      return;
+    }
+
+    const activeChat = selectedChat;
+    const sourceUri = getMediaLocalUri(media);
+    const displayUri = getPhotoEditorDisplayUri(media);
+
+    if (!displayUri) {
+      setError('This photo is not available on this device yet.');
+      return;
+    }
+
+    if (!activeChat.hasActiveDevice) {
+      setError(getChatDeviceNotReadyMessage(activeChat));
+      return;
+    }
+
+    setIsOpeningNativePhotoEditor(true);
+    setError(null);
+
+    try {
+      const editorResult = await openNativePhotoEditor({
+        fileName: media.fileName || 'Synzapp photo',
+        height: getSafePhotoDimension(media.height),
+        messageId: message.messageId,
+        sourceUri: sourceUri || displayUri,
+        userId: userProfile?.uid || currentUid || undefined,
+        width: getSafePhotoDimension(media.width)
+      });
+
+      if (!editorResult) {
+        return;
+      }
+
+      setIsSendingSentPhotoEdit(true);
+
+      const editedMedia = await createLocalMediaFromEditedPhoto({
+        fileName: media.fileName || 'Synzapp photo',
+        height: editorResult.height || getSafePhotoDimension(media.height),
+        uri: editorResult.uri,
+        width: editorResult.width || getSafePhotoDimension(media.width)
+      });
+      const replyReference = buildReplyReference(message);
+
+      void queueAndSendChatPayload({
+        activeChat,
+        clearDraft: false,
+        media: buildLocalChatMediaAttachment(editedMedia),
+        mediaItems: [],
+        replyReference,
+        text: ''
+      });
+    } catch (nextError) {
+      setError(getErrorMessage(nextError, 'Unable to edit and send this photo.'));
+    } finally {
+      setIsOpeningNativePhotoEditor(false);
+      setIsSendingSentPhotoEdit(false);
+    }
+  }
+
+  function handleOpenSentPhotoEditorFromViewer(media: ChatMediaAttachment, message: ChatMessage): void {
+    setMediaViewer(null);
+    InteractionManager.runAfterInteractions(() => {
+      setTimeout(() => {
+        void handleOpenSentPhotoEditor(media, message);
+      }, 360);
+    });
+  }
+
+  async function handleSendSentPhotoEdit(result: SentPhotoEditorResult): Promise<void> {
+    if (!selectedChat || !sentPhotoEditor || isSendingSentPhotoEdit || activeTrashSegmentIdRef.current) {
+      return;
+    }
+
+    const activeChat = selectedChat;
+
+    if (!activeChat.hasActiveDevice) {
+      setError(getChatDeviceNotReadyMessage(activeChat));
+      return;
+    }
+
+    setIsSendingSentPhotoEdit(true);
+
+    try {
+      const editedMedia = await createLocalMediaFromEditedPhoto({
+        fileName: sentPhotoEditor.fileName,
+        height: result.height || sentPhotoEditor.height,
+        uri: result.uri,
+        width: result.width || sentPhotoEditor.width
+      });
+      const replyReference = buildReplyReference(sentPhotoEditor.message);
+
+      setSentPhotoEditor(null);
+      setMediaViewer(null);
+      setError(null);
+
+      void queueAndSendChatPayload({
+        activeChat,
+        clearDraft: false,
+        media: buildLocalChatMediaAttachment(editedMedia),
+        mediaItems: [],
+        replyReference,
+        text: result.caption.trim()
+      });
+    } catch (nextError) {
+      Alert.alert('Photo not sent', getErrorMessage(nextError, 'Unable to send the edited photo.'));
+    } finally {
+      setIsSendingSentPhotoEdit(false);
+    }
+  }
+
   async function handlePrepareAttachment(message: ChatMessage, activeIndex: number): Promise<string | null> {
     const activeChat = selectedChatRef.current;
     const mediaItems = getMessageMediaItems(message);
@@ -7546,23 +7750,31 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
 
           if (sourceMediaItems.length > 1) {
             for (const sourceMedia of sourceMediaItems) {
+              await yieldToChatUi();
               forwardMediaItems.push(await uploadEncryptedChatMedia({
                 chatType: recipient.chatType,
                 contactId: recipient.contactId,
                 idToken,
                 media: toLocalChatMediaInput(sourceMedia)
               }));
+              await yieldToChatUi();
             }
           }
 
           const sourceMedia = sourceMediaItems[0] || getMessageMedia(message);
           const forwardMedia = sourceMedia && !forwardMediaItems.length
-            ? await uploadEncryptedChatMedia({
-                chatType: recipient.chatType,
-                contactId: recipient.contactId,
-                idToken,
-                media: toLocalChatMediaInput(sourceMedia)
-              })
+            ? await (async () => {
+                await yieldToChatUi();
+                const uploadedMedia = await uploadEncryptedChatMedia({
+                  chatType: recipient.chatType,
+                  contactId: recipient.contactId,
+                  idToken,
+                  media: toLocalChatMediaInput(sourceMedia)
+                });
+                await yieldToChatUi();
+
+                return uploadedMedia;
+              })()
             : null;
           const result = await sendChatMessage({
             chatType: recipient.chatType,
@@ -8529,6 +8741,46 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
       });
     } finally {
       setIsDeletingOrganization(false);
+    }
+  }
+
+  function handleRequestSignOut() {
+    if (isSigningOut) {
+      return;
+    }
+
+    Alert.alert(
+      'Sign out of Synzapp?',
+      'This will end your session on this device. You can sign back in with your verified phone number.',
+      [
+        {
+          style: 'cancel',
+          text: 'Cancel'
+        },
+        {
+          onPress: () => {
+            void handleConfirmSignOut();
+          },
+          style: 'destructive',
+          text: 'Sign out'
+        }
+      ]
+    );
+  }
+
+  async function handleConfirmSignOut() {
+    if (isSigningOut) {
+      return;
+    }
+
+    try {
+      setIsSigningOut(true);
+      setError(null);
+      await signOutOrgAdmin();
+    } catch (nextError) {
+      setError(getErrorMessage(nextError, 'Synzapp could not sign you out. Please try again.'));
+    } finally {
+      setIsSigningOut(false);
     }
   }
 
@@ -10164,9 +10416,11 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
             <YouTab
               isLoading={isLoadingUserProfile}
               isSavingPhoto={isSavingUserPhoto}
+              isSigningOut={isSigningOut}
               onChangePhoto={() => {
                 void handleUpdateUserProfilePhoto();
               }}
+              onSignOut={handleRequestSignOut}
               profile={userProfile}
               profilePhotoHeaders={profilePhotoHeaders}
             />
@@ -10257,6 +10511,9 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           setMediaViewer(null);
           handleDeleteMessageForMe(message);
         }}
+        onEditPhoto={(media, message) => {
+          handleOpenSentPhotoEditorFromViewer(media, message);
+        }}
         onForward={(message) => {
           setMediaViewer(null);
           handleQuickForwardMessage(message);
@@ -10277,6 +10534,25 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
         starred={mediaViewer ? Boolean(starredMessageIds[mediaViewer.sourceMessage.messageId]) : false}
         state={mediaViewer}
       />
+
+      <PhotoEditorCrashBoundary
+        onCrash={(message) => {
+          setSentPhotoEditor(null);
+          setError(message);
+        }}
+        resetKey={sentPhotoEditor?.displayUri || 'closed'}
+      >
+        <LocalFirstSentPhotoEditorModal
+          isSending={isSendingSentPhotoEdit}
+          onCancel={() => {
+            if (!isSendingSentPhotoEdit) {
+              setSentPhotoEditor(null);
+            }
+          }}
+          onSend={(result) => void handleSendSentPhotoEdit(result)}
+          state={sentPhotoEditor}
+        />
+      </PhotoEditorCrashBoundary>
 
       <AudioAttachmentPreviewModal
         state={audioAttachmentPreview}
@@ -11933,6 +12209,7 @@ function MediaReviewModal({
 function MediaViewerModal({
   onClose,
   onDelete,
+  onEditPhoto,
   onForward,
   onInfo,
   onReply,
@@ -11943,6 +12220,7 @@ function MediaViewerModal({
 }: {
   onClose: () => void;
   onDelete: (message: ChatMessage) => void;
+  onEditPhoto: (media: ChatMediaAttachment, message: ChatMessage) => void;
   onForward: (message: ChatMessage) => void;
   onInfo: (message: ChatMessage) => void;
   onReply: (message: ChatMessage) => void;
@@ -12006,22 +12284,26 @@ function MediaViewerModal({
               {formatMessageDateTime(sourceMessage.sentAt)}
             </Text>
           </View>
-          <Pressable
-            accessibilityLabel="Edit video"
-            accessibilityRole="button"
-            onPress={() => Alert.alert('Edit media', 'Video trimming and markup will open from this control when media editing is enabled for videos.')}
-            style={({ pressed }) => [styles.mediaViewerTopActionButton, pressed && styles.pressed]}
-          >
-            <Feather color="#0F172A" name="edit-2" size={18} />
-          </Pressable>
-          <Pressable
-            accessibilityLabel="Media information"
-            accessibilityRole="button"
-            onPress={() => onInfo(sourceMessage)}
-            style={({ pressed }) => [styles.mediaViewerTopActionButton, pressed && styles.pressed]}
-          >
-            <Feather color="#0F172A" name="more-horizontal" size={20} />
-          </Pressable>
+          {activeMedia?.kind === 'image' ? (
+            <Pressable
+              accessibilityLabel="Edit photo"
+              accessibilityRole="button"
+              onPress={() => onEditPhoto(activeMedia, sourceMessage)}
+              style={({ pressed }) => [styles.mediaViewerTopActionButton, pressed && styles.pressed]}
+            >
+              <Feather color="#0F172A" name="edit-2" size={18} />
+            </Pressable>
+          ) : null}
+          {activeMedia?.kind !== 'image' ? (
+            <Pressable
+              accessibilityLabel="Media information"
+              accessibilityRole="button"
+              onPress={() => onInfo(sourceMessage)}
+              style={({ pressed }) => [styles.mediaViewerTopActionButton, pressed && styles.pressed]}
+            >
+              <Feather color="#0F172A" name="more-horizontal" size={20} />
+            </Pressable>
+          ) : null}
         </View>
 
         <ScrollView
@@ -12156,6 +12438,597 @@ function MediaViewerModal({
       </View>
     </Modal>
   );
+}
+
+type LocalPhotoEditorTool = 'crop' | 'pen' | 'sticker' | 'text';
+
+interface LocalPhotoEditorPoint {
+  x: number;
+  y: number;
+}
+
+interface LocalPhotoEditorStroke {
+  color: string;
+  id: string;
+  points: LocalPhotoEditorPoint[];
+  size: number;
+}
+
+interface LocalPhotoEditorText {
+  color: string;
+  id: string;
+  size: number;
+  text: string;
+  x: number;
+  y: number;
+}
+
+interface LocalPhotoEditorSticker {
+  emoji: string;
+  id: string;
+  size: number;
+  x: number;
+  y: number;
+}
+
+interface LocalPhotoEditorCrop {
+  h: number;
+  w: number;
+  x: number;
+  y: number;
+}
+
+function LocalFirstSentPhotoEditorModal({
+  isSending,
+  onCancel,
+  onSend,
+  state
+}: {
+  isSending: boolean;
+  onCancel: () => void;
+  onSend: (result: SentPhotoEditorResult) => void;
+  state: SentPhotoEditorState | null;
+}) {
+  const insets = useSafeAreaInsets();
+  const { height: windowHeight, width: windowWidth } = useWindowDimensions();
+  const exportRef = useRef<View | null>(null);
+  const currentStrokeIdRef = useRef<string | null>(null);
+  const dragTextIdRef = useRef<string | null>(null);
+  const dragTextStartRef = useRef<{ x: number; y: number; tx: number; ty: number } | null>(null);
+  const [tool, setTool] = useState<LocalPhotoEditorTool>('pen');
+  const [color, setColor] = useState('#25D366');
+  const [size, setSize] = useState(10);
+  const [caption, setCaption] = useState('');
+  const [imageSize, setImageSize] = useState<{ height: number; width: number } | null>(null);
+  const [strokes, setStrokes] = useState<LocalPhotoEditorStroke[]>([]);
+  const [texts, setTexts] = useState<LocalPhotoEditorText[]>([]);
+  const [stickers, setStickers] = useState<LocalPhotoEditorSticker[]>([]);
+  const [crop, setCrop] = useState<LocalPhotoEditorCrop | null>(null);
+  const [activeTextId, setActiveTextId] = useState<string | null>(null);
+  const [isExporting, setIsExporting] = useState(false);
+  const [editorImageUri, setEditorImageUri] = useState('');
+  const stickerOptions = ['👍', '❤️', '✅', '⚠️', '⭐', '😊', '👏', '🙏', '📌', '🔎', '⭕', '❌'];
+  const [selectedSticker, setSelectedSticker] = useState(stickerOptions[0]);
+
+  useEffect(() => {
+    if (!state) {
+      return;
+    }
+
+    setTool('pen');
+    setColor('#25D366');
+    setSize(10);
+    setCaption('');
+    setStrokes([]);
+    setTexts([]);
+    setStickers([]);
+    setCrop(null);
+    setActiveTextId(null);
+    setIsExporting(false);
+    setEditorImageUri(state.displayUri);
+    setImageSize(state.width && state.height
+      ? { height: state.height, width: state.width }
+      : null
+    );
+
+    if (!state.width || !state.height) {
+      Image.getSize(
+        state.displayUri,
+        (width, height) => setImageSize({ height, width }),
+        () => setImageSize({ height: 1200, width: 900 })
+      );
+    }
+  }, [state?.displayUri, state?.height, state?.width]);
+
+  const editorState = state;
+  const safeImageWidth = Math.max(imageSize?.width || editorState?.width || 900, 1);
+  const safeImageHeight = Math.max(imageSize?.height || editorState?.height || 1200, 1);
+  const maxEditorWidth = windowWidth;
+  const maxEditorHeight = Math.max(220, windowHeight - insets.top - insets.bottom - 174);
+  const fitRatio = Math.min(maxEditorWidth / safeImageWidth, maxEditorHeight / safeImageHeight);
+  const surfaceWidth = Math.max(1, Math.floor(safeImageWidth * fitRatio));
+  const surfaceHeight = Math.max(1, Math.floor(safeImageHeight * fitRatio));
+  const strokePaths = useMemo(() => strokes
+    .map((stroke) => ({
+      ...stroke,
+      path: getLocalPhotoEditorPath(stroke.points)
+    }))
+    .filter((stroke) => stroke.path.length > 0), [strokes]);
+
+  function getPoint(event: { nativeEvent: { locationX: number; locationY: number } }): LocalPhotoEditorPoint {
+    return {
+      x: Math.max(0, Math.min(surfaceWidth, event.nativeEvent.locationX)),
+      y: Math.max(0, Math.min(surfaceHeight, event.nativeEvent.locationY))
+    };
+  }
+
+  const editorPanResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => tool !== 'text' || activeTextId === null,
+    onMoveShouldSetPanResponder: () => tool !== 'text' || activeTextId === null,
+    onPanResponderGrant: (event) => {
+      const point = getPoint(event);
+
+      if (tool === 'pen') {
+        const id = createLocalPhotoEditorId('stroke');
+        currentStrokeIdRef.current = id;
+        setStrokes((current) => [...current, { color, id, points: [point], size }]);
+        return;
+      }
+
+      if (tool === 'crop') {
+        setCrop({ h: 1, w: 1, x: point.x, y: point.y });
+        currentStrokeIdRef.current = `${point.x}:${point.y}`;
+        return;
+      }
+
+      if (tool === 'sticker') {
+        setStickers((current) => [...current, {
+          emoji: selectedSticker,
+          id: createLocalPhotoEditorId('sticker'),
+          size: Math.max(30, size * 3),
+          x: point.x,
+          y: point.y
+        }]);
+        return;
+      }
+
+      if (tool === 'text') {
+        const id = createLocalPhotoEditorId('text');
+        setTexts((current) => [...current, {
+          color,
+          id,
+          size: Math.max(18, size * 2),
+          text: 'Text',
+          x: point.x,
+          y: point.y
+        }]);
+        setActiveTextId(id);
+      }
+    },
+    onPanResponderMove: (event) => {
+      const point = getPoint(event);
+
+      if (tool === 'pen' && currentStrokeIdRef.current) {
+        const strokeId = currentStrokeIdRef.current;
+        setStrokes((current) => current.map((stroke) =>
+          stroke.id === strokeId
+            ? { ...stroke, points: [...stroke.points, point] }
+            : stroke
+        ));
+        return;
+      }
+
+      if (tool === 'crop' && currentStrokeIdRef.current) {
+        const [startX, startY] = currentStrokeIdRef.current.split(':').map(Number);
+        setCrop({
+          h: Math.max(1, Math.abs(point.y - startY)),
+          w: Math.max(1, Math.abs(point.x - startX)),
+          x: Math.min(startX, point.x),
+          y: Math.min(startY, point.y)
+        });
+      }
+    },
+    onPanResponderRelease: () => {
+      currentStrokeIdRef.current = null;
+    },
+    onPanResponderTerminate: () => {
+      currentStrokeIdRef.current = null;
+    }
+  }), [activeTextId, color, selectedSticker, size, surfaceHeight, surfaceWidth, tool]);
+
+  if (!editorState) {
+    return null;
+  }
+
+  function handleUndo() {
+    if (tool === 'crop' && crop) {
+      setCrop(null);
+      return;
+    }
+
+    if (texts.length) {
+      const removed = texts[texts.length - 1];
+      setTexts((current) => current.slice(0, -1));
+      if (removed?.id === activeTextId) {
+        setActiveTextId(null);
+      }
+      return;
+    }
+
+    if (stickers.length) {
+      setStickers((current) => current.slice(0, -1));
+      return;
+    }
+
+    if (strokes.length) {
+      setStrokes((current) => current.slice(0, -1));
+    }
+  }
+
+  async function handleSend() {
+    if (!exportRef.current || isSending || !editorState) {
+      return;
+    }
+
+    setActiveTextId(null);
+
+    try {
+      Keyboard.dismiss();
+      setIsExporting(true);
+      await waitForNextFrame();
+      const capturedUri = await captureRef(exportRef.current, {
+        fileName: getEditedPhotoFileName(editorState.fileName).replace(/\.[^.]+$/, ''),
+        format: 'jpg',
+        quality: 0.92,
+        result: 'tmpfile'
+      });
+      const hasAppliedCrop = Boolean(crop && crop.w >= 12 && crop.h >= 12);
+      const output = hasAppliedCrop && crop
+        ? await ImageManipulator.manipulateAsync(
+          capturedUri,
+          [{
+            crop: {
+              height: Math.max(1, Math.round(crop.h)),
+              originX: Math.max(0, Math.round(crop.x)),
+              originY: Math.max(0, Math.round(crop.y)),
+              width: Math.max(1, Math.round(crop.w))
+            }
+          }],
+          {
+            compress: 0.92,
+            format: ImageManipulator.SaveFormat.JPEG
+          }
+        )
+        : { height: surfaceHeight, uri: capturedUri, width: surfaceWidth };
+
+      onSend({
+        caption,
+        height: Math.round(output.height || surfaceHeight),
+        uri: output.uri,
+        width: Math.round(output.width || surfaceWidth)
+      });
+    } catch (error) {
+      Alert.alert('Photo editor', getErrorMessage(error, 'Unable to export the edited photo.'));
+    } finally {
+      setIsExporting(false);
+    }
+  }
+
+  return (
+    <Modal
+      animationType="slide"
+      onRequestClose={onCancel}
+      presentationStyle="fullScreen"
+      transparent={false}
+      visible
+    >
+      <View style={styles.sentPhotoNativeEditorRoot}>
+        <View style={[
+          styles.sentPhotoNativeEditorTop,
+          { paddingTop: Math.max(insets.top + 10, 18) }
+        ]}>
+          <Pressable
+            accessibilityLabel="Close photo editor"
+            accessibilityRole="button"
+            onPress={onCancel}
+            style={({ pressed }) => [styles.sentPhotoNativeToolButton, styles.sentPhotoNativeCloseButton, pressed && styles.pressed]}
+          >
+            <Feather color="#FFFFFF" name="x" size={23} />
+          </Pressable>
+          <View style={styles.sentPhotoNativeToolSpacer} />
+          <PhotoEditorToolButton active={tool === 'crop'} icon="crop" onPress={() => setTool('crop')} />
+          <PhotoEditorToolButton active={tool === 'sticker'} icon="smile" onPress={() => setTool('sticker')} />
+          <PhotoEditorToolButton active={tool === 'text'} icon="type" onPress={() => setTool('text')} />
+          <PhotoEditorToolButton active={tool === 'pen'} icon="edit-3" onPress={() => setTool('pen')} />
+          <Pressable
+            accessibilityLabel="Undo edit"
+            accessibilityRole="button"
+            onPress={handleUndo}
+            style={({ pressed }) => [styles.sentPhotoNativeToolButton, pressed && styles.pressed]}
+          >
+            <Feather color="#FFFFFF" name="rotate-ccw" size={21} />
+          </Pressable>
+        </View>
+
+        <View style={styles.sentPhotoNativeStage}>
+          <View
+            collapsable={false}
+            ref={exportRef}
+            style={[
+              styles.sentPhotoNativeSurface,
+              {
+                height: surfaceHeight,
+                width: surfaceWidth
+              }
+            ]}
+            {...editorPanResponder.panHandlers}
+          >
+            <Image
+              onError={() => {
+                const fallbackUri = editorState.sourceUri && editorState.sourceUri !== editorImageUri
+                  ? editorState.sourceUri
+                  : '';
+
+                if (fallbackUri) {
+                  setEditorImageUri(fallbackUri);
+                }
+              }}
+              resizeMode="contain"
+              source={{ uri: editorImageUri || editorState.displayUri }}
+              style={styles.sentPhotoNativeImage}
+            />
+            <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+              <Svg height="100%" width="100%">
+                {strokePaths.map((stroke) => (
+                  <Path
+                    d={stroke.path}
+                    fill="none"
+                    key={stroke.id}
+                    stroke={stroke.color}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={stroke.size}
+                  />
+                ))}
+              </Svg>
+            </View>
+            {stickers.map((sticker) => (
+              <Text
+                key={sticker.id}
+                pointerEvents="none"
+                style={[
+                  styles.sentPhotoNativeSticker,
+                  {
+                    fontSize: sticker.size,
+                    left: sticker.x - sticker.size / 2,
+                    top: sticker.y - sticker.size / 2
+                  }
+                ]}
+              >
+                {sticker.emoji}
+              </Text>
+            ))}
+            {texts.map((label) => {
+              const isActive = label.id === activeTextId;
+
+              return (
+                <TextInput
+                  key={label.id}
+                  multiline
+                  onChangeText={(text) => setTexts((current) => current.map((item) =>
+                    item.id === label.id ? { ...item, text } : item
+                  ))}
+                  onFocus={() => setActiveTextId(label.id)}
+                  onTouchStart={(event) => {
+                    dragTextIdRef.current = label.id;
+                    dragTextStartRef.current = {
+                      tx: label.x,
+                      ty: label.y,
+                      x: event.nativeEvent.pageX,
+                      y: event.nativeEvent.pageY
+                    };
+                  }}
+                  onTouchMove={(event) => {
+                    if (dragTextIdRef.current !== label.id || !dragTextStartRef.current) {
+                      return;
+                    }
+
+                    const nextX = dragTextStartRef.current.tx + event.nativeEvent.pageX - dragTextStartRef.current.x;
+                    const nextY = dragTextStartRef.current.ty + event.nativeEvent.pageY - dragTextStartRef.current.y;
+
+                    setTexts((current) => current.map((item) =>
+                      item.id === label.id
+                        ? {
+                          ...item,
+                          x: Math.max(0, Math.min(surfaceWidth - 70, nextX)),
+                          y: Math.max(0, Math.min(surfaceHeight - 36, nextY))
+                        }
+                        : item
+                    ));
+                  }}
+                  onTouchEnd={() => {
+                    dragTextIdRef.current = null;
+                    dragTextStartRef.current = null;
+                  }}
+                  style={[
+                    styles.sentPhotoNativeText,
+                    isActive && styles.sentPhotoNativeTextActive,
+                    {
+                      color: label.color,
+                      fontSize: label.size,
+                      left: label.x,
+                      top: label.y
+                    }
+                  ]}
+                  value={label.text}
+                />
+              );
+            })}
+            {tool === 'crop' && crop && !isExporting ? (
+              <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+                <View style={[styles.sentPhotoCropShade, { height: crop.y, left: 0, right: 0, top: 0 }]} />
+                <View style={[styles.sentPhotoCropShade, { bottom: 0, left: 0, right: 0, top: crop.y + crop.h }]} />
+                <View style={[styles.sentPhotoCropShade, { height: crop.h, left: 0, top: crop.y, width: crop.x }]} />
+                <View style={[styles.sentPhotoCropShade, { height: crop.h, left: crop.x + crop.w, right: 0, top: crop.y }]} />
+                <View style={[
+                  styles.sentPhotoCropBox,
+                  {
+                    height: crop.h,
+                    left: crop.x,
+                    top: crop.y,
+                    width: crop.w
+                  }
+                ]} />
+              </View>
+            ) : null}
+          </View>
+        </View>
+
+        {tool === 'sticker' ? (
+          <ScrollView
+            contentContainerStyle={styles.sentPhotoStickerRowContent}
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.sentPhotoStickerRow}
+          >
+            {stickerOptions.map((emoji) => (
+              <Pressable
+                accessibilityLabel={`Use sticker ${emoji}`}
+                accessibilityRole="button"
+                key={emoji}
+                onPress={() => setSelectedSticker(emoji)}
+                style={[
+                  styles.sentPhotoStickerOption,
+                  emoji === selectedSticker && styles.sentPhotoStickerOptionActive
+                ]}
+              >
+                <Text style={styles.sentPhotoStickerOptionText}>{emoji}</Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        ) : null}
+
+        <View style={styles.sentPhotoNativeControls}>
+          <Pressable
+            accessibilityLabel="Choose green"
+            accessibilityRole="button"
+            onPress={() => setColor('#25D366')}
+            style={[styles.sentPhotoColorDot, { backgroundColor: '#25D366' }, color === '#25D366' && styles.sentPhotoColorDotActive]}
+          />
+          <Pressable
+            accessibilityLabel="Choose red"
+            accessibilityRole="button"
+            onPress={() => setColor('#EF4444')}
+            style={[styles.sentPhotoColorDot, { backgroundColor: '#EF4444' }, color === '#EF4444' && styles.sentPhotoColorDotActive]}
+          />
+          <Pressable
+            accessibilityLabel="Choose yellow"
+            accessibilityRole="button"
+            onPress={() => setColor('#FACC15')}
+            style={[styles.sentPhotoColorDot, { backgroundColor: '#FACC15' }, color === '#FACC15' && styles.sentPhotoColorDotActive]}
+          />
+          <Text style={styles.sentPhotoNativeSizeLabel}>{size}px</Text>
+          <Pressable
+            accessibilityLabel="Decrease tool size"
+            accessibilityRole="button"
+            onPress={() => setSize((current) => Math.max(4, current - 2))}
+            style={({ pressed }) => [styles.sentPhotoNativeSizeButton, pressed && styles.pressed]}
+          >
+            <Feather color="#FFFFFF" name="minus" size={18} />
+          </Pressable>
+          <Pressable
+            accessibilityLabel="Increase tool size"
+            accessibilityRole="button"
+            onPress={() => setSize((current) => Math.min(40, current + 2))}
+            style={({ pressed }) => [styles.sentPhotoNativeSizeButton, pressed && styles.pressed]}
+          >
+            <Feather color="#FFFFFF" name="plus" size={18} />
+          </Pressable>
+        </View>
+
+        <View style={[
+          styles.sentPhotoNativeBottom,
+          { paddingBottom: Math.max(insets.bottom + 10, 16) }
+        ]}>
+          <TextInput
+            editable={!isSending}
+            onChangeText={setCaption}
+            placeholder="Add a caption..."
+            placeholderTextColor="rgba(255, 255, 255, 0.55)"
+            style={styles.sentPhotoNativeCaption}
+            value={caption}
+          />
+          <Pressable
+            accessibilityLabel="Send edited photo"
+            accessibilityRole="button"
+            disabled={isSending}
+            onPress={() => void handleSend()}
+            style={({ pressed }) => [
+              styles.sentPhotoNativeSendButton,
+              pressed && !isSending && styles.pressed,
+              isSending && styles.disabled
+            ]}
+          >
+            {isSending ? (
+              <ActivityIndicator color="#04130b" size="small" />
+            ) : (
+              <Ionicons color="#04130b" name="send" size={22} />
+            )}
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function PhotoEditorToolButton({
+  active,
+  icon,
+  onPress
+}: {
+  active: boolean;
+  icon: React.ComponentProps<typeof Feather>['name'];
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.sentPhotoNativeToolButton,
+        active && styles.sentPhotoNativeToolButtonActive,
+        pressed && styles.pressed
+      ]}
+    >
+      <Feather color={active ? '#04130b' : '#FFFFFF'} name={icon} size={21} />
+    </Pressable>
+  );
+}
+
+function createLocalPhotoEditorId(prefix: string): string {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function getLocalPhotoEditorPath(points: LocalPhotoEditorPoint[]): string {
+  if (points.length === 0) {
+    return '';
+  }
+
+  if (points.length === 1) {
+    const point = points[0];
+
+    return `M ${point.x} ${point.y} L ${point.x + 0.01} ${point.y + 0.01}`;
+  }
+
+  const [firstPoint, ...restPoints] = points;
+
+  return restPoints.reduce((path, point) => `${path} L ${point.x} ${point.y}`, `M ${firstPoint.x} ${firstPoint.y}`);
+}
+
+function waitForNextFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => resolve());
+  });
 }
 
 function MediaViewerVideoSlide({
@@ -14815,8 +15688,6 @@ function MessageMediaTransferOverlay({
   status: ChatMediaAttachment['transferStatus'] | null;
 }) {
   const safeProgress = Math.max(0, Math.min(progress || 0, 1));
-  const progressValue = Math.max(1, Math.round(safeProgress * 100));
-  const shouldShowPercent = isActive && safeProgress > 0;
   const iconName: FeatherIconName = status === 'failed'
     ? 'alert-circle'
     : isActive && isVideo
@@ -14830,16 +15701,113 @@ function MessageMediaTransferOverlay({
   return (
     <View style={styles.messageMediaProgressOverlay}>
       <View style={styles.messageMediaProgressCircle}>
-        {isActive && !isVideo ? (
-          <ActivityIndicator color="#64748B" size="small" />
-        ) : (
-          <Feather color="#64748B" name={iconName} size={isActive && isVideo ? 15 : 18} />
-        )}
-        {shouldShowPercent ? (
-          <Text style={styles.messageMediaProgressPercent}>{progressValue}</Text>
-        ) : null}
+        <MediaCircularProgress
+          isActive={isActive}
+          progress={safeProgress}
+          status={status}
+        />
+        <View style={styles.messageMediaProgressIcon}>
+          <Feather
+            color={status === 'failed' ? '#DC2626' : '#475569'}
+            name={iconName}
+            size={isActive && isVideo ? 14 : 16}
+          />
+        </View>
       </View>
       <Text style={styles.messageMediaProgressLabel}>{label}</Text>
+    </View>
+  );
+}
+
+function MediaCircularProgress({
+  isActive,
+  progress,
+  status
+}: {
+  isActive: boolean;
+  progress: number;
+  status: ChatMediaAttachment['transferStatus'] | null;
+}) {
+  const rotation = useRef(new Animated.Value(0)).current;
+  const safeProgress = Math.max(0, Math.min(progress || 0, 1));
+  const isDeterminate = safeProgress > 0 || status === 'available' || status === 'failed';
+  const ringColor = status === 'failed'
+    ? '#EF4444'
+    : status === 'available'
+      ? '#10B981'
+      : '#2563EB';
+  const rightRotation = Math.min(safeProgress, 0.5) * 360;
+  const leftRotation = Math.max(safeProgress - 0.5, 0) * 360;
+
+  useEffect(() => {
+    if (!isActive || isDeterminate) {
+      rotation.stopAnimation();
+      rotation.setValue(0);
+      return undefined;
+    }
+
+    const animation = Animated.loop(
+      Animated.timing(rotation, {
+        duration: 920,
+        easing: Easing.linear,
+        toValue: 1,
+        useNativeDriver: true
+      })
+    );
+
+    animation.start();
+
+    return () => {
+      animation.stop();
+      rotation.stopAnimation();
+    };
+  }, [isActive, isDeterminate, rotation]);
+
+  if (!isDeterminate) {
+    const rotate = rotation.interpolate({
+      inputRange: [0, 1],
+      outputRange: ['0deg', '360deg']
+    });
+
+    return (
+      <Animated.View
+        style={[
+          styles.messageMediaProgressIndeterminate,
+          { transform: [{ rotate }] }
+        ]}
+      />
+    );
+  }
+
+  return (
+    <View style={styles.messageMediaProgressRing}>
+      <View style={styles.messageMediaProgressHalfClip}>
+        <View
+          style={[
+            styles.messageMediaProgressHalf,
+            styles.messageMediaProgressRightHalf,
+            {
+              borderRightColor: ringColor,
+              borderTopColor: ringColor,
+              transform: [{ rotate: `${rightRotation}deg` }]
+            }
+          ]}
+        />
+      </View>
+      <View style={[styles.messageMediaProgressHalfClip, styles.messageMediaProgressLeftClip]}>
+        <View
+          style={[
+            styles.messageMediaProgressHalf,
+            styles.messageMediaProgressLeftHalf,
+            {
+              borderBottomColor: ringColor,
+              borderLeftColor: ringColor,
+              opacity: safeProgress > 0.5 || status === 'available' ? 1 : 0,
+              transform: [{ rotate: `${leftRotation}deg` }]
+            }
+          ]}
+        />
+      </View>
     </View>
   );
 }
@@ -21116,13 +22084,17 @@ function BatchContactRow({
 function YouTab({
   isLoading,
   isSavingPhoto,
+  isSigningOut,
   onChangePhoto,
+  onSignOut,
   profile,
   profilePhotoHeaders
 }: {
   isLoading: boolean;
   isSavingPhoto: boolean;
+  isSigningOut: boolean;
   onChangePhoto: () => void;
+  onSignOut: () => void;
   profile: CurrentUserProfile | null;
   profilePhotoHeaders?: Record<string, string>;
 }) {
@@ -21206,6 +22178,37 @@ function YouTab({
         <ProfileDetailRow label="Role" value={profile.roleName} />
         <ProfileDetailRow label="Company" value={profile.companyName} />
         <ProfileDetailRow label="Status" value={formatEmployeeStatus(profile.status)} />
+      </View>
+
+      <View style={styles.youSessionSection}>
+        <Text style={[styles.youSessionLabel, { color: appTheme.colors.muted }]}>Session</Text>
+        <Pressable
+          accessibilityLabel="Sign out of Synzapp"
+          accessibilityRole="button"
+          disabled={isSigningOut}
+          onPress={onSignOut}
+          style={({ pressed }) => [
+            styles.youSignOutRow,
+            { borderTopColor: appTheme.colors.divider },
+            pressed && !isSigningOut && styles.pressed,
+            isSigningOut && styles.disabled
+          ]}
+        >
+          <View style={styles.youSignOutIcon}>
+            {isSigningOut ? (
+              <ActivityIndicator color="#DC2626" size="small" />
+            ) : (
+              <Feather color="#DC2626" name="log-out" size={18} />
+            )}
+          </View>
+          <View style={styles.youSignOutCopy}>
+            <Text style={styles.youSignOutTitle}>{isSigningOut ? 'Signing out...' : 'Sign out'}</Text>
+            <Text style={[styles.youSignOutText, { color: appTheme.colors.muted }]}>
+              End this verified session on this device.
+            </Text>
+          </View>
+          <Feather color="#94A3B8" name="chevron-right" size={18} />
+        </Pressable>
       </View>
     </View>
   );
@@ -25785,6 +26788,50 @@ function getMediaPreviewUri(media: ChatMediaAttachment | null): string {
   return getMediaLocalUri(media) || media.thumbnailDataUrl || '';
 }
 
+function getPhotoEditorDisplayUri(media: ChatMediaAttachment | null): string {
+  if (!media || media.kind !== 'image') {
+    return '';
+  }
+
+  const localUri = getMediaLocalUri(media);
+  const previewUri = getMediaPreviewUri(media);
+
+  if (isRenderSafePhotoUri(localUri)) {
+    return localUri;
+  }
+
+  if (isRenderSafePhotoUri(previewUri)) {
+    return previewUri;
+  }
+
+  return previewUri || localUri || '';
+}
+
+function isRenderSafePhotoUri(uri: string): boolean {
+  if (!uri) {
+    return false;
+  }
+
+  return /^file:\/\//i.test(uri) ||
+    /^https?:\/\//i.test(uri) ||
+    /^data:image\//i.test(uri) ||
+    /^content:\/\//i.test(uri);
+}
+
+function getSafePhotoDimension(value: unknown): number | undefined {
+  const numericValue = typeof value === 'number'
+    ? value
+    : typeof value === 'string'
+      ? Number(value)
+      : NaN;
+
+  if (!Number.isFinite(numericValue) || numericValue < 1) {
+    return undefined;
+  }
+
+  return Math.round(numericValue);
+}
+
 function getLocalChatMediaPreviewUri(media: LocalChatMediaInput | null): string {
   if (!media) {
     return '';
@@ -25926,6 +26973,33 @@ function getMediaItemsTransferProgress(mediaItems: ChatMediaAttachment[]): numbe
   const progressTotal = mediaItems.reduce((total, media) => total + Math.max(0, Math.min(media.transferProgress || 0, 1)), 0);
 
   return progressTotal / mediaItems.length;
+}
+
+function markChatMessageSendFailed(message: ChatMessage): ChatMessage {
+  const mediaItems = getMessageMediaItems(message);
+  const media = getMessageMedia(message);
+  const failedMediaItems = mediaItems.map((mediaItem) => ({
+    ...mediaItem,
+    transferProgress: mediaItem.transferProgress || 0,
+    transferStatus: 'failed' as const
+  }));
+  const failedMedia = media
+    ? {
+        ...media,
+        transferProgress: media.transferProgress || 0,
+        transferStatus: 'failed' as const
+      }
+    : failedMediaItems[0] || null;
+
+  return {
+    ...message,
+    deliveryStatus: 'queued',
+    image: failedMedia?.kind === 'image'
+      ? toChatImageAttachment(failedMedia)
+      : null,
+    media: failedMedia,
+    mediaItems: failedMediaItems.length ? failedMediaItems : []
+  };
 }
 
 function getMediaItemsSize(mediaItems: ChatMediaAttachment[]): number {
@@ -26216,6 +27290,58 @@ function formatAudioSeconds(valueSeconds?: number): string {
   return `${minutes}:${seconds.toString().padStart(2, '0')}`;
 }
 
+async function createLocalMediaFromEditedPhoto(input: {
+  fileName: string;
+  height?: number;
+  uri: string;
+  width?: number;
+}): Promise<LocalChatMediaInput> {
+  const fileName = getEditedPhotoFileName(input.fileName);
+  const info = await FileSystem.getInfoAsync(input.uri);
+  const sizeBytes = info.exists && typeof info.size === 'number'
+    ? info.size
+    : 1;
+  const thumbnail = await ImageManipulator.manipulateAsync(
+    input.uri,
+    [{ resize: { width: 360 } }],
+    {
+      base64: true,
+      compress: 0.54,
+      format: ImageManipulator.SaveFormat.JPEG
+    }
+  ).catch(() => null);
+
+  return {
+    contentType: 'image/jpeg',
+    fileName,
+    height: input.height,
+    kind: 'image',
+    originalContentType: 'image/jpeg',
+    originalHeight: input.height,
+    originalSizeBytes: sizeBytes,
+    originalUri: input.uri,
+    originalWidth: input.width,
+    qualityMode: 'standard',
+    sizeBytes,
+    thumbnailContentType: thumbnail?.base64 ? 'image/jpeg' : undefined,
+    thumbnailDataUrl: thumbnail?.base64 ? `data:image/jpeg;base64,${thumbnail.base64}` : undefined,
+    thumbnailHeight: thumbnail?.height,
+    thumbnailWidth: thumbnail?.width,
+    uri: input.uri,
+    width: input.width
+  };
+}
+
+function getEditedPhotoFileName(fileName: string): string {
+  const baseName = (fileName || 'photo.jpg')
+    .replace(/\.[^.]+$/, '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80) || 'photo';
+
+  return `${baseName}_edited.jpg`;
+}
+
 function formatByteCount(sizeBytes?: number): string {
   const safeSize = Number.isFinite(sizeBytes) ? Math.max(sizeBytes || 0, 0) : 0;
 
@@ -26393,21 +27519,21 @@ async function cacheApprovedEmployeePhotos(
   employees: ApprovedEmployee[],
   idToken: string
 ): Promise<ApprovedEmployee[]> {
-  return Promise.all(employees.map(async (employee) => ({
+  return mapWithLimitedConcurrency(employees, 4, async (employee) => ({
     ...employee,
     profilePhotoUrl: await getCachedProfilePhotoUri({
       cacheKey: employee.profilePhotoCacheKey,
       idToken,
       profilePhotoUrl: employee.profilePhotoUrl
-    })
-  })));
+    }) || employee.profilePhotoUrl
+  }));
 }
 
 async function cacheChatContactPhotos(
   contacts: ChatContact[],
   idToken: string
 ): Promise<ChatContact[]> {
-  return Promise.all(contacts.map((contact) => cacheChatContactPhoto(contact, idToken)));
+  return mapWithLimitedConcurrency(contacts, 4, (contact) => cacheChatContactPhoto(contact, idToken));
 }
 
 async function cacheChatContactPhoto(
@@ -26428,7 +27554,7 @@ async function cacheChatContactPhoto(
   return {
     ...contact,
     members,
-    profilePhotoUrl
+    profilePhotoUrl: profilePhotoUrl || contact.profilePhotoUrl
   };
 }
 
@@ -26436,14 +27562,44 @@ async function cacheChatGroupMemberPhotos(
   members: ChatGroupMember[],
   idToken: string
 ): Promise<ChatGroupMember[]> {
-  return Promise.all(members.map(async (member) => ({
+  return mapWithLimitedConcurrency(members, 4, async (member) => ({
     ...member,
     profilePhotoUrl: await getCachedProfilePhotoUri({
       cacheKey: member.profilePhotoCacheKey,
       idToken,
       profilePhotoUrl: member.profilePhotoUrl
-    })
-  })));
+    }) || member.profilePhotoUrl
+  }));
+}
+
+async function mapWithLimitedConcurrency<T, U>(
+  items: T[],
+  limit: number,
+  mapper: (item: T, index: number) => Promise<U>
+): Promise<U[]> {
+  const results = new Array<U>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(Math.floor(limit), items.length));
+
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+
+      nextIndex += 1;
+      results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+      await yieldToChatUi();
+    }
+  }));
+
+  return results;
+}
+
+function yieldToChatUi(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => {
+      setTimeout(resolve, 0);
+    });
+  });
 }
 
 function mapApprovedEmployeeToListItem(
@@ -29750,6 +30906,51 @@ const styles = StyleSheet.create({
   youDetails: {
     paddingTop: 8
   },
+  youSessionSection: {
+    paddingTop: 18
+  },
+  youSessionLabel: {
+    color: '#64748B',
+    fontSize: 12,
+    fontWeight: '400',
+    letterSpacing: 1.1,
+    lineHeight: 16,
+    marginBottom: 2,
+    textTransform: 'uppercase'
+  },
+  youSignOutRow: {
+    alignItems: 'center',
+    borderTopColor: '#E5E7EB',
+    borderTopWidth: 1,
+    flexDirection: 'row',
+    gap: 12,
+    minHeight: 64,
+    paddingVertical: 12
+  },
+  youSignOutIcon: {
+    alignItems: 'center',
+    backgroundColor: '#FEF2F2',
+    borderRadius: 18,
+    height: 36,
+    justifyContent: 'center',
+    width: 36
+  },
+  youSignOutCopy: {
+    flex: 1,
+    gap: 2
+  },
+  youSignOutTitle: {
+    color: '#B91C1C',
+    fontSize: 16,
+    fontWeight: '400',
+    lineHeight: 21
+  },
+  youSignOutText: {
+    color: '#64748B',
+    fontSize: 13,
+    fontWeight: '400',
+    lineHeight: 18
+  },
   profileDetailRow: {
     borderBottomColor: '#E5E7EB',
     borderBottomWidth: 1,
@@ -30969,25 +32170,72 @@ const styles = StyleSheet.create({
   },
   messageMediaProgressCircle: {
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.94)',
+    backgroundColor: 'rgba(255, 255, 255, 0.9)',
     borderColor: 'rgba(255, 255, 255, 0.95)',
     borderRadius: 32,
-    borderWidth: 5,
+    borderWidth: 1,
     elevation: 7,
     height: 64,
     justifyContent: 'center',
+    overflow: 'hidden',
     shadowColor: '#0F172A',
     shadowOffset: { height: 5, width: 0 },
     shadowOpacity: 0.24,
     shadowRadius: 12,
     width: 64
   },
-  messageMediaProgressPercent: {
-    color: '#64748B',
-    fontSize: 11,
-    fontWeight: '400',
-    lineHeight: 13,
-    marginTop: -1
+  messageMediaProgressIcon: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.82)',
+    borderRadius: 17,
+    height: 34,
+    justifyContent: 'center',
+    position: 'absolute',
+    width: 34
+  },
+  messageMediaProgressIndeterminate: {
+    borderColor: 'rgba(37, 99, 235, 0.18)',
+    borderRadius: 26,
+    borderRightColor: '#2563EB',
+    borderTopColor: '#2563EB',
+    borderWidth: 5,
+    height: 52,
+    width: 52
+  },
+  messageMediaProgressRing: {
+    borderColor: 'rgba(37, 99, 235, 0.18)',
+    borderRadius: 26,
+    borderWidth: 5,
+    height: 52,
+    position: 'relative',
+    width: 52
+  },
+  messageMediaProgressHalfClip: {
+    height: 52,
+    overflow: 'hidden',
+    position: 'absolute',
+    right: -5,
+    top: -5,
+    width: 26
+  },
+  messageMediaProgressLeftClip: {
+    left: -5,
+    right: undefined
+  },
+  messageMediaProgressHalf: {
+    borderColor: 'transparent',
+    borderRadius: 26,
+    borderWidth: 5,
+    height: 52,
+    position: 'absolute',
+    top: 0,
+    width: 52
+  },
+  messageMediaProgressRightHalf: {
+    right: 0
+  },
+  messageMediaProgressLeftHalf: {
+    left: 0
   },
   messageMediaProgressLabel: {
     color: '#FFFFFF',
@@ -32198,6 +33446,173 @@ const styles = StyleSheet.create({
     height: 38,
     justifyContent: 'center',
     width: 44
+  },
+  sentPhotoNativeEditorRoot: {
+    backgroundColor: '#020617',
+    flex: 1
+  },
+  sentPhotoNativeEditorTop: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 10,
+    paddingBottom: 9,
+    paddingHorizontal: 12
+  },
+  sentPhotoNativeToolSpacer: {
+    flex: 1
+  },
+  sentPhotoNativeToolButton: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.18)',
+    borderRadius: 999,
+    height: 42,
+    justifyContent: 'center',
+    width: 42
+  },
+  sentPhotoNativeToolButtonActive: {
+    backgroundColor: '#25D366'
+  },
+  sentPhotoNativeCloseButton: {
+    backgroundColor: 'rgba(255, 255, 255, 0.22)'
+  },
+  sentPhotoNativeStage: {
+    alignItems: 'center',
+    flex: 1,
+    justifyContent: 'center',
+    overflow: 'hidden'
+  },
+  sentPhotoNativeSurface: {
+    backgroundColor: '#0F172A',
+    overflow: 'hidden'
+  },
+  sentPhotoNativeImage: {
+    height: '100%',
+    width: '100%'
+  },
+  sentPhotoNativeSticker: {
+    position: 'absolute',
+    textShadowColor: 'rgba(0, 0, 0, 0.35)',
+    textShadowOffset: { height: 1, width: 0 },
+    textShadowRadius: 4
+  },
+  sentPhotoNativeText: {
+    backgroundColor: 'rgba(2, 6, 23, 0.18)',
+    borderColor: 'transparent',
+    borderRadius: 12,
+    borderWidth: 1,
+    minHeight: 34,
+    minWidth: 74,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    position: 'absolute',
+    textShadowColor: 'rgba(0, 0, 0, 0.6)',
+    textShadowOffset: { height: 1, width: 0 },
+    textShadowRadius: 4
+  },
+  sentPhotoNativeTextActive: {
+    borderColor: 'rgba(255, 255, 255, 0.86)'
+  },
+  sentPhotoCropShade: {
+    backgroundColor: 'rgba(2, 6, 23, 0.36)',
+    position: 'absolute'
+  },
+  sentPhotoCropBox: {
+    backgroundColor: 'transparent',
+    borderColor: '#FFFFFF',
+    borderRadius: 2,
+    borderStyle: 'dashed',
+    borderWidth: 1.4,
+    position: 'absolute'
+  },
+  sentPhotoStickerRow: {
+    backgroundColor: 'rgba(2, 6, 23, 0.92)',
+    maxHeight: 56
+  },
+  sentPhotoStickerRowContent: {
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8
+  },
+  sentPhotoStickerOption: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.14)',
+    borderRadius: 999,
+    height: 40,
+    justifyContent: 'center',
+    width: 40
+  },
+  sentPhotoStickerOptionActive: {
+    backgroundColor: '#FFFFFF'
+  },
+  sentPhotoStickerOptionText: {
+    fontSize: 22,
+    lineHeight: 27
+  },
+  sentPhotoNativeControls: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(2, 6, 23, 0.92)',
+    borderTopColor: 'rgba(255, 255, 255, 0.09)',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 9
+  },
+  sentPhotoColorDot: {
+    borderColor: 'rgba(255, 255, 255, 0.38)',
+    borderRadius: 999,
+    borderWidth: 1,
+    height: 28,
+    width: 28
+  },
+  sentPhotoColorDotActive: {
+    borderColor: '#FFFFFF',
+    borderWidth: 3
+  },
+  sentPhotoNativeSizeLabel: {
+    color: 'rgba(255, 255, 255, 0.78)',
+    fontSize: 13,
+    fontWeight: '400',
+    lineHeight: 18,
+    marginLeft: 'auto',
+    minWidth: 42,
+    textAlign: 'right'
+  },
+  sentPhotoNativeSizeButton: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+    borderRadius: 999,
+    height: 34,
+    justifyContent: 'center',
+    width: 34
+  },
+  sentPhotoNativeBottom: {
+    alignItems: 'center',
+    backgroundColor: '#000000',
+    flexDirection: 'row',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingTop: 10
+  },
+  sentPhotoNativeCaption: {
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
+    borderRadius: 22,
+    color: '#FFFFFF',
+    flex: 1,
+    fontSize: 16,
+    fontWeight: '400',
+    height: 44,
+    lineHeight: 21,
+    paddingHorizontal: 16
+  },
+  sentPhotoNativeSendButton: {
+    alignItems: 'center',
+    backgroundColor: '#25D366',
+    borderRadius: 999,
+    height: 46,
+    justifyContent: 'center',
+    width: 46
   },
   audioPreviewRoot: {
     backgroundColor: '#F8FAFC',

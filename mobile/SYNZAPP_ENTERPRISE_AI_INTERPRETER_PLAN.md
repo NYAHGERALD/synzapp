@@ -29,7 +29,7 @@ Current official guidance supports this direction:
 - OpenAI recommends `/v1/realtime/translations` for continuous interpreter-style translation sessions.
 - Mobile or browser clients should use short-lived client secrets minted by the backend; the normal OpenAI API key must stay server-side only.
 - Realtime requests should include a privacy-preserving safety identifier bound on the backend when creating the client secret.
-- Native mobile builds should prefer a backend-brokered SDP handshake: the phone sends its SDP offer to Synzapp backend, the backend creates the short-lived OpenAI translation token, forwards the SDP to OpenAI, and returns only the SDP answer to mobile.
+- Native mobile builds should use a backend-minted short-lived Realtime Translation client secret, then let the mobile device perform the WebRTC SDP exchange directly with OpenAI. The root OpenAI API key remains server-side only; the mobile app receives only the scoped, temporary translation token.
 
 Source references:
 
@@ -49,16 +49,24 @@ Backend summary model:
 - `gpt-4.1-mini` can be used initially because Synzapp already has `OPENAI_MODEL` defaulting to that value.
 - The summary model should be configurable so we can move to the latest approved enterprise text model without changing mobile code.
 
+Backend spoken-summary model:
+
+- `gpt-4o-mini-tts` should be used for fast summary speech generation.
+- `cedar` is the default calm enterprise voice, configurable without a mobile rebuild.
+
 Environment variables:
 
 - Existing required variable: `OPENAI_API_KEY`
 - New recommended variables:
   - `OPENAI_INTERPRETER_REALTIME_MODEL=gpt-realtime-translate`
   - `OPENAI_INTERPRETER_SUMMARY_MODEL=gpt-4.1-mini`
+  - `OPENAI_INTERPRETER_SUMMARY_TTS_MODEL=gpt-4o-mini-tts`
+  - `OPENAI_INTERPRETER_SUMMARY_TTS_VOICE=cedar`
   - `INTERPRETER_MAX_TARGET_LANGUAGES=6`
   - `INTERPRETER_RETENTION_DAYS=30`
   - `INTERPRETER_AUDIO_RETENTION=disabled`
   - `INTERPRETER_SUMMARY_ENABLED=true`
+  - `INTERPRETER_SUMMARY_AUDIO_ENABLED=true`
 
 No OpenAI key should ever be shipped in the mobile app.
 
@@ -118,14 +126,15 @@ New backend files:
 - `src/services/interpreterReminderService.ts`
 
 The backend creates short-lived OpenAI Realtime Translation client secrets. The mobile app never receives the root `OPENAI_API_KEY`.
+Meeting summaries are audio-first. The backend creates the auditable text summary, then generates short-lived spoken MP3 playback for each selected summary language through the server-side OpenAI speech endpoint. Summary audio is returned to the mobile app for immediate playback and local cache only; the backend stores the text summary and audit metadata, not base64 audio.
 
-For native mobile, Synzapp should keep the OpenAI ephemeral token server-side too. The mobile app sends its local WebRTC SDP offer to Synzapp backend, and the backend completes the OpenAI translation SDP exchange using the short-lived token it minted server-side. The phone receives only the SDP answer needed to finish the peer connection.
+For native mobile, Synzapp backend mints a short-lived Realtime Translation client secret for the authenticated meeting, target language, tenant, and user. The mobile app then posts its local WebRTC SDP offer directly to OpenAI using that short-lived token and receives the SDP answer needed to finish the peer connection. This matches the intended client-secret architecture while keeping the permanent OpenAI API key out of the app.
 
 Implementation requirement:
 
-- Mobile must send the WebRTC offer to Synzapp backend as raw `application/sdp`, not as a JSON-wrapped SDP blob.
-- Backend must validate that the offer starts with `v=0`, contains an audio media section, normalizes line endings, and forwards raw SDP to the OpenAI Realtime Translation SDP exchange.
-- Backend logs may include audit-safe diagnostics such as SDP length and a short hash, but must never log raw SDP, transcripts, translated speech, or the OpenAI root key.
+- Mobile must generate the WebRTC offer locally and exchange it with OpenAI using only the short-lived client secret returned by Synzapp backend.
+- Backend must validate meeting access, selected language, user status, tenant status, rate limits, and then return only the temporary client secret value.
+- Backend logs may include audit-safe diagnostics such as target language, model, and session preparation status, but must never log raw SDP, transcripts, translated speech, the temporary client secret, or the OpenAI root key.
 - User-facing errors must stay actionable and must not expose provider-internal SDP parser text.
 - The backend must expose an admin-only provider diagnostic that mints a short-lived realtime translation credential and proves the provider accepts it before mobile live audio testing begins. The diagnostic must return readiness status only, never secrets.
 
@@ -405,7 +414,10 @@ Flow:
 - Native modal opens.
 - User selects one or more configured meeting languages.
 - Backend creates summaries from transcript segments.
-- Summary appears in selected languages.
+- Backend generates spoken summary audio for the selected languages.
+- The first selected summary language plays immediately when the summary is ready.
+- Summary appears in selected languages as supporting text.
+- Users can tap Listen beside any saved summary language to replay the spoken summary.
 - Summary can be saved to meeting record.
 
 ### Accessibility
@@ -472,6 +484,7 @@ Response:
 - `POST /api/interpreter/meetings/:meetingId/transcript-segments`
 - `POST /api/interpreter/meetings/:meetingId/translation-segments`
 - `POST /api/interpreter/meetings/:meetingId/summaries`
+- `POST /api/interpreter/meetings/:meetingId/summaries/:summaryId/audio`
 - `GET /api/interpreter/meetings/:meetingId/summaries`
 
 ## OpenAI Request Shape
@@ -564,7 +577,7 @@ Realtime translation sessions must stay on this documented translation-client-se
 
 ## What the User May Need to Provide
 
-Nothing new is needed for the first implementation if `OPENAI_API_KEY` is already present on Render and local backend.
+If `OPENAI_API_KEY` is already present on Render and local backend, the spoken summary feature can use defaults. For explicit production control, set `OPENAI_INTERPRETER_SUMMARY_TTS_MODEL`, `OPENAI_INTERPRETER_SUMMARY_TTS_VOICE`, and `INTERPRETER_SUMMARY_AUDIO_ENABLED`.
 
 For production hardening, the user may later choose to add:
 
@@ -617,11 +630,16 @@ Completed:
 - Mobile microphone readiness is now separated from the room title header so it stays readable on smaller devices.
 - Interpreter errors now use a Synzapp-styled modal overlay instead of platform alert popups.
 - Meeting summaries now use a language selection modal so managers choose exactly which languages to summarize.
+- Backend now supports spoken summary audio generation for selected summary languages, using server-side OpenAI TTS with no OpenAI key exposed to mobile.
+- Mobile now caches spoken summary audio locally and lets managers listen to summary audio in the selected language.
+- Local backend provider validation passed on July 28, 2026: `OPENAI_INTERPRETER_REALTIME_MODEL=gpt-realtime-translate` minted a Realtime Translation client secret, and the Realtime Translation calls endpoint accepted the credential and returned the expected invalid-offer response for a diagnostic SDP.
+- Render route reachability was verified on July 28, 2026: `POST /api/interpreter/realtime-diagnostics` is live and correctly returns `401 Missing authorization token` without a Firebase session.
 - Backend interpreter enterprise control tests are in place for route protection, participant access, validation, summary access, privacy-safe audit events, and short-lived client-secret handling.
 - Backend and mobile TypeScript checks pass.
 
 Still required before production release:
 
+- Run the production `POST /api/interpreter/realtime-diagnostics` check with a real admin Firebase ID token from the app, or enable Google IAM Service Account Credentials API / provide a private-key Firebase service account locally so a short-lived diagnostic token can be minted safely. The current local diagnostic cannot mint a Firebase custom token because the IAM Credentials API is disabled for the Firebase project and `.env` does not contain `FIREBASE_SERVICE_ACCOUNT_JSON`.
 - Physical-device validation of OpenAI Realtime audio playback on iOS and Android using the new device readiness check.
 - Automated backend route tests and mobile interaction tests.
 
