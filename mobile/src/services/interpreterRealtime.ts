@@ -173,7 +173,9 @@ export async function startInterpreterRealtimeSession(
     });
 
     if (!answerResponse.ok) {
-      throw new Error('Live interpreter could not connect to the secure translation session.');
+      const providerMessage = await readRealtimeProviderError(answerResponse);
+      console.warn('Interpreter realtime WebRTC call failed:', providerMessage);
+      throw new Error(providerMessage);
     }
 
     const answerSdp = await answerResponse.text();
@@ -320,6 +322,58 @@ function loadWebRtcRuntime(): WebRtcRuntime {
     return require('react-native-webrtc') as WebRtcRuntime;
   } catch {
     return {};
+  }
+}
+
+async function readRealtimeProviderError(response: Response): Promise<string> {
+  const requestId = response.headers.get('x-request-id') || response.headers.get('openai-request-id');
+  const body = await response.text().catch(() => '');
+  const detail = extractProviderErrorMessage(body);
+  const reference = requestId ? ` Reference: ${requestId}.` : '';
+
+  if (response.status === 400) {
+    return `The live interpreter audio session was rejected by the AI provider.${detail ? ` ${detail}` : ''}${reference}`;
+  }
+
+  if (response.status === 401 || response.status === 403) {
+    return `The secure interpreter token was rejected before audio could connect.${reference}`;
+  }
+
+  if (response.status === 404) {
+    return `The live interpreter endpoint or model is not available for this AI project.${reference}`;
+  }
+
+  if (response.status === 408 || response.status === 504) {
+    return `The live interpreter connection timed out. Please try again.${reference}`;
+  }
+
+  if (response.status === 429) {
+    return `The live interpreter is rate limited or out of quota.${reference}`;
+  }
+
+  if (response.status >= 500) {
+    return `The live interpreter provider is temporarily unavailable.${reference}`;
+  }
+
+  return `Live interpreter could not connect to the secure translation session.${reference}`;
+}
+
+function extractProviderErrorMessage(body: string): string {
+  if (!body.trim()) {
+    return '';
+  }
+
+  try {
+    const parsed = JSON.parse(body) as { error?: { message?: unknown }; message?: unknown };
+    const message = typeof parsed.error?.message === 'string'
+      ? parsed.error.message
+      : typeof parsed.message === 'string'
+        ? parsed.message
+        : '';
+
+    return message ? message.slice(0, 220) : '';
+  } catch {
+    return body.slice(0, 220);
   }
 }
 

@@ -563,17 +563,18 @@ function InterpreterRoom({
     }
   }
 
-  async function startLiveInterpreter() {
+  async function startLiveInterpreter(languageCode = selectedLanguageCode) {
     closeRealtimeSessionPool();
     setLiveTranscript('');
     setLiveTranslation('');
+    setSelectedLanguageCode(languageCode);
     setLiveStatus('connecting');
     setLiveMode('connecting');
     setWasInterpretationInterrupted(false);
     setIsLiveRoomOpen(true);
 
     try {
-      const targetLanguages = getSessionPoolLanguages(details.meeting, selectedLanguageCode);
+      const targetLanguages = getSessionPoolLanguages(details.meeting, languageCode);
 
       if (!targetLanguages.length) {
         setLiveStatus('closed');
@@ -623,9 +624,7 @@ function InterpreterRoom({
         closeRealtimeSessionPool();
         setLiveStatus('error');
         setLiveMode('idle');
-        onError(
-          getErrorMessage(failureReason) || 'No interpreter language sessions could be started.'
-        );
+        onError(getErrorMessage(failureReason) || 'The selected interpreter language session could not be started.');
         return;
       }
 
@@ -647,6 +646,14 @@ function InterpreterRoom({
 
   function respondInSelectedLanguage(languageCode = selectedLanguageCode) {
     setSelectedLanguageCode(languageCode);
+    if (!realtimeSessionPoolRef.current[languageCode]) {
+      stopLiveInterpreter();
+      setTimeout(() => {
+        void startLiveInterpreterForLanguage(languageCode);
+      }, 0);
+      return;
+    }
+
     Object.entries(realtimeSessionPoolRef.current).forEach(([currentLanguageCode, session]) => {
       if (currentLanguageCode === languageCode) {
         session.respond();
@@ -673,6 +680,11 @@ function InterpreterRoom({
     Object.values(realtimeSessionPoolRef.current).forEach((session) => session.cancelResponse());
     respondInSelectedLanguage(languageCode);
     setWasInterpretationInterrupted(false);
+  }
+
+  async function startLiveInterpreterForLanguage(languageCode: string) {
+    setSelectedLanguageCode(languageCode);
+    await startLiveInterpreter(languageCode);
   }
 
   function closeRealtimeSessionPool(resetState = true) {
@@ -930,7 +942,7 @@ function InterpreterRoom({
           <View style={styles.poolReadinessRow}>
             <Ionicons color={appTheme.colors.primary} name="layers-outline" size={16} />
             <Text style={styles.poolReadinessText}>
-              {getSessionPoolReadyCount(languageSessionState)} of {getSessionPoolLanguages(details.meeting, selectedLanguageCode).length} language sessions ready
+              {getSessionPoolReadyCount(languageSessionState)} of 1 active language session ready
             </Text>
           </View>
         ) : null}
@@ -1087,7 +1099,7 @@ function InterpreterLiveRoomModal({
       <View style={[styles.liveRoomScreen, { paddingBottom: Math.max(insets.bottom + 16, 28), paddingTop: Math.max(insets.top + 12, 26) }]}>
         <View style={styles.liveRoomHeader}>
           <Pressable onPress={onClose} style={({ pressed }) => [styles.liveIconButton, pressed && styles.pressed]}>
-            <Ionicons color="#e5edf8" name="chevron-down" size={24} />
+            <Ionicons color={appTheme.colors.ink} name="chevron-down" size={24} />
           </Pressable>
           <View style={styles.liveRoomTitleWrap}>
             <Text style={styles.liveRoomTitle}>{details.meeting.meetingName}</Text>
@@ -1101,7 +1113,7 @@ function InterpreterLiveRoomModal({
         </View>
 
         <View style={styles.liveRoomPrivacyRow}>
-          <Ionicons color="#5eead4" name="shield-checkmark-outline" size={17} />
+          <Ionicons color={appTheme.colors.primary} name="shield-checkmark-outline" size={17} />
           <Text style={styles.liveRoomPrivacyText}>Interpreter only. Chat messages and chat media are not connected.</Text>
         </View>
 
@@ -1115,7 +1127,7 @@ function InterpreterLiveRoomModal({
             />
             <View style={styles.liveOrb}>
               <Ionicons
-                color="#ecfeff"
+                color="#fff"
                 name={liveMode === 'responding' ? 'volume-high-outline' : 'mic-outline'}
                 size={42}
               />
@@ -1137,6 +1149,11 @@ function InterpreterLiveRoomModal({
                   key={language.code}
                   onPress={() => {
                     setSelectedLanguageCode(language.code);
+                    if (isActive && language.code !== selectedLanguageCode) {
+                      onRespond(language.code);
+                      return;
+                    }
+
                     if (isActive) {
                       onRespond(language.code);
                     }
@@ -1172,11 +1189,11 @@ function InterpreterLiveRoomModal({
         {wasInterrupted ? (
           <View style={styles.liveRoomRecoveryRow}>
             <Pressable onPress={onContinue} style={({ pressed }) => [styles.liveSecondaryAction, pressed && styles.pressed]}>
-              <Ionicons color="#e5edf8" name="play-forward-outline" size={18} />
+              <Ionicons color={appTheme.colors.ink} name="play-forward-outline" size={18} />
               <Text style={styles.liveSecondaryActionText}>Continue</Text>
             </Pressable>
             <Pressable onPress={onCurrent} style={({ pressed }) => [styles.livePrimaryAction, pressed && styles.pressed]}>
-              <Ionicons color="#06251f" name="flash-outline" size={18} />
+              <Ionicons color="#fff" name="flash-outline" size={18} />
               <Text style={styles.livePrimaryActionText}>Current</Text>
             </Pressable>
           </View>
@@ -1192,7 +1209,7 @@ function InterpreterLiveRoomModal({
               ]}
             >
               <Ionicons
-                color={liveMode === 'responding' ? '#06251f' : '#fff'}
+                color="#fff"
                 name={liveMode === 'responding' ? 'mic-outline' : 'volume-high-outline'}
                 size={20}
               />
@@ -2087,7 +2104,7 @@ function getLiveModeTitle(mode: InterpreterLiveMode): string {
 function getLiveModeDescription(mode: InterpreterLiveMode, languageLabel: string): string {
   switch (mode) {
     case 'connecting':
-      return 'Synzapp is opening secure realtime language lanes.';
+      return 'Synzapp is opening the secure realtime interpreter session.';
     case 'listening':
       return 'Let the speaker finish, then tap a language to respond.';
     case 'responding':
@@ -2126,10 +2143,6 @@ function getSessionPoolLanguages(
   meeting: InterpreterMeeting,
   selectedLanguageCode: string
 ): InterpreterLanguage[] {
-  if (meeting.meetingType === 'LEVEL_1' || meeting.meetingType === 'LEVEL_3') {
-    return meeting.interpreterLanguages;
-  }
-
   return meeting.interpreterLanguages.filter((language) => language.code === selectedLanguageCode);
 }
 
@@ -2516,19 +2529,19 @@ function createStyles(colors: AppColors) {
     },
     liveEndButton: {
       alignItems: 'center',
-      backgroundColor: 'rgba(248,113,113,0.12)',
+      backgroundColor: colors.redSoft,
       borderRadius: 999,
       minHeight: 36,
       justifyContent: 'center',
       paddingHorizontal: 14
     },
     liveEndButtonText: {
-      color: '#fecaca',
+      color: colors.red,
       fontSize: 13
     },
     liveIconButton: {
       alignItems: 'center',
-      backgroundColor: 'rgba(148,163,184,0.16)',
+      backgroundColor: colors.surfaceElevated,
       borderRadius: 999,
       height: 42,
       justifyContent: 'center',
@@ -2536,7 +2549,7 @@ function createStyles(colors: AppColors) {
     },
     liveLanguageButton: {
       alignItems: 'center',
-      backgroundColor: 'rgba(255,255,255,0.08)',
+      backgroundColor: colors.surfaceElevated,
       borderRadius: 999,
       flexDirection: 'row',
       gap: 8,
@@ -2545,14 +2558,14 @@ function createStyles(colors: AppColors) {
       paddingHorizontal: 13
     },
     liveLanguageButtonActive: {
-      backgroundColor: '#ccfbf1'
+      backgroundColor: colors.primarySoft
     },
     liveLanguageButtonText: {
-      color: '#dbeafe',
+      color: colors.mutedStrong,
       fontSize: 13
     },
     liveLanguageButtonTextActive: {
-      color: '#0f766e'
+      color: colors.primary
     },
     liveLanguageStatus: {
       borderRadius: 4,
@@ -2561,14 +2574,14 @@ function createStyles(colors: AppColors) {
     },
     liveOrb: {
       alignItems: 'center',
-      backgroundColor: '#0f766e',
+      backgroundColor: colors.primary,
       borderRadius: 42,
       height: 84,
       justifyContent: 'center',
       width: 84
     },
     liveOrbPulse: {
-      backgroundColor: '#5eead4',
+      backgroundColor: colors.primary,
       borderRadius: 68,
       height: 136,
       position: 'absolute',
@@ -2582,7 +2595,7 @@ function createStyles(colors: AppColors) {
     },
     livePrimaryAction: {
       alignItems: 'center',
-      backgroundColor: '#5eead4',
+      backgroundColor: colors.primary,
       borderRadius: 999,
       flex: 1,
       flexDirection: 'row',
@@ -2592,12 +2605,12 @@ function createStyles(colors: AppColors) {
       paddingHorizontal: 14
     },
     livePrimaryActionText: {
-      color: '#06251f',
+      color: '#fff',
       fontSize: 14
     },
     liveRespondAction: {
       alignItems: 'center',
-      backgroundColor: '#0f766e',
+      backgroundColor: colors.primary,
       borderRadius: 999,
       flex: 1,
       flexDirection: 'row',
@@ -2611,7 +2624,7 @@ function createStyles(colors: AppColors) {
       fontSize: 14
     },
     liveRoomDivider: {
-      backgroundColor: 'rgba(226,232,240,0.16)',
+      backgroundColor: colors.divider,
       height: 1,
       marginVertical: 12
     },
@@ -2630,22 +2643,22 @@ function createStyles(colors: AppColors) {
       marginBottom: 18
     },
     liveRoomMeta: {
-      color: '#9fb0c7',
+      color: colors.muted,
       fontSize: 12,
       marginTop: 2
     },
     liveRoomPrivacyRow: {
       alignItems: 'center',
-      borderBottomColor: 'rgba(226,232,240,0.16)',
+      borderBottomColor: colors.divider,
       borderBottomWidth: 1,
-      borderTopColor: 'rgba(226,232,240,0.16)',
+      borderTopColor: colors.divider,
       borderTopWidth: 1,
       flexDirection: 'row',
       gap: 8,
       paddingVertical: 10
     },
     liveRoomPrivacyText: {
-      color: '#cbd5e1',
+      color: colors.mutedStrong,
       flex: 1,
       fontSize: 12,
       lineHeight: 17
@@ -2656,12 +2669,12 @@ function createStyles(colors: AppColors) {
       marginBottom: 10
     },
     liveRoomScreen: {
-      backgroundColor: '#020617',
+      backgroundColor: colors.screen,
       flex: 1,
       paddingHorizontal: 18
     },
     liveRoomSectionLabel: {
-      color: '#5eead4',
+      color: colors.primary,
       fontSize: 11,
       letterSpacing: 1.4,
       textTransform: 'uppercase'
@@ -2673,45 +2686,45 @@ function createStyles(colors: AppColors) {
       paddingHorizontal: 12
     },
     liveRoomStateText: {
-      color: '#bfd0e5',
+      color: colors.mutedStrong,
       fontSize: 14,
       lineHeight: 21,
       marginTop: 8,
       textAlign: 'center'
     },
     liveRoomStateTitle: {
-      color: '#f8fafc',
+      color: colors.ink,
       fontSize: 21
     },
     liveRoomTitle: {
-      color: '#f8fafc',
+      color: colors.ink,
       fontSize: 17
     },
     liveRoomTitleWrap: {
       flex: 1
     },
     liveRoomTranscriptArea: {
-      borderBottomColor: 'rgba(226,232,240,0.16)',
+      borderBottomColor: colors.divider,
       borderBottomWidth: 1,
-      borderTopColor: 'rgba(226,232,240,0.16)',
+      borderTopColor: colors.divider,
       borderTopWidth: 1,
       gap: 6,
       marginBottom: 16,
       paddingVertical: 14
     },
     liveRoomTranscriptText: {
-      color: '#cbd5e1',
+      color: colors.mutedStrong,
       fontSize: 14,
       lineHeight: 21
     },
     liveRoomTranslationText: {
-      color: '#f8fafc',
+      color: colors.ink,
       fontSize: 16,
       lineHeight: 23
     },
     liveSecondaryAction: {
       alignItems: 'center',
-      backgroundColor: 'rgba(255,255,255,0.1)',
+      backgroundColor: colors.surfaceElevated,
       borderRadius: 999,
       flex: 1,
       flexDirection: 'row',
@@ -2721,7 +2734,7 @@ function createStyles(colors: AppColors) {
       paddingHorizontal: 14
     },
     liveSecondaryActionText: {
-      color: '#e5edf8',
+      color: colors.ink,
       fontSize: 14
     },
     meetingBody: {

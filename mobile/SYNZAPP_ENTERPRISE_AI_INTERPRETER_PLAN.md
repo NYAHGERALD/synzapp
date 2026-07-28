@@ -130,12 +130,12 @@ For Level 1 and Level 3:
 
 - English is always included by default.
 - The user can add multiple target languages during meeting creation.
-- Create a controlled session pool, one target language per active translation lane.
-- Capture microphone once, fan out source audio to each target lane.
+- The mobile app starts one active selected-language Realtime Translation lane first. This avoids duplicate microphone capture, duplicate WebRTC setup, and unstable multi-session startup on mobile devices.
+- Multi-language hot lanes should move to a backend-controlled or native audio fanout architecture before being treated as production-ready for Level 1 and Level 3 meetings.
 - Cap active target languages using `INTERPRETER_MAX_TARGET_LANGUAGES`.
 - If the language count is too high, keep only priority languages hot and warm the others on demand.
 
-Instant response is achieved by preparing translation while listening. The language button should not start translation from scratch. It should play the already-prepared output for that language.
+Instant response is achieved by preparing translation while listening for the active selected language. When the supervisor switches language, Synzapp should stop the previous lane cleanly and open the new selected-language lane instead of running several mobile WebRTC sessions at the same time.
 
 ### Meeting Memory
 
