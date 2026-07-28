@@ -521,21 +521,16 @@ export async function createInterpreterRealtimeClientSecret(
   assertRateLimit(`interpreter:realtime:${context.uid}`, 60_000, 60);
 
   const safetyIdentifier = createSafetyIdentifier(context.tenantId, context.uid);
-  const instructions = buildRealtimeInstructions(meeting, targetLanguage);
+  const realtimeModel = env.openAiInterpreterRealtimeModel.trim();
   const response = await fetch('https://api.openai.com/v1/realtime/translations/client_secrets', {
     body: JSON.stringify({
       session: {
         audio: {
-          input: {
-            noise_reduction: { type: 'near_field' },
-            transcription: { model: 'gpt-realtime-whisper' }
-          },
           output: {
             language: toOpenAiTranslationLanguage(targetLanguage.code)
           }
         },
-        instructions,
-        model: env.openAiInterpreterRealtimeModel
+        model: realtimeModel
       }
     }),
     headers: {
@@ -549,8 +544,13 @@ export async function createInterpreterRealtimeClientSecret(
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => '');
-    console.warn('OpenAI interpreter realtime session failed:', response.status, errorText.slice(0, 300));
-    throw serviceError('Interpreter realtime session could not be prepared.');
+    console.warn('OpenAI interpreter realtime session failed:', {
+      error: errorText.slice(0, 500),
+      model: realtimeModel,
+      status: response.status,
+      targetLanguageCode: targetLanguage.code
+    });
+    throw serviceError(getOpenAiRealtimePreparationError(response.status));
   }
 
   const clientSecretResponse = await response.json() as Record<string, unknown>;
@@ -565,7 +565,7 @@ export async function createInterpreterRealtimeClientSecret(
     context,
     meetingId,
     metadata: {
-      model: env.openAiInterpreterRealtimeModel,
+      model: realtimeModel,
       targetLanguageCode: targetLanguage?.code || 'multi-language'
     },
     summary: `Prepared realtime interpreter session for "${meeting.meetingName}".`,
@@ -575,7 +575,7 @@ export async function createInterpreterRealtimeClientSecret(
   return {
     clientSecret,
     expiresWithSession: true,
-    model: env.openAiInterpreterRealtimeModel,
+    model: realtimeModel,
     targetLanguage
   };
 }
@@ -1231,6 +1231,38 @@ function extractRealtimeClientSecret(response: Record<string, unknown>): string 
   }
 
   return null;
+}
+
+function getOpenAiRealtimePreparationError(status: number): string {
+  if (status === 400) {
+    return 'Interpreter realtime request was rejected by the AI provider configuration.';
+  }
+
+  if (status === 401) {
+    return 'Interpreter AI credentials are not valid on the backend.';
+  }
+
+  if (status === 403) {
+    return 'Interpreter realtime access is not enabled for this AI project.';
+  }
+
+  if (status === 404) {
+    return 'Interpreter realtime model or endpoint is not available for this AI project.';
+  }
+
+  if (status === 408 || status === 504) {
+    return 'Interpreter realtime setup timed out. Please try again.';
+  }
+
+  if (status === 429) {
+    return 'Interpreter realtime setup is rate limited or out of quota.';
+  }
+
+  if (status >= 500) {
+    return 'Interpreter realtime provider is temporarily unavailable.';
+  }
+
+  return 'Interpreter realtime session could not be prepared.';
 }
 
 async function writeInterpreterAuditEvent({

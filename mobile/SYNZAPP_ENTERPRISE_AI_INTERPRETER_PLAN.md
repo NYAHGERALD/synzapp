@@ -480,6 +480,8 @@ await fetch('https://api.openai.com/v1/realtime/translations/client_secrets', {
 
 The mobile app then uses the short-lived value to connect to the Realtime translation call endpoint through WebRTC.
 
+Realtime translation sessions must stay on this documented translation-client-secret shape. Do not add voice-agent request fields such as `response.create`, custom transcription config, or assistant instructions to the client-secret request unless OpenAI documents those fields for Realtime Translation sessions.
+
 ## Implementation Phases
 
 ### Phase 1: Plan and Feature Boundary
