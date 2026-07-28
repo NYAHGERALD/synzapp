@@ -8,6 +8,7 @@ const testDir = dirname(fileURLToPath(import.meta.url));
 const backendRoot = resolve(testDir, '..');
 const interpreterRoutes = readFileSync(resolve(backendRoot, 'src', 'routes', 'interpreterRoutes.ts'), 'utf8');
 const interpreterService = readFileSync(resolve(backendRoot, 'src', 'services', 'interpreterService.ts'), 'utf8');
+const server = readFileSync(resolve(backendRoot, 'src', 'server.ts'), 'utf8');
 
 describe('interpreter enterprise controls', () => {
   it('keeps every interpreter route behind App Check and Firebase session verification', () => {
@@ -55,6 +56,15 @@ describe('interpreter enterprise controls', () => {
     assert.match(interpreterService, /The selected speaker language is not supported yet\./);
     assert.match(interpreterService, /Scheduled interpreter meetings must be set for a future time\./);
     assert.match(interpreterService, /A reminder requires a scheduled meeting date and time\./);
+  });
+
+  it('runs interpreter reminder dispatch from the backend, not the mobile client', () => {
+    assert.match(server, /startInterpreterReminderWorker\(\)/);
+    assert.match(interpreterService, /runInterpreterReminderDispatchCycle/);
+    assert.match(interpreterService, /claimInterpreterReminder/);
+    assert.match(interpreterService, /sendInterpreterPushNotification/);
+    assert.match(interpreterService, /INTERPRETER_MEETING_REMINDER_SENT/);
+    assert.match(interpreterService, /reminderNextAtIso/);
   });
 
   it('audits meeting memory writes without duplicating sensitive transcript text in audit metadata', () => {

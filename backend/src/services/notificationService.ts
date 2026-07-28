@@ -130,6 +130,17 @@ interface SendRailsPushNotificationInput {
   type: string;
 }
 
+interface SendInterpreterPushNotificationInput {
+  body: string;
+  meetingId: string;
+  metadata?: Record<string, string>;
+  notificationId: string;
+  recipientUids: string[];
+  tenantId: string;
+  title: string;
+  type: string;
+}
+
 interface ExpoPushMessage {
   badge?: number;
   body?: string;
@@ -683,6 +694,133 @@ export async function sendRailsPushNotification(input: SendRailsPushNotification
           message: {
             body: input.body,
             channelId: 'rails-updates',
+            data,
+            priority: 'high',
+            sound: 'default',
+            title: input.title,
+            to: record.token || ''
+          },
+          record
+        });
+      }
+    }
+
+    for (let index = 0; index < expoTargets.length; index += EXPO_PUSH_BATCH_SIZE) {
+      const targetBatch = expoTargets.slice(index, index + EXPO_PUSH_BATCH_SIZE);
+      const tickets = await sendExpoPushBatch(targetBatch.map((target) => target.message));
+      const annotatedTickets = annotatePushTickets(tickets, targetBatch.map((target) => target.record));
+
+      allTicketResults.push(...annotatedTickets);
+      await deactivateInvalidPushTokens(input.tenantId, recipientUid, annotatedTickets);
+    }
+
+    for (let index = 0; index < fcmTargets.length; index += FCM_PUSH_BATCH_SIZE) {
+      const targetBatch = fcmTargets.slice(index, index + FCM_PUSH_BATCH_SIZE);
+      const tickets = await sendFcmPushBatch(targetBatch.map((target) => target.message));
+      const annotatedTickets = annotatePushTickets(tickets, targetBatch.map((target) => target.record));
+
+      allTicketResults.push(...annotatedTickets);
+      await deactivateInvalidPushTokens(input.tenantId, recipientUid, annotatedTickets);
+    }
+  }));
+
+  const errorCount = allTicketResults.filter((ticket) => ticket.status === 'error').length;
+  const sentCount = allTicketResults.filter((ticket) => ticket.status === 'ok').length;
+
+  await eventRef.set({
+    completedAt: fieldValue.serverTimestamp(),
+    errorCount,
+    sentCount,
+    status: totalTokenCount
+      ? errorCount && sentCount ? 'PARTIAL' : errorCount ? 'FAILED' : 'SENT'
+      : 'NO_ACTIVE_TOKENS',
+    tickets: allTicketResults.map((ticket) => ({
+      details: ticket.details || null,
+      deviceId: ticket.deviceId,
+      id: ticket.id || null,
+      message: ticket.message || null,
+      platform: ticket.platform || null,
+      provider: ticket.provider || null,
+      status: ticket.status || 'error'
+    })),
+    tokenCount: totalTokenCount,
+    updatedAt: fieldValue.serverTimestamp()
+  }, { merge: true });
+}
+
+export async function sendInterpreterPushNotification(input: SendInterpreterPushNotificationInput): Promise<void> {
+  const organizationRef = firestore.collection('organizations').doc(input.tenantId);
+  const eventRef = organizationRef.collection('notificationEvents').doc(input.notificationId);
+  const recipientUids = Array.from(new Set(input.recipientUids
+    .map((recipientUid) => recipientUid.trim())
+    .filter(Boolean)));
+
+  await eventRef.set({
+    channel: 'interpreter',
+    createdAt: fieldValue.serverTimestamp(),
+    meetingId: input.meetingId,
+    notificationId: input.notificationId,
+    recipientUids,
+    status: recipientUids.length ? 'QUEUED' : 'NO_RECIPIENTS',
+    tenantId: input.tenantId,
+    title: input.title,
+    type: input.type
+  }, { merge: true });
+
+  if (!recipientUids.length) {
+    return;
+  }
+
+  const allTicketResults: PushDeliveryTicket[] = [];
+  let totalTokenCount = 0;
+
+  await Promise.all(recipientUids.map(async (recipientUid) => {
+    const pushTokensSnapshot = await organizationRef
+      .collection('users')
+      .doc(recipientUid)
+      .collection('pushTokens')
+      .where('status', '==', 'ACTIVE')
+      .get();
+    const pushTokens = pushTokensSnapshot.docs
+      .map((doc) => ({
+        ...(doc.data() as PushTokenRecord),
+        deviceId: getPushTokenRecordDeviceId(doc)
+      }))
+      .filter((record) => isDeliverablePushToken(record))
+      .filter((record) => record.provider !== 'apnsVoip');
+    const expoTargets: Array<{ message: ExpoPushMessage; record: PushTokenRecord & { deviceId: string } }> = [];
+    const fcmTargets: Array<{ message: Message; record: PushTokenRecord & { deviceId: string } }> = [];
+
+    totalTokenCount += pushTokens.length;
+
+    for (const record of pushTokens) {
+      const data = stripUndefinedStringValues({
+        meetingId: input.meetingId,
+        notificationId: input.notificationId,
+        recipientUid,
+        title: input.title,
+        type: input.type,
+        ...(input.metadata || {})
+      });
+
+      if (record.provider === 'fcm') {
+        fcmTargets.push({
+          message: {
+            android: { priority: 'high' },
+            data,
+            notification: {
+              body: input.body,
+              title: input.title
+            },
+            token: record.token || ''
+          },
+          record
+        });
+      } else if (record.provider === 'expo') {
+        expoTargets.push({
+          message: {
+            body: input.body,
+            channelId: 'interpreter-reminders',
             data,
             priority: 'high',
             sound: 'default',

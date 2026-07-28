@@ -5,6 +5,7 @@ import { fieldValue, firestore } from '../config/firebaseAdmin.js';
 import { assertRateLimit } from '../middleware/rateLimit.js';
 import { SynzappRole } from '../types/auth.js';
 import { buildAuthSession } from './authSessionService.js';
+import { sendInterpreterPushNotification } from './notificationService.js';
 
 export type InterpreterMeetingType = 'LEVEL_1' | 'LEVEL_3' | 'ONE_ON_ONE';
 export type InterpreterMeetingStatus = 'ENDED' | 'LIVE' | 'SCHEDULED';
@@ -91,8 +92,13 @@ interface InterpreterMeetingRecord {
   meetingId: string;
   meetingName: string;
   meetingType: InterpreterMeetingType;
+  reminderDeliveredCount?: number;
+  reminderDispatchClaimId?: string | null;
+  reminderDispatchClaimedAtIso?: string | null;
   reminderFrequency: 'daily' | 'none' | 'once' | 'weekly';
+  reminderLastSentAtIso?: string | null;
   reminderLeadMinutes: number | null;
+  reminderNextAtIso?: string | null;
   scheduledAtIso: string | null;
   sourceLanguageCode: string | null;
   status: InterpreterMeetingStatus;
@@ -207,6 +213,9 @@ export async function createInterpreterMeeting(
   const meetingId = meetingRef.id;
   const interpreterLanguages = normalizeInterpreterLanguages(input.interpreterLanguageCodes);
   const invitedUserIds = await normalizeInvitedUserIds(context, input.invitedUserIds || []);
+  const reminderFrequency = input.reminderFrequency || 'none';
+  const reminderLeadMinutes = typeof input.reminderLeadMinutes === 'number' ? input.reminderLeadMinutes : null;
+  const scheduledAtIso = input.scheduledAtIso || null;
   const record: InterpreterMeetingRecord = {
     autoDetectSourceLanguage: input.autoDetectSourceLanguage !== false,
     createdAt: fieldValue.serverTimestamp(),
@@ -219,11 +228,16 @@ export async function createInterpreterMeeting(
     meetingId,
     meetingName: input.meetingName.trim(),
     meetingType: input.meetingType,
-    reminderFrequency: input.reminderFrequency || 'none',
-    reminderLeadMinutes: typeof input.reminderLeadMinutes === 'number' ? input.reminderLeadMinutes : null,
-    scheduledAtIso: input.scheduledAtIso || null,
+    reminderDeliveredCount: 0,
+    reminderDispatchClaimId: null,
+    reminderDispatchClaimedAtIso: null,
+    reminderFrequency,
+    reminderLastSentAtIso: null,
+    reminderLeadMinutes,
+    reminderNextAtIso: calculateInitialReminderNextAtIso(scheduledAtIso, reminderFrequency, reminderLeadMinutes, nowIso),
+    scheduledAtIso,
     sourceLanguageCode: input.autoDetectSourceLanguage === false ? input.sourceLanguageCode || 'en-US' : null,
-    status: input.scheduledAtIso ? 'SCHEDULED' : 'LIVE',
+    status: scheduledAtIso ? 'SCHEDULED' : 'LIVE',
     tenantId: context.tenantId,
     updatedAt: fieldValue.serverTimestamp(),
     updatedAtIso: nowIso
@@ -298,12 +312,11 @@ export async function listInterpreterSummaries(decodedToken: DecodedIdToken, mee
     .collection(INTERPRETER_MEETINGS_COLLECTION)
     .doc(meetingId)
     .collection(SUMMARY_COLLECTION)
-    .orderBy('createdAtIso', 'desc')
     .limit(50)
     .get();
 
   return {
-    summaries: summariesSnapshot.docs.map((doc) => doc.data())
+    summaries: sortRecordsByIso(summariesSnapshot.docs.map((doc) => doc.data()), 'desc')
   };
 }
 
@@ -312,24 +325,23 @@ export async function getInterpreterMeeting(decodedToken: DecodedIdToken, meetin
   const meeting = await readAccessibleMeeting(context, meetingId);
   const [transcriptsSnapshot, translationsSnapshot, summariesSnapshot, auditSnapshot] = await Promise.all([
     context.organizationRef.collection(INTERPRETER_MEETINGS_COLLECTION).doc(meetingId)
-      .collection(TRANSCRIPT_COLLECTION).orderBy('createdAtIso', 'asc').limit(200).get(),
+      .collection(TRANSCRIPT_COLLECTION).limit(200).get(),
     context.organizationRef.collection(INTERPRETER_MEETINGS_COLLECTION).doc(meetingId)
-      .collection(TRANSLATION_COLLECTION).orderBy('createdAtIso', 'asc').limit(300).get(),
+      .collection(TRANSLATION_COLLECTION).limit(300).get(),
     context.organizationRef.collection(INTERPRETER_MEETINGS_COLLECTION).doc(meetingId)
-      .collection(SUMMARY_COLLECTION).orderBy('createdAtIso', 'desc').limit(20).get(),
+      .collection(SUMMARY_COLLECTION).limit(20).get(),
     context.organizationRef.collection(INTERPRETER_AUDIT_COLLECTION)
       .where('meetingId', '==', meetingId)
-      .orderBy('createdAtIso', 'desc')
       .limit(50)
       .get()
   ]);
 
   return {
-    auditEvents: auditSnapshot.docs.map((doc) => doc.data()),
+    auditEvents: sortRecordsByIso(auditSnapshot.docs.map((doc) => doc.data()), 'desc'),
     meeting,
-    summaries: summariesSnapshot.docs.map((doc) => doc.data()),
-    transcripts: transcriptsSnapshot.docs.map((doc) => doc.data()),
-    translations: translationsSnapshot.docs.map((doc) => doc.data())
+    summaries: sortRecordsByIso(summariesSnapshot.docs.map((doc) => doc.data()), 'desc'),
+    transcripts: sortRecordsByIso(transcriptsSnapshot.docs.map((doc) => doc.data()), 'asc'),
+    translations: sortRecordsByIso(translationsSnapshot.docs.map((doc) => doc.data()), 'asc')
   };
 }
 
@@ -584,12 +596,12 @@ export async function createInterpreterSummary(
     .collection(INTERPRETER_MEETINGS_COLLECTION)
     .doc(input.meetingId)
     .collection(TRANSCRIPT_COLLECTION)
-    .orderBy('createdAtIso', 'asc')
     .limit(250)
     .get();
   const transcriptText = transcriptSnapshot.docs
-    .map((doc) => {
-      const data = doc.data() as { text?: string };
+    .map((doc) => doc.data())
+    .sort(compareRecordsByIso('asc'))
+    .map((data) => {
       return data.text?.trim();
     })
     .filter((text): text is string => Boolean(text))
@@ -635,6 +647,177 @@ export async function createInterpreterSummary(
   });
 
   return { summary };
+}
+
+let reminderWorkerTimer: NodeJS.Timeout | null = null;
+let reminderWorkerRunning = false;
+
+export function startInterpreterReminderWorker(): void {
+  if (!env.interpreterReminderWorkerEnabled || reminderWorkerTimer) {
+    return;
+  }
+
+  reminderWorkerTimer = setInterval(() => {
+    void runInterpreterReminderDispatchCycle().catch((error) => {
+      console.error('Interpreter reminder worker failed:', error);
+    });
+  }, env.interpreterReminderWorkerIntervalMs);
+  reminderWorkerTimer.unref?.();
+
+  void runInterpreterReminderDispatchCycle().catch((error) => {
+    console.error('Interpreter reminder worker startup cycle failed:', error);
+  });
+}
+
+export async function runInterpreterReminderDispatchCycle(now = new Date()) {
+  if (reminderWorkerRunning) {
+    return { claimed: 0, sent: 0, skipped: 0 };
+  }
+
+  reminderWorkerRunning = true;
+
+  try {
+    const nowIso = now.toISOString();
+    const snapshot = await firestore
+      .collectionGroup(INTERPRETER_MEETINGS_COLLECTION)
+      .where('status', '==', 'SCHEDULED')
+      .limit(env.interpreterReminderWorkerBatchSize)
+      .get();
+    let claimed = 0;
+    let sent = 0;
+    let skipped = 0;
+
+    for (const doc of snapshot.docs) {
+      const meeting = normalizeMeetingRecord(doc.data() as Partial<InterpreterMeetingRecord>);
+
+      if (!meeting || !isInterpreterReminderDue(meeting, nowIso)) {
+        skipped += 1;
+        continue;
+      }
+
+      const claim = await claimInterpreterReminder(doc.ref, nowIso);
+
+      if (!claim) {
+        skipped += 1;
+        continue;
+      }
+
+      claimed += 1;
+
+      try {
+        await dispatchInterpreterReminder(claim.meeting, claim.claimId, nowIso);
+        sent += 1;
+      } catch (error) {
+        await doc.ref.set({
+          reminderDeliveryError: error instanceof Error ? error.message : 'Interpreter reminder delivery failed.',
+          reminderDispatchClaimId: null,
+          reminderDispatchClaimedAtIso: null,
+          updatedAt: fieldValue.serverTimestamp(),
+          updatedAtIso: new Date().toISOString()
+        }, { merge: true });
+        console.error('Unable to send interpreter reminder:', error);
+      }
+    }
+
+    return { claimed, sent, skipped };
+  } finally {
+    reminderWorkerRunning = false;
+  }
+}
+
+async function claimInterpreterReminder(
+  meetingRef: FirebaseFirestore.DocumentReference,
+  nowIso: string
+): Promise<{ claimId: string; meeting: InterpreterMeetingRecord } | null> {
+  const claimId = randomUUID();
+
+  return firestore.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(meetingRef);
+    const meeting = normalizeMeetingRecord(snapshot.data() as Partial<InterpreterMeetingRecord>);
+
+    if (!meeting || !isInterpreterReminderDue(meeting, nowIso)) {
+      return null;
+    }
+
+    transaction.update(meetingRef, {
+      reminderDispatchClaimId: claimId,
+      reminderDispatchClaimedAtIso: nowIso,
+      updatedAt: fieldValue.serverTimestamp(),
+      updatedAtIso: nowIso
+    });
+
+    return { claimId, meeting };
+  });
+}
+
+async function dispatchInterpreterReminder(
+  meeting: InterpreterMeetingRecord,
+  claimId: string,
+  nowIso: string
+): Promise<void> {
+  const recipientUids = Array.from(new Set([
+    meeting.createdByUid,
+    ...(meeting.invitedUserIds || [])
+  ].filter(Boolean)));
+  const notificationId = `interpreter_reminder_${meeting.meetingId}_${claimId.replace(/-/g, '')}`;
+  const scheduledAt = meeting.scheduledAtIso ? new Date(meeting.scheduledAtIso) : null;
+  const nextReminderAtIso = calculateNextReminderAtIso(meeting, nowIso);
+
+  await sendInterpreterPushNotification({
+    body: scheduledAt
+      ? `${meeting.meetingName} starts ${formatReminderScheduledTime(scheduledAt)}.`
+      : `${meeting.meetingName} is ready to start.`,
+    meetingId: meeting.meetingId,
+    metadata: {
+      meetingType: meeting.meetingType,
+      scheduledAtIso: meeting.scheduledAtIso || ''
+    },
+    notificationId,
+    recipientUids,
+    tenantId: meeting.tenantId,
+    title: 'Interpreter meeting reminder',
+    type: 'INTERPRETER_MEETING_REMINDER'
+  });
+
+  await firestore
+    .collection('organizations')
+    .doc(meeting.tenantId)
+    .collection(INTERPRETER_MEETINGS_COLLECTION)
+    .doc(meeting.meetingId)
+    .set({
+      reminderDeliveredCount: fieldValue.increment(1),
+      reminderDeliveryError: null,
+      reminderDispatchClaimId: null,
+      reminderDispatchClaimedAtIso: null,
+      reminderLastSentAtIso: nowIso,
+      reminderNextAtIso: nextReminderAtIso,
+      updatedAt: fieldValue.serverTimestamp(),
+      updatedAtIso: nowIso
+    }, { merge: true });
+
+  await firestore
+    .collection('organizations')
+    .doc(meeting.tenantId)
+    .collection(INTERPRETER_AUDIT_COLLECTION)
+    .doc()
+    .set(stripUndefined({
+      actorDisplayName: 'Synzapp Reminder Worker',
+      actorRole: 'SYSTEM',
+      actorUid: 'system',
+      createdAt: fieldValue.serverTimestamp(),
+      createdAtIso: nowIso,
+      meetingId: meeting.meetingId,
+      metadata: {
+        notificationId,
+        recipientCount: recipientUids.length,
+        reminderFrequency: meeting.reminderFrequency,
+        reminderLeadMinutes: meeting.reminderLeadMinutes,
+        reminderNextAtIso: nextReminderAtIso
+      },
+      summary: `Sent interpreter meeting reminder for "${meeting.meetingName}".`,
+      tenantId: meeting.tenantId,
+      type: 'INTERPRETER_MEETING_REMINDER_SENT'
+    }));
 }
 
 async function requestOpenAiMeetingSummary(
@@ -748,6 +931,20 @@ function canManageInterpreterMeeting(
     context.permissions.includes('tenant.update');
 }
 
+function sortRecordsByIso<T extends { createdAtIso?: unknown }>(records: T[], direction: 'asc' | 'desc'): T[] {
+  return [...records].sort(compareRecordsByIso(direction));
+}
+
+function compareRecordsByIso(direction: 'asc' | 'desc') {
+  return (left: { createdAtIso?: unknown }, right: { createdAtIso?: unknown }) => {
+    const leftIso = typeof left.createdAtIso === 'string' ? left.createdAtIso : '';
+    const rightIso = typeof right.createdAtIso === 'string' ? right.createdAtIso : '';
+    const comparison = leftIso.localeCompare(rightIso);
+
+    return direction === 'asc' ? comparison : -comparison;
+  };
+}
+
 async function normalizeInvitedUserIds(
   context: AuthorizedInterpreterContext,
   invitedUserIds: string[]
@@ -795,8 +992,18 @@ function normalizeMeetingRecord(meeting: Partial<InterpreterMeetingRecord>): Int
     createdAtIso: meeting.createdAtIso || meeting.updatedAtIso || new Date(0).toISOString(),
     interpreterLanguages: Array.isArray(meeting.interpreterLanguages) ? meeting.interpreterLanguages : [],
     invitedUserIds: Array.isArray(meeting.invitedUserIds) ? meeting.invitedUserIds.filter((uid) => typeof uid === 'string') : [],
+    reminderDeliveredCount: typeof meeting.reminderDeliveredCount === 'number' ? meeting.reminderDeliveredCount : 0,
+    reminderDispatchClaimId: meeting.reminderDispatchClaimId || null,
+    reminderDispatchClaimedAtIso: meeting.reminderDispatchClaimedAtIso || null,
     reminderFrequency: meeting.reminderFrequency || 'none',
+    reminderLastSentAtIso: meeting.reminderLastSentAtIso || null,
     reminderLeadMinutes: typeof meeting.reminderLeadMinutes === 'number' ? meeting.reminderLeadMinutes : null,
+    reminderNextAtIso: meeting.reminderNextAtIso || calculateInitialReminderNextAtIso(
+      meeting.scheduledAtIso || null,
+      meeting.reminderFrequency || 'none',
+      typeof meeting.reminderLeadMinutes === 'number' ? meeting.reminderLeadMinutes : null,
+      meeting.createdAtIso || meeting.updatedAtIso || new Date().toISOString()
+    ),
     scheduledAtIso: meeting.scheduledAtIso || null,
     sourceLanguageCode: meeting.sourceLanguageCode || null,
     status: meeting.status || 'LIVE',
@@ -861,6 +1068,95 @@ function normalizeInterpreterLanguages(languageCodes: string[]): InterpreterLang
   }
 
   return languages as InterpreterLanguage[];
+}
+
+function calculateInitialReminderNextAtIso(
+  scheduledAtIso: string | null,
+  reminderFrequency: InterpreterMeetingRecord['reminderFrequency'],
+  reminderLeadMinutes: number | null,
+  nowIso: string
+): string | null {
+  if (!scheduledAtIso || reminderFrequency === 'none' || typeof reminderLeadMinutes !== 'number') {
+    return null;
+  }
+
+  const scheduledAtMs = Date.parse(scheduledAtIso);
+
+  if (!Number.isFinite(scheduledAtMs)) {
+    return null;
+  }
+
+  const nowMs = Date.parse(nowIso);
+  const firstDueMs = scheduledAtMs - reminderLeadMinutes * 60_000;
+
+  if (scheduledAtMs <= nowMs) {
+    return null;
+  }
+
+  return new Date(Math.max(firstDueMs, nowMs)).toISOString();
+}
+
+function calculateNextReminderAtIso(
+  meeting: InterpreterMeetingRecord,
+  nowIso: string
+): string | null {
+  if (
+    !meeting.scheduledAtIso ||
+    meeting.reminderFrequency === 'none' ||
+    meeting.reminderFrequency === 'once' ||
+    typeof meeting.reminderLeadMinutes !== 'number'
+  ) {
+    return null;
+  }
+
+  const scheduledAtMs = Date.parse(meeting.scheduledAtIso);
+  const nowMs = Date.parse(nowIso);
+  const intervalMs = meeting.reminderFrequency === 'daily'
+    ? 24 * 60 * 60 * 1000
+    : 7 * 24 * 60 * 60 * 1000;
+
+  if (!Number.isFinite(scheduledAtMs) || scheduledAtMs <= nowMs) {
+    return null;
+  }
+
+  let nextDueMs = nowMs + intervalMs;
+
+  while (nextDueMs < nowMs) {
+    nextDueMs += intervalMs;
+  }
+
+  return nextDueMs < scheduledAtMs ? new Date(nextDueMs).toISOString() : null;
+}
+
+function isInterpreterReminderDue(meeting: InterpreterMeetingRecord, nowIso: string): boolean {
+  if (meeting.status !== 'SCHEDULED' || meeting.reminderFrequency === 'none') {
+    return false;
+  }
+
+  const scheduledAtMs = meeting.scheduledAtIso ? Date.parse(meeting.scheduledAtIso) : Number.NaN;
+  const nowMs = Date.parse(nowIso);
+  const nextAtIso = meeting.reminderNextAtIso || calculateInitialReminderNextAtIso(
+    meeting.scheduledAtIso,
+    meeting.reminderFrequency,
+    meeting.reminderLeadMinutes,
+    nowIso
+  );
+  const nextAtMs = nextAtIso ? Date.parse(nextAtIso) : Number.NaN;
+
+  return Number.isFinite(scheduledAtMs) &&
+    Number.isFinite(nowMs) &&
+    Number.isFinite(nextAtMs) &&
+    scheduledAtMs > nowMs &&
+    nextAtMs <= nowMs;
+}
+
+function formatReminderScheduledTime(date: Date): string {
+  return new Intl.DateTimeFormat('en-US', {
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    month: 'short'
+  }).format(date);
 }
 
 function validateCreateInterpreterMeetingInput(input: CreateInterpreterMeetingInput) {

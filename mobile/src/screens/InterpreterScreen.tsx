@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -10,6 +11,10 @@ import {
   TextInput,
   View
 } from 'react-native';
+import DateTimePicker, {
+  DateTimePickerAndroid,
+  type DateTimePickerEvent
+} from '@react-native-community/datetimepicker';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAppTheme } from '../theme/AppThemeProvider';
@@ -48,6 +53,10 @@ interface InterpreterScreenProps {
 }
 
 const DEFAULT_LANGUAGE_CODES = ['en-US', 'es-MX'];
+const REMINDER_LEAD_MINUTES = [5, 10, 15, 30, 60, 120, 1440];
+const REMINDER_FREQUENCIES: Array<InterpreterCreateDraft['reminderFrequency']> = ['once', 'daily', 'weekly'];
+
+type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
 
 type InterpreterLanguageSessionState = {
   status: InterpreterRealtimeStatus;
@@ -107,8 +116,8 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
         interpreterLanguageCodes: input.languageCodes,
         meetingName: input.meetingName,
         meetingType: input.meetingType,
-        reminderFrequency: input.isScheduled ? input.reminderFrequency : 'none',
-        reminderLeadMinutes: input.isScheduled ? input.reminderLeadMinutes : null,
+        reminderFrequency: input.isScheduled && input.reminderEnabled ? input.reminderFrequency : 'none',
+        reminderLeadMinutes: input.isScheduled && input.reminderEnabled ? input.reminderLeadMinutes : null,
         scheduledAtIso: input.isScheduled && input.scheduledAtIso ? input.scheduledAtIso : null,
         sourceLanguageCode: input.autoDetectSourceLanguage ? null : input.sourceLanguageCode
       });
@@ -953,10 +962,12 @@ interface InterpreterCreateDraft {
   languageCodes: string[];
   meetingName: string;
   meetingType: InterpreterMeetingType;
+  reminderEnabled: boolean;
   reminderFrequency: 'daily' | 'none' | 'once' | 'weekly';
   reminderLeadMinutes: number | null;
   scheduledAtIso: string | null;
   sourceLanguageCode: string | null;
+  timeFormat: '12h' | '24h';
 }
 
 interface InterpreterCreateModalProps {
@@ -992,11 +1003,17 @@ function InterpreterCreateModal({
     languageCodes: DEFAULT_LANGUAGE_CODES,
     meetingName: '',
     meetingType: 'ONE_ON_ONE',
+    reminderEnabled: false,
     reminderFrequency: 'none',
     reminderLeadMinutes: null,
     scheduledAtIso: null,
-    sourceLanguageCode: null
+    sourceLanguageCode: null,
+    timeFormat: '12h'
   });
+  const [languagePickerMode, setLanguagePickerMode] = useState<'interpret' | 'source' | null>(null);
+  const [participantPickerOpen, setParticipantPickerOpen] = useState(false);
+  const [iosDatePickerMode, setIosDatePickerMode] = useState<'date' | 'time' | null>(null);
+  const [iosPickerDate, setIosPickerDate] = useState<Date>(() => getDraftScheduleDate(null));
 
   useEffect(() => {
     if (isOpen) {
@@ -1007,26 +1024,118 @@ function InterpreterCreateModal({
         languageCodes: DEFAULT_LANGUAGE_CODES,
         meetingName: '',
         meetingType: 'ONE_ON_ONE',
+        reminderEnabled: false,
         reminderFrequency: 'none',
         reminderLeadMinutes: null,
         scheduledAtIso: null,
-        sourceLanguageCode: null
+        sourceLanguageCode: null,
+        timeFormat: '12h'
       });
+      setLanguagePickerMode(null);
+      setParticipantPickerOpen(false);
+      setIosDatePickerMode(null);
     }
   }, [isOpen]);
 
   function toggleLanguage(code: string) {
     setDraft((currentDraft) => {
-      const hasLanguage = currentDraft.languageCodes.includes(code);
-      const languageCodes = hasLanguage
-        ? currentDraft.languageCodes.filter((languageCode) => languageCode !== code)
-        : [...currentDraft.languageCodes, code];
+      if (currentDraft.languageCodes.includes(code)) {
+        return currentDraft;
+      }
 
       return {
         ...currentDraft,
-        languageCodes: languageCodes.includes('en-US') ? languageCodes : ['en-US', ...languageCodes]
+        languageCodes: [...currentDraft.languageCodes, code]
       };
     });
+  }
+
+  function removeInterpretLanguage(code: string) {
+    setDraft((currentDraft) => {
+      if (currentDraft.languageCodes.length <= 1) {
+        return currentDraft;
+      }
+
+      return {
+        ...currentDraft,
+        languageCodes: currentDraft.languageCodes.filter((languageCode) => languageCode !== code)
+      };
+    });
+  }
+
+  function addParticipant(uid: string) {
+    setDraft((currentDraft) => {
+      if (currentDraft.invitedUserIds.includes(uid)) {
+        return currentDraft;
+      }
+
+      return {
+        ...currentDraft,
+        invitedUserIds: [...currentDraft.invitedUserIds, uid]
+      };
+    });
+  }
+
+  function removeParticipant(uid: string) {
+    setDraft((currentDraft) => ({
+      ...currentDraft,
+      invitedUserIds: currentDraft.invitedUserIds.filter((currentUid) => currentUid !== uid)
+    }));
+  }
+
+  function setScheduleDate(nextDate: Date) {
+    setDraft((currentDraft) => ({
+      ...currentDraft,
+      scheduledAtIso: mergeScheduleDate(getDraftScheduleDate(currentDraft.scheduledAtIso), nextDate).toISOString()
+    }));
+  }
+
+  function setScheduleTime(nextTime: Date) {
+    setDraft((currentDraft) => ({
+      ...currentDraft,
+      scheduledAtIso: mergeScheduleTime(getDraftScheduleDate(currentDraft.scheduledAtIso), nextTime).toISOString()
+    }));
+  }
+
+  function openNativeSchedulePicker(mode: 'date' | 'time') {
+    const currentDate = getDraftScheduleDate(draft.scheduledAtIso);
+
+    if (Platform.OS === 'android') {
+      DateTimePickerAndroid.open({
+        display: mode === 'date' ? 'calendar' : 'clock',
+        is24Hour: draft.timeFormat === '24h',
+        mode,
+        onChange: (event: DateTimePickerEvent, selectedDate?: Date) => {
+          if (event.type !== 'set' || !selectedDate) {
+            return;
+          }
+
+          if (mode === 'date') {
+            setScheduleDate(selectedDate);
+            return;
+          }
+
+          setScheduleTime(selectedDate);
+        },
+        value: currentDate
+      });
+      return;
+    }
+
+    setIosPickerDate(currentDate);
+    setIosDatePickerMode(mode);
+  }
+
+  function confirmIosSchedulePicker() {
+    if (iosDatePickerMode === 'date') {
+      setScheduleDate(iosPickerDate);
+    }
+
+    if (iosDatePickerMode === 'time') {
+      setScheduleTime(iosPickerDate);
+    }
+
+    setIosDatePickerMode(null);
   }
 
   function submit() {
@@ -1089,64 +1198,78 @@ function InterpreterCreateModal({
             </View>
 
             <Text style={styles.sectionLabel}>Interpret to</Text>
-            <View style={styles.languageGrid}>
-              {availableLanguages.map((language) => (
+            <View style={styles.selectionList}>
+              {draft.languageCodes.map((languageCode) => {
+                const language = availableLanguages.find((availableLanguage) => availableLanguage.code === languageCode) || {
+                  code: languageCode,
+                  label: languageCode
+                };
+
+                return (
                 <Pressable
-                  disabled={language.code === 'en-US'}
                   key={language.code}
-                  onPress={() => toggleLanguage(language.code)}
-                  style={[
-                    styles.languageToggle,
-                    draft.languageCodes.includes(language.code) && styles.languageToggleActive
-                  ]}
+                  onPress={() => removeInterpretLanguage(language.code)}
+                  style={({ pressed }) => [styles.selectionRow, pressed && styles.pressed]}
                 >
                   <Ionicons
-                    color={draft.languageCodes.includes(language.code) ? appTheme.colors.primary : appTheme.colors.mutedStrong}
-                    name={draft.languageCodes.includes(language.code) ? 'checkmark-circle' : 'ellipse-outline'}
+                    color={appTheme.colors.primary}
+                    name="language-outline"
                     size={18}
                   />
-                  <Text style={styles.languageToggleText}>{language.label}</Text>
+                  <Text style={styles.selectionTitle}>{language.label}</Text>
+                  <Ionicons color={appTheme.colors.mutedStrong} name="close-circle-outline" size={18} />
                 </Pressable>
-              ))}
+                );
+              })}
+              <Pressable
+                onPress={() => setLanguagePickerMode('interpret')}
+                style={({ pressed }) => [styles.addSelectionRow, pressed && styles.pressed]}
+              >
+                <Ionicons color={appTheme.colors.primary} name="add-circle-outline" size={18} />
+                <Text style={styles.addSelectionText}>Add language</Text>
+              </Pressable>
             </View>
 
             <Text style={styles.sectionLabel}>Meeting access</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.participantScroller}>
-              {participants.map((participant) => {
-                const isSelected = draft.invitedUserIds.includes(participant.uid);
+            <View style={styles.selectionList}>
+              {draft.invitedUserIds.map((uid) => {
+                const participant = participants.find((currentParticipant) => currentParticipant.uid === uid);
+
+                if (!participant) {
+                  return null;
+                }
 
                 return (
                   <Pressable
                     key={participant.uid}
-                    onPress={() => setDraft((currentDraft) => ({
-                      ...currentDraft,
-                      invitedUserIds: currentDraft.invitedUserIds.includes(participant.uid)
-                        ? currentDraft.invitedUserIds.filter((uid) => uid !== participant.uid)
-                        : [...currentDraft.invitedUserIds, participant.uid]
-                    }))}
-                    style={[
-                      styles.participantChip,
-                      isSelected && styles.participantChipActive
-                    ]}
+                    onPress={() => removeParticipant(participant.uid)}
+                    style={({ pressed }) => [styles.selectionRow, pressed && styles.pressed]}
                   >
-                    <Ionicons
-                      color={isSelected ? appTheme.colors.primary : appTheme.colors.mutedStrong}
-                      name={isSelected ? 'checkmark-circle' : 'person-add-outline'}
-                      size={17}
-                    />
-                    <View>
+                    <Ionicons color={appTheme.colors.primary} name="person-circle-outline" size={20} />
+                    <View style={styles.selectionBody}>
                       <Text style={styles.participantName}>{participant.displayName}</Text>
                       <Text style={styles.participantMeta}>{participant.roleName || participant.departmentName || 'Company user'}</Text>
                     </View>
+                    <Ionicons color={appTheme.colors.mutedStrong} name="close-circle-outline" size={18} />
                   </Pressable>
                 );
               })}
-            </ScrollView>
+              <Pressable
+                onPress={() => setParticipantPickerOpen(true)}
+                style={({ pressed }) => [styles.addSelectionRow, pressed && styles.pressed]}
+              >
+                <Ionicons color={appTheme.colors.primary} name="person-add-outline" size={18} />
+                <Text style={styles.addSelectionText}>Add participant</Text>
+              </Pressable>
+            </View>
 
             <Pressable
               onPress={() => setDraft((currentDraft) => ({
                 ...currentDraft,
-                autoDetectSourceLanguage: !currentDraft.autoDetectSourceLanguage
+                autoDetectSourceLanguage: !currentDraft.autoDetectSourceLanguage,
+                sourceLanguageCode: currentDraft.autoDetectSourceLanguage
+                  ? currentDraft.sourceLanguageCode || 'en-US'
+                  : null
               }))}
               style={styles.switchRow}
             >
@@ -1159,12 +1282,26 @@ function InterpreterCreateModal({
               </View>
             </Pressable>
 
+            {!draft.autoDetectSourceLanguage ? (
+              <Pressable
+                onPress={() => setLanguagePickerMode('source')}
+                style={({ pressed }) => [styles.dropdownRow, pressed && styles.pressed]}
+              >
+                <View style={styles.selectionBody}>
+                  <Text style={styles.sectionLabel}>Speaker language</Text>
+                  <Text style={styles.selectionTitle}>{getLanguageLabel(availableLanguages, draft.sourceLanguageCode || 'en-US')}</Text>
+                </View>
+                <Ionicons color={appTheme.colors.mutedStrong} name="chevron-down-outline" size={18} />
+              </Pressable>
+            ) : null}
+
             <Pressable
               onPress={() => setDraft((currentDraft) => ({
                 ...currentDraft,
                 isScheduled: !currentDraft.isScheduled,
-                reminderFrequency: currentDraft.isScheduled ? 'none' : 'once',
-                reminderLeadMinutes: currentDraft.isScheduled ? null : 15,
+                reminderEnabled: false,
+                reminderFrequency: 'none',
+                reminderLeadMinutes: null,
                 scheduledAtIso: currentDraft.isScheduled ? null : new Date(Date.now() + 60 * 60_000).toISOString()
               }))}
               style={styles.switchRow}
@@ -1174,9 +1311,97 @@ function InterpreterCreateModal({
               </View>
               <View>
                 <Text style={styles.switchTitle}>Schedule for later</Text>
-                <Text style={styles.mutedText}>Reminder metadata is stored with the meeting.</Text>
+                <Text style={styles.mutedText}>Use native date and time selection.</Text>
               </View>
             </Pressable>
+
+            {draft.isScheduled ? (
+              <View style={styles.schedulePanel}>
+                <View style={styles.inlineFieldRow}>
+                  <Pressable
+                    onPress={() => openNativeSchedulePicker('date')}
+                    style={({ pressed }) => [styles.dropdownRow, styles.inlineField, pressed && styles.pressed]}
+                  >
+                    <View style={styles.selectionBody}>
+                      <Text style={styles.sectionLabel}>Date</Text>
+                      <Text style={styles.selectionTitle}>{formatScheduleDate(draft.scheduledAtIso)}</Text>
+                    </View>
+                    <Ionicons color={appTheme.colors.primary} name="calendar-outline" size={18} />
+                  </Pressable>
+                  <Pressable
+                    onPress={() => openNativeSchedulePicker('time')}
+                    style={({ pressed }) => [styles.dropdownRow, styles.inlineField, pressed && styles.pressed]}
+                  >
+                    <View style={styles.selectionBody}>
+                      <Text style={styles.sectionLabel}>Time</Text>
+                      <Text style={styles.selectionTitle}>{formatScheduleTime(draft.scheduledAtIso, draft.timeFormat)}</Text>
+                    </View>
+                    <Ionicons color={appTheme.colors.primary} name="time-outline" size={18} />
+                  </Pressable>
+                </View>
+
+                <View style={styles.segmentedRow}>
+                  {(['12h', '24h'] as const).map((timeFormat) => (
+                    <Pressable
+                      key={timeFormat}
+                      onPress={() => setDraft((currentDraft) => ({ ...currentDraft, timeFormat }))}
+                      style={[
+                        styles.segmentButton,
+                        draft.timeFormat === timeFormat && styles.segmentButtonActive
+                      ]}
+                    >
+                      <Text style={[
+                        styles.segmentButtonText,
+                        draft.timeFormat === timeFormat && styles.segmentButtonTextActive
+                      ]}>
+                        {timeFormat === '12h' ? '12 hour' : '24 hour'}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+
+                <Pressable
+                  onPress={() => setDraft((currentDraft) => ({
+                    ...currentDraft,
+                    reminderEnabled: !currentDraft.reminderEnabled,
+                    reminderFrequency: currentDraft.reminderEnabled ? 'none' : 'once',
+                    reminderLeadMinutes: currentDraft.reminderEnabled ? null : 15
+                  }))}
+                  style={styles.switchRow}
+                >
+                  <View style={[styles.switchTrack, draft.reminderEnabled && styles.switchTrackActive]}>
+                    <View style={[styles.switchKnob, draft.reminderEnabled && styles.switchKnobActive]} />
+                  </View>
+                  <View>
+                    <Text style={styles.switchTitle}>Set reminder</Text>
+                    <Text style={styles.mutedText}>Uses Synzapp push notification reminders.</Text>
+                  </View>
+                </Pressable>
+
+                {draft.reminderEnabled ? (
+                  <View style={styles.inlineFieldRow}>
+                    <InterpreterInlineOption
+                      iconName="notifications-outline"
+                      label="Time frame"
+                      onPress={() => setDraft((currentDraft) => ({
+                        ...currentDraft,
+                        reminderLeadMinutes: getNextReminderLeadMinutes(currentDraft.reminderLeadMinutes)
+                      }))}
+                      value={formatReminderLeadMinutes(draft.reminderLeadMinutes)}
+                    />
+                    <InterpreterInlineOption
+                      iconName="repeat-outline"
+                      label="Frequency"
+                      onPress={() => setDraft((currentDraft) => ({
+                        ...currentDraft,
+                        reminderFrequency: getNextReminderFrequency(currentDraft.reminderFrequency)
+                      }))}
+                      value={formatReminderFrequency(draft.reminderFrequency)}
+                    />
+                  </View>
+                ) : null}
+              </View>
+            ) : null}
           </ScrollView>
 
           <Pressable
@@ -1189,6 +1414,55 @@ function InterpreterCreateModal({
           </Pressable>
         </View>
       </View>
+      <InterpreterOptionPickerModal
+        isOpen={languagePickerMode !== null}
+        onClose={() => setLanguagePickerMode(null)}
+        options={(languagePickerMode === 'interpret'
+          ? availableLanguages.filter((language) => !draft.languageCodes.includes(language.code))
+          : availableLanguages
+        ).map((language) => ({
+          iconName: 'language-outline',
+          id: language.code,
+          subtitle: language.code,
+          title: language.label
+        }))}
+        title={languagePickerMode === 'source' ? 'Speaker language' : 'Add interpretation language'}
+        onSelect={(languageCode) => {
+          if (languagePickerMode === 'source') {
+            setDraft((currentDraft) => ({ ...currentDraft, sourceLanguageCode: languageCode }));
+          } else {
+            toggleLanguage(languageCode);
+          }
+
+          setLanguagePickerMode(null);
+        }}
+      />
+      <InterpreterOptionPickerModal
+        isOpen={participantPickerOpen}
+        onClose={() => setParticipantPickerOpen(false)}
+        options={participants
+          .filter((participant) => !draft.invitedUserIds.includes(participant.uid))
+          .map((participant) => ({
+            iconName: 'person-circle-outline',
+            id: participant.uid,
+            subtitle: participant.roleName || participant.departmentName || 'Company user',
+            title: participant.displayName
+          }))}
+        title="Add meeting access"
+        onSelect={(participantUid) => {
+          addParticipant(participantUid);
+          setParticipantPickerOpen(false);
+        }}
+      />
+      <ScheduleDateTimePickerModal
+        date={iosPickerDate}
+        isOpen={iosDatePickerMode !== null}
+        is24Hour={draft.timeFormat === '24h'}
+        mode={iosDatePickerMode || 'date'}
+        onCancel={() => setIosDatePickerMode(null)}
+        onChange={setIosPickerDate}
+        onConfirm={confirmIosSchedulePicker}
+      />
     </Modal>
   );
 }
@@ -1288,6 +1562,156 @@ function InterpreterSummaryLanguageModal({
             {isBusy ? <ActivityIndicator color="#fff" /> : <Ionicons color="#fff" name="document-text-outline" size={20} />}
             <Text style={styles.primaryButtonText}>Create summary</Text>
           </Pressable>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+interface InterpreterInlineOptionProps {
+  iconName: IoniconName;
+  label: string;
+  onPress: () => void;
+  value: string;
+}
+
+function InterpreterInlineOption({ iconName, label, onPress, value }: InterpreterInlineOptionProps) {
+  const appTheme = useAppTheme();
+  const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
+
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [styles.inlineOption, pressed && styles.pressed]}
+    >
+      <Ionicons color={appTheme.colors.primary} name={iconName} size={18} />
+      <View style={styles.selectionBody}>
+        <Text style={styles.sectionLabel}>{label}</Text>
+        <Text style={styles.selectionTitle}>{value}</Text>
+      </View>
+      <Ionicons color={appTheme.colors.mutedStrong} name="chevron-down-outline" size={18} />
+    </Pressable>
+  );
+}
+
+interface InterpreterOptionPickerOption {
+  iconName: IoniconName;
+  id: string;
+  subtitle?: string;
+  title: string;
+}
+
+interface InterpreterOptionPickerModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onSelect: (id: string) => void;
+  options: InterpreterOptionPickerOption[];
+  title: string;
+}
+
+function InterpreterOptionPickerModal({
+  isOpen,
+  onClose,
+  onSelect,
+  options,
+  title
+}: InterpreterOptionPickerModalProps) {
+  const appTheme = useAppTheme();
+  const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
+  const insets = useSafeAreaInsets();
+
+  return (
+    <Modal animationType="fade" onRequestClose={onClose} transparent visible={isOpen}>
+      <Pressable onPress={onClose} style={styles.pickerOverlay}>
+        <Pressable style={[styles.pickerSheet, { paddingBottom: Math.max(insets.bottom + 14, 24) }]}>
+          <View style={styles.modalHandle} />
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>{title}</Text>
+            <Pressable onPress={onClose} style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}>
+              <Ionicons color={appTheme.colors.ink} name="close" size={24} />
+            </Pressable>
+          </View>
+          <ScrollView contentContainerStyle={styles.pickerList} keyboardShouldPersistTaps="handled">
+            {options.length ? options.map((option) => (
+              <Pressable
+                key={option.id}
+                onPress={() => onSelect(option.id)}
+                style={({ pressed }) => [styles.pickerRow, pressed && styles.pressed]}
+              >
+                <View style={styles.pickerIcon}>
+                  <Ionicons color={appTheme.colors.primary} name={option.iconName} size={19} />
+                </View>
+                <View style={styles.selectionBody}>
+                  <Text style={styles.selectionTitle}>{option.title}</Text>
+                  {option.subtitle ? <Text style={styles.mutedText}>{option.subtitle}</Text> : null}
+                </View>
+                <Ionicons color={appTheme.colors.mutedStrong} name="add-circle-outline" size={20} />
+              </Pressable>
+            )) : (
+              <View style={styles.emptyPickerState}>
+                <Ionicons color={appTheme.colors.mutedStrong} name="checkmark-circle-outline" size={28} />
+                <Text style={styles.mutedText}>All available options have already been added.</Text>
+              </View>
+            )}
+          </ScrollView>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+interface ScheduleDateTimePickerModalProps {
+  date: Date;
+  is24Hour: boolean;
+  isOpen: boolean;
+  mode: 'date' | 'time';
+  onCancel: () => void;
+  onChange: (date: Date) => void;
+  onConfirm: () => void;
+}
+
+function ScheduleDateTimePickerModal({
+  date,
+  is24Hour,
+  isOpen,
+  mode,
+  onCancel,
+  onChange,
+  onConfirm
+}: ScheduleDateTimePickerModalProps) {
+  const appTheme = useAppTheme();
+  const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
+  const insets = useSafeAreaInsets();
+
+  if (Platform.OS === 'android') {
+    return null;
+  }
+
+  return (
+    <Modal animationType="fade" onRequestClose={onCancel} transparent visible={isOpen}>
+      <View style={styles.pickerOverlay}>
+        <View style={[styles.datePickerSheet, { paddingBottom: Math.max(insets.bottom + 12, 22) }]}>
+          <View style={styles.modalHeader}>
+            <Pressable onPress={onCancel} style={({ pressed }) => [styles.secondaryTextButton, pressed && styles.pressed]}>
+              <Text style={styles.secondaryTextButtonText}>Cancel</Text>
+            </Pressable>
+            <Text style={styles.modalTitle}>{mode === 'date' ? 'Select date' : 'Select time'}</Text>
+            <Pressable onPress={onConfirm} style={({ pressed }) => [styles.secondaryTextButton, pressed && styles.pressed]}>
+              <Text style={styles.primaryTextButtonText}>Done</Text>
+            </Pressable>
+          </View>
+          <DateTimePicker
+            display="spinner"
+            is24Hour={is24Hour}
+            mode={mode}
+            onChange={(_event, selectedDate) => {
+              if (selectedDate) {
+                onChange(selectedDate);
+              }
+            }}
+            style={styles.iosDatePicker}
+            value={date}
+          />
         </View>
       </View>
     </Modal>
@@ -1397,6 +1821,111 @@ function getSessionPoolReadyCount(sessionState: Record<string, InterpreterLangua
   ).length;
 }
 
+function getDraftScheduleDate(scheduledAtIso: string | null): Date {
+  if (!scheduledAtIso) {
+    return new Date(Date.now() + 60 * 60_000);
+  }
+
+  const parsedDate = new Date(scheduledAtIso);
+
+  return Number.isNaN(parsedDate.getTime()) ? new Date(Date.now() + 60 * 60_000) : parsedDate;
+}
+
+function mergeScheduleDate(currentDate: Date, nextDate: Date): Date {
+  const mergedDate = new Date(currentDate);
+
+  mergedDate.setFullYear(nextDate.getFullYear(), nextDate.getMonth(), nextDate.getDate());
+
+  return mergedDate;
+}
+
+function mergeScheduleTime(currentDate: Date, nextTime: Date): Date {
+  const mergedDate = new Date(currentDate);
+
+  mergedDate.setHours(nextTime.getHours(), nextTime.getMinutes(), 0, 0);
+
+  return mergedDate;
+}
+
+function getLanguageLabel(languages: InterpreterLanguage[], code: string): string {
+  return languages.find((language) => language.code === code)?.label || code;
+}
+
+function formatScheduleDate(scheduledAtIso: string | null): string {
+  const date = getDraftScheduleDate(scheduledAtIso);
+
+  return new Intl.DateTimeFormat(undefined, {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric'
+  }).format(date);
+}
+
+function formatScheduleTime(
+  scheduledAtIso: string | null,
+  timeFormat: InterpreterCreateDraft['timeFormat']
+): string {
+  const date = getDraftScheduleDate(scheduledAtIso);
+
+  return new Intl.DateTimeFormat(undefined, {
+    hour: 'numeric',
+    hour12: timeFormat === '12h',
+    minute: '2-digit'
+  }).format(date);
+}
+
+function getNextReminderLeadMinutes(currentLeadMinutes: number | null): number {
+  const currentIndex = REMINDER_LEAD_MINUTES.findIndex((leadMinutes) => leadMinutes === currentLeadMinutes);
+  const nextIndex = currentIndex < 0 ? 2 : (currentIndex + 1) % REMINDER_LEAD_MINUTES.length;
+
+  return REMINDER_LEAD_MINUTES[nextIndex];
+}
+
+function formatReminderLeadMinutes(leadMinutes: number | null): string {
+  if (!leadMinutes) {
+    return 'No reminder';
+  }
+
+  if (leadMinutes < 60) {
+    return `${leadMinutes} min before`;
+  }
+
+  if (leadMinutes === 60) {
+    return '1 hour before';
+  }
+
+  if (leadMinutes === 1440) {
+    return '1 day before';
+  }
+
+  return `${leadMinutes / 60} hours before`;
+}
+
+function getNextReminderFrequency(
+  currentFrequency: InterpreterCreateDraft['reminderFrequency']
+): InterpreterCreateDraft['reminderFrequency'] {
+  const currentIndex = REMINDER_FREQUENCIES.findIndex((frequency) => frequency === currentFrequency);
+  const nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % REMINDER_FREQUENCIES.length;
+
+  return REMINDER_FREQUENCIES[nextIndex];
+}
+
+function formatReminderFrequency(frequency: InterpreterCreateDraft['reminderFrequency']): string {
+  if (frequency === 'daily') {
+    return 'Daily';
+  }
+
+  if (frequency === 'weekly') {
+    return 'Weekly';
+  }
+
+  if (frequency === 'once') {
+    return 'Once';
+  }
+
+  return 'None';
+}
+
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Interpreter could not complete that action.';
 }
@@ -1422,8 +1951,8 @@ function createStyles(colors: AppColors) {
     },
     deviceCheckButton: {
       alignItems: 'center',
-      backgroundColor: colors.primarySoft,
-      borderColor: colors.primary,
+      backgroundColor: colors.surface,
+      borderColor: colors.divider,
       borderRadius: 999,
       borderWidth: 1,
       flexDirection: 'row',
@@ -1481,12 +2010,29 @@ function createStyles(colors: AppColors) {
     diagnosticPillTextReady: {
       color: '#047857'
     },
+    dropdownRow: {
+      alignItems: 'center',
+      backgroundColor: colors.surface,
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
+      flexDirection: 'row',
+      gap: 10,
+      minHeight: 58,
+      paddingHorizontal: 4,
+      paddingVertical: 10
+    },
     emptyState: {
       alignItems: 'center',
       gap: 10,
       justifyContent: 'center',
       paddingHorizontal: 24,
       paddingVertical: 48
+    },
+    emptyPickerState: {
+      alignItems: 'center',
+      gap: 8,
+      paddingHorizontal: 16,
+      paddingVertical: 28
     },
     emptyTitle: {
       color: colors.ink,
@@ -1523,9 +2069,7 @@ function createStyles(colors: AppColors) {
     heroIcon: {
       alignItems: 'center',
       backgroundColor: colors.primarySoft,
-      borderColor: colors.primary,
       borderRadius: 18,
-      borderWidth: 1,
       height: 46,
       justifyContent: 'center',
       width: 46
@@ -1536,10 +2080,8 @@ function createStyles(colors: AppColors) {
     },
     iconButton: {
       alignItems: 'center',
-      backgroundColor: colors.card,
-      borderColor: colors.border,
+      backgroundColor: colors.surface,
       borderRadius: 20,
-      borderWidth: 1,
       height: 42,
       justifyContent: 'center',
       width: 42
@@ -1639,13 +2181,12 @@ function createStyles(colors: AppColors) {
       alignItems: 'center',
       alignSelf: 'stretch',
       backgroundColor: colors.surface,
-      borderColor: colors.border,
-      borderRadius: 20,
-      borderWidth: 1,
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
       flexDirection: 'row',
       gap: 10,
       marginBottom: 12,
-      padding: 12
+      paddingBottom: 12
     },
     liveStatusTextWrap: {
       flex: 1,
@@ -1670,7 +2211,7 @@ function createStyles(colors: AppColors) {
     },
     meetingRow: {
       alignItems: 'center',
-      backgroundColor: colors.card,
+      backgroundColor: colors.surface,
       borderBottomColor: colors.divider,
       borderBottomWidth: 1,
       flexDirection: 'row',
@@ -1679,10 +2220,8 @@ function createStyles(colors: AppColors) {
     },
     meetingStatusIcon: {
       alignItems: 'center',
-      backgroundColor: colors.surface,
-      borderColor: colors.border,
+      backgroundColor: colors.primarySoft,
       borderRadius: 18,
-      borderWidth: 1,
       height: 42,
       justifyContent: 'center',
       width: 42
@@ -1741,7 +2280,7 @@ function createStyles(colors: AppColors) {
     poolReadinessRow: {
       alignItems: 'center',
       backgroundColor: colors.surface,
-      borderColor: colors.border,
+      borderColor: colors.divider,
       borderRadius: 999,
       borderWidth: 1,
       flexDirection: 'row',
@@ -1777,10 +2316,9 @@ function createStyles(colors: AppColors) {
     },
     participantChip: {
       alignItems: 'center',
-      backgroundColor: colors.card,
-      borderColor: colors.border,
-      borderRadius: 18,
-      borderWidth: 1,
+      backgroundColor: colors.surface,
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
       flexDirection: 'row',
       gap: 8,
       marginRight: 8,
@@ -1806,6 +2344,40 @@ function createStyles(colors: AppColors) {
     participantScroller: {
       flexGrow: 0
     },
+    pickerIcon: {
+      alignItems: 'center',
+      backgroundColor: colors.primarySoft,
+      borderRadius: 18,
+      height: 38,
+      justifyContent: 'center',
+      width: 38
+    },
+    pickerList: {
+      paddingBottom: 12
+    },
+    pickerOverlay: {
+      backgroundColor: 'rgba(15,23,42,0.34)',
+      flex: 1,
+      justifyContent: 'flex-end'
+    },
+    pickerRow: {
+      alignItems: 'center',
+      backgroundColor: colors.surface,
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
+      flexDirection: 'row',
+      gap: 12,
+      minHeight: 64,
+      paddingVertical: 10
+    },
+    pickerSheet: {
+      backgroundColor: colors.surface,
+      borderTopLeftRadius: 30,
+      borderTopRightRadius: 30,
+      maxHeight: '72%',
+      paddingHorizontal: 18,
+      paddingTop: 12
+    },
     primaryButton: {
       alignItems: 'center',
       backgroundColor: colors.primary,
@@ -1813,7 +2385,7 @@ function createStyles(colors: AppColors) {
       flexDirection: 'row',
       gap: 6,
       justifyContent: 'center',
-      minHeight: 38,
+      minHeight: 36,
       paddingHorizontal: 16
     },
     primaryButtonText: {
@@ -1862,6 +2434,16 @@ function createStyles(colors: AppColors) {
       flexDirection: 'row',
       gap: 10,
       marginBottom: 14
+    },
+    datePickerSheet: {
+      backgroundColor: colors.surface,
+      borderTopLeftRadius: 30,
+      borderTopRightRadius: 30,
+      paddingHorizontal: 18,
+      paddingTop: 18
+    },
+    iosDatePicker: {
+      alignSelf: 'stretch'
     },
     roomTitle: {
       color: colors.ink,
@@ -1917,6 +2499,18 @@ function createStyles(colors: AppColors) {
       color: colors.ink,
       fontSize: 15
     },
+    secondaryTextButton: {
+      alignItems: 'center',
+      borderRadius: 999,
+      justifyContent: 'center',
+      minHeight: 36,
+      minWidth: 68,
+      paddingHorizontal: 8
+    },
+    secondaryTextButtonText: {
+      color: colors.mutedStrong,
+      fontSize: 14
+    },
     sectionHeaderRow: {
       alignItems: 'center',
       flexDirection: 'row',
@@ -1954,11 +2548,79 @@ function createStyles(colors: AppColors) {
     segmentButtonTextActive: {
       color: colors.primary
     },
-    statusPill: {
+    selectionBody: {
+      flex: 1,
+      gap: 2
+    },
+    selectionList: {
       backgroundColor: colors.surface,
-      borderColor: colors.border,
+      borderTopColor: colors.divider,
+      borderTopWidth: 1
+    },
+    selectionRow: {
+      alignItems: 'center',
+      backgroundColor: colors.surface,
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
+      flexDirection: 'row',
+      gap: 10,
+      minHeight: 54,
+      paddingHorizontal: 4,
+      paddingVertical: 9
+    },
+    selectionTitle: {
+      color: colors.ink,
+      flexShrink: 1,
+      fontSize: 14,
+      lineHeight: 19
+    },
+    addSelectionRow: {
+      alignItems: 'center',
+      backgroundColor: colors.surface,
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
+      flexDirection: 'row',
+      gap: 10,
+      minHeight: 52,
+      paddingHorizontal: 4
+    },
+    addSelectionText: {
+      color: colors.primary,
+      fontSize: 14
+    },
+    inlineField: {
+      flex: 1,
+      minWidth: 0
+    },
+    inlineFieldRow: {
+      flexDirection: 'row',
+      gap: 10
+    },
+    inlineOption: {
+      alignItems: 'center',
+      backgroundColor: colors.surface,
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
+      flex: 1,
+      flexDirection: 'row',
+      gap: 10,
+      minHeight: 58,
+      paddingVertical: 10
+    },
+    primaryTextButtonText: {
+      color: colors.primary,
+      fontSize: 14
+    },
+    schedulePanel: {
+      backgroundColor: colors.surface,
+      borderTopColor: colors.divider,
+      borderTopWidth: 1,
+      gap: 12,
+      paddingTop: 12
+    },
+    statusPill: {
+      backgroundColor: colors.primarySoft,
       borderRadius: 999,
-      borderWidth: 1,
       fontSize: 12,
       overflow: 'hidden',
       paddingHorizontal: 10,
@@ -1999,7 +2661,7 @@ function createStyles(colors: AppColors) {
     summaryLanguageIcon: {
       alignItems: 'center',
       backgroundColor: colors.surface,
-      borderColor: colors.border,
+      borderColor: colors.divider,
       borderRadius: 16,
       borderWidth: 1,
       height: 34,
@@ -2013,10 +2675,9 @@ function createStyles(colors: AppColors) {
     },
     summaryLanguageRow: {
       alignItems: 'center',
-      backgroundColor: colors.card,
-      borderColor: colors.border,
-      borderRadius: 18,
-      borderWidth: 1,
+      backgroundColor: colors.surface,
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
       flexDirection: 'row',
       gap: 10,
       minHeight: 56,
@@ -2042,10 +2703,9 @@ function createStyles(colors: AppColors) {
     },
     switchRow: {
       alignItems: 'center',
-      backgroundColor: colors.card,
-      borderColor: colors.border,
-      borderRadius: 18,
-      borderWidth: 1,
+      backgroundColor: colors.surface,
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
       flexDirection: 'row',
       gap: 12,
       padding: 12
@@ -2094,9 +2754,8 @@ function createStyles(colors: AppColors) {
     },
     transcriptPreview: {
       backgroundColor: colors.surface,
-      borderColor: colors.divider,
-      borderRadius: 16,
-      borderWidth: 1,
+      borderTopColor: colors.divider,
+      borderTopWidth: 1,
       gap: 6,
       marginTop: 10,
       padding: 10
