@@ -65,6 +65,8 @@ describe('interpreter enterprise controls', () => {
     assert.match(interpreterService, /sendInterpreterPushNotification/);
     assert.match(interpreterService, /INTERPRETER_MEETING_REMINDER_SENT/);
     assert.match(interpreterService, /reminderNextAtIso/);
+    assert.match(interpreterService, /listScheduledInterpreterReminderMeetingDocs/);
+    assert.doesNotMatch(interpreterService, /collectionGroup\(INTERPRETER_MEETINGS_COLLECTION\)/);
   });
 
   it('audits meeting memory writes without duplicating sensitive transcript text in audit metadata', () => {
@@ -82,11 +84,11 @@ describe('interpreter enterprise controls', () => {
     assert.match(interpreterService, /extractRealtimeClientSecret/);
   });
 
-  it('brokers native mobile realtime SDP exchange through the backend', () => {
+  it('keeps the backend realtime SDP exchange endpoint guarded for compatibility', () => {
     assert.match(
       interpreterRoutes,
       /interpreterRouter\.post\('\/meetings\/:meetingId\/realtime-sdp-answer'/,
-      'Native mobile interpreter setup must use a backend-brokered SDP answer endpoint.'
+      'Compatibility SDP answer endpoint must stay authenticated and validated.'
     );
     assert.match(interpreterService, /createInterpreterRealtimeSdpAnswer/);
     assert.match(interpreterService, /INTERPRETER_REALTIME_SDP_EXCHANGED/);

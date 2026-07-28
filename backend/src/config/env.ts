@@ -41,6 +41,7 @@ export const env = {
   interpreterReminderWorkerEnabled: booleanFromEnv('INTERPRETER_REMINDER_WORKER_ENABLED', true),
   interpreterReminderWorkerIntervalMs: numberFromEnv('INTERPRETER_REMINDER_WORKER_INTERVAL_MS', 60_000),
   interpreterReminderWorkerBatchSize: numberFromEnv('INTERPRETER_REMINDER_WORKER_BATCH_SIZE', 50),
+  interpreterReminderWorkerTenantBatchSize: numberFromEnv('INTERPRETER_REMINDER_WORKER_TENANT_BATCH_SIZE', 100),
   requireAppCheck: booleanFromEnv('SYNZAPP_REQUIRE_APP_CHECK'),
   authRateLimitWindowMs: numberFromEnv('AUTH_RATE_LIMIT_WINDOW_MS', 60_000),
   authRateLimitMax: numberFromEnv('AUTH_RATE_LIMIT_MAX', 20),

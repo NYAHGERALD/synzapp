@@ -880,16 +880,12 @@ export async function runInterpreterReminderDispatchCycle(now = new Date()) {
 
   try {
     const nowIso = now.toISOString();
-    const snapshot = await firestore
-      .collectionGroup(INTERPRETER_MEETINGS_COLLECTION)
-      .where('status', '==', 'SCHEDULED')
-      .limit(env.interpreterReminderWorkerBatchSize)
-      .get();
+    const scheduledMeetingDocs = await listScheduledInterpreterReminderMeetingDocs();
     let claimed = 0;
     let sent = 0;
     let skipped = 0;
 
-    for (const doc of snapshot.docs) {
+    for (const doc of scheduledMeetingDocs) {
       const meeting = normalizeMeetingRecord(doc.data() as Partial<InterpreterMeetingRecord>);
 
       if (!meeting || !isInterpreterReminderDue(meeting, nowIso)) {
@@ -925,6 +921,38 @@ export async function runInterpreterReminderDispatchCycle(now = new Date()) {
   } finally {
     reminderWorkerRunning = false;
   }
+}
+
+async function listScheduledInterpreterReminderMeetingDocs(): Promise<FirebaseFirestore.QueryDocumentSnapshot[]> {
+  const organizationSnapshot = await firestore
+    .collection('organizations')
+    .where('status', '==', 'ACTIVE')
+    .limit(env.interpreterReminderWorkerTenantBatchSize)
+    .get();
+  const scheduledMeetingDocs: FirebaseFirestore.QueryDocumentSnapshot[] = [];
+
+  for (const organizationDoc of organizationSnapshot.docs) {
+    if (scheduledMeetingDocs.length >= env.interpreterReminderWorkerBatchSize) {
+      break;
+    }
+
+    const organization = organizationDoc.data() as OrganizationRecord;
+
+    if (organization.status !== 'ACTIVE') {
+      continue;
+    }
+
+    const remainingBatchSize = env.interpreterReminderWorkerBatchSize - scheduledMeetingDocs.length;
+    const meetingSnapshot = await organizationDoc.ref
+      .collection(INTERPRETER_MEETINGS_COLLECTION)
+      .where('status', '==', 'SCHEDULED')
+      .limit(remainingBatchSize)
+      .get();
+
+    scheduledMeetingDocs.push(...meetingSnapshot.docs);
+  }
+
+  return scheduledMeetingDocs;
 }
 
 async function claimInterpreterReminder(
