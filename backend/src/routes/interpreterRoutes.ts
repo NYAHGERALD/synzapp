@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, text } from 'express';
 import { z } from 'zod';
 import { verifyAppCheck } from '../middleware/appCheck.js';
 import { verifyFirebaseSession } from '../services/authSessionService.js';
@@ -9,6 +9,7 @@ import {
   createInterpreterRealtimeClientSecret,
   createInterpreterRealtimeSdpAnswer,
   createInterpreterSummary,
+  deleteInterpreterMeeting,
   endInterpreterMeeting,
   getInterpreterMeeting,
   listInterpreterMeetings,
@@ -20,6 +21,7 @@ import {
 } from '../services/interpreterService.js';
 
 const interpreterRouter = Router();
+const realtimeSdpBodyParser = text({ limit: '256kb', type: ['application/sdp', 'text/plain'] });
 
 const languageCodeSchema = z.string().trim().min(2).max(16).regex(/^[a-z]{2,3}(?:-[A-Z0-9]{2,4})?$/);
 const meetingIdSchema = z.string().trim().min(6).max(128).regex(/^[A-Za-z0-9_-]+$/);
@@ -41,7 +43,11 @@ const realtimeSessionBodySchema = z.object({
 });
 
 const realtimeSdpAnswerBodySchema = z.object({
-  offerSdp: z.string().trim().min(20).max(200_000),
+  offerSdp: z.string().min(20).max(200_000),
+  targetLanguageCode: languageCodeSchema
+});
+
+const realtimeSdpAnswerQuerySchema = z.object({
   targetLanguageCode: languageCodeSchema
 });
 
@@ -142,6 +148,18 @@ interpreterRouter.post('/meetings/:meetingId/end', verifyAppCheck, async (req, r
   }
 });
 
+interpreterRouter.delete('/meetings/:meetingId', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const meetingId = meetingIdSchema.parse(req.params.meetingId);
+    const result = await deleteInterpreterMeeting(decodedToken, meetingId);
+
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
 interpreterRouter.post('/meetings/:meetingId/invitations', verifyAppCheck, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
@@ -171,11 +189,16 @@ interpreterRouter.post('/meetings/:meetingId/realtime-client-secret', verifyAppC
   }
 });
 
-interpreterRouter.post('/meetings/:meetingId/realtime-sdp-answer', verifyAppCheck, async (req, res, next) => {
+interpreterRouter.post('/meetings/:meetingId/realtime-sdp-answer', verifyAppCheck, realtimeSdpBodyParser, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
     const meetingId = meetingIdSchema.parse(req.params.meetingId);
-    const body = realtimeSdpAnswerBodySchema.parse(req.body);
+    const body = typeof req.body === 'string'
+      ? realtimeSdpAnswerBodySchema.parse({
+          offerSdp: req.body,
+          targetLanguageCode: realtimeSdpAnswerQuerySchema.parse(req.query).targetLanguageCode
+        })
+      : realtimeSdpAnswerBodySchema.parse(req.body);
     const result = await createInterpreterRealtimeSdpAnswer(decodedToken, meetingId, body);
 
     res.json(result);

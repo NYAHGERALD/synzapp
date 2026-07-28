@@ -12,7 +12,7 @@ const server = readFileSync(resolve(backendRoot, 'src', 'server.ts'), 'utf8');
 
 describe('interpreter enterprise controls', () => {
   it('keeps every interpreter route behind App Check and Firebase session verification', () => {
-    const routeBlocks = getRouteBlocks(interpreterRoutes, 'interpreterRouter', ['get', 'post']);
+    const routeBlocks = getRouteBlocks(interpreterRoutes, 'interpreterRouter', ['get', 'post', 'delete']);
 
     assert.ok(routeBlocks.length > 0, 'Expected interpreter routes to be present.');
 
@@ -90,14 +90,28 @@ describe('interpreter enterprise controls', () => {
     );
     assert.match(interpreterService, /createInterpreterRealtimeSdpAnswer/);
     assert.match(interpreterService, /INTERPRETER_REALTIME_SDP_EXCHANGED/);
+    assert.match(interpreterService, /normalizeRealtimeOfferSdp/);
+    assert.match(interpreterRoutes, /application\/sdp/);
     assert.doesNotMatch(interpreterService, /return\s*\{\s*answerSdp,[\s\S]{0,220}clientSecret/);
+  });
+
+  it('supports controlled interpreter meeting deletion with audit retention', () => {
+    assert.match(
+      interpreterRoutes,
+      /interpreterRouter\.delete\('\/meetings\/:meetingId'/,
+      'Interpreter meetings need a controlled delete endpoint.'
+    );
+    assert.match(interpreterService, /deleteInterpreterMeeting/);
+    assert.match(interpreterService, /INTERPRETER_MEETING_DELETED/);
+    assert.match(interpreterService, /deletedAtIso/);
+    assert.match(interpreterService, /End this live interpreter session before deleting it\./);
   });
 });
 
 function getRouteBlocks(
   source: string,
   routerName: string,
-  methods: Array<'get' | 'post'>
+  methods: Array<'delete' | 'get' | 'post'>
 ): Array<{ body: string; header: string }> {
   const routePattern = new RegExp(`${routerName}\\.(${methods.join('|')})\\(`, 'g');
   const blocks: Array<{ body: string; header: string }> = [];

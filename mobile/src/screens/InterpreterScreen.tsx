@@ -5,6 +5,7 @@ import {
   Animated,
   Easing,
   Modal,
+  PanResponder,
   Platform,
   Pressable,
   ScrollView,
@@ -27,6 +28,7 @@ import {
   createInterpreterMeeting,
   createInterpreterRealtimeSdpAnswer,
   createInterpreterSummary,
+  deleteInterpreterMeeting,
   endInterpreterMeeting,
   getInterpreterMeeting,
   InterpreterLanguage,
@@ -144,6 +146,40 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
       const details = await getInterpreterMeeting(idToken, meetingId);
 
       setSelectedMeetingDetails(details);
+    } catch (error) {
+      showInterpreterError(getErrorMessage(error));
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  function handleDeleteMeeting(meeting: InterpreterMeeting) {
+    Alert.alert(
+      'Delete interpreter session?',
+      `${meeting.meetingName} will be removed from the interpreter workspace. Meeting memory and audit history stay retained by tenant policy.`,
+      [
+        { style: 'cancel', text: 'Cancel' },
+        {
+          onPress: () => void runDeleteMeeting(meeting),
+          style: 'destructive',
+          text: 'Delete'
+        }
+      ]
+    );
+  }
+
+  async function runDeleteMeeting(meeting: InterpreterMeeting) {
+    setIsBusy(true);
+
+    try {
+      const idToken = await getIdToken();
+      await deleteInterpreterMeeting(idToken, meeting.meetingId);
+      setMeetings((currentMeetings) => currentMeetings.filter((currentMeeting) =>
+        currentMeeting.meetingId !== meeting.meetingId
+      ));
+      setSelectedMeetingDetails((currentDetails) =>
+        currentDetails?.meeting.meetingId === meeting.meetingId ? null : currentDetails
+      );
     } catch (error) {
       showInterpreterError(getErrorMessage(error));
     } finally {
@@ -351,28 +387,13 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
       ) : meetings.length ? (
         <ScrollView contentContainerStyle={styles.listContent}>
           {meetings.map((meeting) => (
-            <Pressable
+            <InterpreterMeetingSwipeRow
               key={meeting.meetingId}
-              onPress={() => void handleOpenMeeting(meeting.meetingId)}
-              style={({ pressed }) => [styles.meetingRow, pressed && styles.pressed]}
-            >
-              <View style={styles.meetingStatusIcon}>
-                <Ionicons
-                  color={getStatusColor(meeting.status)}
-                  name={meeting.status === 'ENDED' ? 'checkmark-circle-outline' : 'radio-outline'}
-                  size={22}
-                />
-              </View>
-              <View style={styles.meetingBody}>
-                <Text style={styles.meetingName}>{meeting.meetingName}</Text>
-                <Text style={styles.meetingMeta}>
-                  {formatMeetingType(meeting.meetingType)} · {meeting.interpreterLanguages.map((language) => language.label).join(', ')}
-                </Text>
-              </View>
-              <Text style={[styles.statusPill, { color: getStatusColor(meeting.status) }]}>
-                {formatStatus(meeting.status)}
-              </Text>
-            </Pressable>
+              disabled={isBusy}
+              meeting={meeting}
+              onDelete={handleDeleteMeeting}
+              onOpen={handleOpenMeeting}
+            />
           ))}
         </ScrollView>
       ) : (
@@ -407,6 +428,117 @@ interface InterpreterRoomProps {
   onCreateRealtimeSdpAnswer: (targetLanguageCode: string, offerSdp: string) => Promise<string | null>;
   onUpdateInvitations: (invitedUserIds: string[]) => Promise<void>;
   participants: InterpreterParticipant[];
+}
+
+interface InterpreterMeetingSwipeRowProps {
+  disabled: boolean;
+  meeting: InterpreterMeeting;
+  onDelete: (meeting: InterpreterMeeting) => void;
+  onOpen: (meetingId: string) => Promise<void>;
+}
+
+const INTERPRETER_SESSION_DELETE_WIDTH = 88;
+const INTERPRETER_SESSION_DELETE_TRIGGER = 48;
+
+function InterpreterMeetingSwipeRow({
+  disabled,
+  meeting,
+  onDelete,
+  onOpen
+}: InterpreterMeetingSwipeRowProps) {
+  const appTheme = useAppTheme();
+  const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
+  const translateX = useRef(new Animated.Value(0)).current;
+  const openOffsetRef = useRef(0);
+
+  const closeRow = useCallback(() => {
+    openOffsetRef.current = 0;
+    Animated.spring(translateX, {
+      damping: 22,
+      mass: 0.7,
+      stiffness: 190,
+      toValue: 0,
+      useNativeDriver: true
+    }).start();
+  }, [translateX]);
+
+  const openRow = useCallback(() => {
+    openOffsetRef.current = -INTERPRETER_SESSION_DELETE_WIDTH;
+    Animated.spring(translateX, {
+      damping: 22,
+      mass: 0.7,
+      stiffness: 190,
+      toValue: -INTERPRETER_SESSION_DELETE_WIDTH,
+      useNativeDriver: true
+    }).start();
+  }, [translateX]);
+
+  const panResponder = useMemo(() => PanResponder.create({
+    onMoveShouldSetPanResponder: (_event, gesture) =>
+      Math.abs(gesture.dx) > 10 && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.2,
+    onPanResponderMove: (_event, gesture) => {
+      const nextOffset = Math.max(
+        -INTERPRETER_SESSION_DELETE_WIDTH,
+        Math.min(0, openOffsetRef.current + gesture.dx)
+      );
+
+      translateX.setValue(nextOffset);
+    },
+    onPanResponderRelease: (_event, gesture) => {
+      if (openOffsetRef.current + gesture.dx < -INTERPRETER_SESSION_DELETE_TRIGGER) {
+        openRow();
+      } else {
+        closeRow();
+      }
+    },
+    onPanResponderTerminate: closeRow,
+    onShouldBlockNativeResponder: () => false
+  }), [closeRow, openRow, translateX]);
+
+  return (
+    <View style={styles.meetingSwipeShell}>
+      <View style={styles.meetingSwipeActions}>
+        <Pressable
+          disabled={disabled}
+          onPress={() => {
+            closeRow();
+            onDelete(meeting);
+          }}
+          style={({ pressed }) => [styles.meetingDeleteAction, pressed && styles.pressed]}
+        >
+          <Ionicons color="#fff" name="trash-outline" size={18} />
+          <Text style={styles.meetingDeleteText}>Delete</Text>
+        </Pressable>
+      </View>
+      <Animated.View
+        {...panResponder.panHandlers}
+        style={[styles.meetingSwipeContent, { transform: [{ translateX }] }]}
+      >
+        <Pressable
+          disabled={disabled}
+          onPress={() => void onOpen(meeting.meetingId)}
+          style={({ pressed }) => [styles.meetingRow, pressed && styles.pressed]}
+        >
+          <View style={styles.meetingStatusIcon}>
+            <Ionicons
+              color={getStatusColor(meeting.status)}
+              name={meeting.status === 'ENDED' ? 'checkmark-circle-outline' : 'radio-outline'}
+              size={22}
+            />
+          </View>
+          <View style={styles.meetingBody}>
+            <Text style={styles.meetingName}>{meeting.meetingName}</Text>
+            <Text style={styles.meetingMeta}>
+              {formatMeetingType(meeting.meetingType)} · {meeting.interpreterLanguages.map((language) => language.label).join(', ')}
+            </Text>
+          </View>
+          <Text style={[styles.statusPill, { color: getStatusColor(meeting.status) }]}>
+            {formatStatus(meeting.status)}
+          </Text>
+        </Pressable>
+      </Animated.View>
+    </View>
+  );
 }
 
 function InterpreterRoom({
@@ -2761,6 +2893,33 @@ function createStyles(colors: AppColors) {
       flexDirection: 'row',
       gap: 12,
       paddingVertical: 12
+    },
+    meetingDeleteAction: {
+      alignItems: 'center',
+      backgroundColor: colors.red,
+      gap: 4,
+      height: '100%',
+      justifyContent: 'center',
+      width: INTERPRETER_SESSION_DELETE_WIDTH
+    },
+    meetingDeleteText: {
+      color: '#fff',
+      fontSize: 12
+    },
+    meetingSwipeActions: {
+      alignItems: 'stretch',
+      bottom: 0,
+      justifyContent: 'center',
+      position: 'absolute',
+      right: 0,
+      top: 0
+    },
+    meetingSwipeContent: {
+      backgroundColor: colors.surface
+    },
+    meetingSwipeShell: {
+      backgroundColor: colors.red,
+      overflow: 'hidden'
     },
     meetingStatusIcon: {
       alignItems: 'center',

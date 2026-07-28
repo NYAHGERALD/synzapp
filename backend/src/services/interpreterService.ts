@@ -91,6 +91,10 @@ interface InterpreterMeetingRecord {
   createdAtIso: string;
   createdByDisplayName: string;
   createdByUid: string;
+  deletedAt?: FirebaseFirestore.FieldValue;
+  deletedAtIso?: string | null;
+  deletedByDisplayName?: string | null;
+  deletedByUid?: string | null;
   endedAtIso?: string | null;
   interpreterLanguages: InterpreterLanguage[];
   invitedUserIds: string[];
@@ -164,7 +168,7 @@ export async function listInterpreterMeetings(decodedToken: DecodedIdToken) {
   [...ownedSnapshot.docs, ...invitedSnapshot.docs].forEach((doc) => {
     const meeting = normalizeMeetingRecord(doc.data() as Partial<InterpreterMeetingRecord>);
 
-    if (meeting && meeting.tenantId === context.tenantId) {
+    if (meeting && meeting.tenantId === context.tenantId && !meeting.deletedAtIso) {
       meetingById.set(meeting.meetingId, meeting);
     }
   });
@@ -397,6 +401,53 @@ export async function endInterpreterMeeting(decodedToken: DecodedIdToken, meetin
   return { meeting: { ...meeting, endedAtIso: nowIso, status: 'ENDED' as const, updatedAtIso: nowIso } };
 }
 
+export async function deleteInterpreterMeeting(decodedToken: DecodedIdToken, meetingId: string) {
+  const context = await getAuthorizedInterpreterContext(decodedToken);
+  const meeting = await readAccessibleMeeting(context, meetingId);
+
+  if (!canManageInterpreterMeeting(context, meeting)) {
+    throw authorizationError('Only the meeting owner or an authorized administrator can delete this interpreter session.');
+  }
+
+  if (meeting.status === 'LIVE') {
+    throw validationError('End this live interpreter session before deleting it.');
+  }
+
+  const nowIso = new Date().toISOString();
+  const patch = {
+    deletedAt: fieldValue.serverTimestamp(),
+    deletedAtIso: nowIso,
+    deletedByDisplayName: getDisplayName(context.user),
+    deletedByUid: context.uid,
+    updatedAt: fieldValue.serverTimestamp(),
+    updatedAtIso: nowIso
+  };
+
+  await context.organizationRef.collection(INTERPRETER_MEETINGS_COLLECTION)
+    .doc(safeDocumentId(meeting.meetingId))
+    .update(patch);
+
+  await writeInterpreterAuditEvent({
+    context,
+    meetingId,
+    metadata: {
+      deletedAtIso: nowIso,
+      deletedByUid: context.uid,
+      interpreterLanguageCodes: meeting.interpreterLanguages.map((language) => language.code),
+      invitedUserCount: meeting.invitedUserIds.length,
+      previousStatus: meeting.status
+    },
+    summary: `Deleted interpreter meeting "${meeting.meetingName}".`,
+    type: 'INTERPRETER_MEETING_DELETED'
+  });
+
+  return {
+    deleted: true,
+    deletedAtIso: nowIso,
+    meetingId: meeting.meetingId
+  };
+}
+
 export async function addInterpreterTranscriptSegment(
   decodedToken: DecodedIdToken,
   meetingId: string,
@@ -520,9 +571,11 @@ export async function createInterpreterRealtimeSdpAnswer(
 ) {
   const context = await getAuthorizedInterpreterContext(decodedToken);
   const meeting = await readAccessibleMeeting(context, meetingId);
+  const offerSdp = normalizeRealtimeOfferSdp(input.offerSdp);
+  const offerSdpHash = createHash('sha256').update(offerSdp).digest('hex').slice(0, 16);
   const session = await createOpenAiInterpreterRealtimeSession(context, meeting, input.targetLanguageCode);
   const response = await fetch('https://api.openai.com/v1/realtime/translations/calls', {
-    body: input.offerSdp,
+    body: offerSdp,
     headers: {
       Authorization: `Bearer ${session.clientSecret}`,
       'Content-Type': 'application/sdp',
@@ -537,6 +590,10 @@ export async function createInterpreterRealtimeSdpAnswer(
     console.warn('OpenAI interpreter realtime SDP exchange failed:', {
       error: errorText.slice(0, 500),
       model: session.realtimeModel,
+      offerSdpHash,
+      offerSdpHasAudio: containsRealtimeAudioMediaSection(offerSdp),
+      offerSdpLength: offerSdp.length,
+      offerSdpStartsWithV0: offerSdp.startsWith('v=0'),
       status: response.status,
       targetLanguageCode: session.targetLanguage.code
     });
@@ -554,6 +611,7 @@ export async function createInterpreterRealtimeSdpAnswer(
     meetingId,
     metadata: {
       model: session.realtimeModel,
+      offerSdpHash,
       targetLanguageCode: session.targetLanguage.code
     },
     summary: `Completed realtime interpreter SDP exchange for "${meeting.meetingName}".`,
@@ -984,7 +1042,29 @@ async function readAccessibleMeeting(
     throw authorizationError('You do not have access to this interpreter meeting.');
   }
 
+  if (meeting.deletedAtIso) {
+    throw notFoundError('Interpreter meeting was not found.');
+  }
+
   return meeting;
+}
+
+function normalizeRealtimeOfferSdp(offerSdp: string): string {
+  const normalizedOfferSdp = offerSdp.replace(/\r?\n/g, '\r\n').trimEnd();
+
+  if (!normalizedOfferSdp.startsWith('v=0')) {
+    throw validationError('The device sent an invalid realtime audio offer.');
+  }
+
+  if (!containsRealtimeAudioMediaSection(normalizedOfferSdp)) {
+    throw validationError('The device realtime audio offer did not include a microphone media lane.');
+  }
+
+  return `${normalizedOfferSdp}\r\n`;
+}
+
+function containsRealtimeAudioMediaSection(offerSdp: string): boolean {
+  return /(^|\r?\n)m=audio\s+/i.test(offerSdp);
 }
 
 function canAccessInterpreterMeeting(
@@ -1064,6 +1144,9 @@ function normalizeMeetingRecord(meeting: Partial<InterpreterMeetingRecord>): Int
     ...meeting,
     autoDetectSourceLanguage: meeting.autoDetectSourceLanguage !== false,
     createdAtIso: meeting.createdAtIso || meeting.updatedAtIso || new Date(0).toISOString(),
+    deletedAtIso: meeting.deletedAtIso || null,
+    deletedByDisplayName: meeting.deletedByDisplayName || null,
+    deletedByUid: meeting.deletedByUid || null,
     interpreterLanguages: Array.isArray(meeting.interpreterLanguages) ? meeting.interpreterLanguages : [],
     invitedUserIds: Array.isArray(meeting.invitedUserIds) ? meeting.invitedUserIds.filter((uid) => typeof uid === 'string') : [],
     reminderDeliveredCount: typeof meeting.reminderDeliveredCount === 'number' ? meeting.reminderDeliveredCount : 0,
@@ -1344,7 +1427,7 @@ function getOpenAiRealtimeSdpExchangeError(status: number, errorText = ''): stri
     const detail = getOpenAiErrorMessage(errorText);
 
     return detail
-      ? `Interpreter realtime audio offer was rejected: ${detail}`
+      ? sanitizeRealtimeSdpExchangeError(detail)
       : 'Interpreter realtime audio offer was rejected by the AI provider.';
   }
 
@@ -1369,6 +1452,14 @@ function getOpenAiRealtimeSdpExchangeError(status: number, errorText = ''): stri
   }
 
   return 'Interpreter realtime audio could not be prepared.';
+}
+
+function sanitizeRealtimeSdpExchangeError(detail: string): string {
+  if (/unmarshal SDP|parse offer|sdp/i.test(detail)) {
+    return 'Interpreter realtime audio could not read a valid microphone connection. Please close the live interpreter and start it again.';
+  }
+
+  return `Interpreter realtime audio offer was rejected: ${detail}`;
 }
 
 function getOpenAiErrorMessage(errorText: string): string {

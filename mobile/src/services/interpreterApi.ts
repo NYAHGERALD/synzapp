@@ -151,6 +151,14 @@ export async function endInterpreterMeeting(idToken: string, meetingId: string) 
   return response.json() as Promise<{ meeting: InterpreterMeeting }>;
 }
 
+export async function deleteInterpreterMeeting(idToken: string, meetingId: string) {
+  const response = await interpreterFetch(idToken, `/meetings/${encodeURIComponent(meetingId)}`, {
+    method: 'DELETE'
+  });
+
+  return response.json() as Promise<{ deleted: boolean; deletedAtIso: string; meetingId: string }>;
+}
+
 export async function updateInterpreterMeetingInvitations(
   idToken: string,
   meetingId: string,
@@ -182,10 +190,18 @@ export async function createInterpreterRealtimeSdpAnswer(
   meetingId: string,
   input: { offerSdp: string; targetLanguageCode: string }
 ) {
-  const response = await interpreterFetch(idToken, `/meetings/${encodeURIComponent(meetingId)}/realtime-sdp-answer`, {
-    body: JSON.stringify(input),
-    method: 'POST'
-  });
+  const targetLanguageCode = encodeURIComponent(input.targetLanguageCode);
+  const response = await interpreterFetch(
+    idToken,
+    `/meetings/${encodeURIComponent(meetingId)}/realtime-sdp-answer?targetLanguageCode=${targetLanguageCode}`,
+    {
+      body: input.offerSdp,
+      headers: {
+        'Content-Type': 'application/sdp'
+      },
+      method: 'POST'
+    }
+  );
 
   return response.json() as Promise<InterpreterRealtimeSdpAnswerResponse>;
 }

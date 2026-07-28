@@ -121,6 +121,13 @@ The backend creates short-lived OpenAI Realtime Translation client secrets. The 
 
 For native mobile, Synzapp should keep the OpenAI ephemeral token server-side too. The mobile app sends its local WebRTC SDP offer to Synzapp backend, and the backend completes the OpenAI translation SDP exchange using the short-lived token it minted server-side. The phone receives only the SDP answer needed to finish the peer connection.
 
+Implementation requirement:
+
+- Mobile must send the WebRTC offer to Synzapp backend as raw `application/sdp`, not as a JSON-wrapped SDP blob.
+- Backend must validate that the offer starts with `v=0`, contains an audio media section, normalizes line endings, and forwards raw SDP to the OpenAI Realtime Translation SDP exchange.
+- Backend logs may include audit-safe diagnostics such as SDP length and a short hash, but must never log raw SDP, transcripts, translated speech, or the OpenAI root key.
+- User-facing errors must stay actionable and must not expose provider-internal SDP parser text.
+
 ### Realtime Path
 
 For 1-on-1:
@@ -265,7 +272,16 @@ Audit events should include:
 - Respond button tapped.
 - Summary generated.
 - Meeting ended.
+- Meeting deleted.
 - Retention policy changed.
+
+Deleting an interpreter session is a controlled soft delete:
+
+- The meeting disappears from the active interpreter workspace.
+- Meeting memory and audit history remain retained by tenant policy.
+- Live meetings must be ended before deletion.
+- Only the meeting owner or an authorized administrator can delete.
+- Mobile exposes delete through a swipe action plus native destructive confirmation.
 
 ## Security Controls
 
