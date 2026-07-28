@@ -540,7 +540,7 @@ export async function createInterpreterRealtimeSdpAnswer(
       status: response.status,
       targetLanguageCode: session.targetLanguage.code
     });
-    throw serviceError(getOpenAiRealtimeSdpExchangeError(response.status));
+    throw serviceError(getOpenAiRealtimeSdpExchangeError(response.status, errorText));
   }
 
   const answerSdp = await response.text();
@@ -1339,9 +1339,13 @@ function getOpenAiRealtimePreparationError(status: number): string {
   return 'Interpreter realtime session could not be prepared.';
 }
 
-function getOpenAiRealtimeSdpExchangeError(status: number): string {
+function getOpenAiRealtimeSdpExchangeError(status: number, errorText = ''): string {
   if (status === 400) {
-    return 'Interpreter realtime audio offer was rejected by the AI provider.';
+    const detail = getOpenAiErrorMessage(errorText);
+
+    return detail
+      ? `Interpreter realtime audio offer was rejected: ${detail}`
+      : 'Interpreter realtime audio offer was rejected by the AI provider.';
   }
 
   if (status === 401 || status === 403) {
@@ -1365,6 +1369,25 @@ function getOpenAiRealtimeSdpExchangeError(status: number): string {
   }
 
   return 'Interpreter realtime audio could not be prepared.';
+}
+
+function getOpenAiErrorMessage(errorText: string): string {
+  if (!errorText.trim()) {
+    return '';
+  }
+
+  try {
+    const parsed = JSON.parse(errorText) as { error?: { message?: unknown }; message?: unknown };
+    const message = typeof parsed.error?.message === 'string'
+      ? parsed.error.message
+      : typeof parsed.message === 'string'
+        ? parsed.message
+        : '';
+
+    return message.slice(0, 220);
+  } catch {
+    return errorText.slice(0, 220);
+  }
 }
 
 async function writeInterpreterAuditEvent({

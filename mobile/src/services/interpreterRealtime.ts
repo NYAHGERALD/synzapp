@@ -6,7 +6,7 @@ type RtcPeerConnection = {
   addTrack?: (track: unknown, stream: unknown) => void;
   close: () => void;
   createDataChannel?: (label: string) => RtcDataChannel;
-  createOffer: () => Promise<{ sdp?: string; type: string }>;
+  createOffer: (options?: Record<string, unknown>) => Promise<{ sdp?: string; type: string }>;
   iceGatheringState?: string;
   localDescription?: { sdp?: string; type: string } | null;
   onicecandidate?: ((event: { candidate?: unknown | null }) => void) | null;
@@ -24,6 +24,7 @@ type RtcDataChannel = {
 };
 
 type MediaStreamLike = {
+  getAudioTracks?: () => Array<{ enabled?: boolean; kind?: string; stop?: () => void }>;
   getTracks?: () => Array<{ enabled?: boolean; stop?: () => void }>;
 };
 
@@ -103,10 +104,7 @@ export async function startInterpreterRealtimeSession(
   }).catch(() => undefined);
 
   const localStream = await runtime.mediaDevices.getUserMedia({
-    audio: {
-      echoCancellation: true,
-      noiseSuppression: true
-    },
+    audio: true,
     video: false
   });
   const peerConnection = new runtime.RTCPeerConnection({
@@ -114,9 +112,15 @@ export async function startInterpreterRealtimeSession(
   });
   const eventsChannel = peerConnection.createDataChannel?.('oai-events') || null;
   const remoteTracks: Array<{ enabled?: boolean }> = [];
+  const audioTracks = getAudioTracks(localStream);
   let closed = false;
 
-  localStream.getTracks?.().forEach((track) => {
+  if (!audioTracks.length) {
+    closeInterpreterRealtimeSession(peerConnection, localStream, eventsChannel);
+    throw new Error('Microphone started, but the device did not provide an audio track for the interpreter.');
+  }
+
+  audioTracks.forEach((track) => {
     track.enabled = true;
     peerConnection.addTrack?.(track, localStream);
   });
@@ -153,7 +157,10 @@ export async function startInterpreterRealtimeSession(
   }
 
   try {
-    const offer = await peerConnection.createOffer();
+    const offer = await peerConnection.createOffer({
+      offerToReceiveAudio: true,
+      offerToReceiveVideo: false
+    });
 
     await peerConnection.setLocalDescription(offer);
     await waitForIceGathering(peerConnection);
@@ -162,6 +169,10 @@ export async function startInterpreterRealtimeSession(
 
     if (!localSdp) {
       throw new Error('Live interpreter could not prepare the microphone session.');
+    }
+
+    if (!containsAudioMediaSection(localSdp)) {
+      throw new Error('The device created an invalid interpreter audio offer. Please restart the app and try again.');
     }
 
     const answerSdp = await session.createAnswerSdp(localSdp);
@@ -292,7 +303,7 @@ function closeInterpreterRealtimeSession(
 }
 
 function setStreamTracksEnabled(stream: MediaStreamLike, enabled: boolean) {
-  stream.getTracks?.().forEach((track) => {
+  getAudioTracks(stream).forEach((track) => {
     track.enabled = enabled;
   });
 }
@@ -309,6 +320,22 @@ function loadWebRtcRuntime(): WebRtcRuntime {
   } catch {
     return {};
   }
+}
+
+function getAudioTracks(stream: MediaStreamLike): Array<{ enabled?: boolean; kind?: string; stop?: () => void }> {
+  const explicitAudioTracks = stream.getAudioTracks?.();
+
+  if (explicitAudioTracks?.length) {
+    return explicitAudioTracks;
+  }
+
+  return (stream.getTracks?.() || []).filter((track) =>
+    !('kind' in track) || (track as { kind?: string }).kind === 'audio'
+  );
+}
+
+function containsAudioMediaSection(sdp: string): boolean {
+  return /(^|\r?\n)m=audio\s+/i.test(sdp);
 }
 
 function getRuntimeReadinessMessage(input: {
