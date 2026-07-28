@@ -16,6 +16,7 @@ export interface InterpreterMeeting {
   createdByUid: string;
   endedAtIso?: string | null;
   interpreterLanguages: InterpreterLanguage[];
+  invitedUserIds: string[];
   meetingId: string;
   meetingName: string;
   meetingType: InterpreterMeetingType;
@@ -26,6 +27,13 @@ export interface InterpreterMeeting {
   status: InterpreterMeetingStatus;
   tenantId: string;
   updatedAtIso: string;
+}
+
+export interface InterpreterParticipant {
+  departmentName: string | null;
+  displayName: string;
+  roleName: string | null;
+  uid: string;
 }
 
 export interface InterpreterSegment {
@@ -69,6 +77,7 @@ export interface InterpreterRealtimeClientSecretResponse {
 
 export interface CreateInterpreterMeetingInput {
   autoDetectSourceLanguage: boolean;
+  invitedUserIds?: string[];
   interpreterLanguageCodes: string[];
   meetingName: string;
   meetingType: InterpreterMeetingType;
@@ -93,6 +102,12 @@ export async function listInterpreterLanguages(idToken: string) {
   return response.json() as Promise<{ languages: InterpreterLanguage[] }>;
 }
 
+export async function listInterpreterParticipants(idToken: string) {
+  const response = await interpreterFetch(idToken, '/participants');
+
+  return response.json() as Promise<{ participants: InterpreterParticipant[] }>;
+}
+
 export async function createInterpreterMeeting(idToken: string, input: CreateInterpreterMeetingInput) {
   const response = await interpreterFetch(idToken, '/meetings', {
     body: JSON.stringify(input),
@@ -108,6 +123,12 @@ export async function getInterpreterMeeting(idToken: string, meetingId: string) 
   return response.json() as Promise<InterpreterMeetingDetails>;
 }
 
+export async function listInterpreterSummaries(idToken: string, meetingId: string) {
+  const response = await interpreterFetch(idToken, `/meetings/${encodeURIComponent(meetingId)}/summaries`);
+
+  return response.json() as Promise<{ summaries: InterpreterSummary[] }>;
+}
+
 export async function startInterpreterMeeting(idToken: string, meetingId: string) {
   const response = await interpreterFetch(idToken, `/meetings/${encodeURIComponent(meetingId)}/start`, {
     method: 'POST'
@@ -118,6 +139,19 @@ export async function startInterpreterMeeting(idToken: string, meetingId: string
 
 export async function endInterpreterMeeting(idToken: string, meetingId: string) {
   const response = await interpreterFetch(idToken, `/meetings/${encodeURIComponent(meetingId)}/end`, {
+    method: 'POST'
+  });
+
+  return response.json() as Promise<{ meeting: InterpreterMeeting }>;
+}
+
+export async function updateInterpreterMeetingInvitations(
+  idToken: string,
+  meetingId: string,
+  invitedUserIds: string[]
+) {
+  const response = await interpreterFetch(idToken, `/meetings/${encodeURIComponent(meetingId)}/invitations`, {
+    body: JSON.stringify({ invitedUserIds }),
     method: 'POST'
   });
 

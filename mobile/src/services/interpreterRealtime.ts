@@ -68,6 +68,16 @@ export interface InterpreterAudioReadiness {
   status: string;
 }
 
+export interface InterpreterRealtimeRuntimeReadiness {
+  audio: InterpreterAudioReadiness;
+  canStart: boolean;
+  dataChannelSupported: boolean;
+  getUserMediaSupported: boolean;
+  message: string;
+  peerConnectionSupported: boolean;
+  webRtcRuntimeAvailable: boolean;
+}
+
 const OPENAI_REALTIME_TRANSLATION_CALL_URL = 'https://api.openai.com/v1/realtime/translations/calls';
 
 export async function startInterpreterRealtimeSession(
@@ -220,6 +230,31 @@ export async function requestInterpreterAudioReadiness(): Promise<InterpreterAud
   }
 }
 
+export async function getInterpreterRealtimeRuntimeReadiness(): Promise<InterpreterRealtimeRuntimeReadiness> {
+  const runtime = loadWebRtcRuntime();
+  const audio = await getInterpreterAudioReadiness();
+  const peerConnectionSupported = Boolean(runtime.RTCPeerConnection);
+  const getUserMediaSupported = Boolean(runtime.mediaDevices?.getUserMedia);
+  const dataChannelSupported = Boolean(runtime.RTCPeerConnection?.prototype?.createDataChannel);
+  const webRtcRuntimeAvailable = peerConnectionSupported && getUserMediaSupported;
+  const canStart = audio.granted && webRtcRuntimeAvailable;
+
+  return {
+    audio,
+    canStart,
+    dataChannelSupported,
+    getUserMediaSupported,
+    message: getRuntimeReadinessMessage({
+      audio,
+      getUserMediaSupported,
+      peerConnectionSupported,
+      webRtcRuntimeAvailable
+    }),
+    peerConnectionSupported,
+    webRtcRuntimeAvailable
+  };
+}
+
 async function ensureInterpreterAudioPermission() {
   const currentPermission = await getInterpreterAudioReadiness();
 
@@ -250,6 +285,23 @@ function loadWebRtcRuntime(): WebRtcRuntime {
   } catch {
     return {};
   }
+}
+
+function getRuntimeReadinessMessage(input: {
+  audio: InterpreterAudioReadiness;
+  getUserMediaSupported: boolean;
+  peerConnectionSupported: boolean;
+  webRtcRuntimeAvailable: boolean;
+}): string {
+  if (!input.peerConnectionSupported || !input.getUserMediaSupported || !input.webRtcRuntimeAvailable) {
+    return 'This installed mobile build does not include the live audio runtime required for interpreter testing.';
+  }
+
+  if (!input.audio.granted) {
+    return 'Microphone permission is not granted yet. Allow microphone access before the live test.';
+  }
+
+  return 'This device is ready for a live interpreter test.';
 }
 
 function waitForIceGathering(peerConnection: RtcPeerConnection): Promise<void> {

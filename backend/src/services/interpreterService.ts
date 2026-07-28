@@ -16,6 +16,7 @@ export interface InterpreterLanguage {
 
 export interface CreateInterpreterMeetingInput {
   autoDetectSourceLanguage?: boolean;
+  invitedUserIds?: string[];
   interpreterLanguageCodes: string[];
   meetingName: string;
   meetingType: InterpreterMeetingType;
@@ -42,6 +43,11 @@ export interface InterpreterTranslationInput {
 
 export interface InterpreterSummaryInput {
   languageCodes: string[];
+  meetingId: string;
+}
+
+export interface UpdateInterpreterInvitationsInput {
+  invitedUserIds: string[];
   meetingId: string;
 }
 
@@ -81,6 +87,7 @@ interface InterpreterMeetingRecord {
   createdByUid: string;
   endedAtIso?: string | null;
   interpreterLanguages: InterpreterLanguage[];
+  invitedUserIds: string[];
   meetingId: string;
   meetingName: string;
   meetingType: InterpreterMeetingType;
@@ -92,6 +99,13 @@ interface InterpreterMeetingRecord {
   tenantId: string;
   updatedAt?: FirebaseFirestore.FieldValue;
   updatedAtIso: string;
+}
+
+interface InterpreterParticipant {
+  departmentName: string | null;
+  displayName: string;
+  roleName: string | null;
+  uid: string;
 }
 
 const INTERPRETER_MEETINGS_COLLECTION = 'interpreterMeetings';
@@ -122,17 +136,63 @@ export function listInterpreterSupportedLanguages(): InterpreterLanguage[] {
 
 export async function listInterpreterMeetings(decodedToken: DecodedIdToken) {
   const context = await getAuthorizedInterpreterContext(decodedToken);
-  const snapshot = await context.organizationRef
+  const [ownedSnapshot, invitedSnapshot] = await Promise.all([
+    context.organizationRef
     .collection(INTERPRETER_MEETINGS_COLLECTION)
     .where('createdByUid', '==', context.uid)
     .orderBy('updatedAtIso', 'desc')
     .limit(50)
-    .get();
+    .get(),
+    context.organizationRef
+      .collection(INTERPRETER_MEETINGS_COLLECTION)
+      .where('invitedUserIds', 'array-contains', context.uid)
+      .limit(50)
+      .get()
+  ]);
+  const meetingById = new Map<string, InterpreterMeetingRecord>();
+
+  [...ownedSnapshot.docs, ...invitedSnapshot.docs].forEach((doc) => {
+    const meeting = normalizeMeetingRecord(doc.data() as Partial<InterpreterMeetingRecord>);
+
+    if (meeting && meeting.tenantId === context.tenantId) {
+      meetingById.set(meeting.meetingId, meeting);
+    }
+  });
 
   return {
-    meetings: snapshot.docs.map((doc) => doc.data() as InterpreterMeetingRecord),
+    meetings: [...meetingById.values()].sort((left, right) =>
+      right.updatedAtIso.localeCompare(left.updatedAtIso)
+    ),
     supportedLanguages: SUPPORTED_LANGUAGES
   };
+}
+
+export async function listInterpreterParticipants(decodedToken: DecodedIdToken) {
+  const context = await getAuthorizedInterpreterContext(decodedToken);
+  const snapshot = await context.organizationRef
+    .collection('users')
+    .where('status', '==', 'ACTIVE')
+    .limit(500)
+    .get();
+  const participants = snapshot.docs
+    .map((doc) => {
+      const user = doc.data() as TenantUserRecord;
+
+      if (user.tenantId && user.tenantId !== context.tenantId) {
+        return null;
+      }
+
+      return {
+        departmentName: user.departmentName || null,
+        displayName: getDisplayName(user),
+        roleName: user.roleName || user.role || null,
+        uid: doc.id
+      };
+    })
+    .filter((participant): participant is InterpreterParticipant => Boolean(participant))
+    .sort((left, right) => left.displayName.localeCompare(right.displayName));
+
+  return { participants };
 }
 
 export async function createInterpreterMeeting(
@@ -141,11 +201,13 @@ export async function createInterpreterMeeting(
 ) {
   const context = await getAuthorizedInterpreterContext(decodedToken);
   assertRateLimit(`interpreter:create:${context.uid}`, 60_000, 20);
+  validateCreateInterpreterMeetingInput(input);
 
   const nowIso = new Date().toISOString();
   const meetingRef = context.organizationRef.collection(INTERPRETER_MEETINGS_COLLECTION).doc();
   const meetingId = meetingRef.id;
   const interpreterLanguages = normalizeInterpreterLanguages(input.interpreterLanguageCodes);
+  const invitedUserIds = await normalizeInvitedUserIds(context, input.invitedUserIds || []);
   const record: InterpreterMeetingRecord = {
     autoDetectSourceLanguage: input.autoDetectSourceLanguage !== false,
     createdAt: fieldValue.serverTimestamp(),
@@ -154,6 +216,7 @@ export async function createInterpreterMeeting(
     createdByUid: context.uid,
     endedAtIso: null,
     interpreterLanguages,
+    invitedUserIds,
     meetingId,
     meetingName: input.meetingName.trim(),
     meetingType: input.meetingType,
@@ -173,6 +236,7 @@ export async function createInterpreterMeeting(
     meetingId,
     metadata: {
       interpreterLanguageCodes: interpreterLanguages.map((language) => language.code),
+      invitedUserCount: invitedUserIds.length,
       meetingType: record.meetingType,
       scheduledAtIso: record.scheduledAtIso
     },
@@ -181,6 +245,67 @@ export async function createInterpreterMeeting(
   });
 
   return { meeting: record };
+}
+
+export async function updateInterpreterMeetingInvitations(
+  decodedToken: DecodedIdToken,
+  input: UpdateInterpreterInvitationsInput
+) {
+  const context = await getAuthorizedInterpreterContext(decodedToken);
+  const meeting = await readAccessibleMeeting(context, input.meetingId);
+
+  if (!canManageInterpreterMeeting(context, meeting)) {
+    throw authorizationError('Only the meeting owner or an interpreter administrator can change meeting access.');
+  }
+
+  const invitedUserIds = await normalizeInvitedUserIds(context, input.invitedUserIds || []);
+  const nowIso = new Date().toISOString();
+  const patch = {
+    invitedUserIds,
+    updatedAt: fieldValue.serverTimestamp(),
+    updatedAtIso: nowIso
+  };
+
+  await context.organizationRef
+    .collection(INTERPRETER_MEETINGS_COLLECTION)
+    .doc(input.meetingId)
+    .update(patch);
+  await writeInterpreterAuditEvent({
+    context,
+    meetingId: input.meetingId,
+    metadata: {
+      afterInvitedUserCount: invitedUserIds.length,
+      beforeInvitedUserCount: meeting.invitedUserIds?.length || 0
+    },
+    summary: `Updated interpreter meeting access for "${meeting.meetingName}".`,
+    type: 'INTERPRETER_MEETING_ACCESS_UPDATED'
+  });
+
+  return {
+    meeting: {
+      ...meeting,
+      invitedUserIds,
+      updatedAtIso: nowIso
+    }
+  };
+}
+
+export async function listInterpreterSummaries(decodedToken: DecodedIdToken, meetingId: string) {
+  const context = await getAuthorizedInterpreterContext(decodedToken);
+
+  await readAccessibleMeeting(context, meetingId);
+
+  const summariesSnapshot = await context.organizationRef
+    .collection(INTERPRETER_MEETINGS_COLLECTION)
+    .doc(meetingId)
+    .collection(SUMMARY_COLLECTION)
+    .orderBy('createdAtIso', 'desc')
+    .limit(50)
+    .get();
+
+  return {
+    summaries: summariesSnapshot.docs.map((doc) => doc.data())
+  };
 }
 
 export async function getInterpreterMeeting(decodedToken: DecodedIdToken, meetingId: string) {
@@ -286,6 +411,20 @@ export async function addInterpreterTranscriptSegment(
 
   await context.organizationRef.collection(INTERPRETER_MEETINGS_COLLECTION).doc(meetingId)
     .collection(TRANSCRIPT_COLLECTION).doc(segmentId).set(segment);
+  await writeInterpreterAuditEvent({
+    context,
+    meetingId,
+    metadata: {
+      confidence: input.confidence ?? null,
+      detectedLanguageCode: input.detectedLanguageCode || null,
+      durationMs: input.durationMs ?? null,
+      segmentId,
+      sourceLanguageCode: segment.sourceLanguageCode || null,
+      textCharacterCount: segment.text.length
+    },
+    summary: `Recorded interpreter transcript segment for "${meeting.meetingName}".`,
+    type: 'INTERPRETER_TRANSCRIPT_SEGMENT_RECORDED'
+  });
 
   return { segment };
 }
@@ -323,6 +462,19 @@ export async function addInterpreterTranslationSegment(
 
   await context.organizationRef.collection(INTERPRETER_MEETINGS_COLLECTION).doc(meetingId)
     .collection(TRANSLATION_COLLECTION).doc(translationId).set(translation);
+  await writeInterpreterAuditEvent({
+    context,
+    meetingId,
+    metadata: {
+      sourceCharacterCount: translation.sourceText.length,
+      sourceSegmentId: input.sourceSegmentId || null,
+      targetLanguageCode: input.targetLanguageCode,
+      translatedCharacterCount: translation.translatedText.length,
+      translationId
+    },
+    summary: `Recorded interpreter translation segment for "${meeting.meetingName}".`,
+    type: 'INTERPRETER_TRANSLATION_SEGMENT_RECORDED'
+  });
 
   return { translation };
 }
@@ -570,9 +722,9 @@ async function readAccessibleMeeting(
     throw notFoundError('Interpreter meeting was not found.');
   }
 
-  const meeting = snapshot.data() as InterpreterMeetingRecord;
+  const meeting = normalizeMeetingRecord(snapshot.data() as Partial<InterpreterMeetingRecord>);
 
-  if (meeting.tenantId !== context.tenantId || !canAccessInterpreterMeeting(context, meeting)) {
+  if (!meeting || meeting.tenantId !== context.tenantId || !canAccessInterpreterMeeting(context, meeting)) {
     throw authorizationError('You do not have access to this interpreter meeting.');
   }
 
@@ -583,11 +735,74 @@ function canAccessInterpreterMeeting(
   context: AuthorizedInterpreterContext,
   meeting: InterpreterMeetingRecord
 ): boolean {
+  return canManageInterpreterMeeting(context, meeting) || meeting.invitedUserIds?.includes(context.uid) === true;
+}
+
+function canManageInterpreterMeeting(
+  context: AuthorizedInterpreterContext,
+  meeting: InterpreterMeetingRecord
+): boolean {
   return context.role === 'ORG_ADMIN' ||
     context.role === 'SYSTEM_ADMIN' ||
     meeting.createdByUid === context.uid ||
     context.permissions.includes('interpreter.manage') ||
     context.permissions.includes('tenant.update');
+}
+
+async function normalizeInvitedUserIds(
+  context: AuthorizedInterpreterContext,
+  invitedUserIds: string[]
+): Promise<string[]> {
+  const uniqueIds = [...new Set(invitedUserIds.map((uid) => safeDocumentId(uid)).filter(Boolean))]
+    .filter((uid) => uid !== context.uid)
+    .slice(0, 50);
+
+  if (!uniqueIds.length) {
+    return [];
+  }
+
+  const userSnapshots = await Promise.all(uniqueIds.map((uid) =>
+    context.organizationRef.collection('users').doc(uid).get()
+  ));
+  const activeUserIds = userSnapshots
+    .map((snapshot) => {
+      if (!snapshot.exists) {
+        return null;
+      }
+
+      const user = snapshot.data() as TenantUserRecord;
+
+      return user.status === 'ACTIVE' && (!user.tenantId || user.tenantId === context.tenantId)
+        ? snapshot.id
+        : null;
+    })
+    .filter((uid): uid is string => Boolean(uid));
+
+  if (activeUserIds.length !== uniqueIds.length) {
+    throw validationError('One or more selected interpreter participants are not active company users.');
+  }
+
+  return activeUserIds;
+}
+
+function normalizeMeetingRecord(meeting: Partial<InterpreterMeetingRecord>): InterpreterMeetingRecord | null {
+  if (!meeting.meetingId || !meeting.tenantId || !meeting.createdByUid || !meeting.meetingName) {
+    return null;
+  }
+
+  return {
+    ...meeting,
+    autoDetectSourceLanguage: meeting.autoDetectSourceLanguage !== false,
+    createdAtIso: meeting.createdAtIso || meeting.updatedAtIso || new Date(0).toISOString(),
+    interpreterLanguages: Array.isArray(meeting.interpreterLanguages) ? meeting.interpreterLanguages : [],
+    invitedUserIds: Array.isArray(meeting.invitedUserIds) ? meeting.invitedUserIds.filter((uid) => typeof uid === 'string') : [],
+    reminderFrequency: meeting.reminderFrequency || 'none',
+    reminderLeadMinutes: typeof meeting.reminderLeadMinutes === 'number' ? meeting.reminderLeadMinutes : null,
+    scheduledAtIso: meeting.scheduledAtIso || null,
+    sourceLanguageCode: meeting.sourceLanguageCode || null,
+    status: meeting.status || 'LIVE',
+    updatedAtIso: meeting.updatedAtIso || meeting.createdAtIso || new Date(0).toISOString()
+  } as InterpreterMeetingRecord;
 }
 
 async function getAuthorizedInterpreterContext(decodedToken: DecodedIdToken): Promise<AuthorizedInterpreterContext> {
@@ -647,6 +862,32 @@ function normalizeInterpreterLanguages(languageCodes: string[]): InterpreterLang
   }
 
   return languages as InterpreterLanguage[];
+}
+
+function validateCreateInterpreterMeetingInput(input: CreateInterpreterMeetingInput) {
+  if (input.autoDetectSourceLanguage === false) {
+    const sourceLanguageCode = input.sourceLanguageCode || 'en-US';
+
+    if (!LANGUAGE_BY_CODE.has(sourceLanguageCode)) {
+      throw validationError('The selected speaker language is not supported yet.');
+    }
+  }
+
+  if (input.scheduledAtIso) {
+    const scheduledAt = Date.parse(input.scheduledAtIso);
+
+    if (!Number.isFinite(scheduledAt)) {
+      throw validationError('The scheduled meeting date is invalid.');
+    }
+
+    if (scheduledAt < Date.now() - 60_000) {
+      throw validationError('Scheduled interpreter meetings must be set for a future time.');
+    }
+  }
+
+  if (input.reminderFrequency && input.reminderFrequency !== 'none' && !input.scheduledAtIso) {
+    throw validationError('A reminder requires a scheduled meeting date and time.');
+  }
 }
 
 function buildRealtimeInstructions(

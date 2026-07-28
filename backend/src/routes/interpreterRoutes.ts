@@ -11,8 +11,11 @@ import {
   endInterpreterMeeting,
   getInterpreterMeeting,
   listInterpreterMeetings,
+  listInterpreterParticipants,
+  listInterpreterSummaries,
   listInterpreterSupportedLanguages,
-  startInterpreterMeeting
+  startInterpreterMeeting,
+  updateInterpreterMeetingInvitations
 } from '../services/interpreterService.js';
 
 const interpreterRouter = Router();
@@ -22,6 +25,7 @@ const meetingIdSchema = z.string().trim().min(6).max(128).regex(/^[A-Za-z0-9_-]+
 
 const createMeetingBodySchema = z.object({
   autoDetectSourceLanguage: z.boolean().optional(),
+  invitedUserIds: z.array(meetingIdSchema).max(50).optional(),
   interpreterLanguageCodes: z.array(languageCodeSchema).min(1).max(10),
   meetingName: z.string().trim().min(2).max(140),
   meetingType: z.enum(['ONE_ON_ONE', 'LEVEL_1', 'LEVEL_3']),
@@ -54,6 +58,10 @@ const summaryBodySchema = z.object({
   languageCodes: z.array(languageCodeSchema).min(1).max(10)
 });
 
+const invitationsBodySchema = z.object({
+  invitedUserIds: z.array(meetingIdSchema).max(50)
+});
+
 interpreterRouter.get('/languages', verifyAppCheck, (_req, res) => {
   res.json({ languages: listInterpreterSupportedLanguages() });
 });
@@ -62,6 +70,17 @@ interpreterRouter.get('/meetings', verifyAppCheck, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
     const result = await listInterpreterMeetings(decodedToken);
+
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+interpreterRouter.get('/participants', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const result = await listInterpreterParticipants(decodedToken);
 
     res.json(result);
   } catch (error) {
@@ -117,6 +136,22 @@ interpreterRouter.post('/meetings/:meetingId/end', verifyAppCheck, async (req, r
   }
 });
 
+interpreterRouter.post('/meetings/:meetingId/invitations', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const meetingId = meetingIdSchema.parse(req.params.meetingId);
+    const body = invitationsBodySchema.parse(req.body);
+    const result = await updateInterpreterMeetingInvitations(decodedToken, {
+      invitedUserIds: body.invitedUserIds,
+      meetingId
+    });
+
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
 interpreterRouter.post('/meetings/:meetingId/realtime-client-secret', verifyAppCheck, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
@@ -151,6 +186,18 @@ interpreterRouter.post('/meetings/:meetingId/translations', verifyAppCheck, asyn
     const result = await addInterpreterTranslationSegment(decodedToken, meetingId, body);
 
     res.status(201).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+interpreterRouter.get('/meetings/:meetingId/summaries', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const meetingId = meetingIdSchema.parse(req.params.meetingId);
+    const result = await listInterpreterSummaries(decodedToken, meetingId);
+
+    res.json(result);
   } catch (error) {
     next(error);
   }

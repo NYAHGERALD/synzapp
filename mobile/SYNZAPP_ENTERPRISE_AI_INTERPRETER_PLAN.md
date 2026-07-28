@@ -536,17 +536,56 @@ Completed:
 - Backend OpenAI root API key stays server-side only.
 - Backend now returns only the short-lived Realtime Translation client secret value to mobile, not the raw provider response.
 - Backend creates target-language-specific Realtime Translation sessions.
+- Backend now validates fixed speaker languages, scheduled meeting dates, and reminder dependencies before creating meetings.
+- Backend now exposes the planned `GET /api/interpreter/meetings/:meetingId/summaries` endpoint.
+- Backend now exposes a tenant-scoped interpreter participant directory, separate from admin employee management.
+- Backend now supports controlled interpreter meeting invitations and validates invited users against active company profiles before access is granted.
+- Backend now audits transcript and translation segment writes with privacy-safe metadata only, avoiding duplicated conversation text in audit events.
 - Mobile has a dedicated Interpreter tab outside Chat.
 - Mobile meeting list, create meeting modal, language selection, scheduling metadata, meeting room, summary display, and secure meeting memory console are implemented.
+- Mobile meeting creation and room access controls now allow users to add or remove invited company participants through backend-backed access grants.
 - Mobile now includes an isolated `interpreterRealtime` service for microphone capture, WebRTC session setup, event parsing, respond requests, and cleanup.
 - Mobile room UI now shows live connection state, Start/Stop interpreter, selected-language response, live transcript preview, and live translation preview.
+- Mobile Level 1 and Level 3 rooms now prepare a realtime session pool across all configured interpreter languages, with each language showing its own readiness state.
+- Mobile 1-on-1 rooms start only the selected target language session to preserve cost and battery while still keeping response behavior instant for the selected language.
 - Mobile now checks microphone readiness, requests microphone access from the interpreter room, and explains the readiness state before listening.
+- Mobile now includes a device interpreter readiness check that verifies microphone permission and the installed native WebRTC runtime before real interpreting tests.
+- Mobile microphone readiness is now separated from the room title header so it stays readable on smaller devices.
 - Interpreter errors now use a Synzapp-styled modal overlay instead of platform alert popups.
 - Meeting summaries now use a language selection modal so managers choose exactly which languages to summarize.
+- Backend interpreter enterprise control tests are in place for route protection, participant access, validation, summary access, privacy-safe audit events, and short-lived client-secret handling.
 - Backend and mobile TypeScript checks pass.
 
 Still required before production release:
 
-- Physical-device validation of OpenAI Realtime audio playback on iOS and Android.
-- Multi-language session pool for Level 1 and Level 3 simultaneous language preparation.
+- Physical-device validation of OpenAI Realtime audio playback on iOS and Android using the new device readiness check.
 - Automated backend route tests and mobile interaction tests.
+
+## Real Device Validation Protocol
+
+Use this sequence when validating on a physical iPhone or Android device:
+
+1. Readiness-only test
+   - Open the Interpreter tab.
+   - Create or open a test meeting.
+   - Tap `Allow` if microphone permission is not granted.
+   - Tap `Check` in `Device interpreter check`.
+   - Pass condition: Microphone, WebRTC, Media capture, and Peer session all show ready.
+
+2. One-on-one live interpreter test
+   - Create a `1-on-1` meeting with English and Spanish.
+   - Start the live interpreter.
+   - Speak one short sentence in English.
+   - Tap Spanish.
+   - Tap `Respond`.
+   - Pass condition: the app stays responsive, status moves through listening/responding, and audio/text interpretation returns without exposing the OpenAI API key to mobile.
+
+3. Level 1 / Level 3 multi-language test
+   - Create a Level 1 or Level 3 meeting with English, Spanish, and one additional language.
+   - Start the live interpreter.
+   - Pass condition: the room prepares all configured language sessions, language status dots update independently, and the readiness row shows the correct number of ready sessions.
+
+4. Meeting memory and summary test
+   - Record one secure test segment.
+   - Create a summary in multiple configured languages.
+   - Pass condition: summary is returned only to authorized meeting users and audit logs do not store duplicated transcript text.

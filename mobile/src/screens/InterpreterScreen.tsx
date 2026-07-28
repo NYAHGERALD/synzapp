@@ -24,14 +24,19 @@ import {
   InterpreterLanguage,
   InterpreterMeeting,
   InterpreterMeetingDetails,
+  InterpreterParticipant,
   InterpreterMeetingType,
   listInterpreterMeetings,
-  startInterpreterMeeting
+  listInterpreterParticipants,
+  startInterpreterMeeting,
+  updateInterpreterMeetingInvitations
 } from '../services/interpreterApi';
 import {
   getInterpreterAudioReadiness,
+  getInterpreterRealtimeRuntimeReadiness,
   InterpreterAudioReadiness,
   InterpreterRealtimeSession,
+  InterpreterRealtimeRuntimeReadiness,
   InterpreterRealtimeStatus,
   requestInterpreterAudioReadiness,
   startInterpreterRealtimeSession
@@ -48,12 +53,19 @@ interface InterpreterAlertState {
   title: string;
 }
 
+type InterpreterLanguageSessionState = {
+  status: InterpreterRealtimeStatus;
+  transcript: string;
+  translation: string;
+};
+
 export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
   const appTheme = useAppTheme();
   const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
   const insets = useSafeAreaInsets();
   const [meetings, setMeetings] = useState<InterpreterMeeting[]>([]);
   const [languages, setLanguages] = useState<InterpreterLanguage[]>([]);
+  const [participants, setParticipants] = useState<InterpreterParticipant[]>([]);
   const [selectedMeetingDetails, setSelectedMeetingDetails] = useState<InterpreterMeetingDetails | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
@@ -69,10 +81,14 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
 
     try {
       const idToken = await getIdToken();
-      const result = await listInterpreterMeetings(idToken);
+      const [result, participantResult] = await Promise.all([
+        listInterpreterMeetings(idToken),
+        listInterpreterParticipants(idToken)
+      ]);
 
       setMeetings(result.meetings);
       setLanguages(result.supportedLanguages);
+      setParticipants(participantResult.participants);
     } catch (error) {
       showInterpreterError(getErrorMessage(error));
     } finally {
@@ -91,6 +107,7 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
       const idToken = await getIdToken();
       const result = await createInterpreterMeeting(idToken, {
         autoDetectSourceLanguage: input.autoDetectSourceLanguage,
+        invitedUserIds: input.invitedUserIds,
         interpreterLanguageCodes: input.languageCodes,
         meetingName: input.meetingName,
         meetingType: input.meetingType,
@@ -190,6 +207,32 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
     }
   }
 
+  async function handleUpdateInvitations(invitedUserIds: string[]) {
+    const meeting = selectedMeetingDetails?.meeting;
+
+    if (!meeting) {
+      return;
+    }
+
+    setIsBusy(true);
+
+    try {
+      const idToken = await getIdToken();
+      const result = await updateInterpreterMeetingInvitations(idToken, meeting.meetingId, invitedUserIds);
+
+      setSelectedMeetingDetails((currentDetails) => currentDetails
+        ? { ...currentDetails, meeting: result.meeting }
+        : currentDetails);
+      setMeetings((currentMeetings) => currentMeetings.map((currentMeeting) =>
+        currentMeeting.meetingId === result.meeting.meetingId ? result.meeting : currentMeeting
+      ));
+    } catch (error) {
+      showInterpreterError(getErrorMessage(error));
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
   async function handleAddDemoTranscript(text: string, targetLanguageCode: string) {
     const meeting = selectedMeetingDetails?.meeting;
 
@@ -263,6 +306,8 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
         onEndMeeting={handleEndMeeting}
         onError={showInterpreterError}
         onPrepareRealtimeSession={handlePrepareRealtimeSession}
+        onUpdateInvitations={handleUpdateInvitations}
+        participants={participants}
       />
       <InterpreterAlertModal
         message={alertState?.message || ''}
@@ -353,6 +398,7 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
         languages={languages}
         onClose={() => setIsCreateOpen(false)}
         onError={showInterpreterError}
+        participants={participants}
         onSubmit={handleCreateMeeting}
       />
       <InterpreterAlertModal
@@ -374,6 +420,8 @@ interface InterpreterRoomProps {
   onEndMeeting: () => Promise<void>;
   onError: (message: string, title?: string) => void;
   onPrepareRealtimeSession: (targetLanguageCode?: string | null) => Promise<Awaited<ReturnType<typeof createInterpreterRealtimeClientSecret>> | null>;
+  onUpdateInvitations: (invitedUserIds: string[]) => Promise<void>;
+  participants: InterpreterParticipant[];
 }
 
 function InterpreterRoom({
@@ -384,7 +432,9 @@ function InterpreterRoom({
   onCreateSummary,
   onEndMeeting,
   onError,
-  onPrepareRealtimeSession
+  onPrepareRealtimeSession,
+  onUpdateInvitations,
+  participants
 }: InterpreterRoomProps) {
   const appTheme = useAppTheme();
   const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
@@ -394,16 +444,21 @@ function InterpreterRoom({
   const [liveTranslation, setLiveTranslation] = useState('');
   const [liveStatus, setLiveStatus] = useState<InterpreterRealtimeStatus>('closed');
   const [audioReadiness, setAudioReadiness] = useState<InterpreterAudioReadiness | null>(null);
+  const [runtimeReadiness, setRuntimeReadiness] = useState<InterpreterRealtimeRuntimeReadiness | null>(null);
+  const [isCheckingRuntime, setIsCheckingRuntime] = useState(false);
   const [isSummaryModalOpen, setIsSummaryModalOpen] = useState(false);
   const [selectedLanguageCode, setSelectedLanguageCode] = useState(details.meeting.interpreterLanguages[0]?.code || 'en-US');
-  const realtimeSessionRef = useRef<InterpreterRealtimeSession | null>(null);
+  const [invitedUserIds, setInvitedUserIds] = useState<string[]>(details.meeting.invitedUserIds || []);
+  const realtimeSessionPoolRef = useRef<Record<string, InterpreterRealtimeSession>>({});
+  const [languageSessionState, setLanguageSessionState] = useState<Record<string, InterpreterLanguageSessionState>>({});
   const latestTranslation = [...details.translations].reverse()
     .find((translation) => translation.targetLanguageCode === selectedLanguageCode);
-  const isRealtimeActive = liveStatus === 'connecting' || liveStatus === 'listening' || liveStatus === 'speaking' || liveStatus === 'ready';
+  const selectedLanguageSession = languageSessionState[selectedLanguageCode];
+  const activeSessionStatuses = Object.values(languageSessionState).map((state) => state.status);
+  const isRealtimeActive = activeSessionStatuses.some(isActiveRealtimeStatus);
 
   useEffect(() => () => {
-    realtimeSessionRef.current?.close();
-    realtimeSessionRef.current = null;
+    closeRealtimeSessionPool(false);
   }, []);
 
   useEffect(() => {
@@ -420,37 +475,131 @@ function InterpreterRoom({
     };
   }, []);
 
+  useEffect(() => {
+    setInvitedUserIds(details.meeting.invitedUserIds || []);
+  }, [details.meeting.invitedUserIds]);
+
+  useEffect(() => {
+    setLiveTranscript(selectedLanguageSession?.transcript || '');
+    setLiveTranslation(selectedLanguageSession?.translation || '');
+  }, [selectedLanguageSession?.transcript, selectedLanguageSession?.translation]);
+
+  useEffect(() => {
+    const statuses = Object.values(languageSessionState).map((state) => state.status);
+
+    if (!statuses.length) {
+      return;
+    }
+
+    if (statuses.some((status) => status === 'speaking')) {
+      setLiveStatus('speaking');
+      return;
+    }
+
+    if (statuses.some((status) => status === 'listening' || status === 'ready')) {
+      setLiveStatus('listening');
+      return;
+    }
+
+    if (statuses.some((status) => status === 'connecting')) {
+      setLiveStatus('connecting');
+      return;
+    }
+
+    if (statuses.every((status) => status === 'error')) {
+      setLiveStatus('error');
+    }
+  }, [languageSessionState]);
+
   async function requestMicrophoneAccess() {
     const readiness = await requestInterpreterAudioReadiness();
 
     setAudioReadiness(readiness);
+    setRuntimeReadiness(null);
 
     if (!readiness.granted) {
       onError('Allow microphone access in device settings before starting the live interpreter.');
     }
   }
 
+  async function runDeviceReadinessCheck() {
+    setIsCheckingRuntime(true);
+
+    try {
+      const readiness = await getInterpreterRealtimeRuntimeReadiness();
+
+      setAudioReadiness(readiness.audio);
+      setRuntimeReadiness(readiness);
+
+      if (!readiness.canStart) {
+        onError(readiness.message, 'Device readiness needs attention');
+      }
+    } catch (error) {
+      onError(getErrorMessage(error), 'Device readiness needs attention');
+    } finally {
+      setIsCheckingRuntime(false);
+    }
+  }
+
   async function startLiveInterpreter() {
-    realtimeSessionRef.current?.close();
-    realtimeSessionRef.current = null;
+    closeRealtimeSessionPool();
     setLiveTranscript('');
     setLiveTranslation('');
     setLiveStatus('connecting');
 
-    const realtime = await onPrepareRealtimeSession(selectedLanguageCode);
-
-    if (!realtime) {
-      setLiveStatus('closed');
-      return;
-    }
-
     try {
-      realtimeSessionRef.current = await startInterpreterRealtimeSession(realtime, {
-        onError: (message) => onError(message),
-        onStatus: setLiveStatus,
-        onTranscript: setLiveTranscript,
-        onTranslation: setLiveTranslation
+      const targetLanguages = getSessionPoolLanguages(details.meeting, selectedLanguageCode);
+
+      if (!targetLanguages.length) {
+        setLiveStatus('closed');
+        onError('Choose at least one interpreter language before starting.');
+        return;
+      }
+
+      setLanguageSessionState(Object.fromEntries(targetLanguages.map((language) => [
+        language.code,
+        { status: 'connecting' as InterpreterRealtimeStatus, transcript: '', translation: '' }
+      ])));
+
+      const sessionResults = await Promise.allSettled(targetLanguages.map(async (language) => {
+        const realtime = await onPrepareRealtimeSession(language.code);
+
+        if (!realtime) {
+          throw new Error(`${language.label} session could not be prepared.`);
+        }
+
+        const session = await startInterpreterRealtimeSession(realtime, {
+          onError: (message) => onError(message),
+          onStatus: (status) => updateLanguageSession(language.code, { status }),
+          onTranscript: (transcript) => {
+            updateLanguageSession(language.code, { transcript });
+            setLiveTranscript((currentTranscript) => language.code === selectedLanguageCode ? transcript : currentTranscript);
+          },
+          onTranslation: (translation) => {
+            updateLanguageSession(language.code, { translation });
+            setLiveTranslation((currentTranslation) => language.code === selectedLanguageCode ? translation : currentTranslation);
+          }
+        });
+
+        realtimeSessionPoolRef.current[language.code] = session;
+      }));
+      const failedCount = sessionResults.filter((result) => result.status === 'rejected').length;
+      const startedCount = targetLanguages.length - failedCount;
+
+      sessionResults.forEach((result, index) => {
+        if (result.status === 'rejected') {
+          updateLanguageSession(targetLanguages[index].code, { status: 'error' });
+        }
       });
+
+      if (!startedCount) {
+        closeRealtimeSessionPool();
+        setLiveStatus('error');
+        onError('No interpreter language sessions could be started.');
+        return;
+      }
+
+      setLiveStatus('listening');
     } catch (error) {
       setLiveStatus('error');
       onError(getErrorMessage(error));
@@ -458,13 +607,33 @@ function InterpreterRoom({
   }
 
   function stopLiveInterpreter() {
-    realtimeSessionRef.current?.close();
-    realtimeSessionRef.current = null;
+    closeRealtimeSessionPool();
     setLiveStatus('closed');
   }
 
   function respondInSelectedLanguage() {
-    realtimeSessionRef.current?.respond();
+    realtimeSessionPoolRef.current[selectedLanguageCode]?.respond();
+  }
+
+  function closeRealtimeSessionPool(resetState = true) {
+    Object.values(realtimeSessionPoolRef.current).forEach((session) => session.close());
+    realtimeSessionPoolRef.current = {};
+
+    if (resetState) {
+      setLanguageSessionState({});
+    }
+  }
+
+  function updateLanguageSession(languageCode: string, patch: Partial<InterpreterLanguageSessionState>) {
+    setLanguageSessionState((currentState) => ({
+      ...currentState,
+      [languageCode]: {
+        status: currentState[languageCode]?.status || 'closed',
+        transcript: currentState[languageCode]?.transcript || '',
+        translation: currentState[languageCode]?.translation || '',
+        ...patch
+      }
+    }));
   }
 
   return (
@@ -479,35 +648,6 @@ function InterpreterRoom({
             {formatMeetingType(details.meeting.meetingType)} · {formatStatus(details.meeting.status)}
           </Text>
         </View>
-        <View style={styles.readinessRow}>
-          <View style={styles.readinessCopy}>
-            <Text style={styles.sectionLabel}>Microphone readiness</Text>
-            <Text style={styles.mutedText}>
-              {audioReadiness?.granted ? 'Microphone access is ready for live interpretation.' : 'Microphone access is required before listening.'}
-            </Text>
-          </View>
-          <Pressable
-            disabled={Boolean(audioReadiness?.granted)}
-            onPress={() => void requestMicrophoneAccess()}
-            style={({ pressed }) => [
-              styles.permissionButton,
-              audioReadiness?.granted && styles.permissionButtonReady,
-              pressed && styles.pressed
-            ]}
-          >
-            <Ionicons
-              color={audioReadiness?.granted ? '#047857' : appTheme.colors.primary}
-              name={audioReadiness?.granted ? 'checkmark-circle-outline' : 'mic-outline'}
-              size={17}
-            />
-            <Text style={[
-              styles.permissionButtonText,
-              audioReadiness?.granted && styles.permissionButtonTextReady
-            ]}>
-              {audioReadiness?.granted ? 'Ready' : 'Allow'}
-            </Text>
-          </Pressable>
-        </View>
         <Pressable
           disabled={isBusy || details.meeting.status === 'ENDED'}
           onPress={() => void onEndMeeting()}
@@ -515,6 +655,128 @@ function InterpreterRoom({
         >
           <Text style={styles.endButtonText}>End</Text>
         </Pressable>
+      </View>
+
+      <View style={styles.readinessRow}>
+        <View style={styles.readinessCopy}>
+          <Text style={styles.sectionLabel}>Microphone readiness</Text>
+          <Text style={styles.mutedText}>
+            {audioReadiness?.granted ? 'Microphone access is ready for live interpretation.' : 'Microphone access is required before listening.'}
+          </Text>
+        </View>
+        <Pressable
+          disabled={Boolean(audioReadiness?.granted)}
+          onPress={() => void requestMicrophoneAccess()}
+          style={({ pressed }) => [
+            styles.permissionButton,
+            audioReadiness?.granted && styles.permissionButtonReady,
+            pressed && styles.pressed
+          ]}
+        >
+          <Ionicons
+            color={audioReadiness?.granted ? '#047857' : appTheme.colors.primary}
+            name={audioReadiness?.granted ? 'checkmark-circle-outline' : 'mic-outline'}
+            size={17}
+          />
+          <Text style={[
+            styles.permissionButtonText,
+            audioReadiness?.granted && styles.permissionButtonTextReady
+          ]}>
+            {audioReadiness?.granted ? 'Ready' : 'Allow'}
+          </Text>
+        </Pressable>
+      </View>
+
+      <View style={styles.deviceCheckPanel}>
+        <View style={styles.sectionHeaderRow}>
+          <View style={styles.readinessCopy}>
+            <Text style={styles.sectionLabel}>Device interpreter check</Text>
+            <Text style={styles.mutedText}>
+              {runtimeReadiness?.message || 'Run this before the real interpreting test on each device.'}
+            </Text>
+          </View>
+          <Pressable
+            disabled={isCheckingRuntime}
+            onPress={() => void runDeviceReadinessCheck()}
+            style={({ pressed }) => [
+              styles.deviceCheckButton,
+              runtimeReadiness?.canStart && styles.deviceCheckButtonReady,
+              pressed && styles.pressed
+            ]}
+          >
+            {isCheckingRuntime ? (
+              <ActivityIndicator color={appTheme.colors.primary} />
+            ) : (
+              <Ionicons
+                color={runtimeReadiness?.canStart ? '#047857' : appTheme.colors.primary}
+                name={runtimeReadiness?.canStart ? 'shield-checkmark-outline' : 'pulse-outline'}
+                size={17}
+              />
+            )}
+            <Text style={[
+              styles.deviceCheckButtonText,
+              runtimeReadiness?.canStart && styles.deviceCheckButtonTextReady
+            ]}>
+              {runtimeReadiness?.canStart ? 'Ready' : 'Check'}
+            </Text>
+          </Pressable>
+        </View>
+        {runtimeReadiness ? (
+          <View style={styles.diagnosticGrid}>
+            <DiagnosticPill label="Microphone" ready={runtimeReadiness.audio.granted} />
+            <DiagnosticPill label="WebRTC" ready={runtimeReadiness.webRtcRuntimeAvailable} />
+            <DiagnosticPill label="Media capture" ready={runtimeReadiness.getUserMediaSupported} />
+            <DiagnosticPill label="Peer session" ready={runtimeReadiness.peerConnectionSupported} />
+          </View>
+        ) : null}
+      </View>
+
+      <View style={styles.accessPanel}>
+        <View style={styles.sectionHeaderRow}>
+          <View>
+            <Text style={styles.sectionLabel}>Meeting access</Text>
+            <Text style={styles.mutedText}>{invitedUserIds.length} invited participant{invitedUserIds.length === 1 ? '' : 's'} can open this interpreter meeting.</Text>
+          </View>
+          <Pressable
+            disabled={isBusy}
+            onPress={() => void onUpdateInvitations(invitedUserIds)}
+            style={({ pressed }) => [styles.saveAccessButton, isBusy && styles.disabledButton, pressed && styles.pressed]}
+          >
+            <Text style={styles.saveAccessButtonText}>Save</Text>
+          </Pressable>
+        </View>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.participantScroller}>
+          {participants.map((participant) => {
+            const isSelected = invitedUserIds.includes(participant.uid);
+
+            return (
+              <Pressable
+                key={participant.uid}
+                onPress={() => {
+                  setInvitedUserIds((currentIds) =>
+                    currentIds.includes(participant.uid)
+                      ? currentIds.filter((uid) => uid !== participant.uid)
+                      : [...currentIds, participant.uid]
+                  );
+                }}
+                style={[
+                  styles.participantChip,
+                  isSelected && styles.participantChipActive
+                ]}
+              >
+                <Ionicons
+                  color={isSelected ? appTheme.colors.primary : appTheme.colors.mutedStrong}
+                  name={isSelected ? 'checkmark-circle' : 'person-add-outline'}
+                  size={17}
+                />
+                <View>
+                  <Text style={styles.participantName}>{participant.displayName}</Text>
+                  <Text style={styles.participantMeta}>{participant.roleName || participant.departmentName || 'Company user'}</Text>
+                </View>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
       </View>
 
       <View style={styles.livePanel}>
@@ -569,6 +831,12 @@ function InterpreterRoom({
             ]}>
               {language.label}
             </Text>
+            {languageSessionState[language.code] ? (
+              <View style={[
+                styles.languageStatusDot,
+                { backgroundColor: getRealtimeStatusColor(languageSessionState[language.code].status) }
+              ]} />
+            ) : null}
           </Pressable>
         ))}
       </ScrollView>
@@ -590,12 +858,20 @@ function InterpreterRoom({
           </Pressable>
         </View>
         <Text style={styles.translationText}>
-          {liveTranslation || latestTranslation?.translatedText || 'Tap a language when the speaker finishes. The live interpreter will speak in that language.'}
+          {selectedLanguageSession?.translation || liveTranslation || latestTranslation?.translatedText || 'Tap a language when the speaker finishes. The live interpreter will speak in that language.'}
         </Text>
-        {liveTranscript ? (
+        {selectedLanguageSession?.transcript || liveTranscript ? (
           <View style={styles.transcriptPreview}>
             <Text style={styles.sectionLabel}>Detected speech</Text>
-            <Text style={styles.mutedText}>{liveTranscript}</Text>
+            <Text style={styles.mutedText}>{selectedLanguageSession?.transcript || liveTranscript}</Text>
+          </View>
+        ) : null}
+        {isRealtimeActive ? (
+          <View style={styles.poolReadinessRow}>
+            <Ionicons color={appTheme.colors.primary} name="layers-outline" size={16} />
+            <Text style={styles.poolReadinessText}>
+              {getSessionPoolReadyCount(languageSessionState)} of {getSessionPoolLanguages(details.meeting, selectedLanguageCode).length} language sessions ready
+            </Text>
           </View>
         ) : null}
       </View>
@@ -667,8 +943,38 @@ function InterpreterRoom({
   );
 }
 
+interface DiagnosticPillProps {
+  label: string;
+  ready: boolean;
+}
+
+function DiagnosticPill({ label, ready }: DiagnosticPillProps) {
+  const appTheme = useAppTheme();
+  const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
+
+  return (
+    <View style={[
+      styles.diagnosticPill,
+      ready ? styles.diagnosticPillReady : styles.diagnosticPillBlocked
+    ]}>
+      <Ionicons
+        color={ready ? '#047857' : '#b45309'}
+        name={ready ? 'checkmark-circle-outline' : 'alert-circle-outline'}
+        size={15}
+      />
+      <Text style={[
+        styles.diagnosticPillText,
+        ready ? styles.diagnosticPillTextReady : styles.diagnosticPillTextBlocked
+      ]}>
+        {label}
+      </Text>
+    </View>
+  );
+}
+
 interface InterpreterCreateDraft {
   autoDetectSourceLanguage: boolean;
+  invitedUserIds: string[];
   isScheduled: boolean;
   languageCodes: string[];
   meetingName: string;
@@ -685,6 +991,7 @@ interface InterpreterCreateModalProps {
   languages: InterpreterLanguage[];
   onClose: () => void;
   onError: (message: string, title?: string) => void;
+  participants: InterpreterParticipant[];
   onSubmit: (draft: InterpreterCreateDraft) => Promise<void>;
 }
 
@@ -694,6 +1001,7 @@ function InterpreterCreateModal({
   languages,
   onClose,
   onError,
+  participants,
   onSubmit
 }: InterpreterCreateModalProps) {
   const appTheme = useAppTheme();
@@ -705,6 +1013,7 @@ function InterpreterCreateModal({
   ];
   const [draft, setDraft] = useState<InterpreterCreateDraft>({
     autoDetectSourceLanguage: true,
+    invitedUserIds: [],
     isScheduled: false,
     languageCodes: DEFAULT_LANGUAGE_CODES,
     meetingName: '',
@@ -719,6 +1028,7 @@ function InterpreterCreateModal({
     if (isOpen) {
       setDraft({
         autoDetectSourceLanguage: true,
+        invitedUserIds: [],
         isScheduled: false,
         languageCodes: DEFAULT_LANGUAGE_CODES,
         meetingName: '',
@@ -825,6 +1135,39 @@ function InterpreterCreateModal({
                 </Pressable>
               ))}
             </View>
+
+            <Text style={styles.sectionLabel}>Meeting access</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.participantScroller}>
+              {participants.map((participant) => {
+                const isSelected = draft.invitedUserIds.includes(participant.uid);
+
+                return (
+                  <Pressable
+                    key={participant.uid}
+                    onPress={() => setDraft((currentDraft) => ({
+                      ...currentDraft,
+                      invitedUserIds: currentDraft.invitedUserIds.includes(participant.uid)
+                        ? currentDraft.invitedUserIds.filter((uid) => uid !== participant.uid)
+                        : [...currentDraft.invitedUserIds, participant.uid]
+                    }))}
+                    style={[
+                      styles.participantChip,
+                      isSelected && styles.participantChipActive
+                    ]}
+                  >
+                    <Ionicons
+                      color={isSelected ? appTheme.colors.primary : appTheme.colors.mutedStrong}
+                      name={isSelected ? 'checkmark-circle' : 'person-add-outline'}
+                      size={17}
+                    />
+                    <View>
+                      <Text style={styles.participantName}>{participant.displayName}</Text>
+                      <Text style={styles.participantMeta}>{participant.roleName || participant.departmentName || 'Company user'}</Text>
+                    </View>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
 
             <Pressable
               onPress={() => setDraft((currentDraft) => ({
@@ -1098,6 +1441,27 @@ function getRealtimeStatusColor(status: InterpreterRealtimeStatus): string {
   }
 }
 
+function isActiveRealtimeStatus(status: InterpreterRealtimeStatus): boolean {
+  return status === 'connecting' || status === 'listening' || status === 'speaking' || status === 'ready';
+}
+
+function getSessionPoolLanguages(
+  meeting: InterpreterMeeting,
+  selectedLanguageCode: string
+): InterpreterLanguage[] {
+  if (meeting.meetingType === 'LEVEL_1' || meeting.meetingType === 'LEVEL_3') {
+    return meeting.interpreterLanguages;
+  }
+
+  return meeting.interpreterLanguages.filter((language) => language.code === selectedLanguageCode);
+}
+
+function getSessionPoolReadyCount(sessionState: Record<string, InterpreterLanguageSessionState>): number {
+  return Object.values(sessionState).filter((state) =>
+    state.status === 'listening' || state.status === 'ready' || state.status === 'speaking'
+  ).length;
+}
+
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Interpreter could not complete that action.';
 }
@@ -1108,6 +1472,15 @@ function createStyles(colors: AppColors) {
       flexDirection: 'row',
       gap: 10,
       marginBottom: 14
+    },
+    accessPanel: {
+      backgroundColor: colors.card,
+      borderColor: colors.border,
+      borderRadius: 22,
+      borderWidth: 1,
+      gap: 12,
+      marginBottom: 12,
+      padding: 14
     },
     alertActions: {
       alignItems: 'flex-end',
@@ -1174,6 +1547,68 @@ function createStyles(colors: AppColors) {
     },
     disabledButton: {
       opacity: 0.58
+    },
+    deviceCheckButton: {
+      alignItems: 'center',
+      backgroundColor: colors.primarySoft,
+      borderColor: colors.primary,
+      borderRadius: 999,
+      borderWidth: 1,
+      flexDirection: 'row',
+      gap: 6,
+      minHeight: 36,
+      paddingHorizontal: 12
+    },
+    deviceCheckButtonReady: {
+      backgroundColor: '#dcfce7',
+      borderColor: '#86efac'
+    },
+    deviceCheckButtonText: {
+      color: colors.primary,
+      fontSize: 13
+    },
+    deviceCheckButtonTextReady: {
+      color: '#047857'
+    },
+    deviceCheckPanel: {
+      backgroundColor: colors.card,
+      borderColor: colors.border,
+      borderRadius: 20,
+      borderWidth: 1,
+      gap: 10,
+      marginBottom: 12,
+      padding: 12
+    },
+    diagnosticGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 8
+    },
+    diagnosticPill: {
+      alignItems: 'center',
+      borderRadius: 999,
+      borderWidth: 1,
+      flexDirection: 'row',
+      gap: 6,
+      paddingHorizontal: 10,
+      paddingVertical: 7
+    },
+    diagnosticPillBlocked: {
+      backgroundColor: '#fffbeb',
+      borderColor: '#fcd34d'
+    },
+    diagnosticPillReady: {
+      backgroundColor: '#ecfdf5',
+      borderColor: '#86efac'
+    },
+    diagnosticPillText: {
+      fontSize: 12
+    },
+    diagnosticPillTextBlocked: {
+      color: '#92400e'
+    },
+    diagnosticPillTextReady: {
+      color: '#047857'
     },
     emptyState: {
       alignItems: 'center',
@@ -1250,10 +1685,13 @@ function createStyles(colors: AppColors) {
       paddingHorizontal: 14
     },
     languageChip: {
+      alignItems: 'center',
       backgroundColor: colors.card,
       borderColor: colors.border,
       borderRadius: 999,
       borderWidth: 1,
+      flexDirection: 'row',
+      gap: 8,
       marginRight: 8,
       paddingHorizontal: 16,
       paddingVertical: 10
@@ -1268,6 +1706,11 @@ function createStyles(colors: AppColors) {
     },
     languageChipTextActive: {
       color: colors.primary
+    },
+    languageStatusDot: {
+      borderRadius: 5,
+      height: 10,
+      width: 10
     },
     languageGrid: {
       flexDirection: 'row',
@@ -1332,6 +1775,7 @@ function createStyles(colors: AppColors) {
       borderWidth: 1,
       flexDirection: 'row',
       gap: 10,
+      marginBottom: 12,
       padding: 12
     },
     liveStatusTextWrap: {
@@ -1427,6 +1871,21 @@ function createStyles(colors: AppColors) {
       opacity: 0.76,
       transform: [{ scale: 0.99 }]
     },
+    poolReadinessRow: {
+      alignItems: 'center',
+      backgroundColor: colors.surface,
+      borderColor: colors.border,
+      borderRadius: 999,
+      borderWidth: 1,
+      flexDirection: 'row',
+      gap: 8,
+      paddingHorizontal: 10,
+      paddingVertical: 8
+    },
+    poolReadinessText: {
+      color: colors.primary,
+      fontSize: 12
+    },
     permissionButton: {
       alignItems: 'center',
       backgroundColor: colors.primarySoft,
@@ -1448,6 +1907,37 @@ function createStyles(colors: AppColors) {
     },
     permissionButtonTextReady: {
       color: '#047857'
+    },
+    participantChip: {
+      alignItems: 'center',
+      backgroundColor: colors.card,
+      borderColor: colors.border,
+      borderRadius: 18,
+      borderWidth: 1,
+      flexDirection: 'row',
+      gap: 8,
+      marginRight: 8,
+      minHeight: 52,
+      paddingHorizontal: 12,
+      paddingVertical: 8
+    },
+    participantChipActive: {
+      backgroundColor: colors.primarySoft,
+      borderColor: colors.primary
+    },
+    participantMeta: {
+      color: colors.mutedStrong,
+      fontSize: 11,
+      marginTop: 2,
+      maxWidth: 140
+    },
+    participantName: {
+      color: colors.ink,
+      fontSize: 13,
+      maxWidth: 140
+    },
+    participantScroller: {
+      flexGrow: 0
     },
     primaryButton: {
       alignItems: 'center',
@@ -1520,6 +2010,20 @@ function createStyles(colors: AppColors) {
       backgroundColor: colors.surface,
       flex: 1,
       padding: 14
+    },
+    saveAccessButton: {
+      alignItems: 'center',
+      backgroundColor: colors.primarySoft,
+      borderColor: colors.primary,
+      borderRadius: 999,
+      borderWidth: 1,
+      minHeight: 36,
+      justifyContent: 'center',
+      paddingHorizontal: 14
+    },
+    saveAccessButtonText: {
+      color: colors.primary,
+      fontSize: 13
     },
     secondaryButton: {
       alignItems: 'center',
