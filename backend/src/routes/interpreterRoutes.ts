@@ -7,6 +7,7 @@ import {
   addInterpreterTranslationSegment,
   createInterpreterMeeting,
   createInterpreterRealtimeClientSecret,
+  createInterpreterRealtimeSdpAnswer,
   createInterpreterSummary,
   endInterpreterMeeting,
   getInterpreterMeeting,
@@ -37,6 +38,11 @@ const createMeetingBodySchema = z.object({
 
 const realtimeSessionBodySchema = z.object({
   targetLanguageCode: languageCodeSchema.nullable().optional()
+});
+
+const realtimeSdpAnswerBodySchema = z.object({
+  offerSdp: z.string().trim().min(20).max(200_000),
+  targetLanguageCode: languageCodeSchema
 });
 
 const transcriptBodySchema = z.object({
@@ -158,6 +164,19 @@ interpreterRouter.post('/meetings/:meetingId/realtime-client-secret', verifyAppC
     const meetingId = meetingIdSchema.parse(req.params.meetingId);
     const body = realtimeSessionBodySchema.parse(req.body);
     const result = await createInterpreterRealtimeClientSecret(decodedToken, meetingId, body.targetLanguageCode);
+
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+interpreterRouter.post('/meetings/:meetingId/realtime-sdp-answer', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const meetingId = meetingIdSchema.parse(req.params.meetingId);
+    const body = realtimeSdpAnswerBodySchema.parse(req.body);
+    const result = await createInterpreterRealtimeSdpAnswer(decodedToken, meetingId, body);
 
     res.json(result);
   } catch (error) {

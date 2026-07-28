@@ -25,7 +25,7 @@ import {
   addInterpreterTranscriptSegment,
   addInterpreterTranslationSegment,
   createInterpreterMeeting,
-  createInterpreterRealtimeClientSecret,
+  createInterpreterRealtimeSdpAnswer,
   createInterpreterSummary,
   endInterpreterMeeting,
   getInterpreterMeeting,
@@ -151,7 +151,7 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
     }
   }
 
-  async function handlePrepareRealtimeSession(targetLanguageCode?: string | null) {
+  async function handleCreateRealtimeSdpAnswer(targetLanguageCode: string, offerSdp: string) {
     const meeting = selectedMeetingDetails?.meeting;
 
     if (!meeting) {
@@ -165,11 +165,10 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
       const started = meeting.status === 'LIVE'
         ? { meeting }
         : await startInterpreterMeeting(idToken, meeting.meetingId);
-      const realtime = await createInterpreterRealtimeClientSecret(
-        idToken,
-        meeting.meetingId,
-        targetLanguageCode || null
-      );
+      const realtime = await createInterpreterRealtimeSdpAnswer(idToken, meeting.meetingId, {
+        offerSdp,
+        targetLanguageCode
+      });
 
       setSelectedMeetingDetails((currentDetails) => currentDetails
         ? {
@@ -181,7 +180,7 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
         currentMeeting.meetingId === started.meeting.meetingId ? started.meeting : currentMeeting
       ));
 
-      return realtime;
+      return realtime.answerSdp;
     } catch (error) {
       throw error;
     } finally {
@@ -312,7 +311,7 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
         onCreateSummary={handleCreateSummary}
         onEndMeeting={handleEndMeeting}
         onError={showInterpreterError}
-        onPrepareRealtimeSession={handlePrepareRealtimeSession}
+        onCreateRealtimeSdpAnswer={handleCreateRealtimeSdpAnswer}
         onUpdateInvitations={handleUpdateInvitations}
         participants={participants}
       />
@@ -405,7 +404,7 @@ interface InterpreterRoomProps {
   onCreateSummary: (languageCodes: string[]) => Promise<void>;
   onEndMeeting: () => Promise<void>;
   onError: (message: string, title?: string) => void;
-  onPrepareRealtimeSession: (targetLanguageCode?: string | null) => Promise<Awaited<ReturnType<typeof createInterpreterRealtimeClientSecret>> | null>;
+  onCreateRealtimeSdpAnswer: (targetLanguageCode: string, offerSdp: string) => Promise<string | null>;
   onUpdateInvitations: (invitedUserIds: string[]) => Promise<void>;
   participants: InterpreterParticipant[];
 }
@@ -418,7 +417,7 @@ function InterpreterRoom({
   onCreateSummary,
   onEndMeeting,
   onError,
-  onPrepareRealtimeSession,
+  onCreateRealtimeSdpAnswer,
   onUpdateInvitations,
   participants
 }: InterpreterRoomProps) {
@@ -588,13 +587,17 @@ function InterpreterRoom({
       ])));
 
       const sessionResults = await Promise.allSettled(targetLanguages.map(async (language) => {
-        const realtime = await onPrepareRealtimeSession(language.code);
+        const session = await startInterpreterRealtimeSession({
+          createAnswerSdp: async (offerSdp) => {
+            const answerSdp = await onCreateRealtimeSdpAnswer(language.code, offerSdp);
 
-        if (!realtime) {
-          throw new Error(`${language.label} session could not be prepared.`);
-        }
+            if (!answerSdp) {
+              throw new Error(`${language.label} session could not be prepared.`);
+            }
 
-        const session = await startInterpreterRealtimeSession(realtime, {
+            return answerSdp;
+          }
+        }, {
           onError: (message) => onError(message),
           onStatus: (status) => updateLanguageSession(language.code, { status }),
           onTranscript: (transcript) => {

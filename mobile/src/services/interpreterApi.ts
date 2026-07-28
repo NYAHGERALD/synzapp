@@ -75,6 +75,12 @@ export interface InterpreterRealtimeClientSecretResponse {
   targetLanguage: InterpreterLanguage;
 }
 
+export interface InterpreterRealtimeSdpAnswerResponse {
+  answerSdp: string;
+  model: string;
+  targetLanguage: InterpreterLanguage;
+}
+
 export interface CreateInterpreterMeetingInput {
   autoDetectSourceLanguage: boolean;
   invitedUserIds?: string[];
@@ -169,6 +175,19 @@ export async function createInterpreterRealtimeClientSecret(
   });
 
   return response.json() as Promise<InterpreterRealtimeClientSecretResponse>;
+}
+
+export async function createInterpreterRealtimeSdpAnswer(
+  idToken: string,
+  meetingId: string,
+  input: { offerSdp: string; targetLanguageCode: string }
+) {
+  const response = await interpreterFetch(idToken, `/meetings/${encodeURIComponent(meetingId)}/realtime-sdp-answer`, {
+    body: JSON.stringify(input),
+    method: 'POST'
+  });
+
+  return response.json() as Promise<InterpreterRealtimeSdpAnswerResponse>;
 }
 
 export async function addInterpreterTranscriptSegment(

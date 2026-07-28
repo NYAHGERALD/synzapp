@@ -1,5 +1,4 @@
 import { AudioModule } from 'expo-audio';
-import type { InterpreterRealtimeClientSecretResponse } from './interpreterApi';
 
 type RtcPeerConnection = {
   addEventListener?: (eventName: string, listener: (...args: any[]) => void) => void;
@@ -65,6 +64,10 @@ export interface InterpreterRealtimeSession {
   resumeListening: () => void;
 }
 
+export interface InterpreterRealtimeSessionInput {
+  createAnswerSdp: (offerSdp: string) => Promise<string>;
+}
+
 export interface InterpreterAudioReadiness {
   canAskAgain?: boolean;
   granted: boolean;
@@ -81,10 +84,8 @@ export interface InterpreterRealtimeRuntimeReadiness {
   webRtcRuntimeAvailable: boolean;
 }
 
-const OPENAI_REALTIME_TRANSLATION_CALL_URL = 'https://api.openai.com/v1/realtime/translations/calls';
-
 export async function startInterpreterRealtimeSession(
-  session: InterpreterRealtimeClientSecretResponse,
+  session: InterpreterRealtimeSessionInput,
   callbacks: InterpreterRealtimeCallbacks = {}
 ): Promise<InterpreterRealtimeSession> {
   const runtime = loadWebRtcRuntime();
@@ -163,22 +164,7 @@ export async function startInterpreterRealtimeSession(
       throw new Error('Live interpreter could not prepare the microphone session.');
     }
 
-    const answerResponse = await fetch(OPENAI_REALTIME_TRANSLATION_CALL_URL, {
-      body: localSdp,
-      headers: {
-        Authorization: `Bearer ${session.clientSecret}`,
-        'Content-Type': 'application/sdp'
-      },
-      method: 'POST'
-    });
-
-    if (!answerResponse.ok) {
-      const providerMessage = await readRealtimeProviderError(answerResponse);
-      console.warn('Interpreter realtime WebRTC call failed:', providerMessage);
-      throw new Error(providerMessage);
-    }
-
-    const answerSdp = await answerResponse.text();
+    const answerSdp = await session.createAnswerSdp(localSdp);
 
     await peerConnection.setRemoteDescription({ sdp: answerSdp, type: 'answer' });
     callbacks.onStatus?.('listening');
@@ -322,58 +308,6 @@ function loadWebRtcRuntime(): WebRtcRuntime {
     return require('react-native-webrtc') as WebRtcRuntime;
   } catch {
     return {};
-  }
-}
-
-async function readRealtimeProviderError(response: Response): Promise<string> {
-  const requestId = response.headers.get('x-request-id') || response.headers.get('openai-request-id');
-  const body = await response.text().catch(() => '');
-  const detail = extractProviderErrorMessage(body);
-  const reference = requestId ? ` Reference: ${requestId}.` : '';
-
-  if (response.status === 400) {
-    return `The live interpreter audio session was rejected by the AI provider.${detail ? ` ${detail}` : ''}${reference}`;
-  }
-
-  if (response.status === 401 || response.status === 403) {
-    return `The secure interpreter token was rejected before audio could connect.${reference}`;
-  }
-
-  if (response.status === 404) {
-    return `The live interpreter endpoint or model is not available for this AI project.${reference}`;
-  }
-
-  if (response.status === 408 || response.status === 504) {
-    return `The live interpreter connection timed out. Please try again.${reference}`;
-  }
-
-  if (response.status === 429) {
-    return `The live interpreter is rate limited or out of quota.${reference}`;
-  }
-
-  if (response.status >= 500) {
-    return `The live interpreter provider is temporarily unavailable.${reference}`;
-  }
-
-  return `Live interpreter could not connect to the secure translation session.${reference}`;
-}
-
-function extractProviderErrorMessage(body: string): string {
-  if (!body.trim()) {
-    return '';
-  }
-
-  try {
-    const parsed = JSON.parse(body) as { error?: { message?: unknown }; message?: unknown };
-    const message = typeof parsed.error?.message === 'string'
-      ? parsed.error.message
-      : typeof parsed.message === 'string'
-        ? parsed.message
-        : '';
-
-    return message ? message.slice(0, 220) : '';
-  } catch {
-    return body.slice(0, 220);
   }
 }
 

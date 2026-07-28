@@ -81,6 +81,17 @@ describe('interpreter enterprise controls', () => {
     assert.doesNotMatch(interpreterService, /clientSecretResponse,\s*$/m);
     assert.match(interpreterService, /extractRealtimeClientSecret/);
   });
+
+  it('brokers native mobile realtime SDP exchange through the backend', () => {
+    assert.match(
+      interpreterRoutes,
+      /interpreterRouter\.post\('\/meetings\/:meetingId\/realtime-sdp-answer'/,
+      'Native mobile interpreter setup must use a backend-brokered SDP answer endpoint.'
+    );
+    assert.match(interpreterService, /createInterpreterRealtimeSdpAnswer/);
+    assert.match(interpreterService, /INTERPRETER_REALTIME_SDP_EXCHANGED/);
+    assert.doesNotMatch(interpreterService, /return\s*\{\s*answerSdp,[\s\S]{0,220}clientSecret/);
+  });
 });
 
 function getRouteBlocks(

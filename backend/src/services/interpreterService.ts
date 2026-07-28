@@ -52,6 +52,11 @@ export interface UpdateInterpreterInvitationsInput {
   meetingId: string;
 }
 
+export interface InterpreterRealtimeSdpAnswerInput {
+  offerSdp: string;
+  targetLanguageCode: string;
+}
+
 interface OrganizationRecord {
   status?: string;
   tenantId?: string;
@@ -498,6 +503,75 @@ export async function createInterpreterRealtimeClientSecret(
   const context = await getAuthorizedInterpreterContext(decodedToken);
   const meeting = await readAccessibleMeeting(context, meetingId);
 
+  const session = await createOpenAiInterpreterRealtimeSession(context, meeting, targetLanguageCode);
+
+  return {
+    clientSecret: session.clientSecret,
+    expiresWithSession: true,
+    model: session.realtimeModel,
+    targetLanguage: session.targetLanguage
+  };
+}
+
+export async function createInterpreterRealtimeSdpAnswer(
+  decodedToken: DecodedIdToken,
+  meetingId: string,
+  input: InterpreterRealtimeSdpAnswerInput
+) {
+  const context = await getAuthorizedInterpreterContext(decodedToken);
+  const meeting = await readAccessibleMeeting(context, meetingId);
+  const session = await createOpenAiInterpreterRealtimeSession(context, meeting, input.targetLanguageCode);
+  const response = await fetch('https://api.openai.com/v1/realtime/translations/calls', {
+    body: input.offerSdp,
+    headers: {
+      Authorization: `Bearer ${session.clientSecret}`,
+      'Content-Type': 'application/sdp',
+      'OpenAI-Safety-Identifier': session.safetyIdentifier
+    },
+    method: 'POST',
+    signal: AbortSignal.timeout(env.openAiRequestTimeoutMs)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    console.warn('OpenAI interpreter realtime SDP exchange failed:', {
+      error: errorText.slice(0, 500),
+      model: session.realtimeModel,
+      status: response.status,
+      targetLanguageCode: session.targetLanguage.code
+    });
+    throw serviceError(getOpenAiRealtimeSdpExchangeError(response.status));
+  }
+
+  const answerSdp = await response.text();
+
+  if (!answerSdp.trim()) {
+    throw serviceError('Interpreter realtime audio answer was empty.');
+  }
+
+  await writeInterpreterAuditEvent({
+    context,
+    meetingId,
+    metadata: {
+      model: session.realtimeModel,
+      targetLanguageCode: session.targetLanguage.code
+    },
+    summary: `Completed realtime interpreter SDP exchange for "${meeting.meetingName}".`,
+    type: 'INTERPRETER_REALTIME_SDP_EXCHANGED'
+  });
+
+  return {
+    answerSdp,
+    model: session.realtimeModel,
+    targetLanguage: session.targetLanguage
+  };
+}
+
+async function createOpenAiInterpreterRealtimeSession(
+  context: AuthorizedInterpreterContext,
+  meeting: InterpreterMeetingRecord,
+  targetLanguageCode?: string | null
+) {
   if (!env.openAiApiKey) {
     throw validationError('Interpreter AI is not configured on the backend.');
   }
@@ -563,10 +637,10 @@ export async function createInterpreterRealtimeClientSecret(
 
   await writeInterpreterAuditEvent({
     context,
-    meetingId,
+    meetingId: meeting.meetingId,
     metadata: {
       model: realtimeModel,
-      targetLanguageCode: targetLanguage?.code || 'multi-language'
+      targetLanguageCode: targetLanguage.code
     },
     summary: `Prepared realtime interpreter session for "${meeting.meetingName}".`,
     type: 'INTERPRETER_REALTIME_SESSION_PREPARED'
@@ -574,8 +648,8 @@ export async function createInterpreterRealtimeClientSecret(
 
   return {
     clientSecret,
-    expiresWithSession: true,
-    model: realtimeModel,
+    realtimeModel,
+    safetyIdentifier,
     targetLanguage
   };
 }
@@ -1263,6 +1337,34 @@ function getOpenAiRealtimePreparationError(status: number): string {
   }
 
   return 'Interpreter realtime session could not be prepared.';
+}
+
+function getOpenAiRealtimeSdpExchangeError(status: number): string {
+  if (status === 400) {
+    return 'Interpreter realtime audio offer was rejected by the AI provider.';
+  }
+
+  if (status === 401 || status === 403) {
+    return 'Interpreter realtime authorization was rejected during audio setup.';
+  }
+
+  if (status === 404) {
+    return 'Interpreter realtime audio endpoint is not available for this AI project.';
+  }
+
+  if (status === 408 || status === 504) {
+    return 'Interpreter realtime audio setup timed out. Please try again.';
+  }
+
+  if (status === 429) {
+    return 'Interpreter realtime audio setup is rate limited or out of quota.';
+  }
+
+  if (status >= 500) {
+    return 'Interpreter realtime audio provider is temporarily unavailable.';
+  }
+
+  return 'Interpreter realtime audio could not be prepared.';
 }
 
 async function writeInterpreterAuditEvent({

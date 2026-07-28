@@ -29,6 +29,7 @@ Current official guidance supports this direction:
 - OpenAI recommends `/v1/realtime/translations` for continuous interpreter-style translation sessions.
 - Mobile or browser clients should use short-lived client secrets minted by the backend; the normal OpenAI API key must stay server-side only.
 - Realtime requests should include a privacy-preserving safety identifier bound on the backend when creating the client secret.
+- Native mobile builds should prefer a backend-brokered SDP handshake: the phone sends its SDP offer to Synzapp backend, the backend creates the short-lived OpenAI translation token, forwards the SDP to OpenAI, and returns only the SDP answer to mobile.
 
 Source references:
 
@@ -116,7 +117,9 @@ New backend files:
 - `src/services/interpreterSummaryService.ts`
 - `src/services/interpreterReminderService.ts`
 
-The backend creates short-lived OpenAI Realtime Translation client secrets. The mobile app receives only the temporary client secret and never receives the root `OPENAI_API_KEY`.
+The backend creates short-lived OpenAI Realtime Translation client secrets. The mobile app never receives the root `OPENAI_API_KEY`.
+
+For native mobile, Synzapp should keep the OpenAI ephemeral token server-side too. The mobile app sends its local WebRTC SDP offer to Synzapp backend, and the backend completes the OpenAI translation SDP exchange using the short-lived token it minted server-side. The phone receives only the SDP answer needed to finish the peer connection.
 
 ### Realtime Path
 
