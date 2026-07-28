@@ -261,6 +261,7 @@ import {
   isValidCalendarYearStartDate,
   parseCalendarYearStartDate
 } from '../utils/calendarYear';
+import { InterpreterScreen } from './InterpreterScreen';
 
 interface AdminChatScreenProps {
   onOrganizationDeleted: () => void;
@@ -376,7 +377,7 @@ interface AudioAttachmentPreviewState {
 }
 
 type DirectoryFilter = 'Departments' | 'Roles';
-type FooterTab = 'Chats' | 'Calls' | 'Groups' | 'Employees' | 'Settings' | 'You';
+type FooterTab = 'Chats' | 'Calls' | 'Groups' | 'Employees' | 'Interpreter' | 'Settings' | 'You';
 type ChatListFilter = 'all' | 'archived' | 'favorites' | 'groups' | 'unread';
 type ChatMoreActionTarget = ChatItem | null;
 type ArchiveSelectionMap = Record<string, boolean>;
@@ -710,7 +711,7 @@ type WebRtcRuntime = {
   RTCView?: React.ComponentType<any>;
 };
 
-const footerTabs: FooterTab[] = ['Chats', 'Calls', 'Groups', 'Employees', 'Settings', 'You'];
+const footerTabs: FooterTab[] = ['Chats', 'Calls', 'Groups', 'Employees', 'Interpreter', 'Settings', 'You'];
 const chatNotificationMuteOptions: Array<{
   label: string;
   value: ChatNotificationMuteMode;
@@ -1067,8 +1068,8 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   const canViewEmployees = canInviteEmployees || canManageUsers;
   const canDeleteOrganization = userProfile?.isTenantOwner === true;
   const visibleFooterTabs: FooterTab[] = canViewEmployees
-    ? ['Chats', 'Calls', 'Groups', 'Employees', 'Settings', 'You']
-    : ['Chats', 'Calls', 'Groups', 'Settings', 'You'];
+    ? ['Chats', 'Calls', 'Groups', 'Employees', 'Interpreter', 'Settings', 'You']
+    : ['Chats', 'Calls', 'Groups', 'Interpreter', 'Settings', 'You'];
   const chatItems = useMemo(() => chatContacts.map(mapChatContactToChatItem), [chatContacts]);
   const directChatContacts = useMemo(
     () => chatContacts.filter((contact) => (contact.chatType || 'DIRECT') !== 'GROUP'),
@@ -9865,6 +9866,8 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           selectedForwardMessageIds={forwardSelectedMessageIds}
           starredMessageIds={starredMessageIds}
         />
+      ) : activeTab === 'Interpreter' ? (
+        <InterpreterScreen getIdToken={getIdToken} />
       ) : (
         <ScrollView
           contentContainerStyle={[styles.tabContent, { paddingBottom: tabContentBottomPadding }]}
@@ -25030,6 +25033,10 @@ function FooterIcon({
 
   if (tab === 'Employees') {
     return <Ionicons color={iconColor} name={active ? 'people' : 'people-outline'} size={27} />;
+  }
+
+  if (tab === 'Interpreter') {
+    return <Ionicons color={iconColor} name={active ? 'language' : 'language-outline'} size={27} />;
   }
 
   if (tab === 'Calls') {
