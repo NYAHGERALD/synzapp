@@ -25,7 +25,7 @@ type RtcDataChannel = {
 };
 
 type MediaStreamLike = {
-  getTracks?: () => Array<{ stop?: () => void }>;
+  getTracks?: () => Array<{ enabled?: boolean; stop?: () => void }>;
 };
 
 type WebRtcRuntime = {
@@ -58,8 +58,11 @@ export interface InterpreterRealtimeEvent {
 }
 
 export interface InterpreterRealtimeSession {
+  cancelResponse: () => void;
   close: () => void;
+  pauseListening: () => void;
   respond: () => void;
+  resumeListening: () => void;
 }
 
 export interface InterpreterAudioReadiness {
@@ -109,13 +112,22 @@ export async function startInterpreterRealtimeSession(
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
   });
   const eventsChannel = peerConnection.createDataChannel?.('oai-events') || null;
+  const remoteTracks: Array<{ enabled?: boolean }> = [];
   let closed = false;
 
   localStream.getTracks?.().forEach((track) => {
+    track.enabled = true;
     peerConnection.addTrack?.(track, localStream);
   });
 
-  peerConnection.ontrack = () => {
+  peerConnection.ontrack = (event) => {
+    if (event.track && typeof event.track === 'object') {
+      const track = event.track as { enabled?: boolean };
+
+      track.enabled = false;
+      remoteTracks.push(track);
+    }
+
     callbacks.onStatus?.('speaking');
   };
 
@@ -176,6 +188,12 @@ export async function startInterpreterRealtimeSession(
   }
 
   return {
+    cancelResponse: () => {
+      setTracksEnabled(remoteTracks, false);
+      setStreamTracksEnabled(localStream, true);
+      sendRealtimeEvent(eventsChannel, { type: 'response.cancel' });
+      callbacks.onStatus?.('listening');
+    },
     close: () => {
       if (closed) {
         return;
@@ -185,13 +203,19 @@ export async function startInterpreterRealtimeSession(
       closeInterpreterRealtimeSession(peerConnection, localStream, eventsChannel);
       callbacks.onStatus?.('closed');
     },
+    pauseListening: () => {
+      setStreamTracksEnabled(localStream, false);
+      callbacks.onStatus?.('ready');
+    },
     respond: () => {
-      sendRealtimeEvent(eventsChannel, {
-        response: {
-          modalities: ['audio', 'text']
-        },
-        type: 'response.create'
-      });
+      setStreamTracksEnabled(localStream, false);
+      setTracksEnabled(remoteTracks, true);
+      callbacks.onStatus?.('speaking');
+    },
+    resumeListening: () => {
+      setTracksEnabled(remoteTracks, false);
+      setStreamTracksEnabled(localStream, true);
+      callbacks.onStatus?.('listening');
     }
   };
 }
@@ -277,6 +301,18 @@ function closeInterpreterRealtimeSession(
   eventsChannel?.close?.();
   localStream.getTracks?.().forEach((track) => track.stop?.());
   peerConnection.close();
+}
+
+function setStreamTracksEnabled(stream: MediaStreamLike, enabled: boolean) {
+  stream.getTracks?.().forEach((track) => {
+    track.enabled = enabled;
+  });
+}
+
+function setTracksEnabled(tracks: Array<{ enabled?: boolean }>, enabled: boolean) {
+  tracks.forEach((track) => {
+    track.enabled = enabled;
+  });
 }
 
 function loadWebRtcRuntime(): WebRtcRuntime {

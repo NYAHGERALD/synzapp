@@ -335,6 +335,47 @@ The room should feel focused and calm:
 - End meeting.
 - Summary button.
 
+### Live Interpreter Full-Screen Room
+
+The active interpreter experience must run in a dedicated full-screen modal, separate from the setup and meeting administration screen.
+
+The setup screen is for:
+
+- Meeting metadata.
+- Microphone readiness.
+- Device realtime readiness.
+- Participant access.
+- Meeting summaries and audit memory.
+
+The live room is for:
+
+- Active listening.
+- Responding in selected languages.
+- Clear operator control during interpretation.
+- Ending or minimizing the live session.
+
+Required live-room behavior:
+
+- Show a professional animated listening state while the AI is actively listening.
+- Show the privacy label inside the live room: interpreter only, not connected to Chat.
+- Display the target-language response buttons created during meeting setup.
+- Tapping a response language pauses microphone listening and opens the interpretation audio gate for that language.
+- While the interpreter is speaking, the primary control becomes `Listen`.
+- Tapping `Listen` stops the current interpretation audio and returns to live listening.
+- If the user cuts an interpretation short, show:
+  - `Continue`: resumes the interrupted interpretation.
+  - `Current`: discards the interrupted response and plays the latest prepared interpretation.
+- The app must never create the OpenAI realtime session after the user taps a language. Sessions should already be prepared when the live room starts.
+- Startup failures must expose the exact layer that failed:
+  - Backend OpenAI configuration or model/session error.
+  - Device microphone permission.
+  - Missing native WebRTC runtime.
+  - Realtime SDP negotiation failure.
+
+Implementation note:
+
+- Realtime Translation sessions are not voice-agent sessions. The mobile app should not use `response.create` as the interpretation trigger. The operator control is an audio/listening gate: pause microphone input, allow the selected translation lane to play, then resume listening.
+
 ### Summary Modal
 
 Flow:
