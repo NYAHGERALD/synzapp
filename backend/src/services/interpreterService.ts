@@ -140,7 +140,6 @@ export async function listInterpreterMeetings(decodedToken: DecodedIdToken) {
     context.organizationRef
     .collection(INTERPRETER_MEETINGS_COLLECTION)
     .where('createdByUid', '==', context.uid)
-    .orderBy('updatedAtIso', 'desc')
     .limit(50)
     .get(),
     context.organizationRef

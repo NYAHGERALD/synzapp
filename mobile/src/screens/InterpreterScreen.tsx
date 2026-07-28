@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Modal,
   Pressable,
   ScrollView,
@@ -48,11 +49,6 @@ interface InterpreterScreenProps {
 
 const DEFAULT_LANGUAGE_CODES = ['en-US', 'es-MX'];
 
-interface InterpreterAlertState {
-  message: string;
-  title: string;
-}
-
 type InterpreterLanguageSessionState = {
   status: InterpreterRealtimeStatus;
   transcript: string;
@@ -70,10 +66,9 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
   const [isLoading, setIsLoading] = useState(true);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
-  const [alertState, setAlertState] = useState<InterpreterAlertState | null>(null);
 
   const showInterpreterError = useCallback((message: string, title = 'Interpreter needs attention') => {
-    setAlertState({ message, title });
+    Alert.alert(title, message);
   }, []);
 
   const loadWorkspace = useCallback(async () => {
@@ -81,10 +76,11 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
 
     try {
       const idToken = await getIdToken();
-      const [result, participantResult] = await Promise.all([
-        listInterpreterMeetings(idToken),
-        listInterpreterParticipants(idToken)
-      ]);
+      const result = await listInterpreterMeetings(idToken);
+      const participantResult = await listInterpreterParticipants(idToken).catch((error) => {
+        console.warn('Interpreter participant directory unavailable:', getErrorMessage(error));
+        return { participants: [] };
+      });
 
       setMeetings(result.meetings);
       setLanguages(result.supportedLanguages);
@@ -296,7 +292,6 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
 
   if (selectedMeetingDetails) {
     return (
-      <>
       <InterpreterRoom
         details={selectedMeetingDetails}
         isBusy={isBusy}
@@ -309,13 +304,6 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
         onUpdateInvitations={handleUpdateInvitations}
         participants={participants}
       />
-      <InterpreterAlertModal
-        message={alertState?.message || ''}
-        onClose={() => setAlertState(null)}
-        title={alertState?.title || 'Interpreter needs attention'}
-        visible={Boolean(alertState)}
-      />
-      </>
     );
   }
 
@@ -336,18 +324,10 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
 
       <View style={styles.actionRow}>
         <Pressable
-          disabled={isLoading}
-          onPress={() => void loadWorkspace()}
-          style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}
-        >
-          <Ionicons color={appTheme.colors.ink} name="refresh-outline" size={18} />
-          <Text style={styles.secondaryButtonText}>Refresh</Text>
-        </Pressable>
-        <Pressable
           onPress={() => setIsCreateOpen(true)}
           style={({ pressed }) => [styles.primaryButton, pressed && styles.pressed]}
         >
-          <Ionicons color="#fff" name="add" size={20} />
+          <Ionicons color="#fff" name="add" size={17} />
           <Text style={styles.primaryButtonText}>New meeting</Text>
         </Pressable>
       </View>
@@ -400,12 +380,6 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
         onError={showInterpreterError}
         participants={participants}
         onSubmit={handleCreateMeeting}
-      />
-      <InterpreterAlertModal
-        message={alertState?.message || ''}
-        onClose={() => setAlertState(null)}
-        title={alertState?.title || 'Interpreter needs attention'}
-        visible={Boolean(alertState)}
       />
     </View>
   );
@@ -1320,45 +1294,6 @@ function InterpreterSummaryLanguageModal({
   );
 }
 
-interface InterpreterAlertModalProps {
-  message: string;
-  onClose: () => void;
-  title: string;
-  visible: boolean;
-}
-
-function InterpreterAlertModal({
-  message,
-  onClose,
-  title,
-  visible
-}: InterpreterAlertModalProps) {
-  const appTheme = useAppTheme();
-  const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
-
-  return (
-    <Modal animationType="fade" onRequestClose={onClose} transparent visible={visible}>
-      <View style={styles.alertModalRoot}>
-        <View style={styles.alertModalCard}>
-          <View style={styles.alertIcon}>
-            <Ionicons color="#dc2626" name="warning-outline" size={28} />
-          </View>
-          <View style={styles.alertContent}>
-            <Text style={styles.alertEyebrow}>INTERPRETER</Text>
-            <Text style={styles.alertTitle}>{title}</Text>
-            <Text style={styles.alertMessage}>{message}</Text>
-            <View style={styles.alertActions}>
-              <Pressable onPress={onClose} style={({ pressed }) => [styles.alertCloseButton, pressed && styles.pressed]}>
-                <Text style={styles.alertCloseText}>Close</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      </View>
-    </Modal>
-  );
-}
-
 function formatMeetingType(type: InterpreterMeetingType): string {
   if (type === 'ONE_ON_ONE') {
     return '1-on-1';
@@ -1471,79 +1406,16 @@ function createStyles(colors: AppColors) {
     actionRow: {
       flexDirection: 'row',
       gap: 10,
+      justifyContent: 'flex-end',
       marginBottom: 14
     },
     accessPanel: {
-      backgroundColor: colors.card,
-      borderColor: colors.border,
-      borderRadius: 22,
-      borderWidth: 1,
+      backgroundColor: colors.surface,
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
       gap: 12,
       marginBottom: 12,
-      padding: 14
-    },
-    alertActions: {
-      alignItems: 'flex-end',
-      marginTop: 16
-    },
-    alertCloseButton: {
-      alignItems: 'center',
-      backgroundColor: colors.card,
-      borderColor: colors.border,
-      borderRadius: 16,
-      borderWidth: 1,
-      minHeight: 44,
-      justifyContent: 'center',
-      paddingHorizontal: 22
-    },
-    alertCloseText: {
-      color: colors.ink,
-      fontSize: 15
-    },
-    alertContent: {
-      flex: 1
-    },
-    alertEyebrow: {
-      color: '#b91c1c',
-      fontSize: 11,
-      letterSpacing: 1.4,
-      marginBottom: 7
-    },
-    alertIcon: {
-      alignItems: 'center',
-      backgroundColor: '#fff1f2',
-      borderColor: '#fecaca',
-      borderRadius: 14,
-      borderWidth: 1,
-      height: 48,
-      justifyContent: 'center',
-      width: 48
-    },
-    alertMessage: {
-      color: colors.mutedStrong,
-      fontSize: 15,
-      lineHeight: 22,
-      marginTop: 8
-    },
-    alertModalCard: {
-      backgroundColor: colors.card,
-      borderColor: '#fecaca',
-      borderRadius: 24,
-      borderWidth: 1,
-      flexDirection: 'row',
-      gap: 16,
-      marginHorizontal: 24,
-      padding: 20
-    },
-    alertModalRoot: {
-      alignItems: 'center',
-      backgroundColor: 'rgba(15,23,42,0.38)',
-      flex: 1,
-      justifyContent: 'center'
-    },
-    alertTitle: {
-      color: colors.ink,
-      fontSize: 19
+      paddingBottom: 12
     },
     disabledButton: {
       opacity: 0.58
@@ -1571,13 +1443,12 @@ function createStyles(colors: AppColors) {
       color: '#047857'
     },
     deviceCheckPanel: {
-      backgroundColor: colors.card,
-      borderColor: colors.border,
-      borderRadius: 20,
-      borderWidth: 1,
+      backgroundColor: colors.surface,
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
       gap: 10,
       marginBottom: 12,
-      padding: 12
+      paddingBottom: 12
     },
     diagnosticGrid: {
       flexDirection: 'row',
@@ -1619,7 +1490,7 @@ function createStyles(colors: AppColors) {
     },
     emptyTitle: {
       color: colors.ink,
-      fontSize: 18
+      fontSize: 16
     },
     endButton: {
       alignItems: 'center',
@@ -1641,24 +1512,23 @@ function createStyles(colors: AppColors) {
     },
     hero: {
       alignItems: 'center',
-      backgroundColor: colors.card,
-      borderColor: colors.border,
-      borderRadius: 28,
-      borderWidth: 1,
+      backgroundColor: colors.surface,
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
       flexDirection: 'row',
-      gap: 14,
+      gap: 12,
       marginBottom: 14,
-      padding: 16
+      paddingBottom: 14
     },
     heroIcon: {
       alignItems: 'center',
       backgroundColor: colors.primarySoft,
       borderColor: colors.primary,
-      borderRadius: 20,
+      borderRadius: 18,
       borderWidth: 1,
-      height: 54,
+      height: 46,
       justifyContent: 'center',
-      width: 54
+      width: 46
     },
     heroText: {
       flex: 1,
@@ -1746,25 +1616,24 @@ function createStyles(colors: AppColors) {
     },
     livePanel: {
       alignItems: 'center',
-      backgroundColor: colors.card,
-      borderColor: colors.primary,
-      borderRadius: 28,
-      borderWidth: 1,
+      backgroundColor: colors.surface,
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
       gap: 10,
       marginBottom: 12,
-      padding: 18
+      paddingBottom: 14
     },
     livePulse: {
       alignItems: 'center',
       backgroundColor: colors.primarySoft,
-      borderRadius: 32,
-      height: 64,
+      borderRadius: 24,
+      height: 48,
       justifyContent: 'center',
-      width: 64
+      width: 48
     },
     liveTitle: {
       color: colors.ink,
-      fontSize: 19
+      fontSize: 16
     },
     liveStatusCard: {
       alignItems: 'center',
@@ -1802,12 +1671,11 @@ function createStyles(colors: AppColors) {
     meetingRow: {
       alignItems: 'center',
       backgroundColor: colors.card,
-      borderColor: colors.border,
-      borderRadius: 22,
-      borderWidth: 1,
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
       flexDirection: 'row',
       gap: 12,
-      padding: 14
+      paddingVertical: 12
     },
     meetingStatusIcon: {
       alignItems: 'center',
@@ -1851,7 +1719,7 @@ function createStyles(colors: AppColors) {
     },
     modalTitle: {
       color: colors.ink,
-      fontSize: 24
+      fontSize: 20
     },
     mutedText: {
       color: colors.mutedStrong,
@@ -1859,13 +1727,12 @@ function createStyles(colors: AppColors) {
       lineHeight: 19
     },
     operatorCard: {
-      backgroundColor: colors.card,
-      borderColor: colors.border,
-      borderRadius: 22,
-      borderWidth: 1,
+      backgroundColor: colors.surface,
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
       gap: 10,
       marginBottom: 12,
-      padding: 14
+      paddingBottom: 12
     },
     pressed: {
       opacity: 0.76,
@@ -1942,26 +1809,25 @@ function createStyles(colors: AppColors) {
     primaryButton: {
       alignItems: 'center',
       backgroundColor: colors.primary,
-      borderRadius: 18,
-      flex: 1,
+      borderRadius: 999,
       flexDirection: 'row',
-      gap: 8,
+      gap: 6,
       justifyContent: 'center',
-      minHeight: 48,
-      paddingHorizontal: 14
+      minHeight: 38,
+      paddingHorizontal: 16
     },
     primaryButtonText: {
       color: '#fff',
-      fontSize: 15
+      fontSize: 14
     },
     primaryButtonWide: {
       alignItems: 'center',
       backgroundColor: colors.primary,
-      borderRadius: 18,
+      borderRadius: 999,
       flexDirection: 'row',
       gap: 8,
       justifyContent: 'center',
-      minHeight: 50,
+      minHeight: 42,
       paddingHorizontal: 14
     },
     respondButton: {
@@ -1985,12 +1851,11 @@ function createStyles(colors: AppColors) {
       alignItems: 'center',
       alignSelf: 'stretch',
       backgroundColor: colors.surface,
-      borderColor: colors.border,
-      borderRadius: 20,
-      borderWidth: 1,
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
       flexDirection: 'row',
       gap: 10,
-      padding: 12
+      paddingBottom: 12
     },
     roomHeader: {
       alignItems: 'center',
@@ -2000,7 +1865,7 @@ function createStyles(colors: AppColors) {
     },
     roomTitle: {
       color: colors.ink,
-      fontSize: 18
+      fontSize: 16
     },
     roomTitleWrap: {
       flex: 1,
@@ -2212,21 +2077,20 @@ function createStyles(colors: AppColors) {
     },
     title: {
       color: colors.ink,
-      fontSize: 24
+      fontSize: 18
     },
     translationCard: {
-      backgroundColor: colors.primarySoft,
-      borderColor: colors.primary,
-      borderRadius: 22,
-      borderWidth: 1,
+      backgroundColor: colors.surface,
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
       gap: 10,
       marginBottom: 12,
-      padding: 14
+      paddingBottom: 12
     },
     translationText: {
       color: colors.ink,
-      fontSize: 18,
-      lineHeight: 26
+      fontSize: 15,
+      lineHeight: 22
     },
     transcriptPreview: {
       backgroundColor: colors.surface,
