@@ -61,9 +61,10 @@ export interface InterpreterMeetingDetails {
 }
 
 export interface InterpreterRealtimeClientSecretResponse {
-  clientSecret: unknown;
+  clientSecret: string;
   expiresWithSession: boolean;
   model: string;
+  targetLanguage: InterpreterLanguage;
 }
 
 export interface CreateInterpreterMeetingInput {

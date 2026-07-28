@@ -351,13 +351,26 @@ export async function createInterpreterRealtimeClientSecret(
     throw validationError('That language is not enabled for this interpreter meeting.');
   }
 
+  if (!targetLanguage) {
+    throw validationError('Choose a language before starting the live interpreter.');
+  }
+
   assertRateLimit(`interpreter:realtime:${context.uid}`, 60_000, 60);
 
   const safetyIdentifier = createSafetyIdentifier(context.tenantId, context.uid);
-  const instructions = buildRealtimeInstructions(meeting, targetLanguage || null);
+  const instructions = buildRealtimeInstructions(meeting, targetLanguage);
   const response = await fetch('https://api.openai.com/v1/realtime/translations/client_secrets', {
     body: JSON.stringify({
       session: {
+        audio: {
+          input: {
+            noise_reduction: { type: 'near_field' },
+            transcription: { model: 'gpt-realtime-whisper' }
+          },
+          output: {
+            language: toOpenAiTranslationLanguage(targetLanguage.code)
+          }
+        },
         instructions,
         model: env.openAiInterpreterRealtimeModel
       }
@@ -377,7 +390,13 @@ export async function createInterpreterRealtimeClientSecret(
     throw serviceError('Interpreter realtime session could not be prepared.');
   }
 
-  const clientSecret = await response.json() as Record<string, unknown>;
+  const clientSecretResponse = await response.json() as Record<string, unknown>;
+  const clientSecret = extractRealtimeClientSecret(clientSecretResponse);
+
+  if (!clientSecret) {
+    console.warn('OpenAI interpreter realtime session did not return a client secret.');
+    throw serviceError('Interpreter realtime session could not be prepared.');
+  }
 
   await writeInterpreterAuditEvent({
     context,
@@ -393,7 +412,8 @@ export async function createInterpreterRealtimeClientSecret(
   return {
     clientSecret,
     expiresWithSession: true,
-    model: env.openAiInterpreterRealtimeModel
+    model: env.openAiInterpreterRealtimeModel,
+    targetLanguage
   };
 }
 
@@ -631,12 +651,9 @@ function normalizeInterpreterLanguages(languageCodes: string[]): InterpreterLang
 
 function buildRealtimeInstructions(
   meeting: InterpreterMeetingRecord,
-  targetLanguage: InterpreterLanguage | null
+  targetLanguage: InterpreterLanguage
 ): string {
   const languageList = meeting.interpreterLanguages.map((language) => `${language.label} (${language.code})`).join(', ');
-  const targetInstruction = targetLanguage
-    ? `When asked to respond, interpret into ${targetLanguage.label}.`
-    : `Prepare interpretation options for these languages: ${languageList}.`;
 
   return [
     'You are Synzapp AI Interpreter for a workplace meeting.',
@@ -645,11 +662,39 @@ function buildRealtimeInstructions(
     'Only interpret the meaning of what the speaker said.',
     'Correct obvious grammar, filler, and mumbling into clear spoken language while preserving intent.',
     'Use a calm professional human-interpreter tone.',
-    targetInstruction,
+    `Interpret the live source audio into ${targetLanguage.label}.`,
     `Meeting type: ${meeting.meetingType}.`,
+    `Meeting languages enabled in Synzapp: ${languageList}.`,
     'English is always available as a default interpretation language.',
     'Never use or reference Synzapp chat messages.'
   ].join('\n');
+}
+
+function toOpenAiTranslationLanguage(languageCode: string): string {
+  return languageCode.split('-')[0]?.toLowerCase() || languageCode.toLowerCase();
+}
+
+function extractRealtimeClientSecret(response: Record<string, unknown>): string | null {
+  const directClientSecret = response.client_secret;
+
+  if (typeof directClientSecret === 'string') {
+    return directClientSecret;
+  }
+
+  if (
+    directClientSecret &&
+    typeof directClientSecret === 'object' &&
+    'value' in directClientSecret &&
+    typeof (directClientSecret as { value?: unknown }).value === 'string'
+  ) {
+    return (directClientSecret as { value: string }).value;
+  }
+
+  if (typeof response.value === 'string') {
+    return response.value;
+  }
+
+  return null;
 }
 
 async function writeInterpreterAuditEvent({

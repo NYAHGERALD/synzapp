@@ -1,7 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   Modal,
   Pressable,
   ScrollView,
@@ -29,12 +28,25 @@ import {
   listInterpreterMeetings,
   startInterpreterMeeting
 } from '../services/interpreterApi';
+import {
+  getInterpreterAudioReadiness,
+  InterpreterAudioReadiness,
+  InterpreterRealtimeSession,
+  InterpreterRealtimeStatus,
+  requestInterpreterAudioReadiness,
+  startInterpreterRealtimeSession
+} from '../services/interpreterRealtime';
 
 interface InterpreterScreenProps {
   getIdToken: () => Promise<string>;
 }
 
 const DEFAULT_LANGUAGE_CODES = ['en-US', 'es-MX'];
+
+interface InterpreterAlertState {
+  message: string;
+  title: string;
+}
 
 export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
   const appTheme = useAppTheme();
@@ -46,6 +58,11 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
   const [isLoading, setIsLoading] = useState(true);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
+  const [alertState, setAlertState] = useState<InterpreterAlertState | null>(null);
+
+  const showInterpreterError = useCallback((message: string, title = 'Interpreter needs attention') => {
+    setAlertState({ message, title });
+  }, []);
 
   const loadWorkspace = useCallback(async () => {
     setIsLoading(true);
@@ -57,11 +74,11 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
       setMeetings(result.meetings);
       setLanguages(result.supportedLanguages);
     } catch (error) {
-      Alert.alert('Interpreter needs attention', getErrorMessage(error));
+      showInterpreterError(getErrorMessage(error));
     } finally {
       setIsLoading(false);
     }
-  }, [getIdToken]);
+  }, [getIdToken, showInterpreterError]);
 
   useEffect(() => {
     void loadWorkspace();
@@ -87,7 +104,7 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
       setIsCreateOpen(false);
       await handleOpenMeeting(result.meeting.meetingId);
     } catch (error) {
-      Alert.alert('Interpreter needs attention', getErrorMessage(error));
+      showInterpreterError(getErrorMessage(error));
     } finally {
       setIsBusy(false);
     }
@@ -102,17 +119,17 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
 
       setSelectedMeetingDetails(details);
     } catch (error) {
-      Alert.alert('Interpreter needs attention', getErrorMessage(error));
+      showInterpreterError(getErrorMessage(error));
     } finally {
       setIsBusy(false);
     }
   }
 
-  async function handleStartListening(targetLanguageCode?: string | null) {
+  async function handlePrepareRealtimeSession(targetLanguageCode?: string | null) {
     const meeting = selectedMeetingDetails?.meeting;
 
     if (!meeting) {
-      return;
+      return null;
     }
 
     setIsBusy(true);
@@ -137,12 +154,11 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
       setMeetings((currentMeetings) => currentMeetings.map((currentMeeting) =>
         currentMeeting.meetingId === started.meeting.meetingId ? started.meeting : currentMeeting
       ));
-      Alert.alert(
-        'Interpreter ready',
-        `Secure realtime session prepared with ${realtime.model}. The next device build will wire microphone streaming into this session.`
-      );
+
+      return realtime;
     } catch (error) {
-      Alert.alert('Interpreter needs attention', getErrorMessage(error));
+      showInterpreterError(getErrorMessage(error));
+      return null;
     } finally {
       setIsBusy(false);
     }
@@ -168,7 +184,7 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
         currentMeeting.meetingId === result.meeting.meetingId ? result.meeting : currentMeeting
       ));
     } catch (error) {
-      Alert.alert('Interpreter needs attention', getErrorMessage(error));
+      showInterpreterError(getErrorMessage(error));
     } finally {
       setIsBusy(false);
     }
@@ -203,7 +219,7 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
           }
         : currentDetails);
     } catch (error) {
-      Alert.alert('Interpreter needs attention', getErrorMessage(error));
+      showInterpreterError(getErrorMessage(error));
     } finally {
       setIsBusy(false);
     }
@@ -229,7 +245,7 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
           }
         : currentDetails);
     } catch (error) {
-      Alert.alert('Interpreter needs attention', getErrorMessage(error));
+      showInterpreterError(getErrorMessage(error));
     } finally {
       setIsBusy(false);
     }
@@ -237,6 +253,7 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
 
   if (selectedMeetingDetails) {
     return (
+      <>
       <InterpreterRoom
         details={selectedMeetingDetails}
         isBusy={isBusy}
@@ -244,8 +261,16 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
         onBack={() => setSelectedMeetingDetails(null)}
         onCreateSummary={handleCreateSummary}
         onEndMeeting={handleEndMeeting}
-        onStartListening={handleStartListening}
+        onError={showInterpreterError}
+        onPrepareRealtimeSession={handlePrepareRealtimeSession}
       />
+      <InterpreterAlertModal
+        message={alertState?.message || ''}
+        onClose={() => setAlertState(null)}
+        title={alertState?.title || 'Interpreter needs attention'}
+        visible={Boolean(alertState)}
+      />
+      </>
     );
   }
 
@@ -327,7 +352,14 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
         isOpen={isCreateOpen}
         languages={languages}
         onClose={() => setIsCreateOpen(false)}
+        onError={showInterpreterError}
         onSubmit={handleCreateMeeting}
+      />
+      <InterpreterAlertModal
+        message={alertState?.message || ''}
+        onClose={() => setAlertState(null)}
+        title={alertState?.title || 'Interpreter needs attention'}
+        visible={Boolean(alertState)}
       />
     </View>
   );
@@ -340,7 +372,8 @@ interface InterpreterRoomProps {
   onBack: () => void;
   onCreateSummary: (languageCodes: string[]) => Promise<void>;
   onEndMeeting: () => Promise<void>;
-  onStartListening: (targetLanguageCode?: string | null) => Promise<void>;
+  onError: (message: string, title?: string) => void;
+  onPrepareRealtimeSession: (targetLanguageCode?: string | null) => Promise<Awaited<ReturnType<typeof createInterpreterRealtimeClientSecret>> | null>;
 }
 
 function InterpreterRoom({
@@ -350,15 +383,89 @@ function InterpreterRoom({
   onBack,
   onCreateSummary,
   onEndMeeting,
-  onStartListening
+  onError,
+  onPrepareRealtimeSession
 }: InterpreterRoomProps) {
   const appTheme = useAppTheme();
   const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
   const insets = useSafeAreaInsets();
   const [draftTranscript, setDraftTranscript] = useState('');
+  const [liveTranscript, setLiveTranscript] = useState('');
+  const [liveTranslation, setLiveTranslation] = useState('');
+  const [liveStatus, setLiveStatus] = useState<InterpreterRealtimeStatus>('closed');
+  const [audioReadiness, setAudioReadiness] = useState<InterpreterAudioReadiness | null>(null);
+  const [isSummaryModalOpen, setIsSummaryModalOpen] = useState(false);
   const [selectedLanguageCode, setSelectedLanguageCode] = useState(details.meeting.interpreterLanguages[0]?.code || 'en-US');
+  const realtimeSessionRef = useRef<InterpreterRealtimeSession | null>(null);
   const latestTranslation = [...details.translations].reverse()
     .find((translation) => translation.targetLanguageCode === selectedLanguageCode);
+  const isRealtimeActive = liveStatus === 'connecting' || liveStatus === 'listening' || liveStatus === 'speaking' || liveStatus === 'ready';
+
+  useEffect(() => () => {
+    realtimeSessionRef.current?.close();
+    realtimeSessionRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    void getInterpreterAudioReadiness().then((readiness) => {
+      if (isMounted) {
+        setAudioReadiness(readiness);
+      }
+    });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  async function requestMicrophoneAccess() {
+    const readiness = await requestInterpreterAudioReadiness();
+
+    setAudioReadiness(readiness);
+
+    if (!readiness.granted) {
+      onError('Allow microphone access in device settings before starting the live interpreter.');
+    }
+  }
+
+  async function startLiveInterpreter() {
+    realtimeSessionRef.current?.close();
+    realtimeSessionRef.current = null;
+    setLiveTranscript('');
+    setLiveTranslation('');
+    setLiveStatus('connecting');
+
+    const realtime = await onPrepareRealtimeSession(selectedLanguageCode);
+
+    if (!realtime) {
+      setLiveStatus('closed');
+      return;
+    }
+
+    try {
+      realtimeSessionRef.current = await startInterpreterRealtimeSession(realtime, {
+        onError: (message) => onError(message),
+        onStatus: setLiveStatus,
+        onTranscript: setLiveTranscript,
+        onTranslation: setLiveTranslation
+      });
+    } catch (error) {
+      setLiveStatus('error');
+      onError(getErrorMessage(error));
+    }
+  }
+
+  function stopLiveInterpreter() {
+    realtimeSessionRef.current?.close();
+    realtimeSessionRef.current = null;
+    setLiveStatus('closed');
+  }
+
+  function respondInSelectedLanguage() {
+    realtimeSessionRef.current?.respond();
+  }
 
   return (
     <View style={[styles.screen, { paddingBottom: Math.max(insets.bottom + 94, 112) }]}>
@@ -371,6 +478,35 @@ function InterpreterRoom({
           <Text style={styles.meetingMeta}>
             {formatMeetingType(details.meeting.meetingType)} · {formatStatus(details.meeting.status)}
           </Text>
+        </View>
+        <View style={styles.readinessRow}>
+          <View style={styles.readinessCopy}>
+            <Text style={styles.sectionLabel}>Microphone readiness</Text>
+            <Text style={styles.mutedText}>
+              {audioReadiness?.granted ? 'Microphone access is ready for live interpretation.' : 'Microphone access is required before listening.'}
+            </Text>
+          </View>
+          <Pressable
+            disabled={Boolean(audioReadiness?.granted)}
+            onPress={() => void requestMicrophoneAccess()}
+            style={({ pressed }) => [
+              styles.permissionButton,
+              audioReadiness?.granted && styles.permissionButtonReady,
+              pressed && styles.pressed
+            ]}
+          >
+            <Ionicons
+              color={audioReadiness?.granted ? '#047857' : appTheme.colors.primary}
+              name={audioReadiness?.granted ? 'checkmark-circle-outline' : 'mic-outline'}
+              size={17}
+            />
+            <Text style={[
+              styles.permissionButtonText,
+              audioReadiness?.granted && styles.permissionButtonTextReady
+            ]}>
+              {audioReadiness?.granted ? 'Ready' : 'Allow'}
+            </Text>
+          </Pressable>
         </View>
         <Pressable
           disabled={isBusy || details.meeting.status === 'ENDED'}
@@ -389,13 +525,31 @@ function InterpreterRoom({
         <Text style={styles.subtitle}>
           The interpreter listens only in this meeting. Chat messages and chat media are not connected to this feature.
         </Text>
+        <View style={styles.liveStatusCard}>
+          <View style={[styles.statusDot, { backgroundColor: getRealtimeStatusColor(liveStatus) }]} />
+          <View style={styles.liveStatusTextWrap}>
+            <Text style={styles.liveStatusTitle}>{formatRealtimeStatus(liveStatus)}</Text>
+            <Text style={styles.mutedText}>{getRealtimeStatusDescription(liveStatus)}</Text>
+          </View>
+        </View>
         <Pressable
           disabled={isBusy || details.meeting.status === 'ENDED'}
-          onPress={() => void onStartListening(selectedLanguageCode)}
+          onPress={() => {
+            if (isRealtimeActive) {
+              stopLiveInterpreter();
+              return;
+            }
+
+            void startLiveInterpreter();
+          }}
           style={({ pressed }) => [styles.primaryButtonWide, pressed && styles.pressed]}
         >
-          {isBusy ? <ActivityIndicator color="#fff" /> : <Ionicons color="#fff" name="radio-outline" size={20} />}
-          <Text style={styles.primaryButtonText}>Prepare live interpreter</Text>
+          {isBusy || liveStatus === 'connecting' ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Ionicons color="#fff" name={isRealtimeActive ? 'stop-circle-outline' : 'radio-outline'} size={20} />
+          )}
+          <Text style={styles.primaryButtonText}>{isRealtimeActive ? 'Stop interpreter' : 'Start live interpreter'}</Text>
         </Pressable>
       </View>
 
@@ -420,16 +574,36 @@ function InterpreterRoom({
       </ScrollView>
 
       <View style={styles.translationCard}>
-        <Text style={styles.sectionLabel}>Latest interpretation</Text>
+        <View style={styles.sectionHeaderRow}>
+          <Text style={styles.sectionLabel}>Latest interpretation</Text>
+          <Pressable
+            disabled={!isRealtimeActive || details.meeting.status === 'ENDED'}
+            onPress={respondInSelectedLanguage}
+            style={({ pressed }) => [
+              styles.respondButton,
+              (!isRealtimeActive || details.meeting.status === 'ENDED') && styles.disabledButton,
+              pressed && styles.pressed
+            ]}
+          >
+            <Ionicons color="#fff" name="volume-high-outline" size={17} />
+            <Text style={styles.respondButtonText}>Respond</Text>
+          </Pressable>
+        </View>
         <Text style={styles.translationText}>
-          {latestTranslation?.translatedText || 'Tap a language when the speaker finishes. The live interpreter will speak in that language.'}
+          {liveTranslation || latestTranslation?.translatedText || 'Tap a language when the speaker finishes. The live interpreter will speak in that language.'}
         </Text>
+        {liveTranscript ? (
+          <View style={styles.transcriptPreview}>
+            <Text style={styles.sectionLabel}>Detected speech</Text>
+            <Text style={styles.mutedText}>{liveTranscript}</Text>
+          </View>
+        ) : null}
       </View>
 
       <View style={styles.operatorCard}>
-        <Text style={styles.sectionLabel}>Operator test console</Text>
+        <Text style={styles.sectionLabel}>Meeting memory console</Text>
         <Text style={styles.mutedText}>
-          This console records transcript and translation records through the secured backend while native audio is being wired.
+          Use this only for controlled notes or manual correction while live audio transcription is being validated.
         </Text>
         <TextInput
           multiline
@@ -459,7 +633,7 @@ function InterpreterRoom({
           <Text style={styles.sectionLabel}>Meeting summary</Text>
           <Pressable
             disabled={isBusy}
-            onPress={() => void onCreateSummary(details.meeting.interpreterLanguages.map((language) => language.code))}
+            onPress={() => setIsSummaryModalOpen(true)}
             style={({ pressed }) => [styles.summaryButton, pressed && styles.pressed]}
           >
             <Text style={styles.summaryButtonText}>Summarize</Text>
@@ -478,6 +652,17 @@ function InterpreterRoom({
           <Text style={styles.mutedText}>No summary has been created yet.</Text>
         )}
       </View>
+      <InterpreterSummaryLanguageModal
+        isBusy={isBusy}
+        isOpen={isSummaryModalOpen}
+        languages={details.meeting.interpreterLanguages}
+        onClose={() => setIsSummaryModalOpen(false)}
+        onError={onError}
+        onSubmit={async (languageCodes) => {
+          await onCreateSummary(languageCodes);
+          setIsSummaryModalOpen(false);
+        }}
+      />
     </View>
   );
 }
@@ -499,6 +684,7 @@ interface InterpreterCreateModalProps {
   isOpen: boolean;
   languages: InterpreterLanguage[];
   onClose: () => void;
+  onError: (message: string, title?: string) => void;
   onSubmit: (draft: InterpreterCreateDraft) => Promise<void>;
 }
 
@@ -507,6 +693,7 @@ function InterpreterCreateModal({
   isOpen,
   languages,
   onClose,
+  onError,
   onSubmit
 }: InterpreterCreateModalProps) {
   const appTheme = useAppTheme();
@@ -560,12 +747,12 @@ function InterpreterCreateModal({
 
   function submit() {
     if (!draft.meetingName.trim()) {
-      Alert.alert('Meeting needs attention', 'Enter a meeting name.');
+      onError('Enter a meeting name.', 'Meeting needs attention');
       return;
     }
 
     if (!draft.languageCodes.length) {
-      Alert.alert('Meeting needs attention', 'Select at least one interpretation language.');
+      onError('Select at least one interpretation language.', 'Meeting needs attention');
       return;
     }
 
@@ -689,6 +876,146 @@ function InterpreterCreateModal({
   );
 }
 
+interface InterpreterSummaryLanguageModalProps {
+  isBusy: boolean;
+  isOpen: boolean;
+  languages: InterpreterLanguage[];
+  onClose: () => void;
+  onError: (message: string, title?: string) => void;
+  onSubmit: (languageCodes: string[]) => Promise<void>;
+}
+
+function InterpreterSummaryLanguageModal({
+  isBusy,
+  isOpen,
+  languages,
+  onClose,
+  onError,
+  onSubmit
+}: InterpreterSummaryLanguageModalProps) {
+  const appTheme = useAppTheme();
+  const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
+  const insets = useSafeAreaInsets();
+  const [selectedLanguageCodes, setSelectedLanguageCodes] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (isOpen) {
+      setSelectedLanguageCodes(languages.map((language) => language.code));
+    }
+  }, [isOpen, languages]);
+
+  function toggleLanguage(languageCode: string) {
+    setSelectedLanguageCodes((currentCodes) =>
+      currentCodes.includes(languageCode)
+        ? currentCodes.filter((currentCode) => currentCode !== languageCode)
+        : [...currentCodes, languageCode]
+    );
+  }
+
+  function submit() {
+    if (!selectedLanguageCodes.length) {
+      onError('Select at least one language for the meeting summary.', 'Summary needs attention');
+      return;
+    }
+
+    void onSubmit(selectedLanguageCodes);
+  }
+
+  return (
+    <Modal animationType="slide" onRequestClose={onClose} transparent visible={isOpen}>
+      <View style={styles.modalOverlay}>
+        <View style={[styles.modalSheet, { paddingBottom: Math.max(insets.bottom + 18, 28) }]}>
+          <View style={styles.modalHandle} />
+          <View style={styles.modalHeader}>
+            <View>
+              <Text style={styles.eyebrow}>MEETING SUMMARY</Text>
+              <Text style={styles.modalTitle}>Choose languages</Text>
+            </View>
+            <Pressable onPress={onClose} style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}>
+              <Ionicons color={appTheme.colors.ink} name="close" size={24} />
+            </Pressable>
+          </View>
+          <Text style={styles.subtitle}>
+            Synzapp will summarize only the selected languages using the secured meeting transcript memory.
+          </Text>
+          <View style={styles.summaryLanguageList}>
+            {languages.map((language) => {
+              const isSelected = selectedLanguageCodes.includes(language.code);
+
+              return (
+                <Pressable
+                  key={language.code}
+                  onPress={() => toggleLanguage(language.code)}
+                  style={[
+                    styles.summaryLanguageRow,
+                    isSelected && styles.summaryLanguageRowSelected
+                  ]}
+                >
+                  <View style={styles.summaryLanguageIcon}>
+                    <Ionicons
+                      color={isSelected ? appTheme.colors.primary : appTheme.colors.mutedStrong}
+                      name={isSelected ? 'checkmark-circle' : 'ellipse-outline'}
+                      size={20}
+                    />
+                  </View>
+                  <Text style={styles.summaryLanguageRowText}>{language.label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          <Pressable
+            disabled={isBusy}
+            onPress={submit}
+            style={({ pressed }) => [styles.primaryButtonWide, isBusy && styles.disabledButton, pressed && styles.pressed]}
+          >
+            {isBusy ? <ActivityIndicator color="#fff" /> : <Ionicons color="#fff" name="document-text-outline" size={20} />}
+            <Text style={styles.primaryButtonText}>Create summary</Text>
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+interface InterpreterAlertModalProps {
+  message: string;
+  onClose: () => void;
+  title: string;
+  visible: boolean;
+}
+
+function InterpreterAlertModal({
+  message,
+  onClose,
+  title,
+  visible
+}: InterpreterAlertModalProps) {
+  const appTheme = useAppTheme();
+  const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
+
+  return (
+    <Modal animationType="fade" onRequestClose={onClose} transparent visible={visible}>
+      <View style={styles.alertModalRoot}>
+        <View style={styles.alertModalCard}>
+          <View style={styles.alertIcon}>
+            <Ionicons color="#dc2626" name="warning-outline" size={28} />
+          </View>
+          <View style={styles.alertContent}>
+            <Text style={styles.alertEyebrow}>INTERPRETER</Text>
+            <Text style={styles.alertTitle}>{title}</Text>
+            <Text style={styles.alertMessage}>{message}</Text>
+            <View style={styles.alertActions}>
+              <Pressable onPress={onClose} style={({ pressed }) => [styles.alertCloseButton, pressed && styles.pressed]}>
+                <Text style={styles.alertCloseText}>Close</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 function formatMeetingType(type: InterpreterMeetingType): string {
   if (type === 'ONE_ON_ONE') {
     return '1-on-1';
@@ -717,6 +1044,60 @@ function getStatusColor(status: InterpreterMeeting['status']): string {
   return '#2563eb';
 }
 
+function formatRealtimeStatus(status: InterpreterRealtimeStatus): string {
+  switch (status) {
+    case 'connecting':
+      return 'Preparing secure audio';
+    case 'listening':
+      return 'Listening now';
+    case 'speaking':
+      return 'Interpreter responding';
+    case 'ready':
+      return 'Ready';
+    case 'error':
+      return 'Needs attention';
+    case 'closed':
+    default:
+      return 'Interpreter idle';
+  }
+}
+
+function getRealtimeStatusDescription(status: InterpreterRealtimeStatus): string {
+  switch (status) {
+    case 'connecting':
+      return 'Creating the encrypted live interpreter session.';
+    case 'listening':
+      return 'Speak naturally, then tap Respond on the target language.';
+    case 'speaking':
+      return 'Playing the interpretation in the selected language.';
+    case 'ready':
+      return 'Session is ready for a speaker.';
+    case 'error':
+      return 'The live session stopped before it could complete.';
+    case 'closed':
+    default:
+      return 'Start only when everyone in the meeting is ready.';
+  }
+}
+
+function getRealtimeStatusColor(status: InterpreterRealtimeStatus): string {
+  switch (status) {
+    case 'connecting':
+      return '#f59e0b';
+    case 'listening':
+      return '#10b981';
+    case 'speaking':
+      return '#2563eb';
+    case 'error':
+      return '#dc2626';
+    case 'ready':
+      return '#0f766e';
+    case 'closed':
+    default:
+      return '#94a3b8';
+  }
+}
+
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Interpreter could not complete that action.';
 }
@@ -727,6 +1108,69 @@ function createStyles(colors: AppColors) {
       flexDirection: 'row',
       gap: 10,
       marginBottom: 14
+    },
+    alertActions: {
+      alignItems: 'flex-end',
+      marginTop: 16
+    },
+    alertCloseButton: {
+      alignItems: 'center',
+      backgroundColor: colors.card,
+      borderColor: colors.border,
+      borderRadius: 16,
+      borderWidth: 1,
+      minHeight: 44,
+      justifyContent: 'center',
+      paddingHorizontal: 22
+    },
+    alertCloseText: {
+      color: colors.ink,
+      fontSize: 15
+    },
+    alertContent: {
+      flex: 1
+    },
+    alertEyebrow: {
+      color: '#b91c1c',
+      fontSize: 11,
+      letterSpacing: 1.4,
+      marginBottom: 7
+    },
+    alertIcon: {
+      alignItems: 'center',
+      backgroundColor: '#fff1f2',
+      borderColor: '#fecaca',
+      borderRadius: 14,
+      borderWidth: 1,
+      height: 48,
+      justifyContent: 'center',
+      width: 48
+    },
+    alertMessage: {
+      color: colors.mutedStrong,
+      fontSize: 15,
+      lineHeight: 22,
+      marginTop: 8
+    },
+    alertModalCard: {
+      backgroundColor: colors.card,
+      borderColor: '#fecaca',
+      borderRadius: 24,
+      borderWidth: 1,
+      flexDirection: 'row',
+      gap: 16,
+      marginHorizontal: 24,
+      padding: 20
+    },
+    alertModalRoot: {
+      alignItems: 'center',
+      backgroundColor: 'rgba(15,23,42,0.38)',
+      flex: 1,
+      justifyContent: 'center'
+    },
+    alertTitle: {
+      color: colors.ink,
+      fontSize: 19
     },
     disabledButton: {
       opacity: 0.58
@@ -879,6 +1323,25 @@ function createStyles(colors: AppColors) {
       color: colors.ink,
       fontSize: 19
     },
+    liveStatusCard: {
+      alignItems: 'center',
+      alignSelf: 'stretch',
+      backgroundColor: colors.surface,
+      borderColor: colors.border,
+      borderRadius: 20,
+      borderWidth: 1,
+      flexDirection: 'row',
+      gap: 10,
+      padding: 12
+    },
+    liveStatusTextWrap: {
+      flex: 1,
+      gap: 2
+    },
+    liveStatusTitle: {
+      color: colors.ink,
+      fontSize: 15
+    },
     meetingBody: {
       flex: 1,
       gap: 5
@@ -964,6 +1427,28 @@ function createStyles(colors: AppColors) {
       opacity: 0.76,
       transform: [{ scale: 0.99 }]
     },
+    permissionButton: {
+      alignItems: 'center',
+      backgroundColor: colors.primarySoft,
+      borderColor: colors.primary,
+      borderRadius: 999,
+      borderWidth: 1,
+      flexDirection: 'row',
+      gap: 6,
+      minHeight: 36,
+      paddingHorizontal: 12
+    },
+    permissionButtonReady: {
+      backgroundColor: '#dcfce7',
+      borderColor: '#86efac'
+    },
+    permissionButtonText: {
+      color: colors.primary,
+      fontSize: 13
+    },
+    permissionButtonTextReady: {
+      color: '#047857'
+    },
     primaryButton: {
       alignItems: 'center',
       backgroundColor: colors.primary,
@@ -988,6 +1473,34 @@ function createStyles(colors: AppColors) {
       justifyContent: 'center',
       minHeight: 50,
       paddingHorizontal: 14
+    },
+    respondButton: {
+      alignItems: 'center',
+      backgroundColor: colors.primary,
+      borderRadius: 999,
+      flexDirection: 'row',
+      gap: 6,
+      minHeight: 34,
+      paddingHorizontal: 12
+    },
+    respondButtonText: {
+      color: '#fff',
+      fontSize: 13
+    },
+    readinessCopy: {
+      flex: 1,
+      gap: 3
+    },
+    readinessRow: {
+      alignItems: 'center',
+      alignSelf: 'stretch',
+      backgroundColor: colors.surface,
+      borderColor: colors.border,
+      borderRadius: 20,
+      borderWidth: 1,
+      flexDirection: 'row',
+      gap: 10,
+      padding: 12
     },
     roomHeader: {
       alignItems: 'center',
@@ -1082,6 +1595,11 @@ function createStyles(colors: AppColors) {
       paddingHorizontal: 10,
       paddingVertical: 6
     },
+    statusDot: {
+      borderRadius: 6,
+      height: 12,
+      width: 12
+    },
     subtitle: {
       color: colors.mutedStrong,
       fontSize: 14,
@@ -1108,6 +1626,40 @@ function createStyles(colors: AppColors) {
     summaryLanguage: {
       color: colors.ink,
       fontSize: 14
+    },
+    summaryLanguageIcon: {
+      alignItems: 'center',
+      backgroundColor: colors.surface,
+      borderColor: colors.border,
+      borderRadius: 16,
+      borderWidth: 1,
+      height: 34,
+      justifyContent: 'center',
+      width: 34
+    },
+    summaryLanguageList: {
+      gap: 9,
+      marginBottom: 16,
+      marginTop: 16
+    },
+    summaryLanguageRow: {
+      alignItems: 'center',
+      backgroundColor: colors.card,
+      borderColor: colors.border,
+      borderRadius: 18,
+      borderWidth: 1,
+      flexDirection: 'row',
+      gap: 10,
+      minHeight: 56,
+      paddingHorizontal: 12
+    },
+    summaryLanguageRowSelected: {
+      backgroundColor: colors.primarySoft,
+      borderColor: colors.primary
+    },
+    summaryLanguageRowText: {
+      color: colors.ink,
+      fontSize: 15
     },
     switchKnob: {
       backgroundColor: colors.card,
@@ -1171,6 +1723,15 @@ function createStyles(colors: AppColors) {
       color: colors.ink,
       fontSize: 18,
       lineHeight: 26
+    },
+    transcriptPreview: {
+      backgroundColor: colors.surface,
+      borderColor: colors.divider,
+      borderRadius: 16,
+      borderWidth: 1,
+      gap: 6,
+      marginTop: 10,
+      padding: 10
     }
   });
 }
