@@ -7,6 +7,7 @@ type RtcPeerConnection = {
   close: () => void;
   createDataChannel?: (label: string) => RtcDataChannel;
   createOffer: (options?: Record<string, unknown>) => Promise<{ sdp?: string; type: string }>;
+  getStats?: (selector?: unknown) => Promise<unknown>;
   iceGatheringState?: string;
   localDescription?: { sdp?: string; type: string } | null;
   onicecandidate?: ((event: { candidate?: unknown | null }) => void) | null;
@@ -44,6 +45,7 @@ export type InterpreterRealtimeStatus =
   | 'error';
 
 export interface InterpreterRealtimeCallbacks {
+  onAudioLevel?: (level: number) => void;
   onError?: (message: string) => void;
   onEvent?: (event: InterpreterRealtimeEvent) => void;
   onStatus?: (status: InterpreterRealtimeStatus) => void;
@@ -113,6 +115,7 @@ export async function startInterpreterRealtimeSession(
   const eventsChannel = peerConnection.createDataChannel?.('oai-events') || null;
   const remoteTracks: Array<{ enabled?: boolean }> = [];
   const audioTracks = getAudioTracks(localStream);
+  let audioLevelPollingCleanup: (() => void) | null = null;
   let closed = false;
 
   if (!audioTracks.length) {
@@ -132,8 +135,6 @@ export async function startInterpreterRealtimeSession(
       track.enabled = false;
       remoteTracks.push(track);
     }
-
-    callbacks.onStatus?.('speaking');
   };
 
   if (eventsChannel) {
@@ -178,8 +179,10 @@ export async function startInterpreterRealtimeSession(
     const answerSdp = await session.createAnswerSdp(localSdp);
 
     await peerConnection.setRemoteDescription({ sdp: answerSdp, type: 'answer' });
+    audioLevelPollingCleanup = startAudioLevelPolling(peerConnection, audioTracks[0], callbacks.onAudioLevel);
     callbacks.onStatus?.('listening');
   } catch (error) {
+    audioLevelPollingCleanup?.();
     closeInterpreterRealtimeSession(peerConnection, localStream, eventsChannel);
     callbacks.onStatus?.('error');
     callbacks.onError?.(error instanceof Error ? error.message : 'Live interpreter could not start.');
@@ -199,15 +202,19 @@ export async function startInterpreterRealtimeSession(
       }
 
       closed = true;
+      audioLevelPollingCleanup?.();
+      callbacks.onAudioLevel?.(0);
       closeInterpreterRealtimeSession(peerConnection, localStream, eventsChannel);
       callbacks.onStatus?.('closed');
     },
     pauseListening: () => {
       setStreamTracksEnabled(localStream, false);
+      callbacks.onAudioLevel?.(0);
       callbacks.onStatus?.('ready');
     },
     respond: () => {
       setStreamTracksEnabled(localStream, false);
+      callbacks.onAudioLevel?.(0);
       setTracksEnabled(remoteTracks, true);
       callbacks.onStatus?.('speaking');
     },
@@ -412,4 +419,107 @@ function pickEventText(raw: Record<string, unknown>): string | undefined {
   }
 
   return undefined;
+}
+
+function startAudioLevelPolling(
+  peerConnection: RtcPeerConnection,
+  audioTrack: unknown,
+  onAudioLevel?: (level: number) => void
+): (() => void) | null {
+  if (!onAudioLevel || !peerConnection.getStats) {
+    return null;
+  }
+
+  let isPolling = false;
+  let previousEnergy: number | null = null;
+  let previousDuration: number | null = null;
+  const timer = setInterval(() => {
+    if (isPolling) {
+      return;
+    }
+
+    isPolling = true;
+    peerConnection.getStats?.(audioTrack)
+      .then((stats) => {
+        const result = extractAudioLevel(stats, previousEnergy, previousDuration);
+
+        previousEnergy = result.totalAudioEnergy ?? previousEnergy;
+        previousDuration = result.totalSamplesDuration ?? previousDuration;
+
+        if (typeof result.level === 'number') {
+          onAudioLevel(Math.max(0, Math.min(1, result.level)));
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        isPolling = false;
+      });
+  }, 160);
+
+  return () => clearInterval(timer);
+}
+
+function extractAudioLevel(
+  stats: unknown,
+  previousEnergy: number | null,
+  previousDuration: number | null
+): { level?: number; totalAudioEnergy?: number; totalSamplesDuration?: number } {
+  const reports = stats instanceof Map
+    ? Array.from(stats.values())
+    : Array.isArray(stats)
+      ? stats
+      : stats && typeof stats === 'object'
+        ? Object.values(stats as Record<string, unknown>)
+        : [];
+
+  let totalAudioEnergy: number | undefined;
+  let totalSamplesDuration: number | undefined;
+
+  for (const report of reports) {
+    if (!report || typeof report !== 'object') {
+      continue;
+    }
+
+    const record = report as Record<string, unknown>;
+    const directAudioLevel = readNumber(record.audioLevel);
+
+    if (typeof directAudioLevel === 'number') {
+      return { level: directAudioLevel };
+    }
+
+    const energy = readNumber(record.totalAudioEnergy);
+    const duration = readNumber(record.totalSamplesDuration);
+
+    if (typeof energy === 'number' && typeof duration === 'number') {
+      totalAudioEnergy = energy;
+      totalSamplesDuration = duration;
+    }
+  }
+
+  if (
+    typeof totalAudioEnergy === 'number' &&
+    typeof totalSamplesDuration === 'number' &&
+    typeof previousEnergy === 'number' &&
+    typeof previousDuration === 'number' &&
+    totalSamplesDuration > previousDuration
+  ) {
+    const energyDelta = Math.max(0, totalAudioEnergy - previousEnergy);
+    const durationDelta = Math.max(0.001, totalSamplesDuration - previousDuration);
+    const rms = Math.sqrt(energyDelta / durationDelta);
+
+    return {
+      level: Math.max(0, Math.min(1, rms * 3.2)),
+      totalAudioEnergy,
+      totalSamplesDuration
+    };
+  }
+
+  return {
+    totalAudioEnergy,
+    totalSamplesDuration
+  };
+}
+
+function readNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }

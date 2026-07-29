@@ -12,9 +12,11 @@ The feature is for live workplace conversations such as:
 
 The experience should feel like a real interpreter:
 
-- The interpreter listens continuously after the meeting starts.
-- It does not speak until the manager taps a target language button.
-- It prepares translations while the person speaks so playback is immediate when requested.
+- The live room opens idle. Nothing is captured until the manager taps `Listen`.
+- `Listen` starts microphone capture and the realtime audio spectrum reacts to microphone input.
+- `Stop` pauses microphone capture and opens the response-language picker.
+- The interpreter does not speak until the manager selects one of the configured meeting languages.
+- It prepares the active translation lane while the person speaks so playback is immediate when requested.
 - It cleans up unclear speech into simple, natural spoken language without changing the intent.
 - It can summarize the meeting so far in one or more configured meeting languages.
 
@@ -357,11 +359,13 @@ The room should feel focused and calm:
 - Visible privacy label: "Interpreter only. Not connected to Chat."
 - Current detected language.
 - Live source transcript preview.
-- Target language buttons.
-- Respond button behavior:
-  - If a language button is tapped, play the prepared interpretation in that language.
-  - If the selected language has no ready audio yet, show a tiny "finishing interpretation" state and play as soon as available.
-- Pause listening.
+- A `Listen` button that starts capture only when the user intentionally taps it.
+- A `Stop` button state while active listening is running.
+- Native response-language picker after Stop.
+- Spoken interpretation in the selected configured meeting language.
+- Language icon/player control that can reopen the response-language picker for the last captured speech.
+- Transcript icon for structured captured speech text.
+- Interpretation history icon for grouped interpretation records by language.
 - End meeting.
 - Summary button.
 
@@ -386,16 +390,21 @@ The live room is for:
 
 Required live-room behavior:
 
-- Show a professional animated listening state while the AI is actively listening.
+- The room opens idle and must not start listening automatically.
+- Show a professional realtime audio spectrum while the AI is actively listening.
 - Show the privacy label inside the live room: interpreter only, not connected to Chat.
-- Display the target-language response buttons created during meeting setup.
-- Tapping a response language pauses microphone listening and opens the interpretation audio gate for that language.
+- Display the configured meeting languages in the response-language picker, not as always-active ambiguous command buttons.
+- Tapping `Listen` starts microphone capture and changes the button to `Stop`.
+- Tapping `Stop` pauses microphone input, opens the response-language picker, and lets the manager choose the language to speak.
+- Selecting a response language closes the picker and opens the spoken interpretation gate for that language.
 - While the interpreter is speaking, the primary control becomes `Listen`.
 - Tapping `Listen` stops the current interpretation audio and returns to live listening.
 - If the user cuts an interpretation short, show:
   - `Continue`: resumes the interrupted interpretation.
   - `Current`: discards the interrupted response and plays the latest prepared interpretation.
-- The app must never create the OpenAI realtime session after the user taps a language. Sessions should already be prepared when the live room starts.
+- The app must not create a new OpenAI realtime session as a visible blocking step after the user chooses a language. If the selected language lane is not active yet, the UI must present a controlled preparation state and never look frozen.
+- Transcript and interpretation history must be available from header icons inside the live room.
+- Interpretation history is grouped by language. Text/audit history is available now; replayable interpreted audio requires the planned segment-audio endpoint or native remote-track recording path before it can be treated as complete.
 - Startup failures must expose the exact layer that failed:
   - Backend OpenAI configuration or model/session error.
   - Device microphone permission.
@@ -591,8 +600,9 @@ For production hardening, the user may later choose to add:
 The feature is enterprise ready when:
 
 - A supervisor can create and start a meeting.
-- The interpreter listens continuously after Start.
-- Tapping a target language plays interpretation without a noticeable wait.
+- The interpreter remains idle until the supervisor taps `Listen`.
+- Tapping `Stop` opens the configured response-language picker.
+- Selecting a response language plays interpretation without a noticeable wait.
 - Level meetings support multiple target languages.
 - Summaries can be generated in selected configured languages.
 - Every sensitive action is audited.

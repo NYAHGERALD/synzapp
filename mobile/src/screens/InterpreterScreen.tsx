@@ -3,7 +3,6 @@ import {
   ActivityIndicator,
   Alert,
   Animated,
-  Easing,
   Modal,
   PanResponder,
   Platform,
@@ -88,7 +87,14 @@ type InterpreterLanguageSessionState = {
   translation: string;
 };
 
-type InterpreterLiveMode = 'idle' | 'connecting' | 'listening' | 'responding' | 'interrupted';
+type InterpreterLiveMode = 'idle' | 'connecting' | 'listening' | 'choosing' | 'responding' | 'interrupted';
+
+type InterpreterLiveHistoryItem = {
+  createdAtIso: string;
+  languageCode: string;
+  sourceText: string;
+  translatedText: string;
+};
 
 type InterpreterSummaryCreateResult = {
   summary: InterpreterMeetingDetails['summaries'][number];
@@ -594,17 +600,21 @@ function InterpreterRoom({
   const [isCheckingRuntime, setIsCheckingRuntime] = useState(false);
   const [isSummaryModalOpen, setIsSummaryModalOpen] = useState(false);
   const [isLiveRoomOpen, setIsLiveRoomOpen] = useState(false);
+  const [isLiveLanguageModalOpen, setIsLiveLanguageModalOpen] = useState(false);
+  const [isLiveTranscriptOpen, setIsLiveTranscriptOpen] = useState(false);
+  const [isLiveHistoryOpen, setIsLiveHistoryOpen] = useState(false);
   const [liveMode, setLiveMode] = useState<InterpreterLiveMode>('idle');
   const [wasInterpretationInterrupted, setWasInterpretationInterrupted] = useState(false);
   const [selectedLanguageCode, setSelectedLanguageCode] = useState(details.meeting.interpreterLanguages[0]?.code || 'en-US');
   const [respondingLanguageCode, setRespondingLanguageCode] = useState<string | null>(null);
   const [invitedUserIds, setInvitedUserIds] = useState<string[]>(details.meeting.invitedUserIds || []);
+  const [audioLevel, setAudioLevel] = useState(0);
+  const [liveInterpretationHistory, setLiveInterpretationHistory] = useState<InterpreterLiveHistoryItem[]>([]);
   const [summaryAudioSourceUri, setSummaryAudioSourceUri] = useState<string | null>(null);
   const [summaryAudioCache, setSummaryAudioCache] = useState<Record<string, string>>({});
   const [activeSummaryAudioKey, setActiveSummaryAudioKey] = useState<string | null>(null);
   const [preparingSummaryAudioKey, setPreparingSummaryAudioKey] = useState<string | null>(null);
   const realtimeSessionPoolRef = useRef<Record<string, InterpreterRealtimeSession>>({});
-  const pulseAnim = useRef(new Animated.Value(0)).current;
   const [languageSessionState, setLanguageSessionState] = useState<Record<string, InterpreterLanguageSessionState>>({});
   const summaryAudioPlayer = useAudioPlayer(summaryAudioSourceUri ? { uri: summaryAudioSourceUri } : null, {
     updateInterval: 250
@@ -631,34 +641,6 @@ function InterpreterRoom({
   }, [summaryAudioStatus.didJustFinish]);
 
   useEffect(() => {
-    const animation = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseAnim, {
-          duration: 1150,
-          easing: Easing.out(Easing.cubic),
-          toValue: 1,
-          useNativeDriver: true
-        }),
-        Animated.timing(pulseAnim, {
-          duration: 450,
-          easing: Easing.in(Easing.cubic),
-          toValue: 0,
-          useNativeDriver: true
-        })
-      ])
-    );
-
-    if (isLiveRoomOpen && (liveMode === 'listening' || liveMode === 'connecting')) {
-      animation.start();
-    } else {
-      animation.stop();
-      pulseAnim.setValue(0);
-    }
-
-    return () => animation.stop();
-  }, [isLiveRoomOpen, liveMode, pulseAnim]);
-
-  useEffect(() => {
     let isMounted = true;
 
     void getInterpreterAudioReadiness().then((readiness) => {
@@ -677,9 +659,25 @@ function InterpreterRoom({
   }, [details.meeting.invitedUserIds]);
 
   useEffect(() => {
+    setLiveInterpretationHistory([]);
+  }, [details.meeting.meetingId]);
+
+  useEffect(() => {
     setLiveTranscript(selectedLanguageSession?.transcript || '');
     setLiveTranslation(selectedLanguageSession?.translation || '');
   }, [selectedLanguageSession?.transcript, selectedLanguageSession?.translation]);
+
+  useEffect(() => {
+    if (liveMode === 'responding' && respondingLanguageCode) {
+      recordLiveInterpretation(respondingLanguageCode);
+    }
+  }, [
+    liveMode,
+    respondingLanguageCode,
+    languageSessionState,
+    liveTranscript,
+    liveTranslation
+  ]);
 
   useEffect(() => {
     const statuses = Object.values(languageSessionState).map((state) => state.status);
@@ -695,8 +693,16 @@ function InterpreterRoom({
     }
 
     if (statuses.some((status) => status === 'listening' || status === 'ready')) {
-      setLiveStatus('listening');
-      setLiveMode((currentMode) => currentMode === 'interrupted' ? currentMode : 'listening');
+      const isChoosingLanguage = statuses.every((status) => status === 'ready');
+
+      setLiveStatus(isChoosingLanguage ? 'ready' : 'listening');
+      setLiveMode((currentMode) => {
+        if (currentMode === 'interrupted' || currentMode === 'choosing') {
+          return currentMode;
+        }
+
+        return isChoosingLanguage ? 'choosing' : 'listening';
+      });
       return;
     }
 
@@ -757,11 +763,13 @@ function InterpreterRoom({
     closeRealtimeSessionPool();
     setLiveTranscript('');
     setLiveTranslation('');
+    setAudioLevel(0);
     setSelectedLanguageCode(languageCode);
     setLiveStatus('connecting');
     setLiveMode('connecting');
     setWasInterpretationInterrupted(false);
     setRespondingLanguageCode(null);
+    setIsLiveLanguageModalOpen(false);
     setIsLiveRoomOpen(true);
 
     try {
@@ -791,6 +799,11 @@ function InterpreterRoom({
           }
         }, {
           onError: (message) => onError(message),
+          onAudioLevel: (level) => {
+            if (language.code === languageCode) {
+              setAudioLevel(level);
+            }
+          },
           onStatus: (status) => updateLanguageSession(language.code, { status }),
           onTranscript: (transcript) => {
             updateLanguageSession(language.code, { transcript });
@@ -838,11 +851,26 @@ function InterpreterRoom({
     setLiveMode('idle');
     setWasInterpretationInterrupted(false);
     setRespondingLanguageCode(null);
+    setIsLiveLanguageModalOpen(false);
+    setAudioLevel(0);
+  }
+
+  function stopListeningAndChooseLanguage() {
+    if (!isRealtimeActive || liveMode !== 'listening') {
+      return;
+    }
+
+    Object.values(realtimeSessionPoolRef.current).forEach((session) => session.pauseListening());
+    setAudioLevel(0);
+    setLiveStatus('ready');
+    setLiveMode('choosing');
+    setIsLiveLanguageModalOpen(true);
   }
 
   function respondInSelectedLanguage(languageCode = selectedLanguageCode) {
     setSelectedLanguageCode(languageCode);
     setRespondingLanguageCode(languageCode);
+    setIsLiveLanguageModalOpen(false);
     if (!realtimeSessionPoolRef.current[languageCode]) {
       stopLiveInterpreter();
       setTimeout(() => {
@@ -859,11 +887,14 @@ function InterpreterRoom({
       }
     });
     setLiveMode('responding');
+    recordLiveInterpretation(languageCode);
   }
 
   function listenAgain() {
     Object.values(realtimeSessionPoolRef.current).forEach((session) => session.cancelResponse());
     setWasInterpretationInterrupted(liveMode === 'responding');
+    setIsLiveLanguageModalOpen(false);
+    setAudioLevel(0);
     setLiveMode('listening');
     setLiveStatus('listening');
   }
@@ -882,6 +913,36 @@ function InterpreterRoom({
   async function startLiveInterpreterForLanguage(languageCode: string) {
     setSelectedLanguageCode(languageCode);
     await startLiveInterpreter(languageCode);
+  }
+
+  function recordLiveInterpretation(languageCode: string) {
+    const session = languageSessionState[languageCode];
+    const translatedText = session?.translation || liveTranslation;
+    const sourceText = session?.transcript || liveTranscript;
+
+    if (!translatedText.trim() && !sourceText.trim()) {
+      return;
+    }
+
+    setLiveInterpretationHistory((currentHistory) => {
+      const lastItem = currentHistory[0];
+
+      if (
+        lastItem &&
+        lastItem.languageCode === languageCode &&
+        lastItem.sourceText === sourceText &&
+        lastItem.translatedText === translatedText
+      ) {
+        return currentHistory;
+      }
+
+      return [{
+        createdAtIso: new Date().toISOString(),
+        languageCode,
+        sourceText,
+        translatedText
+      }, ...currentHistory].slice(0, 80);
+    });
   }
 
   function closeRealtimeSessionPool(resetState = true) {
@@ -1342,8 +1403,13 @@ function InterpreterRoom({
         }}
       />
       <InterpreterLiveRoomModal
+        audioLevel={audioLevel}
         details={details}
+        historyItems={liveInterpretationHistory}
+        isHistoryOpen={isLiveHistoryOpen}
+        isLanguageModalOpen={isLiveLanguageModalOpen}
         isOpen={isLiveRoomOpen}
+        isTranscriptOpen={isLiveTranscriptOpen}
         languageSessionState={languageSessionState}
         liveMode={liveMode}
         liveStatus={liveStatus}
@@ -1356,11 +1422,16 @@ function InterpreterRoom({
           stopLiveInterpreter();
           setIsLiveRoomOpen(false);
         }}
+        onOpenHistory={() => setIsLiveHistoryOpen(true)}
+        onOpenLanguageModal={() => setIsLiveLanguageModalOpen(true)}
+        onOpenTranscript={() => setIsLiveTranscriptOpen(true)}
         onListen={listenAgain}
+        onLanguageModalClose={() => setIsLiveLanguageModalOpen(false)}
         onRespond={respondInSelectedLanguage}
         onStart={() => void startLiveInterpreter()}
-        onStop={stopLiveInterpreter}
-        pulseAnim={pulseAnim}
+        onStop={stopListeningAndChooseLanguage}
+        onTranscriptClose={() => setIsLiveTranscriptOpen(false)}
+        onHistoryClose={() => setIsLiveHistoryOpen(false)}
         respondingLanguageCode={respondingLanguageCode}
         selectedLanguageCode={selectedLanguageCode}
         setSelectedLanguageCode={setSelectedLanguageCode}
@@ -1371,8 +1442,13 @@ function InterpreterRoom({
 }
 
 interface InterpreterLiveRoomModalProps {
+  audioLevel: number;
   details: InterpreterMeetingDetails;
+  historyItems: InterpreterLiveHistoryItem[];
+  isHistoryOpen: boolean;
+  isLanguageModalOpen: boolean;
   isOpen: boolean;
+  isTranscriptOpen: boolean;
   languageSessionState: Record<string, InterpreterLanguageSessionState>;
   liveMode: InterpreterLiveMode;
   liveStatus: InterpreterRealtimeStatus;
@@ -1382,11 +1458,16 @@ interface InterpreterLiveRoomModalProps {
   onContinue: () => void;
   onCurrent: () => void;
   onEnd: () => void;
+  onHistoryClose: () => void;
+  onLanguageModalClose: () => void;
   onListen: () => void;
+  onOpenHistory: () => void;
+  onOpenLanguageModal: () => void;
+  onOpenTranscript: () => void;
   onRespond: (languageCode: string) => void;
   onStart: () => void;
   onStop: () => void;
-  pulseAnim: Animated.Value;
+  onTranscriptClose: () => void;
   respondingLanguageCode: string | null;
   selectedLanguageCode: string;
   setSelectedLanguageCode: (languageCode: string) => void;
@@ -1394,8 +1475,13 @@ interface InterpreterLiveRoomModalProps {
 }
 
 function InterpreterLiveRoomModal({
+  audioLevel,
   details,
+  historyItems,
+  isHistoryOpen,
+  isLanguageModalOpen,
   isOpen,
+  isTranscriptOpen,
   languageSessionState,
   liveMode,
   liveStatus,
@@ -1405,11 +1491,16 @@ function InterpreterLiveRoomModal({
   onContinue,
   onCurrent,
   onEnd,
+  onHistoryClose,
+  onLanguageModalClose,
   onListen,
+  onOpenHistory,
+  onOpenLanguageModal,
+  onOpenTranscript,
   onRespond,
   onStart,
   onStop,
-  pulseAnim,
+  onTranscriptClose,
   respondingLanguageCode,
   selectedLanguageCode,
   setSelectedLanguageCode,
@@ -1420,15 +1511,32 @@ function InterpreterLiveRoomModal({
   const insets = useSafeAreaInsets();
   const selectedLanguage = details.meeting.interpreterLanguages.find((language) => language.code === selectedLanguageCode)
     || details.meeting.interpreterLanguages[0];
-  const pulseScale = pulseAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0.82, 1.32]
-  });
-  const pulseOpacity = pulseAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0.4, 0.04]
-  });
   const isActive = isActiveRealtimeStatus(liveStatus);
+  const canChooseLanguage = isActive && (liveMode === 'choosing' || liveMode === 'responding');
+  const primaryActionLabel = getLivePrimaryActionLabel(liveMode, liveStatus);
+  const primaryActionIcon: IoniconName = liveMode === 'listening'
+    ? 'stop-outline'
+    : liveMode === 'responding'
+      ? 'mic-outline'
+      : 'mic-outline';
+  const handlePrimaryAction = () => {
+    if (liveMode === 'listening') {
+      onStop();
+      return;
+    }
+
+    if (liveMode === 'responding') {
+      onListen();
+      return;
+    }
+
+    if (liveMode === 'choosing') {
+      onOpenLanguageModal();
+      return;
+    }
+
+    onStart();
+  };
 
   return (
     <Modal animationType="slide" onRequestClose={onClose} visible={isOpen}>
@@ -1443,6 +1551,18 @@ function InterpreterLiveRoomModal({
               {formatMeetingType(details.meeting.meetingType)} · {formatRealtimeStatus(liveStatus)}
             </Text>
           </View>
+          <Pressable
+            onPress={onOpenTranscript}
+            style={({ pressed }) => [styles.liveIconButton, pressed && styles.pressed]}
+          >
+            <Ionicons color={appTheme.colors.ink} name="document-text-outline" size={21} />
+          </Pressable>
+          <Pressable
+            onPress={onOpenHistory}
+            style={({ pressed }) => [styles.liveIconButton, pressed && styles.pressed]}
+          >
+            <Ionicons color={appTheme.colors.ink} name="albums-outline" size={21} />
+          </Pressable>
           <Pressable onPress={onEnd} style={({ pressed }) => [styles.liveEndButton, pressed && styles.pressed]}>
             <Text style={styles.liveEndButtonText}>End</Text>
           </Pressable>
@@ -1454,74 +1574,51 @@ function InterpreterLiveRoomModal({
         </View>
 
         <View style={styles.liveRoomStage}>
-          <View style={styles.liveOrbWrap}>
-            <Animated.View
-              style={[
-                styles.liveOrbPulse,
-                { opacity: pulseOpacity, transform: [{ scale: pulseScale }] }
-              ]}
-            />
-            <View style={styles.liveOrb}>
-              <Ionicons
-                color="#fff"
-                name={liveMode === 'responding' ? 'volume-high-outline' : 'mic-outline'}
-                size={42}
-              />
-            </View>
-          </View>
+          <InterpreterAudioSpectrum
+            audioLevel={audioLevel}
+            isListening={liveMode === 'listening'}
+          />
+          <Pressable
+            disabled={liveStatus === 'connecting'}
+            onPress={handlePrimaryAction}
+            style={({ pressed }) => [
+              styles.liveCenterAction,
+              liveMode === 'listening' && styles.liveCenterActionStop,
+              pressed && styles.pressed
+            ]}
+          >
+            {liveStatus === 'connecting' ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Ionicons color="#fff" name={primaryActionIcon} size={24} />
+            )}
+            <Text style={styles.liveCenterActionText}>{primaryActionLabel}</Text>
+          </Pressable>
           <Text style={styles.liveRoomStateTitle}>{getLiveModeTitle(liveMode)}</Text>
           <Text style={styles.liveRoomStateText}>{getLiveModeDescription(liveMode, selectedLanguage?.label || 'selected language')}</Text>
         </View>
 
         <View style={styles.liveRoomLanguageArea}>
-          <Text style={styles.liveRoomSectionLabel}>Respond language</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-            {details.meeting.interpreterLanguages.map((language) => {
-              const isSelected = language.code === selectedLanguageCode;
-              const isRespondingLanguage = liveMode === 'responding' && respondingLanguageCode === language.code;
-              const sessionState = languageSessionState[language.code];
-
-              return (
-                <Pressable
-                  key={language.code}
-                  onPress={() => {
-                    setSelectedLanguageCode(language.code);
-                    if (isActive && language.code !== selectedLanguageCode) {
-                      onRespond(language.code);
-                      return;
-                    }
-
-                    if (isActive) {
-                      onRespond(language.code);
-                    }
-                  }}
-                  style={({ pressed }) => [
-                    styles.liveLanguageButton,
-                    isSelected && styles.liveLanguageButtonActive,
-                    isRespondingLanguage && styles.liveLanguageButtonResponding,
-                    pressed && styles.pressed
-                  ]}
-                >
-                  <Ionicons
-                    color={isRespondingLanguage ? '#fff' : isSelected ? appTheme.colors.primary : appTheme.colors.mutedStrong}
-                    name={isRespondingLanguage ? 'volume-high-outline' : 'language-outline'}
-                    size={16}
-                  />
-                  <View style={[styles.liveLanguageStatus, { backgroundColor: isRespondingLanguage ? '#fff' : getRealtimeStatusColor(sessionState?.status || 'closed') }]} />
-                  <Text style={[
-                    styles.liveLanguageButtonText,
-                    isSelected && styles.liveLanguageButtonTextActive,
-                    isRespondingLanguage && styles.liveLanguageButtonTextResponding
-                  ]}>
-                    {language.label}
-                  </Text>
-                  {isRespondingLanguage ? (
-                    <Text style={styles.liveLanguageRespondingText}>Responding</Text>
-                  ) : null}
-                </Pressable>
-              );
-            })}
-          </ScrollView>
+          <View style={styles.liveLanguageSummaryRow}>
+            <View style={styles.liveLanguageSummaryCopy}>
+              <Text style={styles.liveRoomSectionLabel}>Interpreter languages</Text>
+              <Text style={styles.liveRoomLanguageSummaryText} numberOfLines={2}>
+                {details.meeting.interpreterLanguages.map((language) => language.label).join(', ')}
+              </Text>
+            </View>
+            <Pressable
+              disabled={!canChooseLanguage}
+              onPress={onOpenLanguageModal}
+              style={({ pressed }) => [
+                styles.liveLanguageChooseButton,
+                !canChooseLanguage && styles.disabledButton,
+                pressed && styles.pressed
+              ]}
+            >
+              <Ionicons color={appTheme.colors.primary} name="language-outline" size={17} />
+              <Text style={styles.liveLanguageChooseText}>Choose</Text>
+            </Pressable>
+          </View>
         </View>
 
         <View style={styles.liveRoomTranscriptArea}>
@@ -1550,33 +1647,268 @@ function InterpreterLiveRoomModal({
         ) : null}
 
         <View style={styles.liveRoomFooter}>
-          {isActive ? (
-            <>
-              <Pressable
-                disabled={liveMode !== 'responding'}
-                onPress={onListen}
-                style={({ pressed }) => [
-                  styles.liveListenAction,
-                  liveMode !== 'responding' && styles.liveListenActionActive,
-                  pressed && styles.pressed
-                ]}
-              >
-                <Ionicons color="#fff" name="mic-outline" size={20} />
-                <Text style={styles.liveRespondActionText}>
-                  {liveMode === 'responding' ? 'Listen' : 'Listening'}
-                </Text>
-              </Pressable>
-              <Pressable onPress={onStop} style={({ pressed }) => [styles.liveStopAction, pressed && styles.pressed]}>
-                <Ionicons color={appTheme.colors.red} name="stop-circle-outline" size={20} />
-              </Pressable>
-            </>
-          ) : (
-            <Pressable onPress={onStart} style={({ pressed }) => [styles.liveRespondAction, pressed && styles.pressed]}>
-              <Ionicons color="#fff" name="mic-outline" size={20} />
-              <Text style={styles.liveRespondActionText}>Listen</Text>
-            </Pressable>
-          )}
+          <Text style={styles.liveFooterHint}>
+            {getLiveFooterHint(liveMode)}
+          </Text>
         </View>
+        <InterpreterResponseLanguageModal
+          isOpen={isLanguageModalOpen}
+          languages={details.meeting.interpreterLanguages}
+          onClose={onLanguageModalClose}
+          onSelect={(languageCode) => {
+            setSelectedLanguageCode(languageCode);
+            onRespond(languageCode);
+          }}
+          respondingLanguageCode={respondingLanguageCode}
+          selectedLanguageCode={selectedLanguageCode}
+        />
+        <InterpreterLiveTranscriptModal
+          details={details}
+          isOpen={isTranscriptOpen}
+          liveTranscript={liveTranscript}
+          onClose={onTranscriptClose}
+        />
+        <InterpreterInterpretationHistoryModal
+          details={details}
+          historyItems={historyItems}
+          isOpen={isHistoryOpen}
+          onClose={onHistoryClose}
+        />
+      </View>
+    </Modal>
+  );
+}
+
+interface InterpreterAudioSpectrumProps {
+  audioLevel: number;
+  isListening: boolean;
+}
+
+function InterpreterAudioSpectrum({ audioLevel, isListening }: InterpreterAudioSpectrumProps) {
+  const appTheme = useAppTheme();
+  const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
+  const bars = useMemo(() => [0.36, 0.62, 0.84, 0.54, 1, 0.72, 0.44, 0.68, 0.38], []);
+  const normalizedLevel = isListening ? Math.max(0.08, Math.min(1, audioLevel || 0.18)) : 0.08;
+
+  return (
+    <View style={styles.audioSpectrumWrap}>
+      <View style={styles.audioSpectrum}>
+        {bars.map((bar, index) => {
+          const height = 18 + Math.round(92 * Math.min(1, normalizedLevel * (0.55 + bar)));
+
+          return (
+            <View
+              key={`${bar}-${index}`}
+              style={[
+                styles.audioSpectrumBar,
+                {
+                  height,
+                  opacity: isListening ? 0.5 + normalizedLevel * 0.5 : 0.28
+                }
+              ]}
+            />
+          );
+        })}
+      </View>
+      <Text style={styles.audioSpectrumLabel}>
+        {isListening ? 'Listening to microphone input' : 'Audio spectrum ready'}
+      </Text>
+    </View>
+  );
+}
+
+interface InterpreterResponseLanguageModalProps {
+  isOpen: boolean;
+  languages: InterpreterLanguage[];
+  onClose: () => void;
+  onSelect: (languageCode: string) => void;
+  respondingLanguageCode: string | null;
+  selectedLanguageCode: string;
+}
+
+function InterpreterResponseLanguageModal({
+  isOpen,
+  languages,
+  onClose,
+  onSelect,
+  respondingLanguageCode,
+  selectedLanguageCode
+}: InterpreterResponseLanguageModalProps) {
+  const appTheme = useAppTheme();
+  const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
+  const insets = useSafeAreaInsets();
+
+  return (
+    <Modal animationType="fade" onRequestClose={onClose} transparent visible={isOpen}>
+      <Pressable onPress={onClose} style={styles.pickerOverlay}>
+        <Pressable style={[styles.pickerSheet, { paddingBottom: Math.max(insets.bottom + 14, 24) }]}>
+          <View style={styles.modalHandle} />
+          <View style={styles.modalHeader}>
+            <View>
+              <Text style={styles.eyebrow}>INTERPRET NOW</Text>
+              <Text style={styles.modalTitle}>Choose response language</Text>
+            </View>
+            <Pressable onPress={onClose} style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}>
+              <Ionicons color={appTheme.colors.ink} name="close" size={24} />
+            </Pressable>
+          </View>
+          <Text style={styles.subtitle}>
+            The interpreter will pause listening and speak the latest captured speech in the selected language.
+          </Text>
+          <View style={styles.responseLanguageGrid}>
+            {languages.map((language) => {
+              const isSelected = language.code === selectedLanguageCode;
+              const isResponding = language.code === respondingLanguageCode;
+
+              return (
+                <Pressable
+                  key={language.code}
+                  onPress={() => onSelect(language.code)}
+                  style={({ pressed }) => [
+                    styles.responseLanguageButton,
+                    isSelected && styles.responseLanguageButtonSelected,
+                    isResponding && styles.responseLanguageButtonResponding,
+                    pressed && styles.pressed
+                  ]}
+                >
+                  <Ionicons
+                    color={isResponding ? '#fff' : isSelected ? appTheme.colors.primary : appTheme.colors.mutedStrong}
+                    name={isResponding ? 'volume-high-outline' : 'language-outline'}
+                    size={20}
+                  />
+                  <View style={styles.selectionBody}>
+                    <Text style={[
+                      styles.responseLanguageTitle,
+                      isResponding && styles.responseLanguageTitleResponding
+                    ]}>
+                      {language.label}
+                    </Text>
+                    <Text style={[
+                      styles.responseLanguageMeta,
+                      isResponding && styles.responseLanguageTitleResponding
+                    ]}>
+                      {isResponding ? 'Speaking now' : isSelected ? 'Current choice' : 'Tap to interpret'}
+                    </Text>
+                  </View>
+                </Pressable>
+              );
+            })}
+          </View>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+interface InterpreterLiveTranscriptModalProps {
+  details: InterpreterMeetingDetails;
+  isOpen: boolean;
+  liveTranscript: string;
+  onClose: () => void;
+}
+
+function InterpreterLiveTranscriptModal({
+  details,
+  isOpen,
+  liveTranscript,
+  onClose
+}: InterpreterLiveTranscriptModalProps) {
+  const appTheme = useAppTheme();
+  const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
+  const insets = useSafeAreaInsets();
+  const transcriptRows = [
+    ...(liveTranscript.trim()
+      ? [{
+          createdAtIso: new Date().toISOString(),
+          text: liveTranscript
+        }]
+      : []),
+    ...details.transcripts
+  ];
+
+  return (
+    <Modal animationType="slide" onRequestClose={onClose} visible={isOpen}>
+      <View style={[styles.liveDetailScreen, { paddingBottom: Math.max(insets.bottom + 16, 28), paddingTop: Math.max(insets.top + 12, 24) }]}>
+        <View style={styles.liveRoomHeader}>
+          <Pressable onPress={onClose} style={({ pressed }) => [styles.liveIconButton, pressed && styles.pressed]}>
+            <Ionicons color={appTheme.colors.ink} name="chevron-down" size={24} />
+          </Pressable>
+          <View style={styles.liveRoomTitleWrap}>
+            <Text style={styles.liveRoomTitle}>Transcript</Text>
+            <Text style={styles.liveRoomMeta}>{details.meeting.meetingName}</Text>
+          </View>
+        </View>
+        <ScrollView contentContainerStyle={styles.liveDetailList}>
+          {transcriptRows.length ? transcriptRows.map((segment, index) => (
+            <View key={segment.segmentId || `${segment.createdAtIso}-${index}`} style={styles.liveDetailRow}>
+              <Text style={styles.liveDetailMeta}>{formatDateTime(segment.createdAtIso)}</Text>
+              <Text style={styles.liveDetailText}>{segment.text}</Text>
+            </View>
+          )) : (
+            <Text style={styles.mutedText}>Transcript appears here after the interpreter captures speech.</Text>
+          )}
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+}
+
+interface InterpreterInterpretationHistoryModalProps {
+  details: InterpreterMeetingDetails;
+  historyItems: InterpreterLiveHistoryItem[];
+  isOpen: boolean;
+  onClose: () => void;
+}
+
+function InterpreterInterpretationHistoryModal({
+  details,
+  historyItems,
+  isOpen,
+  onClose
+}: InterpreterInterpretationHistoryModalProps) {
+  const appTheme = useAppTheme();
+  const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
+  const insets = useSafeAreaInsets();
+  const groupedHistory = groupInterpreterHistory(details, historyItems);
+
+  return (
+    <Modal animationType="slide" onRequestClose={onClose} visible={isOpen}>
+      <View style={[styles.liveDetailScreen, { paddingBottom: Math.max(insets.bottom + 16, 28), paddingTop: Math.max(insets.top + 12, 24) }]}>
+        <View style={styles.liveRoomHeader}>
+          <Pressable onPress={onClose} style={({ pressed }) => [styles.liveIconButton, pressed && styles.pressed]}>
+            <Ionicons color={appTheme.colors.ink} name="chevron-down" size={24} />
+          </Pressable>
+          <View style={styles.liveRoomTitleWrap}>
+            <Text style={styles.liveRoomTitle}>Interpretation history</Text>
+            <Text style={styles.liveRoomMeta}>Grouped by meeting language</Text>
+          </View>
+        </View>
+        <ScrollView contentContainerStyle={styles.liveDetailList}>
+          {groupedHistory.length ? groupedHistory.map((group) => (
+            <View key={group.language.code} style={styles.historyLanguageGroup}>
+              <Text style={styles.liveRoomSectionLabel}>{group.language.label}</Text>
+              {group.items.map((item, index) => (
+                <View key={`${item.createdAtIso}-${index}`} style={styles.liveDetailRow}>
+                  <View style={styles.historyRowHeader}>
+                    <Text style={styles.liveDetailMeta}>{formatDateTime(item.createdAtIso)}</Text>
+                    <Ionicons color={appTheme.colors.primary} name="volume-high-outline" size={16} />
+                  </View>
+                  {item.sourceText ? (
+                    <Text style={styles.historySourceText}>{item.sourceText}</Text>
+                  ) : null}
+                  <Text style={styles.liveDetailText}>{item.translatedText || 'Interpretation audio was played live.'}</Text>
+                </View>
+              ))}
+            </View>
+          )) : (
+            <View style={styles.liveDetailRow}>
+              <Text style={styles.liveDetailText}>No interpretations have been played in this session yet.</Text>
+              <Text style={styles.mutedText}>
+                Replayable interpretation audio requires the next native/backend audio-history endpoint; this screen already groups the auditable interpretation records by language.
+              </Text>
+            </View>
+          )}
+        </ScrollView>
       </View>
     </Modal>
   );
@@ -2425,7 +2757,7 @@ function getRealtimeStatusDescription(status: InterpreterRealtimeStatus): string
     case 'connecting':
       return 'Creating the encrypted live interpreter session.';
     case 'listening':
-      return 'Speak naturally, then tap the target language to respond.';
+      return 'Speak naturally, then tap Stop when the speaker is finished.';
     case 'speaking':
       return 'Playing the interpretation in the selected language.';
     case 'ready':
@@ -2444,6 +2776,8 @@ function getLiveModeTitle(mode: InterpreterLiveMode): string {
       return 'Preparing the interpreter';
     case 'listening':
       return 'Listening to the conversation';
+    case 'choosing':
+      return 'Choose the response language';
     case 'responding':
       return 'Interpreting now';
     case 'interrupted':
@@ -2459,7 +2793,9 @@ function getLiveModeDescription(mode: InterpreterLiveMode, languageLabel: string
     case 'connecting':
       return 'Synzapp is opening the secure realtime interpreter session.';
     case 'listening':
-      return 'Let the speaker finish, then tap a language to respond.';
+      return 'The spectrum reacts to microphone input. Tap Stop when the speaker is finished.';
+    case 'choosing':
+      return 'Select the language your team should hear for the last listening segment.';
     case 'responding':
       return `The interpreter is speaking in ${languageLabel}. Tap Listen to return to the room.`;
     case 'interrupted':
@@ -2467,6 +2803,40 @@ function getLiveModeDescription(mode: InterpreterLiveMode, languageLabel: string
     case 'idle':
     default:
       return 'Tap Listen after microphone readiness and meeting access are correct.';
+  }
+}
+
+function getLivePrimaryActionLabel(mode: InterpreterLiveMode, status: InterpreterRealtimeStatus): string {
+  if (status === 'connecting' || mode === 'connecting') {
+    return 'Preparing';
+  }
+
+  if (mode === 'listening') {
+    return 'Stop';
+  }
+
+  if (mode === 'choosing') {
+    return 'Choose language';
+  }
+
+  return 'Listen';
+}
+
+function getLiveFooterHint(mode: InterpreterLiveMode): string {
+  switch (mode) {
+    case 'connecting':
+      return 'Preparing the secure audio session.';
+    case 'listening':
+      return 'Tap Stop when the speaker finishes. Synzapp will ask which meeting language to speak.';
+    case 'choosing':
+      return 'Choose a language to play the interpretation for the last captured speech.';
+    case 'responding':
+      return 'Tap Listen to stop speaking and return to microphone listening.';
+    case 'interrupted':
+      return 'Use Continue for the paused interpretation, or Current for the latest captured speech.';
+    case 'idle':
+    default:
+      return 'Tap Listen to begin. Nothing is captured before Listen is active.';
   }
 }
 
@@ -2503,6 +2873,63 @@ function getSessionPoolReadyCount(sessionState: Record<string, InterpreterLangua
   return Object.values(sessionState).filter((state) =>
     state.status === 'listening' || state.status === 'ready' || state.status === 'speaking'
   ).length;
+}
+
+function formatDateTime(dateIso: string): string {
+  const date = new Date(dateIso);
+
+  if (Number.isNaN(date.getTime())) {
+    return 'Time unavailable';
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short'
+  }).format(date);
+}
+
+function getInterpreterLanguageLabel(details: InterpreterMeetingDetails, languageCode: string): string {
+  return details.meeting.interpreterLanguages.find((language) => language.code === languageCode)?.label
+    || languageCode;
+}
+
+function groupInterpreterHistory(
+  details: InterpreterMeetingDetails,
+  liveHistoryItems: InterpreterLiveHistoryItem[]
+): Array<{ items: InterpreterLiveHistoryItem[]; language: InterpreterLanguage }> {
+  const persistedItems: InterpreterLiveHistoryItem[] = details.translations.map((translation) => {
+    const sourceSegment = details.transcripts.find((transcript) => transcript.segmentId === translation.sourceSegmentId);
+
+    return {
+      createdAtIso: translation.createdAtIso,
+      languageCode: translation.targetLanguageCode,
+      sourceText: sourceSegment?.text || '',
+      translatedText: translation.translatedText
+    };
+  });
+  const allItems = [...liveHistoryItems, ...persistedItems]
+    .filter((item) => item.languageCode)
+    .sort((firstItem, secondItem) =>
+      new Date(secondItem.createdAtIso).getTime() - new Date(firstItem.createdAtIso).getTime()
+    );
+  const languageMap = new Map<string, InterpreterLanguage>();
+
+  details.meeting.interpreterLanguages.forEach((language) => languageMap.set(language.code, language));
+  allItems.forEach((item) => {
+    if (!languageMap.has(item.languageCode)) {
+      languageMap.set(item.languageCode, {
+        code: item.languageCode,
+        label: getInterpreterLanguageLabel(details, item.languageCode)
+      });
+    }
+  });
+
+  return Array.from(languageMap.values())
+    .map((language) => ({
+      language,
+      items: allItems.filter((item) => item.languageCode === language.code)
+    }))
+    .filter((group) => group.items.length);
 }
 
 function getDraftScheduleDate(scheduledAtIso: string | null): Date {
@@ -2967,6 +3394,47 @@ function createStyles(colors: AppColors) {
       justifyContent: 'center',
       width: 42
     },
+    audioSpectrumWrap: {
+      alignItems: 'center',
+      gap: 12,
+      marginBottom: 22
+    },
+    audioSpectrum: {
+      alignItems: 'center',
+      flexDirection: 'row',
+      gap: 5,
+      height: 132,
+      justifyContent: 'center',
+      width: 210
+    },
+    audioSpectrumBar: {
+      backgroundColor: colors.primary,
+      borderRadius: 999,
+      width: 9
+    },
+    audioSpectrumLabel: {
+      color: colors.mutedStrong,
+      fontSize: 12
+    },
+    liveCenterAction: {
+      alignItems: 'center',
+      backgroundColor: colors.primary,
+      borderRadius: 999,
+      flexDirection: 'row',
+      gap: 8,
+      justifyContent: 'center',
+      marginBottom: 24,
+      minHeight: 48,
+      minWidth: 158,
+      paddingHorizontal: 22
+    },
+    liveCenterActionStop: {
+      backgroundColor: '#b91c1c'
+    },
+    liveCenterActionText: {
+      color: '#fff',
+      fontSize: 15
+    },
     liveLanguageButton: {
       alignItems: 'center',
       backgroundColor: colors.surfaceElevated,
@@ -3002,6 +3470,36 @@ function createStyles(colors: AppColors) {
       borderRadius: 4,
       height: 8,
       width: 8
+    },
+    liveLanguageSummaryRow: {
+      alignItems: 'center',
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
+      flexDirection: 'row',
+      gap: 12,
+      paddingBottom: 14
+    },
+    liveLanguageSummaryCopy: {
+      flex: 1,
+      gap: 4
+    },
+    liveRoomLanguageSummaryText: {
+      color: colors.ink,
+      fontSize: 14,
+      lineHeight: 20
+    },
+    liveLanguageChooseButton: {
+      alignItems: 'center',
+      backgroundColor: colors.primarySoft,
+      borderRadius: 999,
+      flexDirection: 'row',
+      gap: 6,
+      minHeight: 38,
+      paddingHorizontal: 13
+    },
+    liveLanguageChooseText: {
+      color: colors.primary,
+      fontSize: 13
     },
     liveListenAction: {
       alignItems: 'center',
@@ -3085,6 +3583,12 @@ function createStyles(colors: AppColors) {
       flexDirection: 'row',
       gap: 10
     },
+    liveFooterHint: {
+      color: colors.mutedStrong,
+      flex: 1,
+      fontSize: 12,
+      lineHeight: 18
+    },
     liveRoomHeader: {
       alignItems: 'center',
       flexDirection: 'row',
@@ -3156,6 +3660,29 @@ function createStyles(colors: AppColors) {
     liveRoomTitleWrap: {
       flex: 1
     },
+    liveDetailScreen: {
+      backgroundColor: colors.surface,
+      flex: 1,
+      paddingHorizontal: 18
+    },
+    liveDetailList: {
+      paddingBottom: 28
+    },
+    liveDetailRow: {
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
+      gap: 6,
+      paddingVertical: 14
+    },
+    liveDetailMeta: {
+      color: colors.mutedStrong,
+      fontSize: 12
+    },
+    liveDetailText: {
+      color: colors.ink,
+      fontSize: 15,
+      lineHeight: 22
+    },
     liveRoomTranscriptArea: {
       borderBottomColor: colors.divider,
       borderBottomWidth: 1,
@@ -3189,6 +3716,20 @@ function createStyles(colors: AppColors) {
     liveSecondaryActionText: {
       color: colors.ink,
       fontSize: 14
+    },
+    historyLanguageGroup: {
+      gap: 6,
+      marginBottom: 10
+    },
+    historyRowHeader: {
+      alignItems: 'center',
+      flexDirection: 'row',
+      justifyContent: 'space-between'
+    },
+    historySourceText: {
+      color: colors.mutedStrong,
+      fontSize: 13,
+      lineHeight: 19
     },
     meetingBody: {
       flex: 1,
@@ -3449,6 +3990,38 @@ function createStyles(colors: AppColors) {
       flexDirection: 'row',
       gap: 10,
       paddingBottom: 12
+    },
+    responseLanguageGrid: {
+      gap: 8,
+      marginTop: 16
+    },
+    responseLanguageButton: {
+      alignItems: 'center',
+      backgroundColor: colors.surface,
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
+      flexDirection: 'row',
+      gap: 12,
+      minHeight: 58,
+      paddingVertical: 10
+    },
+    responseLanguageButtonSelected: {
+      backgroundColor: colors.primarySoft
+    },
+    responseLanguageButtonResponding: {
+      backgroundColor: colors.primary,
+      borderBottomColor: colors.primary
+    },
+    responseLanguageTitle: {
+      color: colors.ink,
+      fontSize: 15
+    },
+    responseLanguageMeta: {
+      color: colors.mutedStrong,
+      fontSize: 12
+    },
+    responseLanguageTitleResponding: {
+      color: '#fff'
     },
     roomHeader: {
       alignItems: 'center',
