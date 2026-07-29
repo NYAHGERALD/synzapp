@@ -84,6 +84,11 @@ export interface InterpreterSegmentAudio extends InterpreterSummaryAudio {
   translationModel: string;
 }
 
+export interface InterpreterVoicePreviewAudio extends InterpreterSummaryAudio {
+  previewText: string;
+  voiceProfile: InterpreterVoiceProfile;
+}
+
 export interface InterpreterMeetingDetails {
   auditEvents: unknown[];
   meeting: InterpreterMeeting;
@@ -203,6 +208,19 @@ export async function updateInterpreterMeetingInvitations(
 ) {
   const response = await interpreterFetch(idToken, `/meetings/${encodeURIComponent(meetingId)}/invitations`, {
     body: JSON.stringify({ invitedUserIds }),
+    method: 'POST'
+  });
+
+  return response.json() as Promise<{ meeting: InterpreterMeeting }>;
+}
+
+export async function updateInterpreterMeetingVoice(
+  idToken: string,
+  meetingId: string,
+  interpreterVoiceId: string
+) {
+  const response = await interpreterFetch(idToken, `/meetings/${encodeURIComponent(meetingId)}/voice`, {
+    body: JSON.stringify({ interpreterVoiceId }),
     method: 'POST'
   });
 
@@ -329,6 +347,42 @@ export async function createInterpreterInterpretationAudio(
   });
 
   return response.json() as Promise<{ audio: InterpreterSegmentAudio }>;
+}
+
+export async function createInterpreterTranslationReplayAudio(
+  idToken: string,
+  meetingId: string,
+  translationId: string,
+  voiceId?: string | null
+) {
+  const response = await interpreterFetch(
+    idToken,
+    `/meetings/${encodeURIComponent(meetingId)}/translations/${encodeURIComponent(translationId)}/audio`,
+    {
+      body: JSON.stringify({ voiceId: voiceId || null }),
+      method: 'POST'
+    }
+  );
+
+  return response.json() as Promise<{ audio: InterpreterSegmentAudio }>;
+}
+
+export async function createInterpreterVoicePreviewAudio(
+  idToken: string,
+  input: {
+    languageCode?: string | null;
+    voiceId: string;
+  }
+) {
+  const response = await interpreterFetch(idToken, '/voices/preview', {
+    body: JSON.stringify({
+      languageCode: input.languageCode || null,
+      voiceId: input.voiceId
+    }),
+    method: 'POST'
+  });
+
+  return response.json() as Promise<{ audio: InterpreterVoicePreviewAudio }>;
 }
 
 export async function createInterpreterSummary(

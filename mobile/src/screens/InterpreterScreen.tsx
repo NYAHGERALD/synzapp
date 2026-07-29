@@ -36,6 +36,8 @@ import {
   createInterpreterRealtimeClientSecret,
   createInterpreterSummary,
   createInterpreterSummaryAudio,
+  createInterpreterTranslationReplayAudio,
+  createInterpreterVoicePreviewAudio,
   deleteInterpreterMeeting,
   endInterpreterMeeting,
   exchangeInterpreterRealtimeSdpWithClientSecret,
@@ -48,11 +50,13 @@ import {
   InterpreterSummaryAudio,
   InterpreterMeetingType,
   InterpreterVoiceProfile,
+  InterpreterVoicePreviewAudio,
   listInterpreterMeetings,
   listInterpreterParticipants,
   runInterpreterRealtimeProviderDiagnostic,
   startInterpreterMeeting,
-  updateInterpreterMeetingInvitations
+  updateInterpreterMeetingInvitations,
+  updateInterpreterMeetingVoice
 } from '../services/interpreterApi';
 import {
   getInterpreterAudioReadiness,
@@ -75,7 +79,11 @@ const FALLBACK_INTERPRETER_VOICES: InterpreterVoiceProfile[] = [
   { id: 'cedar', label: 'Cedar', description: 'Calm executive interpreter for workplace conversations.' },
   { id: 'marin', label: 'Marin', description: 'Clear multilingual facilitator for mixed teams.' },
   { id: 'coral', label: 'Coral', description: 'Warm natural interpreter for coaching and 1-on-1s.' },
-  { id: 'sage', label: 'Sage', description: 'Measured enterprise voice for sensitive meetings.' }
+  { id: 'sage', label: 'Sage', description: 'Measured enterprise voice for sensitive meetings.' },
+  { id: 'verse', label: 'Verse', description: 'Expressive interpreter for training and standups.' },
+  { id: 'ash', label: 'Ash', description: 'Neutral operations voice for daily production meetings.' },
+  { id: 'nova', label: 'Nova', description: 'Bright modern voice for concise workplace updates.' },
+  { id: 'shimmer', label: 'Shimmer', description: 'Smooth voice for service and people-focused conversations.' }
 ];
 const REMINDER_LEAD_MINUTES = [5, 10, 15, 30, 60, 120, 1440];
 const REMINDER_FREQUENCIES: Array<InterpreterCreateDraft['reminderFrequency']> = ['once', 'daily', 'weekly'];
@@ -89,6 +97,7 @@ const INTERPRETER_SUMMARY_AUDIO_MODE: AudioMode = {
 };
 const INTERPRETER_SUMMARY_AUDIO_CACHE_DIR = `${FileSystem.cacheDirectory || ''}synzapp-interpreter-summaries/`;
 const INTERPRETER_SEGMENT_AUDIO_CACHE_DIR = `${FileSystem.cacheDirectory || ''}synzapp-interpreter-segments/`;
+const INTERPRETER_VOICE_PREVIEW_AUDIO_CACHE_DIR = `${FileSystem.cacheDirectory || ''}synzapp-interpreter-voices/`;
 
 type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
 
@@ -105,6 +114,7 @@ type InterpreterLiveHistoryItem = {
   languageCode: string;
   sourceText: string;
   translatedText: string;
+  translationId?: string;
 };
 
 type InterpreterSummaryCreateResult = {
@@ -319,6 +329,32 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
     }
   }
 
+  async function handleUpdateMeetingVoice(interpreterVoiceId: string) {
+    const meeting = selectedMeetingDetails?.meeting;
+
+    if (!meeting) {
+      return;
+    }
+
+    setIsBusy(true);
+
+    try {
+      const idToken = await getIdToken();
+      const result = await updateInterpreterMeetingVoice(idToken, meeting.meetingId, interpreterVoiceId);
+
+      setSelectedMeetingDetails((currentDetails) => currentDetails
+        ? { ...currentDetails, meeting: result.meeting }
+        : currentDetails);
+      setMeetings((currentMeetings) => currentMeetings.map((currentMeeting) =>
+        currentMeeting.meetingId === result.meeting.meetingId ? result.meeting : currentMeeting
+      ));
+    } catch (error) {
+      showInterpreterError(getErrorMessage(error), 'Speaker selection needs attention');
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
   async function handleAddDemoTranscript(text: string, targetLanguageCode: string) {
     const meeting = selectedMeetingDetails?.meeting;
 
@@ -396,6 +432,7 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
         onError={showInterpreterError}
         onCreateRealtimeSdpAnswer={handleCreateRealtimeSdpAnswer}
         onUpdateInvitations={handleUpdateInvitations}
+        onUpdateVoice={handleUpdateMeetingVoice}
         participants={participants}
         voiceProfiles={voiceProfiles}
       />
@@ -453,6 +490,7 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
       )}
 
       <InterpreterCreateModal
+        getIdToken={getIdToken}
         isBusy={isBusy}
         isOpen={isCreateOpen}
         languages={languages}
@@ -477,6 +515,7 @@ interface InterpreterRoomProps {
   onError: (message: string, title?: string) => void;
   onCreateRealtimeSdpAnswer: (targetLanguageCode: string, offerSdp: string) => Promise<string | null>;
   onUpdateInvitations: (invitedUserIds: string[]) => Promise<void>;
+  onUpdateVoice: (interpreterVoiceId: string) => Promise<void>;
   participants: InterpreterParticipant[];
   voiceProfiles: InterpreterVoiceProfile[];
 }
@@ -603,6 +642,7 @@ function InterpreterRoom({
   onError,
   onCreateRealtimeSdpAnswer,
   onUpdateInvitations,
+  onUpdateVoice,
   participants,
   voiceProfiles
 }: InterpreterRoomProps) {
@@ -621,6 +661,7 @@ function InterpreterRoom({
   const [isLiveLanguageModalOpen, setIsLiveLanguageModalOpen] = useState(false);
   const [isLiveTranscriptOpen, setIsLiveTranscriptOpen] = useState(false);
   const [isLiveHistoryOpen, setIsLiveHistoryOpen] = useState(false);
+  const [isRoomVoicePickerOpen, setIsRoomVoicePickerOpen] = useState(false);
   const [liveMode, setLiveMode] = useState<InterpreterLiveMode>('idle');
   const [wasInterpretationInterrupted, setWasInterpretationInterrupted] = useState(false);
   const [selectedLanguageCode, setSelectedLanguageCode] = useState(details.meeting.interpreterLanguages[0]?.code || 'en-US');
@@ -638,6 +679,12 @@ function InterpreterRoom({
   const [activeSegmentAudioKey, setActiveSegmentAudioKey] = useState<string | null>(null);
   const [pendingSegmentAudioKey, setPendingSegmentAudioKey] = useState<string | null>(null);
   const [isPreparingSegmentAudio, setIsPreparingSegmentAudio] = useState(false);
+  const [preparingHistoryAudioKey, setPreparingHistoryAudioKey] = useState<string | null>(null);
+  const [roomVoicePreviewSourceUri, setRoomVoicePreviewSourceUri] = useState<string | null>(null);
+  const [roomVoicePreviewCache, setRoomVoicePreviewCache] = useState<Record<string, string>>({});
+  const [activeRoomVoicePreviewKey, setActiveRoomVoicePreviewKey] = useState<string | null>(null);
+  const [pendingRoomVoicePreviewKey, setPendingRoomVoicePreviewKey] = useState<string | null>(null);
+  const [preparingRoomVoicePreviewKey, setPreparingRoomVoicePreviewKey] = useState<string | null>(null);
   const realtimeSessionPoolRef = useRef<Record<string, InterpreterRealtimeSession>>({});
   const [languageSessionState, setLanguageSessionState] = useState<Record<string, InterpreterLanguageSessionState>>({});
   const summaryAudioPlayer = useAudioPlayer(summaryAudioSourceUri ? { uri: summaryAudioSourceUri } : null, {
@@ -648,13 +695,32 @@ function InterpreterRoom({
     updateInterval: 250
   });
   const segmentAudioStatus = useAudioPlayerStatus(segmentAudioPlayer);
+  const roomVoicePreviewPlayer = useAudioPlayer(roomVoicePreviewSourceUri ? { uri: roomVoicePreviewSourceUri } : null, {
+    updateInterval: 250
+  });
+  const roomVoicePreviewStatus = useAudioPlayerStatus(roomVoicePreviewPlayer);
   const latestTranslation = [...details.translations].reverse()
     .find((translation) => translation.targetLanguageCode === selectedLanguageCode);
   const selectedLanguageSession = languageSessionState[selectedLanguageCode];
   const selectedVoiceId = details.meeting.interpreterVoiceId || DEFAULT_INTERPRETER_VOICE_ID;
   const selectedVoiceProfile = getInterpreterVoiceProfile(voiceProfiles, selectedVoiceId);
+  const latestReplayItem = groupInterpreterHistory(details, liveInterpretationHistory)[0]?.items[0] || null;
+  const latestReplayAudioKey = latestReplayItem
+    ? getHistoryAudioKey(details.meeting.meetingId, latestReplayItem)
+    : null;
   const activeSessionStatuses = Object.values(languageSessionState).map((state) => state.status);
   const isRealtimeActive = activeSessionStatuses.some(isActiveRealtimeStatus);
+  const hasLiveRoomMemory = isRealtimeActive ||
+    Boolean(liveTranscript.trim()) ||
+    Boolean(liveTranslation.trim()) ||
+    liveInterpretationHistory.length > 0 ||
+    details.transcripts.length > 0 ||
+    details.translations.length > 0;
+  const liveRoomPrimaryLabel = hasLiveRoomMemory && !isLiveRoomOpen
+    ? 'Resume live room'
+    : isRealtimeActive
+      ? 'Open live room'
+      : 'Listen';
 
   useEffect(() => () => {
     closeRealtimeSessionPool(false);
@@ -667,6 +733,10 @@ function InterpreterRoom({
   useEffect(() => () => {
     safePauseAudioPlayer(segmentAudioPlayer);
   }, [segmentAudioPlayer]);
+
+  useEffect(() => () => {
+    safePauseAudioPlayer(roomVoicePreviewPlayer);
+  }, [roomVoicePreviewPlayer]);
 
   useEffect(() => {
     if (summaryAudioStatus.didJustFinish) {
@@ -768,6 +838,51 @@ function InterpreterRoom({
     segmentAudioPlayer,
     segmentAudioSourceUri,
     segmentAudioStatus.isLoaded
+  ]);
+
+  useEffect(() => {
+    if (roomVoicePreviewStatus.didJustFinish) {
+      setActiveRoomVoicePreviewKey(null);
+    }
+  }, [roomVoicePreviewStatus.didJustFinish]);
+
+  useEffect(() => {
+    if (!pendingRoomVoicePreviewKey || !roomVoicePreviewSourceUri || !roomVoicePreviewStatus.isLoaded) {
+      return;
+    }
+
+    let isCancelled = false;
+
+    void (async () => {
+      try {
+        await setAudioModeAsync(INTERPRETER_SUMMARY_AUDIO_MODE).catch(() => undefined);
+        await roomVoicePreviewPlayer.seekTo(0).catch(() => undefined);
+
+        if (isCancelled) {
+          return;
+        }
+
+        setActiveRoomVoicePreviewKey(pendingRoomVoicePreviewKey);
+        roomVoicePreviewPlayer.play();
+        setPendingRoomVoicePreviewKey(null);
+      } catch (error) {
+        if (!isCancelled) {
+          setPendingRoomVoicePreviewKey(null);
+          setActiveRoomVoicePreviewKey(null);
+          onError(getErrorMessage(error), 'Speaker preview needs attention');
+        }
+      }
+    })();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [
+    onError,
+    pendingRoomVoicePreviewKey,
+    roomVoicePreviewPlayer,
+    roomVoicePreviewSourceUri,
+    roomVoicePreviewStatus.isLoaded
   ]);
 
   useEffect(() => {
@@ -999,13 +1114,20 @@ function InterpreterRoom({
       return;
     }
 
-    Object.values(realtimeSessionPoolRef.current).forEach((session) => session.pauseListening());
+    const realtimeSpeakerSession = realtimeSessionPoolRef.current[languageCode] || null;
+    const shouldUseRealtimeAudio = Boolean(realtimeSpeakerSession && realtimeTranslation.trim());
+
+    Object.entries(realtimeSessionPoolRef.current).forEach(([sessionLanguageCode, session]) => {
+      if (sessionLanguageCode !== languageCode) {
+        session.pauseListening();
+      }
+    });
     safePauseAudioPlayer(summaryAudioPlayer);
     safePauseAudioPlayer(segmentAudioPlayer);
     setSelectedLanguageCode(languageCode);
     setRespondingLanguageCode(languageCode);
     setIsLiveLanguageModalOpen(false);
-    setIsPreparingSegmentAudio(true);
+    setIsPreparingSegmentAudio(!shouldUseRealtimeAudio);
     setLiveStatus('speaking');
     setLiveMode('responding');
     updateLanguageSession(languageCode, {
@@ -1013,6 +1135,7 @@ function InterpreterRoom({
       transcript: sourceText || realtimeTranslation,
       translation: realtimeTranslation
     });
+    realtimeSpeakerSession?.respond();
 
     try {
       const idToken = await getIdToken();
@@ -1030,9 +1153,25 @@ function InterpreterRoom({
       });
       setLiveTranscript(result.audio.sourceText);
       setLiveTranslation(result.audio.translatedText);
-      recordLiveInterpretation(languageCode, result.audio.sourceText, result.audio.translatedText);
+      recordLiveInterpretation(
+        languageCode,
+        result.audio.sourceText,
+        result.audio.translatedText,
+        result.audio.translationId
+      );
+
+      if (shouldUseRealtimeAudio) {
+        await cacheInterpreterSegmentAudioPayload(result.audio);
+        return;
+      }
+
       await playInterpreterSegmentAudioPayload(result.audio);
     } catch (error) {
+      if (shouldUseRealtimeAudio) {
+        console.warn('Interpreter replay audio could not be persisted after realtime response:', getErrorMessage(error));
+        return;
+      }
+
       setLiveStatus('ready');
       setLiveMode('choosing');
       updateLanguageSession(languageCode, { status: 'ready' });
@@ -1094,7 +1233,8 @@ function InterpreterRoom({
   function recordLiveInterpretation(
     languageCode: string,
     sourceTextOverride?: string,
-    translatedTextOverride?: string
+    translatedTextOverride?: string,
+    translationId?: string
   ) {
     const session = languageSessionState[languageCode];
     const translatedText = translatedTextOverride || session?.translation || liveTranslation;
@@ -1120,7 +1260,8 @@ function InterpreterRoom({
         createdAtIso: new Date().toISOString(),
         languageCode,
         sourceText,
-        translatedText
+        translatedText,
+        translationId
       }, ...currentHistory].slice(0, 80);
     });
   }
@@ -1163,6 +1304,15 @@ function InterpreterRoom({
   }
 
   async function playInterpreterSegmentAudioPayload(audio: InterpreterSegmentAudio) {
+    const cachedUri = await cacheInterpreterSegmentAudioPayload(audio);
+
+    setSegmentAudioSourceUri(cachedUri);
+    setPendingSegmentAudioKey(getInterpreterSegmentAudioKey(details.meeting.meetingId, audio.translationId, audio.languageCode));
+    setLiveStatus('speaking');
+    setLiveMode('responding');
+  }
+
+  async function cacheInterpreterSegmentAudioPayload(audio: InterpreterSegmentAudio) {
     const audioKey = getInterpreterSegmentAudioKey(details.meeting.meetingId, audio.translationId, audio.languageCode);
     const cachedUri = segmentAudioCache[audioKey] || await cacheInterpreterSegmentAudio(details.meeting.meetingId, audio);
 
@@ -1171,10 +1321,7 @@ function InterpreterRoom({
       [audioKey]: cachedUri
     }));
 
-    setSegmentAudioSourceUri(cachedUri);
-    setPendingSegmentAudioKey(audioKey);
-    setLiveStatus('speaking');
-    setLiveMode('responding');
+    return cachedUri;
   }
 
   async function handleReplayInterpreterSegmentAudio() {
@@ -1236,6 +1383,101 @@ function InterpreterRoom({
     } finally {
       setPreparingSummaryAudioKey(null);
     }
+  }
+
+  async function handlePlayInterpreterHistoryItem(item: InterpreterLiveHistoryItem) {
+    if (!item.translationId) {
+      onError('This interpretation does not have replay audio available yet.', 'Interpretation history needs attention');
+      return;
+    }
+
+    const audioKey = getInterpreterSegmentAudioKey(details.meeting.meetingId, item.translationId, item.languageCode);
+
+    if (activeSegmentAudioKey === audioKey && segmentAudioStatus.playing) {
+      safePauseAudioPlayer(segmentAudioPlayer);
+      setActiveSegmentAudioKey(null);
+      setLiveStatus('ready');
+      return;
+    }
+
+    try {
+      setPreparingHistoryAudioKey(audioKey);
+      setSelectedLanguageCode(item.languageCode);
+      setRespondingLanguageCode(item.languageCode);
+
+      const cachedUri = segmentAudioCache[audioKey];
+
+      if (cachedUri) {
+        setSegmentAudioSourceUri(cachedUri);
+        setPendingSegmentAudioKey(audioKey);
+        return;
+      }
+
+      const idToken = await getIdToken();
+      const result = await createInterpreterTranslationReplayAudio(
+        idToken,
+        details.meeting.meetingId,
+        item.translationId,
+        selectedVoiceId
+      );
+
+      await playInterpreterSegmentAudioPayload(result.audio);
+    } catch (error) {
+      onError(getErrorMessage(error), 'Interpretation history needs attention');
+    } finally {
+      setPreparingHistoryAudioKey(null);
+    }
+  }
+
+  async function handlePreviewRoomVoice(voice: InterpreterVoiceProfile) {
+    const previewLanguageCode = details.meeting.interpreterLanguages[0]?.code || selectedLanguageCode || 'en-US';
+    const previewKey = getInterpreterVoicePreviewAudioKey(voice.id, previewLanguageCode);
+
+    if (activeRoomVoicePreviewKey === previewKey && roomVoicePreviewStatus.playing) {
+      safePauseAudioPlayer(roomVoicePreviewPlayer);
+      setActiveRoomVoicePreviewKey(null);
+      return;
+    }
+
+    try {
+      setPreparingRoomVoicePreviewKey(previewKey);
+
+      const cachedUri = roomVoicePreviewCache[previewKey];
+
+      if (cachedUri) {
+        setRoomVoicePreviewSourceUri(cachedUri);
+        setPendingRoomVoicePreviewKey(previewKey);
+        return;
+      }
+
+      const idToken = await getIdToken();
+      const result = await createInterpreterVoicePreviewAudio(idToken, {
+        languageCode: previewLanguageCode,
+        voiceId: voice.id
+      });
+      const cachedPreviewUri = await cacheInterpreterVoicePreviewAudio(result.audio);
+
+      setRoomVoicePreviewCache((currentCache) => ({
+        ...currentCache,
+        [previewKey]: cachedPreviewUri
+      }));
+      setRoomVoicePreviewSourceUri(cachedPreviewUri);
+      setPendingRoomVoicePreviewKey(previewKey);
+    } catch (error) {
+      onError(getErrorMessage(error), 'Speaker preview needs attention');
+    } finally {
+      setPreparingRoomVoicePreviewKey(null);
+    }
+  }
+
+  async function handleSelectRoomVoice(interpreterVoiceId: string) {
+    if (interpreterVoiceId === selectedVoiceId) {
+      setIsRoomVoicePickerOpen(false);
+      return;
+    }
+
+    await onUpdateVoice(interpreterVoiceId);
+    setIsRoomVoicePickerOpen(false);
   }
 
   return (
@@ -1397,10 +1639,56 @@ function InterpreterRoom({
           </View>
         </View>
         <Pressable
+          onPress={() => setIsRoomVoicePickerOpen(true)}
+          style={({ pressed }) => [styles.roomVoiceRow, pressed && styles.pressed]}
+        >
+          <View style={styles.roomVoiceIcon}>
+            <Ionicons color={appTheme.colors.primary} name="volume-high-outline" size={18} />
+          </View>
+          <View style={styles.selectionBody}>
+            <Text style={styles.sectionLabel}>Interpreter speaker</Text>
+            <Text style={styles.selectionTitle}>{selectedVoiceProfile.label}</Text>
+            <Text style={styles.mutedText} numberOfLines={2}>{selectedVoiceProfile.description}</Text>
+          </View>
+          <Ionicons color={appTheme.colors.mutedStrong} name="chevron-forward-outline" size={18} />
+        </Pressable>
+        <View style={styles.liveQuickActionsRow}>
+          <Pressable
+            disabled={!hasLiveRoomMemory}
+            onPress={() => {
+              setIsLiveRoomOpen(true);
+              setIsLiveTranscriptOpen(true);
+            }}
+            style={({ pressed }) => [
+              styles.liveQuickAction,
+              !hasLiveRoomMemory && styles.disabledButton,
+              pressed && styles.pressed
+            ]}
+          >
+            <Ionicons color={appTheme.colors.primary} name="document-text-outline" size={17} />
+            <Text style={styles.liveQuickActionText}>Transcript</Text>
+          </Pressable>
+          <Pressable
+            disabled={!hasLiveRoomMemory}
+            onPress={() => {
+              setIsLiveRoomOpen(true);
+              setIsLiveHistoryOpen(true);
+            }}
+            style={({ pressed }) => [
+              styles.liveQuickAction,
+              !hasLiveRoomMemory && styles.disabledButton,
+              pressed && styles.pressed
+            ]}
+          >
+            <Ionicons color={appTheme.colors.primary} name="albums-outline" size={17} />
+            <Text style={styles.liveQuickActionText}>History</Text>
+          </Pressable>
+        </View>
+        <Pressable
           disabled={isBusy || details.meeting.status === 'ENDED'}
           onPress={() => {
-            if (isRealtimeActive) {
-              stopLiveInterpreter();
+            if (hasLiveRoomMemory) {
+              setIsLiveRoomOpen(true);
               return;
             }
 
@@ -1411,9 +1699,9 @@ function InterpreterRoom({
           {isBusy || liveStatus === 'connecting' ? (
             <ActivityIndicator color="#fff" />
           ) : (
-            <Ionicons color="#fff" name={isRealtimeActive ? 'stop-circle-outline' : 'radio-outline'} size={20} />
+            <Ionicons color="#fff" name={hasLiveRoomMemory ? 'expand-outline' : 'radio-outline'} size={20} />
           )}
-          <Text style={styles.primaryButtonText}>{isRealtimeActive ? 'Stop listening' : 'Listen'}</Text>
+          <Text style={styles.primaryButtonText}>{liveRoomPrimaryLabel}</Text>
         </Pressable>
       </View>
 
@@ -1468,9 +1756,49 @@ function InterpreterRoom({
             {isRealtimeActive ? 'Tap a language to respond.' : 'Tap Listen before responding.'}
           </Text>
         </View>
-        <Text style={styles.translationText}>
-          {selectedLanguageSession?.translation || liveTranslation || latestTranslation?.translatedText || 'Tap a language when the speaker finishes. The live interpreter will speak in that language.'}
-        </Text>
+          <Text style={styles.translationText}>
+            {selectedLanguageSession?.translation || liveTranslation || latestTranslation?.translatedText || 'Tap a language when the speaker finishes. The live interpreter will speak in that language.'}
+          </Text>
+        {latestReplayItem ? (
+          <View style={styles.latestReplayRow}>
+            <View style={styles.interpretationPlayerCopy}>
+              <Text style={styles.interpretationPlayerTitle}>Recent spoken interpretation</Text>
+              <Text style={styles.interpretationPlayerMeta}>
+                {getLanguageLabel(details.meeting.interpreterLanguages, latestReplayItem.languageCode)} · {formatDateTime(latestReplayItem.createdAtIso)}
+              </Text>
+            </View>
+            <Pressable
+              disabled={Boolean(preparingHistoryAudioKey) || !latestReplayAudioKey}
+              onPress={() => void handlePlayInterpreterHistoryItem(latestReplayItem)}
+              style={({ pressed }) => [
+                styles.historyPlayButton,
+                activeSegmentAudioKey === latestReplayAudioKey &&
+                  segmentAudioStatus.playing &&
+                  styles.historyPlayButtonActive,
+                (!latestReplayAudioKey || Boolean(preparingHistoryAudioKey)) && styles.disabledButton,
+                pressed && styles.pressed
+              ]}
+            >
+              {preparingHistoryAudioKey === latestReplayAudioKey ? (
+                <ActivityIndicator color={appTheme.colors.primary} size="small" />
+              ) : (
+                <Ionicons
+                  color={
+                    activeSegmentAudioKey === latestReplayAudioKey && segmentAudioStatus.playing
+                      ? '#fff'
+                      : appTheme.colors.primary
+                  }
+                  name={
+                    activeSegmentAudioKey === latestReplayAudioKey && segmentAudioStatus.playing
+                      ? 'pause'
+                      : 'play'
+                  }
+                  size={15}
+                />
+              )}
+            </Pressable>
+          </View>
+        ) : null}
         {selectedLanguageSession?.transcript || liveTranscript ? (
           <View style={styles.transcriptPreview}>
             <Text style={styles.sectionLabel}>Detected speech</Text>
@@ -1607,8 +1935,10 @@ function InterpreterRoom({
       />
       <InterpreterLiveRoomModal
         audioLevel={audioLevel}
+        activeHistoryAudioKey={activeSegmentAudioKey}
         details={details}
         historyItems={liveInterpretationHistory}
+        isHistoryAudioPlaying={segmentAudioStatus.playing}
         isInterpretationAudioPlaying={segmentAudioStatus.playing}
         isPreparingInterpretationAudio={isPreparingSegmentAudio || Boolean(pendingSegmentAudioKey)}
         isHistoryOpen={isLiveHistoryOpen}
@@ -1620,7 +1950,12 @@ function InterpreterRoom({
         liveStatus={liveStatus}
         liveTranscript={liveTranscript}
         liveTranslation={liveTranslation}
-        onClose={() => setIsLiveRoomOpen(false)}
+        onClose={() => {
+          setIsLiveRoomOpen(false);
+          setIsLiveTranscriptOpen(false);
+          setIsLiveHistoryOpen(false);
+          setIsLiveLanguageModalOpen(false);
+        }}
         onContinue={continueInterruptedInterpretation}
         onCurrent={() => useCurrentInterpretation(selectedLanguageCode)}
         onEnd={() => {
@@ -1638,20 +1973,37 @@ function InterpreterRoom({
         onStop={stopListeningAndChooseLanguage}
         onTranscriptClose={() => setIsLiveTranscriptOpen(false)}
         onHistoryClose={() => setIsLiveHistoryOpen(false)}
+        onPlayHistoryItem={(item) => void handlePlayInterpreterHistoryItem(item)}
+        preparingHistoryAudioKey={preparingHistoryAudioKey}
         respondingLanguageCode={respondingLanguageCode}
         selectedLanguageCode={selectedLanguageCode}
         setSelectedLanguageCode={setSelectedLanguageCode}
         voiceProfile={selectedVoiceProfile}
         wasInterrupted={wasInterpretationInterrupted}
       />
+      <InterpreterVoicePickerModal
+        activePreviewKey={activeRoomVoicePreviewKey}
+        isOpen={isRoomVoicePickerOpen}
+        onClose={() => setIsRoomVoicePickerOpen(false)}
+        onPreview={(voice) => void handlePreviewRoomVoice(voice)}
+        onSelect={(voiceId) => {
+          void handleSelectRoomVoice(voiceId);
+        }}
+        preparingPreviewKey={preparingRoomVoicePreviewKey}
+        previewLanguageCode={details.meeting.interpreterLanguages[0]?.code || selectedLanguageCode || 'en-US'}
+        selectedVoiceId={selectedVoiceId}
+        voices={voiceProfiles.length ? voiceProfiles : FALLBACK_INTERPRETER_VOICES}
+      />
     </View>
   );
 }
 
 interface InterpreterLiveRoomModalProps {
+  activeHistoryAudioKey: string | null;
   audioLevel: number;
   details: InterpreterMeetingDetails;
   historyItems: InterpreterLiveHistoryItem[];
+  isHistoryAudioPlaying: boolean;
   isInterpretationAudioPlaying: boolean;
   isPreparingInterpretationAudio: boolean;
   isHistoryOpen: boolean;
@@ -1673,11 +2025,13 @@ interface InterpreterLiveRoomModalProps {
   onOpenHistory: () => void;
   onOpenLanguageModal: () => void;
   onOpenTranscript: () => void;
+  onPlayHistoryItem: (item: InterpreterLiveHistoryItem) => void;
   onReplayInterpretationAudio: () => void;
   onRespond: (languageCode: string) => void | Promise<void>;
   onStart: () => void;
   onStop: () => void;
   onTranscriptClose: () => void;
+  preparingHistoryAudioKey: string | null;
   respondingLanguageCode: string | null;
   selectedLanguageCode: string;
   setSelectedLanguageCode: (languageCode: string) => void;
@@ -1686,9 +2040,11 @@ interface InterpreterLiveRoomModalProps {
 }
 
 function InterpreterLiveRoomModal({
+  activeHistoryAudioKey,
   audioLevel,
   details,
   historyItems,
+  isHistoryAudioPlaying,
   isInterpretationAudioPlaying,
   isPreparingInterpretationAudio,
   isHistoryOpen,
@@ -1710,11 +2066,13 @@ function InterpreterLiveRoomModal({
   onOpenHistory,
   onOpenLanguageModal,
   onOpenTranscript,
+  onPlayHistoryItem,
   onReplayInterpretationAudio,
   onRespond,
   onStart,
   onStop,
   onTranscriptClose,
+  preparingHistoryAudioKey,
   respondingLanguageCode,
   selectedLanguageCode,
   setSelectedLanguageCode,
@@ -1947,10 +2305,14 @@ function InterpreterLiveRoomModal({
           onClose={onTranscriptClose}
         />
         <InterpreterInterpretationHistoryModal
+          activeHistoryAudioKey={activeHistoryAudioKey}
           details={details}
           historyItems={historyItems}
+          isHistoryAudioPlaying={isHistoryAudioPlaying}
           isOpen={isHistoryOpen}
           onClose={onHistoryClose}
+          onPlayItem={onPlayHistoryItem}
+          preparingHistoryAudioKey={preparingHistoryAudioKey}
         />
       </View>
     </Modal>
@@ -2236,17 +2598,25 @@ function InterpreterLiveTranscriptModal({
 }
 
 interface InterpreterInterpretationHistoryModalProps {
+  activeHistoryAudioKey: string | null;
   details: InterpreterMeetingDetails;
   historyItems: InterpreterLiveHistoryItem[];
+  isHistoryAudioPlaying: boolean;
   isOpen: boolean;
   onClose: () => void;
+  onPlayItem: (item: InterpreterLiveHistoryItem) => void;
+  preparingHistoryAudioKey: string | null;
 }
 
 function InterpreterInterpretationHistoryModal({
+  activeHistoryAudioKey,
   details,
   historyItems,
+  isHistoryAudioPlaying,
   isOpen,
-  onClose
+  onClose,
+  onPlayItem,
+  preparingHistoryAudioKey
 }: InterpreterInterpretationHistoryModalProps) {
   const appTheme = useAppTheme();
   const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
@@ -2273,7 +2643,37 @@ function InterpreterInterpretationHistoryModal({
                 <View key={`${item.createdAtIso}-${index}`} style={styles.liveDetailRow}>
                   <View style={styles.historyRowHeader}>
                     <Text style={styles.liveDetailMeta}>{formatDateTime(item.createdAtIso)}</Text>
-                    <Ionicons color={appTheme.colors.primary} name="volume-high-outline" size={16} />
+                    <Pressable
+                      disabled={!item.translationId || preparingHistoryAudioKey === getHistoryAudioKey(details.meeting.meetingId, item)}
+                      onPress={() => onPlayItem(item)}
+                      style={({ pressed }) => [
+                        styles.historyPlayButton,
+                        activeHistoryAudioKey === getHistoryAudioKey(details.meeting.meetingId, item) &&
+                          isHistoryAudioPlaying &&
+                          styles.historyPlayButtonActive,
+                        pressed && styles.pressed
+                      ]}
+                    >
+                      {preparingHistoryAudioKey === getHistoryAudioKey(details.meeting.meetingId, item) ? (
+                        <ActivityIndicator color={appTheme.colors.primary} size="small" />
+                      ) : (
+                        <Ionicons
+                          color={
+                            activeHistoryAudioKey === getHistoryAudioKey(details.meeting.meetingId, item) &&
+                              isHistoryAudioPlaying
+                              ? '#fff'
+                              : appTheme.colors.primary
+                          }
+                          name={
+                            activeHistoryAudioKey === getHistoryAudioKey(details.meeting.meetingId, item) &&
+                              isHistoryAudioPlaying
+                              ? 'pause'
+                              : 'play'
+                          }
+                          size={15}
+                        />
+                      )}
+                    </Pressable>
                   </View>
                   {item.sourceText ? (
                     <Text style={styles.historySourceText}>{item.sourceText}</Text>
@@ -2286,7 +2686,7 @@ function InterpreterInterpretationHistoryModal({
             <View style={styles.liveDetailRow}>
               <Text style={styles.liveDetailText}>No interpretations have been played in this session yet.</Text>
               <Text style={styles.mutedText}>
-                Replayable interpretation audio requires the next native/backend audio-history endpoint; this screen already groups the auditable interpretation records by language.
+                Interpretations will appear here by language after the meeting has spoken responses.
               </Text>
             </View>
           )}
@@ -2342,6 +2742,7 @@ interface InterpreterCreateDraft {
 }
 
 interface InterpreterCreateModalProps {
+  getIdToken: () => Promise<string>;
   isBusy: boolean;
   isOpen: boolean;
   languages: InterpreterLanguage[];
@@ -2353,6 +2754,7 @@ interface InterpreterCreateModalProps {
 }
 
 function InterpreterCreateModal({
+  getIdToken,
   isBusy,
   isOpen,
   languages,
@@ -2389,6 +2791,15 @@ function InterpreterCreateModal({
   const [voicePickerOpen, setVoicePickerOpen] = useState(false);
   const [iosDatePickerMode, setIosDatePickerMode] = useState<'date' | 'time' | null>(null);
   const [iosPickerDate, setIosPickerDate] = useState<Date>(() => getDraftScheduleDate(null));
+  const [voicePreviewSourceUri, setVoicePreviewSourceUri] = useState<string | null>(null);
+  const [voicePreviewCache, setVoicePreviewCache] = useState<Record<string, string>>({});
+  const [activeVoicePreviewKey, setActiveVoicePreviewKey] = useState<string | null>(null);
+  const [pendingVoicePreviewKey, setPendingVoicePreviewKey] = useState<string | null>(null);
+  const [preparingVoicePreviewKey, setPreparingVoicePreviewKey] = useState<string | null>(null);
+  const voicePreviewPlayer = useAudioPlayer(voicePreviewSourceUri ? { uri: voicePreviewSourceUri } : null, {
+    updateInterval: 250
+  });
+  const voicePreviewStatus = useAudioPlayerStatus(voicePreviewPlayer);
 
   useEffect(() => {
     if (isOpen) {
@@ -2411,8 +2822,61 @@ function InterpreterCreateModal({
       setParticipantPickerOpen(false);
       setVoicePickerOpen(false);
       setIosDatePickerMode(null);
+      setActiveVoicePreviewKey(null);
+      setPendingVoicePreviewKey(null);
+      setPreparingVoicePreviewKey(null);
+      safePauseAudioPlayer(voicePreviewPlayer);
     }
   }, [isOpen]);
+
+  useEffect(() => () => {
+    safePauseAudioPlayer(voicePreviewPlayer);
+  }, [voicePreviewPlayer]);
+
+  useEffect(() => {
+    if (voicePreviewStatus.didJustFinish) {
+      setActiveVoicePreviewKey(null);
+    }
+  }, [voicePreviewStatus.didJustFinish]);
+
+  useEffect(() => {
+    if (!pendingVoicePreviewKey || !voicePreviewSourceUri || !voicePreviewStatus.isLoaded) {
+      return;
+    }
+
+    let isCancelled = false;
+
+    void (async () => {
+      try {
+        await setAudioModeAsync(INTERPRETER_SUMMARY_AUDIO_MODE).catch(() => undefined);
+        await voicePreviewPlayer.seekTo(0).catch(() => undefined);
+
+        if (isCancelled) {
+          return;
+        }
+
+        setActiveVoicePreviewKey(pendingVoicePreviewKey);
+        voicePreviewPlayer.play();
+        setPendingVoicePreviewKey(null);
+      } catch (error) {
+        if (!isCancelled) {
+          setPendingVoicePreviewKey(null);
+          setActiveVoicePreviewKey(null);
+          onError(getErrorMessage(error), 'Speaker preview needs attention');
+        }
+      }
+    })();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [
+    onError,
+    pendingVoicePreviewKey,
+    voicePreviewPlayer,
+    voicePreviewSourceUri,
+    voicePreviewStatus.isLoaded
+  ]);
 
   function toggleLanguage(code: string) {
     setDraft((currentDraft) => {
@@ -2527,6 +2991,47 @@ function InterpreterCreateModal({
     }
 
     void onSubmit(draft);
+  }
+
+  async function handlePreviewVoice(voice: InterpreterVoiceProfile) {
+    const previewLanguageCode = draft.languageCodes[0] || 'en-US';
+    const previewKey = getInterpreterVoicePreviewAudioKey(voice.id, previewLanguageCode);
+
+    if (activeVoicePreviewKey === previewKey && voicePreviewStatus.playing) {
+      safePauseAudioPlayer(voicePreviewPlayer);
+      setActiveVoicePreviewKey(null);
+      return;
+    }
+
+    try {
+      setPreparingVoicePreviewKey(previewKey);
+
+      const cachedUri = voicePreviewCache[previewKey];
+
+      if (cachedUri) {
+        setVoicePreviewSourceUri(cachedUri);
+        setPendingVoicePreviewKey(previewKey);
+        return;
+      }
+
+      const idToken = await getIdToken();
+      const result = await createInterpreterVoicePreviewAudio(idToken, {
+        languageCode: previewLanguageCode,
+        voiceId: voice.id
+      });
+      const cachedPreviewUri = await cacheInterpreterVoicePreviewAudio(result.audio);
+
+      setVoicePreviewCache((currentCache) => ({
+        ...currentCache,
+        [previewKey]: cachedPreviewUri
+      }));
+      setVoicePreviewSourceUri(cachedPreviewUri);
+      setPendingVoicePreviewKey(previewKey);
+    } catch (error) {
+      onError(getErrorMessage(error), 'Speaker preview needs attention');
+    } finally {
+      setPreparingVoicePreviewKey(null);
+    }
   }
 
   return (
@@ -2848,20 +3353,19 @@ function InterpreterCreateModal({
           setParticipantPickerOpen(false);
         }}
       />
-      <InterpreterOptionPickerModal
+      <InterpreterVoicePickerModal
+        activePreviewKey={activeVoicePreviewKey}
         isOpen={voicePickerOpen}
         onClose={() => setVoicePickerOpen(false)}
-        options={(voiceProfiles.length ? voiceProfiles : FALLBACK_INTERPRETER_VOICES).map((voice) => ({
-          iconName: 'volume-high-outline',
-          id: voice.id,
-          subtitle: voice.description,
-          title: voice.label
-        }))}
-        title="Interpreter speaker"
+        onPreview={(voice) => void handlePreviewVoice(voice)}
         onSelect={(voiceId) => {
           setDraft((currentDraft) => ({ ...currentDraft, interpreterVoiceId: voiceId }));
           setVoicePickerOpen(false);
         }}
+        preparingPreviewKey={preparingVoicePreviewKey}
+        previewLanguageCode={draft.languageCodes[0] || 'en-US'}
+        selectedVoiceId={draft.interpreterVoiceId}
+        voices={voiceProfiles.length ? voiceProfiles : FALLBACK_INTERPRETER_VOICES}
       />
       <ScheduleDateTimePickerModal
         date={iosPickerDate}
@@ -3000,6 +3504,110 @@ function InterpreterInlineOption({ iconName, label, onPress, value }: Interprete
       </View>
       <Ionicons color={appTheme.colors.mutedStrong} name="chevron-down-outline" size={18} />
     </Pressable>
+  );
+}
+
+interface InterpreterVoicePickerModalProps {
+  activePreviewKey: string | null;
+  isOpen: boolean;
+  onClose: () => void;
+  onPreview: (voice: InterpreterVoiceProfile) => void;
+  onSelect: (voiceId: string) => void;
+  preparingPreviewKey: string | null;
+  previewLanguageCode: string;
+  selectedVoiceId: string;
+  voices: InterpreterVoiceProfile[];
+}
+
+function InterpreterVoicePickerModal({
+  activePreviewKey,
+  isOpen,
+  onClose,
+  onPreview,
+  onSelect,
+  preparingPreviewKey,
+  previewLanguageCode,
+  selectedVoiceId,
+  voices
+}: InterpreterVoicePickerModalProps) {
+  const appTheme = useAppTheme();
+  const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
+  const insets = useSafeAreaInsets();
+
+  return (
+    <Modal animationType="fade" onRequestClose={onClose} transparent visible={isOpen}>
+      <Pressable onPress={onClose} style={styles.pickerOverlay}>
+        <Pressable style={[styles.pickerSheet, { paddingBottom: Math.max(insets.bottom + 14, 24) }]}>
+          <View style={styles.modalHandle} />
+          <View style={styles.modalHeader}>
+            <View>
+              <Text style={styles.eyebrow}>INTERPRETER SPEAKER</Text>
+              <Text style={styles.modalTitle}>Choose voice</Text>
+            </View>
+            <Pressable onPress={onClose} style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}>
+              <Ionicons color={appTheme.colors.ink} name="close" size={24} />
+            </Pressable>
+          </View>
+          <Text style={styles.subtitle}>
+            Preview each interpreter speaker before assigning it to the meeting.
+          </Text>
+          <ScrollView contentContainerStyle={styles.pickerList} keyboardShouldPersistTaps="handled">
+            {voices.map((voice) => {
+              const previewKey = getInterpreterVoicePreviewAudioKey(voice.id, previewLanguageCode);
+              const isSelected = selectedVoiceId === voice.id;
+              const isPreparingPreview = preparingPreviewKey === previewKey;
+              const isPreviewPlaying = activePreviewKey === previewKey;
+
+              return (
+                <Pressable
+                  key={voice.id}
+                  onPress={() => onSelect(voice.id)}
+                  style={({ pressed }) => [
+                    styles.voicePickerRow,
+                    isSelected && styles.voicePickerRowSelected,
+                    pressed && styles.pressed
+                  ]}
+                >
+                  <View style={styles.voiceAvatar}>
+                    <Ionicons
+                      color={isSelected ? appTheme.colors.primary : appTheme.colors.mutedStrong}
+                      name={isSelected ? 'checkmark-circle' : 'mic-outline'}
+                      size={20}
+                    />
+                  </View>
+                  <View style={styles.selectionBody}>
+                    <Text style={styles.selectionTitle}>{voice.label}</Text>
+                    <Text style={styles.mutedText}>{voice.description}</Text>
+                  </View>
+                  <Pressable
+                    disabled={Boolean(isPreparingPreview)}
+                    onPress={(event) => {
+                      event.stopPropagation();
+                      onPreview(voice);
+                    }}
+                    style={({ pressed }) => [
+                      styles.voicePreviewButton,
+                      isPreviewPlaying && styles.voicePreviewButtonActive,
+                      pressed && styles.pressed
+                    ]}
+                  >
+                    {isPreparingPreview ? (
+                      <ActivityIndicator color={appTheme.colors.primary} size="small" />
+                    ) : (
+                      <Ionicons
+                        color={isPreviewPlaying ? '#fff' : appTheme.colors.primary}
+                        name={isPreviewPlaying ? 'pause' : 'play'}
+                        size={17}
+                      />
+                    )}
+                  </Pressable>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+        </Pressable>
+      </Pressable>
+    </Modal>
   );
 }
 
@@ -3325,7 +3933,8 @@ function groupInterpreterHistory(
       createdAtIso: translation.createdAtIso,
       languageCode: translation.targetLanguageCode,
       sourceText: sourceSegment?.text || '',
-      translatedText: translation.translatedText
+      translatedText: translation.translatedText,
+      translationId: translation.translationId
     };
   });
   const allItems = [...liveHistoryItems, ...persistedItems]
@@ -3482,6 +4091,14 @@ function getInterpreterSegmentAudioKey(
   return `${meetingId}:${translationId}:${languageCode}`;
 }
 
+function getHistoryAudioKey(meetingId: string, item: InterpreterLiveHistoryItem): string | null {
+  return item.translationId ? getInterpreterSegmentAudioKey(meetingId, item.translationId, item.languageCode) : null;
+}
+
+function getInterpreterVoicePreviewAudioKey(voiceId: string, languageCode: string): string {
+  return `${voiceId}:${languageCode}`;
+}
+
 async function cacheInterpreterSummaryAudio(
   summaryId: string,
   audio: InterpreterSummaryAudio
@@ -3521,6 +4138,26 @@ async function cacheInterpreterSegmentAudio(
   const safeTranslationId = audio.translationId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
   const safeLanguageCode = audio.languageCode.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 24);
   const fileUri = `${INTERPRETER_SEGMENT_AUDIO_CACHE_DIR}${safeMeetingId}-${safeTranslationId}-${safeLanguageCode}.mp3`;
+
+  await FileSystem.writeAsStringAsync(fileUri, audio.audioBase64, {
+    encoding: FileSystem.EncodingType.Base64
+  });
+
+  return fileUri;
+}
+
+async function cacheInterpreterVoicePreviewAudio(audio: InterpreterVoicePreviewAudio): Promise<string> {
+  if (!FileSystem.cacheDirectory) {
+    throw new Error('Interpreter speaker preview is not available on this device.');
+  }
+
+  await FileSystem.makeDirectoryAsync(INTERPRETER_VOICE_PREVIEW_AUDIO_CACHE_DIR, {
+    intermediates: true
+  }).catch(() => undefined);
+
+  const safeVoiceId = audio.voice.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
+  const safeLanguageCode = audio.languageCode.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 24);
+  const fileUri = `${INTERPRETER_VOICE_PREVIEW_AUDIO_CACHE_DIR}${safeVoiceId}-${safeLanguageCode}.mp3`;
 
   await FileSystem.writeAsStringAsync(fileUri, audio.audioBase64, {
     encoding: FileSystem.EncodingType.Base64
@@ -3819,6 +4456,43 @@ function createStyles(colors: AppColors) {
     liveStatusTitle: {
       color: colors.ink,
       fontSize: 15
+    },
+    liveQuickActionsRow: {
+      alignSelf: 'stretch',
+      flexDirection: 'row',
+      gap: 10
+    },
+    liveQuickAction: {
+      alignItems: 'center',
+      backgroundColor: colors.surfaceElevated,
+      borderRadius: 999,
+      flex: 1,
+      flexDirection: 'row',
+      gap: 7,
+      justifyContent: 'center',
+      minHeight: 38,
+      paddingHorizontal: 12
+    },
+    liveQuickActionText: {
+      color: colors.primary,
+      fontSize: 13
+    },
+    roomVoiceRow: {
+      alignItems: 'center',
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
+      flexDirection: 'row',
+      gap: 11,
+      paddingBottom: 12,
+      paddingTop: 2
+    },
+    roomVoiceIcon: {
+      alignItems: 'center',
+      backgroundColor: colors.primarySoft,
+      borderRadius: 999,
+      height: 36,
+      justifyContent: 'center',
+      width: 36
     },
     liveEndButton: {
       alignItems: 'center',
@@ -4251,6 +4925,15 @@ function createStyles(colors: AppColors) {
       color: colors.ink,
       fontSize: 14
     },
+    latestReplayRow: {
+      alignItems: 'center',
+      borderTopColor: colors.divider,
+      borderTopWidth: 1,
+      flexDirection: 'row',
+      gap: 10,
+      marginTop: 14,
+      paddingTop: 12
+    },
     liveSecondaryAction: {
       alignItems: 'center',
       backgroundColor: colors.surfaceElevated,
@@ -4274,6 +4957,17 @@ function createStyles(colors: AppColors) {
       alignItems: 'center',
       flexDirection: 'row',
       justifyContent: 'space-between'
+    },
+    historyPlayButton: {
+      alignItems: 'center',
+      backgroundColor: colors.primarySoft,
+      borderRadius: 999,
+      height: 34,
+      justifyContent: 'center',
+      width: 34
+    },
+    historyPlayButtonActive: {
+      backgroundColor: colors.primary
     },
     historySourceText: {
       color: colors.mutedStrong,
@@ -4480,6 +5174,38 @@ function createStyles(colors: AppColors) {
       gap: 12,
       minHeight: 64,
       paddingVertical: 10
+    },
+    voicePickerRow: {
+      alignItems: 'center',
+      backgroundColor: colors.surface,
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
+      flexDirection: 'row',
+      gap: 12,
+      minHeight: 72,
+      paddingVertical: 12
+    },
+    voicePickerRowSelected: {
+      backgroundColor: colors.primarySoft
+    },
+    voiceAvatar: {
+      alignItems: 'center',
+      backgroundColor: colors.surfaceElevated,
+      borderRadius: 18,
+      height: 38,
+      justifyContent: 'center',
+      width: 38
+    },
+    voicePreviewButton: {
+      alignItems: 'center',
+      backgroundColor: colors.primarySoft,
+      borderRadius: 999,
+      height: 38,
+      justifyContent: 'center',
+      width: 38
+    },
+    voicePreviewButtonActive: {
+      backgroundColor: colors.primary
     },
     pickerSheet: {
       backgroundColor: colors.surface,

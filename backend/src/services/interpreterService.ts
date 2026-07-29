@@ -69,6 +69,17 @@ export interface InterpreterSegmentAudioInput {
   voiceId?: string | null;
 }
 
+export interface InterpreterTranslationReplayAudioInput {
+  meetingId: string;
+  translationId: string;
+  voiceId?: string | null;
+}
+
+export interface InterpreterVoicePreviewAudioInput {
+  languageCode?: string | null;
+  voiceId: string;
+}
+
 export interface InterpreterSummaryAudio {
   audioBase64: string;
   contentType: string;
@@ -86,8 +97,18 @@ export interface InterpreterSegmentAudio extends InterpreterSummaryAudio {
   translationModel: string;
 }
 
+export interface InterpreterVoicePreviewAudio extends InterpreterSummaryAudio {
+  previewText: string;
+  voiceProfile: InterpreterVoiceProfile;
+}
+
 export interface UpdateInterpreterInvitationsInput {
   invitedUserIds: string[];
+  meetingId: string;
+}
+
+export interface UpdateInterpreterVoiceInput {
+  interpreterVoiceId: string;
   meetingId: string;
 }
 
@@ -170,6 +191,18 @@ interface InterpreterSummaryRecord {
   summaryId: string;
   summaryTextByLanguage: Record<string, string>;
   tenantId: string;
+}
+
+interface InterpreterTranslationRecord {
+  createdAtIso: string;
+  createdByUid?: string;
+  meetingId: string;
+  sourceSegmentId?: string | null;
+  sourceText: string;
+  targetLanguageCode: string;
+  tenantId: string;
+  translatedText: string;
+  translationId: string;
 }
 
 interface InterpreterParticipant {
@@ -383,6 +416,49 @@ export async function updateInterpreterMeetingInvitations(
     meeting: {
       ...meeting,
       invitedUserIds,
+      updatedAtIso: nowIso
+    }
+  };
+}
+
+export async function updateInterpreterMeetingVoice(
+  decodedToken: DecodedIdToken,
+  input: UpdateInterpreterVoiceInput
+) {
+  const context = await getAuthorizedInterpreterContext(decodedToken);
+  const meeting = await readAccessibleMeeting(context, input.meetingId);
+
+  if (!canManageInterpreterMeeting(context, meeting)) {
+    throw authorizationError('Only the meeting owner or an interpreter administrator can change the interpreter speaker.');
+  }
+
+  const interpreterVoiceId = normalizeInterpreterVoiceId(input.interpreterVoiceId);
+  const nowIso = new Date().toISOString();
+
+  await context.organizationRef
+    .collection(INTERPRETER_MEETINGS_COLLECTION)
+    .doc(input.meetingId)
+    .update({
+      interpreterVoiceId,
+      updatedAt: fieldValue.serverTimestamp(),
+      updatedAtIso: nowIso
+    });
+
+  await writeInterpreterAuditEvent({
+    context,
+    meetingId: input.meetingId,
+    metadata: {
+      afterInterpreterVoiceId: interpreterVoiceId,
+      beforeInterpreterVoiceId: meeting.interpreterVoiceId || null
+    },
+    summary: `Updated interpreter speaker for "${meeting.meetingName}".`,
+    type: 'INTERPRETER_MEETING_VOICE_UPDATED'
+  });
+
+  return {
+    meeting: {
+      ...meeting,
+      interpreterVoiceId,
       updatedAtIso: nowIso
     }
   };
@@ -1094,6 +1170,112 @@ export async function createInterpreterSegmentAudio(
   return { audio };
 }
 
+export async function createInterpreterTranslationReplayAudio(
+  decodedToken: DecodedIdToken,
+  input: InterpreterTranslationReplayAudioInput
+) {
+  const context = await getAuthorizedInterpreterContext(decodedToken);
+  assertRateLimit(`interpreter:translation-replay:${context.uid}`, 60_000, 30);
+  const meeting = await readAccessibleMeeting(context, input.meetingId);
+  const translationSnapshot = await context.organizationRef
+    .collection(INTERPRETER_MEETINGS_COLLECTION)
+    .doc(safeDocumentId(input.meetingId))
+    .collection(TRANSLATION_COLLECTION)
+    .doc(safeDocumentId(input.translationId))
+    .get();
+
+  if (!translationSnapshot.exists) {
+    throw notFoundError('Interpreter translation was not found.');
+  }
+
+  const translation = normalizeInterpreterTranslationRecord(
+    translationSnapshot.data() as Partial<InterpreterTranslationRecord>
+  );
+
+  if (
+    !translation ||
+    translation.meetingId !== meeting.meetingId ||
+    translation.tenantId !== context.tenantId
+  ) {
+    throw notFoundError('Interpreter translation was not found.');
+  }
+
+  const language = getSupportedLanguage(translation.targetLanguageCode);
+  const speechAudio = await requestOpenAiSegmentSpeechAudio({
+    context,
+    introText: getFallbackInterpreterIntro(language),
+    language,
+    meeting,
+    translatedText: translation.translatedText,
+    voiceId: normalizeInterpreterVoiceId(input.voiceId, getMeetingInterpreterVoiceId(meeting))
+  });
+  const audio: InterpreterSegmentAudio = {
+    ...speechAudio,
+    introText: getFallbackInterpreterIntro(language),
+    sourceText: translation.sourceText,
+    translatedText: translation.translatedText,
+    translationId: translation.translationId,
+    translationModel: 'stored-translation-replay'
+  };
+
+  await writeInterpreterAuditEvent({
+    context,
+    meetingId: meeting.meetingId,
+    metadata: {
+      speechModel: env.openAiInterpreterSegmentTtsModel,
+      speechVoice: audio.voice,
+      targetLanguageCode: language.code,
+      translationId: translation.translationId
+    },
+    summary: `Prepared replay audio for interpreter translation in "${meeting.meetingName}".`,
+    type: 'INTERPRETER_TRANSLATION_REPLAY_AUDIO_CREATED'
+  });
+
+  return { audio };
+}
+
+export async function createInterpreterVoicePreviewAudio(
+  decodedToken: DecodedIdToken,
+  input: InterpreterVoicePreviewAudioInput
+) {
+  const context = await getAuthorizedInterpreterContext(decodedToken);
+  assertRateLimit(`interpreter:voice-preview:${context.uid}`, 60_000, 40);
+  const language = getSupportedLanguage(input.languageCode || 'en-US');
+  const voiceId = normalizeInterpreterVoiceId(input.voiceId);
+  const voiceProfile = INTERPRETER_VOICE_BY_ID.get(voiceId) || SUPPORTED_INTERPRETER_VOICES[0];
+  const previewText = await requestOpenAiInterpreterVoicePreviewText({
+    context,
+    language,
+    voiceProfile
+  });
+  const speechAudio = await requestOpenAiVoicePreviewSpeechAudio({
+    context,
+    language,
+    previewText,
+    voiceId
+  });
+  const audio: InterpreterVoicePreviewAudio = {
+    ...speechAudio,
+    previewText,
+    voiceProfile
+  };
+
+  await writeInterpreterAuditEvent({
+    context,
+    meetingId: 'voice-preview',
+    metadata: {
+      languageCode: language.code,
+      speechModel: audio.model,
+      speechVoice: audio.voice,
+      voiceId
+    },
+    summary: 'Previewed an interpreter speaker profile.',
+    type: 'INTERPRETER_VOICE_PREVIEW_CREATED'
+  });
+
+  return { audio };
+}
+
 let reminderWorkerTimer: NodeJS.Timeout | null = null;
 let reminderWorkerRunning = false;
 
@@ -1665,6 +1847,143 @@ async function requestOpenAiSegmentSpeechAudio({
   };
 }
 
+async function requestOpenAiInterpreterVoicePreviewText({
+  context,
+  language,
+  voiceProfile
+}: {
+  context: AuthorizedInterpreterContext;
+  language: InterpreterLanguage;
+  voiceProfile: InterpreterVoiceProfile;
+}): Promise<string> {
+  if (!env.openAiApiKey) {
+    throw serviceError('Interpreter speaker preview is not configured on the backend.');
+  }
+
+  const response = await fetch('https://api.openai.com/v1/responses', {
+    body: JSON.stringify({
+      input: [
+        {
+          content: [
+            {
+              text: [
+                'Create one short spoken preview sentence for a workplace AI interpreter.',
+                `Write it in ${language.label} (${language.code}).`,
+                `Voice profile: ${voiceProfile.label}. ${voiceProfile.description}`,
+                'Use simple, natural, professional spoken language.',
+                'Do not mention OpenAI, model names, or technical details.',
+                'Return only the sentence.'
+              ].join('\n'),
+              type: 'input_text'
+            }
+          ],
+          role: 'user'
+        }
+      ],
+      max_output_tokens: 80,
+      model: env.openAiInterpreterSegmentModel
+    }),
+    headers: {
+      Authorization: `Bearer ${env.openAiApiKey}`,
+      'Content-Type': 'application/json',
+      'OpenAI-Safety-Identifier': createSafetyIdentifier(context.tenantId, context.uid)
+    },
+    method: 'POST',
+    signal: AbortSignal.timeout(env.openAiRequestTimeoutMs)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    console.warn('OpenAI interpreter voice preview text failed:', {
+      error: errorText.slice(0, 300),
+      languageCode: language.code,
+      model: env.openAiInterpreterSegmentModel,
+      status: response.status,
+      voiceId: voiceProfile.id
+    });
+    throw serviceError('Interpreter speaker preview could not be prepared.');
+  }
+
+  const body = await response.json() as {
+    output_text?: string;
+    output?: Array<{ content?: Array<{ text?: string }> }>;
+  };
+  const previewText = extractOpenAiTextOutput(body)
+    .replace(/^["“”]+|["“”]+$/g, '')
+    .trim();
+
+  if (!previewText) {
+    throw serviceError('Interpreter speaker preview was empty.');
+  }
+
+  return previewText.slice(0, 280);
+}
+
+async function requestOpenAiVoicePreviewSpeechAudio({
+  context,
+  language,
+  previewText,
+  voiceId
+}: {
+  context: AuthorizedInterpreterContext;
+  language: InterpreterLanguage;
+  previewText: string;
+  voiceId: string;
+}): Promise<InterpreterSummaryAudio> {
+  if (!env.openAiApiKey) {
+    throw serviceError('Interpreter speaker preview is not configured on the backend.');
+  }
+
+  if (!env.interpreterSegmentAudioEnabled) {
+    throw validationError('Interpreter spoken segment playback is disabled for this organization.');
+  }
+
+  const response = await fetch('https://api.openai.com/v1/audio/speech', {
+    body: JSON.stringify({
+      input: previewText,
+      instructions: [
+        `Speak this preview in ${language.label}.`,
+        'Sound like a natural professional workplace interpreter.',
+        'Use clear pacing and a calm enterprise tone.'
+      ].join(' '),
+      model: env.openAiInterpreterSegmentTtsModel,
+      response_format: 'mp3',
+      voice: voiceId
+    }),
+    headers: {
+      Authorization: `Bearer ${env.openAiApiKey}`,
+      'Content-Type': 'application/json',
+      'OpenAI-Safety-Identifier': createSafetyIdentifier(context.tenantId, context.uid)
+    },
+    method: 'POST',
+    signal: AbortSignal.timeout(env.openAiRequestTimeoutMs)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    console.warn('OpenAI interpreter voice preview speech failed:', {
+      error: errorText.slice(0, 300),
+      languageCode: language.code,
+      model: env.openAiInterpreterSegmentTtsModel,
+      status: response.status,
+      voiceId
+    });
+    throw serviceError('Interpreter speaker preview could not be spoken.');
+  }
+
+  const audioBuffer = Buffer.from(await response.arrayBuffer());
+  const contentType = response.headers.get('content-type') || 'audio/mpeg';
+
+  return {
+    audioBase64: audioBuffer.toString('base64'),
+    contentType,
+    format: 'mp3',
+    languageCode: language.code,
+    model: env.openAiInterpreterSegmentTtsModel,
+    voice: voiceId
+  };
+}
+
 function extractOpenAiTextOutput(body: {
   output_text?: string;
   output?: Array<{ content?: Array<{ text?: string }> }>;
@@ -1890,6 +2209,32 @@ function normalizeInterpreterSummaryRecord(summary: Partial<InterpreterSummaryRe
           typeof entry[0] === 'string' && typeof entry[1] === 'string'
         ))
       : {}
+  };
+}
+
+function normalizeInterpreterTranslationRecord(
+  translation: Partial<InterpreterTranslationRecord>
+): InterpreterTranslationRecord | null {
+  if (
+    !translation.translationId ||
+    !translation.meetingId ||
+    !translation.tenantId ||
+    !translation.targetLanguageCode ||
+    !translation.translatedText
+  ) {
+    return null;
+  }
+
+  return {
+    createdAtIso: translation.createdAtIso || new Date(0).toISOString(),
+    createdByUid: translation.createdByUid || '',
+    meetingId: translation.meetingId,
+    sourceSegmentId: translation.sourceSegmentId || null,
+    sourceText: translation.sourceText || '',
+    targetLanguageCode: translation.targetLanguageCode,
+    tenantId: translation.tenantId,
+    translatedText: translation.translatedText,
+    translationId: translation.translationId
   };
 }
 

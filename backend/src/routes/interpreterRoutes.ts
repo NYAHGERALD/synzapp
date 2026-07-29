@@ -11,6 +11,8 @@ import {
   createInterpreterSegmentAudio,
   createInterpreterSummary,
   createInterpreterSummaryAudio,
+  createInterpreterTranslationReplayAudio,
+  createInterpreterVoicePreviewAudio,
   deleteInterpreterMeeting,
   endInterpreterMeeting,
   getInterpreterMeeting,
@@ -21,7 +23,8 @@ import {
   listInterpreterVoiceProfiles,
   runInterpreterRealtimeProviderDiagnostic,
   startInterpreterMeeting,
-  updateInterpreterMeetingInvitations
+  updateInterpreterMeetingInvitations,
+  updateInterpreterMeetingVoice
 } from '../services/interpreterService.js';
 
 const interpreterRouter = Router();
@@ -93,8 +96,21 @@ const summaryAudioBodySchema = z.object({
   voiceId: interpreterVoiceIdSchema.nullable().optional()
 });
 
+const translationReplayAudioBodySchema = z.object({
+  voiceId: interpreterVoiceIdSchema.nullable().optional()
+});
+
+const voicePreviewBodySchema = z.object({
+  languageCode: languageCodeSchema.nullable().optional(),
+  voiceId: interpreterVoiceIdSchema
+});
+
 const invitationsBodySchema = z.object({
   invitedUserIds: z.array(meetingIdSchema).max(50)
+});
+
+const meetingVoiceBodySchema = z.object({
+  interpreterVoiceId: interpreterVoiceIdSchema
 });
 
 interpreterRouter.get('/languages', verifyAppCheck, (_req, res) => {
@@ -102,6 +118,21 @@ interpreterRouter.get('/languages', verifyAppCheck, (_req, res) => {
     languages: listInterpreterSupportedLanguages(),
     voices: listInterpreterVoiceProfiles()
   });
+});
+
+interpreterRouter.post('/voices/preview', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const body = voicePreviewBodySchema.parse(req.body);
+    const result = await createInterpreterVoicePreviewAudio(decodedToken, {
+      languageCode: body.languageCode || null,
+      voiceId: body.voiceId
+    });
+
+    res.status(201).json(result);
+  } catch (error) {
+    next(error);
+  }
 });
 
 interpreterRouter.get('/meetings', verifyAppCheck, async (req, res, next) => {
@@ -202,6 +233,22 @@ interpreterRouter.post('/meetings/:meetingId/invitations', verifyAppCheck, async
   }
 });
 
+interpreterRouter.post('/meetings/:meetingId/voice', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const meetingId = meetingIdSchema.parse(req.params.meetingId);
+    const body = meetingVoiceBodySchema.parse(req.body);
+    const result = await updateInterpreterMeetingVoice(decodedToken, {
+      interpreterVoiceId: body.interpreterVoiceId,
+      meetingId
+    });
+
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
 interpreterRouter.post('/meetings/:meetingId/realtime-client-secret', verifyAppCheck, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
@@ -277,6 +324,24 @@ interpreterRouter.post('/meetings/:meetingId/interpretation-audio', verifyAppChe
     const meetingId = meetingIdSchema.parse(req.params.meetingId);
     const body = segmentAudioBodySchema.parse(req.body);
     const result = await createInterpreterSegmentAudio(decodedToken, meetingId, body);
+
+    res.status(201).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+interpreterRouter.post('/meetings/:meetingId/translations/:translationId/audio', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const meetingId = meetingIdSchema.parse(req.params.meetingId);
+    const translationId = meetingIdSchema.parse(req.params.translationId);
+    const body = translationReplayAudioBodySchema.parse(req.body || {});
+    const result = await createInterpreterTranslationReplayAudio(decodedToken, {
+      meetingId,
+      translationId,
+      voiceId: body.voiceId || null
+    });
 
     res.status(201).json(result);
   } catch (error) {
