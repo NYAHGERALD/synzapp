@@ -18,6 +18,7 @@ import {
   listInterpreterParticipants,
   listInterpreterSummaries,
   listInterpreterSupportedLanguages,
+  listInterpreterVoiceProfiles,
   runInterpreterRealtimeProviderDiagnostic,
   startInterpreterMeeting,
   updateInterpreterMeetingInvitations
@@ -28,9 +29,11 @@ const realtimeSdpBodyParser = text({ limit: '256kb', type: ['application/sdp', '
 
 const languageCodeSchema = z.string().trim().min(2).max(16).regex(/^[a-z]{2,3}(?:-[A-Z0-9]{2,4})?$/);
 const meetingIdSchema = z.string().trim().min(6).max(128).regex(/^[A-Za-z0-9_-]+$/);
+const interpreterVoiceIdSchema = z.string().trim().min(2).max(32).regex(/^[a-z0-9_-]+$/);
 
 const createMeetingBodySchema = z.object({
   autoDetectSourceLanguage: z.boolean().optional(),
+  interpreterVoiceId: interpreterVoiceIdSchema.nullable().optional(),
   invitedUserIds: z.array(meetingIdSchema).max(50).optional(),
   interpreterLanguageCodes: z.array(languageCodeSchema).min(1).max(10),
   meetingName: z.string().trim().min(2).max(140),
@@ -77,7 +80,8 @@ const segmentAudioBodySchema = z.object({
   sourceSegmentId: z.string().trim().max(128).nullable().optional(),
   sourceText: z.string().trim().min(1).max(8_000),
   targetLanguageCode: languageCodeSchema,
-  translatedText: z.string().trim().min(1).max(8_000).nullable().optional()
+  translatedText: z.string().trim().min(1).max(8_000).nullable().optional(),
+  voiceId: interpreterVoiceIdSchema.nullable().optional()
 });
 
 const summaryBodySchema = z.object({
@@ -85,7 +89,8 @@ const summaryBodySchema = z.object({
 });
 
 const summaryAudioBodySchema = z.object({
-  languageCode: languageCodeSchema
+  languageCode: languageCodeSchema,
+  voiceId: interpreterVoiceIdSchema.nullable().optional()
 });
 
 const invitationsBodySchema = z.object({
@@ -93,7 +98,10 @@ const invitationsBodySchema = z.object({
 });
 
 interpreterRouter.get('/languages', verifyAppCheck, (_req, res) => {
-  res.json({ languages: listInterpreterSupportedLanguages() });
+  res.json({
+    languages: listInterpreterSupportedLanguages(),
+    voices: listInterpreterVoiceProfiles()
+  });
 });
 
 interpreterRouter.get('/meetings', verifyAppCheck, async (req, res, next) => {
@@ -313,7 +321,8 @@ interpreterRouter.post('/meetings/:meetingId/summaries/:summaryId/audio', verify
     const result = await createInterpreterSummaryAudio(decodedToken, {
       languageCode: body.languageCode,
       meetingId,
-      summaryId
+      summaryId,
+      voiceId: body.voiceId || null
     });
 
     res.status(201).json(result);

@@ -9,6 +9,12 @@ export interface InterpreterLanguage {
   label: string;
 }
 
+export interface InterpreterVoiceProfile {
+  description: string;
+  id: string;
+  label: string;
+}
+
 export interface InterpreterMeeting {
   autoDetectSourceLanguage: boolean;
   createdAtIso: string;
@@ -16,6 +22,7 @@ export interface InterpreterMeeting {
   createdByUid: string;
   endedAtIso?: string | null;
   interpreterLanguages: InterpreterLanguage[];
+  interpreterVoiceId?: string;
   invitedUserIds: string[];
   meetingId: string;
   meetingName: string;
@@ -70,6 +77,7 @@ export interface InterpreterSummaryAudio {
 }
 
 export interface InterpreterSegmentAudio extends InterpreterSummaryAudio {
+  introText?: string;
   sourceText: string;
   translatedText: string;
   translationId: string;
@@ -110,6 +118,7 @@ export interface InterpreterRealtimeProviderDiagnosticResponse {
 
 export interface CreateInterpreterMeetingInput {
   autoDetectSourceLanguage: boolean;
+  interpreterVoiceId?: string | null;
   invitedUserIds?: string[];
   interpreterLanguageCodes: string[];
   meetingName: string;
@@ -126,13 +135,14 @@ export async function listInterpreterMeetings(idToken: string) {
   return response.json() as Promise<{
     meetings: InterpreterMeeting[];
     supportedLanguages: InterpreterLanguage[];
+    supportedVoices?: InterpreterVoiceProfile[];
   }>;
 }
 
 export async function listInterpreterLanguages(idToken: string) {
   const response = await interpreterFetch(idToken, '/languages');
 
-  return response.json() as Promise<{ languages: InterpreterLanguage[] }>;
+  return response.json() as Promise<{ languages: InterpreterLanguage[]; voices?: InterpreterVoiceProfile[] }>;
 }
 
 export async function listInterpreterParticipants(idToken: string) {
@@ -310,6 +320,7 @@ export async function createInterpreterInterpretationAudio(
     sourceText: string;
     targetLanguageCode: string;
     translatedText?: string | null;
+    voiceId?: string | null;
   }
 ) {
   const response = await interpreterFetch(idToken, `/meetings/${encodeURIComponent(meetingId)}/interpretation-audio`, {
@@ -340,13 +351,14 @@ export async function createInterpreterSummaryAudio(
   idToken: string,
   meetingId: string,
   summaryId: string,
-  languageCode: string
+  languageCode: string,
+  voiceId?: string | null
 ) {
   const response = await interpreterFetch(
     idToken,
     `/meetings/${encodeURIComponent(meetingId)}/summaries/${encodeURIComponent(summaryId)}/audio`,
     {
-      body: JSON.stringify({ languageCode }),
+      body: JSON.stringify({ languageCode, voiceId: voiceId || null }),
       method: 'POST'
     }
   );

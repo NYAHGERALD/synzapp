@@ -47,6 +47,7 @@ import {
   InterpreterSegmentAudio,
   InterpreterSummaryAudio,
   InterpreterMeetingType,
+  InterpreterVoiceProfile,
   listInterpreterMeetings,
   listInterpreterParticipants,
   runInterpreterRealtimeProviderDiagnostic,
@@ -69,6 +70,13 @@ interface InterpreterScreenProps {
 }
 
 const DEFAULT_LANGUAGE_CODES = ['en-US', 'es-MX'];
+const DEFAULT_INTERPRETER_VOICE_ID = 'cedar';
+const FALLBACK_INTERPRETER_VOICES: InterpreterVoiceProfile[] = [
+  { id: 'cedar', label: 'Cedar', description: 'Calm executive interpreter for workplace conversations.' },
+  { id: 'marin', label: 'Marin', description: 'Clear multilingual facilitator for mixed teams.' },
+  { id: 'coral', label: 'Coral', description: 'Warm natural interpreter for coaching and 1-on-1s.' },
+  { id: 'sage', label: 'Sage', description: 'Measured enterprise voice for sensitive meetings.' }
+];
 const REMINDER_LEAD_MINUTES = [5, 10, 15, 30, 60, 120, 1440];
 const REMINDER_FREQUENCIES: Array<InterpreterCreateDraft['reminderFrequency']> = ['once', 'daily', 'weekly'];
 const INTERPRETER_SUMMARY_AUDIO_MODE: AudioMode = {
@@ -110,6 +118,7 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
   const insets = useSafeAreaInsets();
   const [meetings, setMeetings] = useState<InterpreterMeeting[]>([]);
   const [languages, setLanguages] = useState<InterpreterLanguage[]>([]);
+  const [voiceProfiles, setVoiceProfiles] = useState<InterpreterVoiceProfile[]>(FALLBACK_INTERPRETER_VOICES);
   const [participants, setParticipants] = useState<InterpreterParticipant[]>([]);
   const [selectedMeetingDetails, setSelectedMeetingDetails] = useState<InterpreterMeetingDetails | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -133,6 +142,7 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
 
       setMeetings(result.meetings);
       setLanguages(result.supportedLanguages);
+      setVoiceProfiles(result.supportedVoices?.length ? result.supportedVoices : FALLBACK_INTERPRETER_VOICES);
       setParticipants(participantResult.participants);
     } catch (error) {
       showInterpreterError(getErrorMessage(error));
@@ -152,6 +162,7 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
       const idToken = await getIdToken();
       const result = await createInterpreterMeeting(idToken, {
         autoDetectSourceLanguage: input.autoDetectSourceLanguage,
+        interpreterVoiceId: input.interpreterVoiceId,
         invitedUserIds: input.invitedUserIds,
         interpreterLanguageCodes: input.languageCodes,
         meetingName: input.meetingName,
@@ -386,6 +397,7 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
         onCreateRealtimeSdpAnswer={handleCreateRealtimeSdpAnswer}
         onUpdateInvitations={handleUpdateInvitations}
         participants={participants}
+        voiceProfiles={voiceProfiles}
       />
     );
   }
@@ -448,6 +460,7 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
         onError={showInterpreterError}
         participants={participants}
         onSubmit={handleCreateMeeting}
+        voiceProfiles={voiceProfiles}
       />
     </View>
   );
@@ -465,6 +478,7 @@ interface InterpreterRoomProps {
   onCreateRealtimeSdpAnswer: (targetLanguageCode: string, offerSdp: string) => Promise<string | null>;
   onUpdateInvitations: (invitedUserIds: string[]) => Promise<void>;
   participants: InterpreterParticipant[];
+  voiceProfiles: InterpreterVoiceProfile[];
 }
 
 interface InterpreterMeetingSwipeRowProps {
@@ -589,7 +603,8 @@ function InterpreterRoom({
   onError,
   onCreateRealtimeSdpAnswer,
   onUpdateInvitations,
-  participants
+  participants,
+  voiceProfiles
 }: InterpreterRoomProps) {
   const appTheme = useAppTheme();
   const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
@@ -616,10 +631,12 @@ function InterpreterRoom({
   const [summaryAudioSourceUri, setSummaryAudioSourceUri] = useState<string | null>(null);
   const [summaryAudioCache, setSummaryAudioCache] = useState<Record<string, string>>({});
   const [activeSummaryAudioKey, setActiveSummaryAudioKey] = useState<string | null>(null);
+  const [pendingSummaryAudioKey, setPendingSummaryAudioKey] = useState<string | null>(null);
   const [preparingSummaryAudioKey, setPreparingSummaryAudioKey] = useState<string | null>(null);
   const [segmentAudioSourceUri, setSegmentAudioSourceUri] = useState<string | null>(null);
   const [segmentAudioCache, setSegmentAudioCache] = useState<Record<string, string>>({});
   const [activeSegmentAudioKey, setActiveSegmentAudioKey] = useState<string | null>(null);
+  const [pendingSegmentAudioKey, setPendingSegmentAudioKey] = useState<string | null>(null);
   const [isPreparingSegmentAudio, setIsPreparingSegmentAudio] = useState(false);
   const realtimeSessionPoolRef = useRef<Record<string, InterpreterRealtimeSession>>({});
   const [languageSessionState, setLanguageSessionState] = useState<Record<string, InterpreterLanguageSessionState>>({});
@@ -634,6 +651,8 @@ function InterpreterRoom({
   const latestTranslation = [...details.translations].reverse()
     .find((translation) => translation.targetLanguageCode === selectedLanguageCode);
   const selectedLanguageSession = languageSessionState[selectedLanguageCode];
+  const selectedVoiceId = details.meeting.interpreterVoiceId || DEFAULT_INTERPRETER_VOICE_ID;
+  const selectedVoiceProfile = getInterpreterVoiceProfile(voiceProfiles, selectedVoiceId);
   const activeSessionStatuses = Object.values(languageSessionState).map((state) => state.status);
   const isRealtimeActive = activeSessionStatuses.some(isActiveRealtimeStatus);
 
@@ -656,6 +675,45 @@ function InterpreterRoom({
   }, [summaryAudioStatus.didJustFinish]);
 
   useEffect(() => {
+    if (!pendingSummaryAudioKey || !summaryAudioSourceUri || !summaryAudioStatus.isLoaded) {
+      return;
+    }
+
+    let isCancelled = false;
+
+    void (async () => {
+      try {
+        await setAudioModeAsync(INTERPRETER_SUMMARY_AUDIO_MODE).catch(() => undefined);
+        await summaryAudioPlayer.seekTo(0).catch(() => undefined);
+
+        if (isCancelled) {
+          return;
+        }
+
+        setActiveSummaryAudioKey(pendingSummaryAudioKey);
+        summaryAudioPlayer.play();
+        setPendingSummaryAudioKey(null);
+      } catch (error) {
+        if (!isCancelled) {
+          setPendingSummaryAudioKey(null);
+          setActiveSummaryAudioKey(null);
+          onError(getErrorMessage(error), 'Spoken summary needs attention');
+        }
+      }
+    })();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [
+    onError,
+    pendingSummaryAudioKey,
+    summaryAudioPlayer,
+    summaryAudioSourceUri,
+    summaryAudioStatus.isLoaded
+  ]);
+
+  useEffect(() => {
     if (segmentAudioStatus.didJustFinish) {
       setActiveSegmentAudioKey(null);
       setLiveStatus('ready');
@@ -664,6 +722,53 @@ function InterpreterRoom({
       }
     }
   }, [respondingLanguageCode, segmentAudioStatus.didJustFinish]);
+
+  useEffect(() => {
+    if (!pendingSegmentAudioKey || !segmentAudioSourceUri || !segmentAudioStatus.isLoaded) {
+      return;
+    }
+
+    let isCancelled = false;
+
+    void (async () => {
+      try {
+        await setAudioModeAsync(INTERPRETER_SUMMARY_AUDIO_MODE).catch(() => undefined);
+        await segmentAudioPlayer.seekTo(0).catch(() => undefined);
+
+        if (isCancelled) {
+          return;
+        }
+
+        setActiveSegmentAudioKey(pendingSegmentAudioKey);
+        setLiveStatus('speaking');
+        setLiveMode('responding');
+        segmentAudioPlayer.play();
+        setPendingSegmentAudioKey(null);
+      } catch (error) {
+        if (!isCancelled) {
+          setPendingSegmentAudioKey(null);
+          setActiveSegmentAudioKey(null);
+          setLiveStatus('ready');
+          setLiveMode('choosing');
+          if (respondingLanguageCode) {
+            updateLanguageSession(respondingLanguageCode, { status: 'ready' });
+          }
+          onError(getErrorMessage(error), 'Interpreter playback needs attention');
+        }
+      }
+    })();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [
+    onError,
+    pendingSegmentAudioKey,
+    respondingLanguageCode,
+    segmentAudioPlayer,
+    segmentAudioSourceUri,
+    segmentAudioStatus.isLoaded
+  ]);
 
   useEffect(() => {
     let isMounted = true;
@@ -914,7 +1019,8 @@ function InterpreterRoom({
       const result = await createInterpreterInterpretationAudio(idToken, details.meeting.meetingId, {
         sourceText: sourceText || realtimeTranslation,
         targetLanguageCode: languageCode,
-        translatedText: realtimeTranslation || null
+        translatedText: realtimeTranslation || null,
+        voiceId: selectedVoiceId
       });
 
       updateLanguageSession(languageCode, {
@@ -1052,15 +1158,8 @@ function InterpreterRoom({
       [audioKey]: cachedUri
     }));
 
-    if (cachedUri !== summaryAudioSourceUri) {
-      setSummaryAudioSourceUri(cachedUri);
-      safeReplaceAudioPlayerSource(summaryAudioPlayer, cachedUri);
-    }
-
-    await summaryAudioPlayer.seekTo(0).catch(() => undefined);
-    await setAudioModeAsync(INTERPRETER_SUMMARY_AUDIO_MODE).catch(() => undefined);
-    setActiveSummaryAudioKey(audioKey);
-    safePlayAudioPlayer(summaryAudioPlayer);
+    setSummaryAudioSourceUri(cachedUri);
+    setPendingSummaryAudioKey(audioKey);
   }
 
   async function playInterpreterSegmentAudioPayload(audio: InterpreterSegmentAudio) {
@@ -1072,17 +1171,10 @@ function InterpreterRoom({
       [audioKey]: cachedUri
     }));
 
-    if (cachedUri !== segmentAudioSourceUri) {
-      setSegmentAudioSourceUri(cachedUri);
-      safeReplaceAudioPlayerSource(segmentAudioPlayer, cachedUri);
-    }
-
-    await segmentAudioPlayer.seekTo(0).catch(() => undefined);
-    await setAudioModeAsync(INTERPRETER_SUMMARY_AUDIO_MODE).catch(() => undefined);
-    setActiveSegmentAudioKey(audioKey);
+    setSegmentAudioSourceUri(cachedUri);
+    setPendingSegmentAudioKey(audioKey);
     setLiveStatus('speaking');
     setLiveMode('responding');
-    safePlayAudioPlayer(segmentAudioPlayer);
   }
 
   async function handleReplayInterpreterSegmentAudio() {
@@ -1098,12 +1190,9 @@ function InterpreterRoom({
         return;
       }
 
-      await segmentAudioPlayer.seekTo(0).catch(() => undefined);
-      await setAudioModeAsync(INTERPRETER_SUMMARY_AUDIO_MODE).catch(() => undefined);
-      setActiveSegmentAudioKey(activeSegmentAudioKey || `current:${respondingLanguageCode || selectedLanguageCode}`);
+      setPendingSegmentAudioKey(activeSegmentAudioKey || `current:${respondingLanguageCode || selectedLanguageCode}`);
       setLiveStatus('speaking');
       setLiveMode('responding');
-      safePlayAudioPlayer(segmentAudioPlayer);
     } catch (error) {
       onError(getErrorMessage(error), 'Interpreter playback needs attention');
     }
@@ -1127,15 +1216,8 @@ function InterpreterRoom({
       const cachedUri = summaryAudioCache[audioKey];
 
       if (cachedUri) {
-        if (cachedUri !== summaryAudioSourceUri) {
-          setSummaryAudioSourceUri(cachedUri);
-          safeReplaceAudioPlayerSource(summaryAudioPlayer, cachedUri);
-        }
-
-        await summaryAudioPlayer.seekTo(0).catch(() => undefined);
-        await setAudioModeAsync(INTERPRETER_SUMMARY_AUDIO_MODE).catch(() => undefined);
-        setActiveSummaryAudioKey(audioKey);
-        safePlayAudioPlayer(summaryAudioPlayer);
+        setSummaryAudioSourceUri(cachedUri);
+        setPendingSummaryAudioKey(audioKey);
         return;
       }
 
@@ -1144,7 +1226,8 @@ function InterpreterRoom({
         idToken,
         details.meeting.meetingId,
         summary.summaryId,
-        languageCode
+        languageCode,
+        selectedVoiceId
       );
 
       await playInterpreterSummaryAudioPayload(summary.summaryId, result.audio);
@@ -1527,7 +1610,7 @@ function InterpreterRoom({
         details={details}
         historyItems={liveInterpretationHistory}
         isInterpretationAudioPlaying={segmentAudioStatus.playing}
-        isPreparingInterpretationAudio={isPreparingSegmentAudio}
+        isPreparingInterpretationAudio={isPreparingSegmentAudio || Boolean(pendingSegmentAudioKey)}
         isHistoryOpen={isLiveHistoryOpen}
         isLanguageModalOpen={isLiveLanguageModalOpen}
         isOpen={isLiveRoomOpen}
@@ -1558,6 +1641,7 @@ function InterpreterRoom({
         respondingLanguageCode={respondingLanguageCode}
         selectedLanguageCode={selectedLanguageCode}
         setSelectedLanguageCode={setSelectedLanguageCode}
+        voiceProfile={selectedVoiceProfile}
         wasInterrupted={wasInterpretationInterrupted}
       />
     </View>
@@ -1597,6 +1681,7 @@ interface InterpreterLiveRoomModalProps {
   respondingLanguageCode: string | null;
   selectedLanguageCode: string;
   setSelectedLanguageCode: (languageCode: string) => void;
+  voiceProfile: InterpreterVoiceProfile;
   wasInterrupted: boolean;
 }
 
@@ -1633,6 +1718,7 @@ function InterpreterLiveRoomModal({
   respondingLanguageCode,
   selectedLanguageCode,
   setSelectedLanguageCode,
+  voiceProfile,
   wasInterrupted
 }: InterpreterLiveRoomModalProps) {
   const appTheme = useAppTheme();
@@ -1640,6 +1726,7 @@ function InterpreterLiveRoomModal({
   const insets = useSafeAreaInsets();
   const selectedLanguage = details.meeting.interpreterLanguages.find((language) => language.code === selectedLanguageCode)
     || details.meeting.interpreterLanguages[0];
+  const transcriptScrollRef = useRef<ScrollView | null>(null);
   const isActive = isActiveRealtimeStatus(liveStatus);
   const canChooseLanguage = isActive && (liveMode === 'choosing' || liveMode === 'responding');
   const primaryActionLabel = getLivePrimaryActionLabel(liveMode, liveStatus);
@@ -1666,6 +1753,18 @@ function InterpreterLiveRoomModal({
 
     onStart();
   };
+
+  useEffect(() => {
+    if (!liveTranscript.trim() && !liveTranslation.trim()) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      transcriptScrollRef.current?.scrollToEnd({ animated: true });
+    }, 80);
+
+    return () => clearTimeout(timer);
+  }, [liveTranscript, liveTranslation]);
 
   return (
     <Modal animationType="slide" onRequestClose={onClose} visible={isOpen}>
@@ -1731,10 +1830,13 @@ function InterpreterLiveRoomModal({
           <View style={styles.liveLanguageSummaryRow}>
             <View style={styles.liveLanguageSummaryCopy}>
               <Text style={styles.liveRoomSectionLabel}>Interpreter languages</Text>
-              <Text style={styles.liveRoomLanguageSummaryText} numberOfLines={2}>
-                {details.meeting.interpreterLanguages.map((language) => language.label).join(', ')}
-              </Text>
-            </View>
+            <Text style={styles.liveRoomLanguageSummaryText} numberOfLines={2}>
+              {details.meeting.interpreterLanguages.map((language) => language.label).join(', ')}
+            </Text>
+            <Text style={styles.liveRoomVoiceText} numberOfLines={1}>
+              Interpreter speaker: {voiceProfile.label}
+            </Text>
+          </View>
             <Pressable
               disabled={!canChooseLanguage}
               onPress={onOpenLanguageModal}
@@ -1751,55 +1853,62 @@ function InterpreterLiveRoomModal({
         </View>
 
         <View style={styles.liveRoomTranscriptArea}>
-          <Text style={styles.liveRoomSectionLabel}>Detected speech</Text>
-          <Text style={styles.liveRoomTranscriptText}>
-            {liveTranscript || 'The transcript preview appears here while the interpreter listens.'}
-          </Text>
-          <View style={styles.liveRoomDivider} />
-          <Text style={styles.liveRoomSectionLabel}>Current interpretation</Text>
-          <Text style={styles.liveRoomTranslationText}>
-            {liveTranslation || `Ready to interpret in ${selectedLanguage?.label || 'the selected language'}.`}
-          </Text>
-          {isPreparingInterpretationAudio || liveMode === 'responding' ? (
-            <View style={styles.interpretationPlayerRow}>
-              <Pressable
-                disabled={isPreparingInterpretationAudio || !liveTranslation.trim()}
-                onPress={onReplayInterpretationAudio}
-                style={({ pressed }) => [
-                  styles.interpretationPlayerButton,
-                  isInterpretationAudioPlaying && styles.interpretationPlayerButtonActive,
-                  (isPreparingInterpretationAudio || !liveTranslation.trim()) && styles.disabledButton,
-                  pressed && styles.pressed
-                ]}
-              >
-                {isPreparingInterpretationAudio ? (
-                  <ActivityIndicator color={appTheme.colors.primary} size="small" />
-                ) : (
-                  <Ionicons
-                    color={isInterpretationAudioPlaying ? '#fff' : appTheme.colors.primary}
-                    name={isInterpretationAudioPlaying ? 'pause' : 'play'}
-                    size={16}
-                  />
-                )}
-              </Pressable>
-              <View style={styles.interpretationPlayerCopy}>
-                <Text style={styles.interpretationPlayerTitle}>Spoken interpretation</Text>
-                <Text style={styles.interpretationPlayerMeta}>
-                  {isPreparingInterpretationAudio
-                    ? `Preparing ${selectedLanguage?.label || 'language'} audio`
-                    : isInterpretationAudioPlaying
-                      ? `Playing in ${selectedLanguage?.label || 'selected language'}`
-                      : `Ready in ${selectedLanguage?.label || 'selected language'}`}
-                </Text>
+          <ScrollView
+            contentContainerStyle={styles.liveRoomTranscriptContent}
+            ref={transcriptScrollRef}
+            showsVerticalScrollIndicator={false}
+            style={styles.liveRoomTranscriptScroll}
+          >
+            <Text style={styles.liveRoomSectionLabel}>Detected speech</Text>
+            <Text style={styles.liveRoomTranscriptText}>
+              {liveTranscript || 'The transcript preview appears here while the interpreter listens.'}
+            </Text>
+            <View style={styles.liveRoomDivider} />
+            <Text style={styles.liveRoomSectionLabel}>Current interpretation</Text>
+            <Text style={styles.liveRoomTranslationText}>
+              {liveTranslation || `Ready to interpret in ${selectedLanguage?.label || 'the selected language'}.`}
+            </Text>
+            {isPreparingInterpretationAudio || liveMode === 'responding' ? (
+              <View style={styles.interpretationPlayerRow}>
+                <Pressable
+                  disabled={isPreparingInterpretationAudio || !liveTranslation.trim()}
+                  onPress={onReplayInterpretationAudio}
+                  style={({ pressed }) => [
+                    styles.interpretationPlayerButton,
+                    isInterpretationAudioPlaying && styles.interpretationPlayerButtonActive,
+                    (isPreparingInterpretationAudio || !liveTranslation.trim()) && styles.disabledButton,
+                    pressed && styles.pressed
+                  ]}
+                >
+                  {isPreparingInterpretationAudio ? (
+                    <ActivityIndicator color={appTheme.colors.primary} size="small" />
+                  ) : (
+                    <Ionicons
+                      color={isInterpretationAudioPlaying ? '#fff' : appTheme.colors.primary}
+                      name={isInterpretationAudioPlaying ? 'pause' : 'play'}
+                      size={16}
+                    />
+                  )}
+                </Pressable>
+                <View style={styles.interpretationPlayerCopy}>
+                  <Text style={styles.interpretationPlayerTitle}>Spoken interpretation</Text>
+                  <Text style={styles.interpretationPlayerMeta}>
+                    {isPreparingInterpretationAudio
+                      ? `Preparing ${selectedLanguage?.label || 'language'} audio`
+                      : isInterpretationAudioPlaying
+                        ? `Playing in ${selectedLanguage?.label || 'selected language'}`
+                        : `Ready in ${selectedLanguage?.label || 'selected language'}`}
+                  </Text>
+                </View>
+                <Pressable
+                  onPress={onOpenLanguageModal}
+                  style={({ pressed }) => [styles.interpretationLanguageButton, pressed && styles.pressed]}
+                >
+                  <Ionicons color={appTheme.colors.primary} name="language-outline" size={17} />
+                </Pressable>
               </View>
-              <Pressable
-                onPress={onOpenLanguageModal}
-                style={({ pressed }) => [styles.interpretationLanguageButton, pressed && styles.pressed]}
-              >
-                <Ionicons color={appTheme.colors.primary} name="language-outline" size={17} />
-              </Pressable>
-            </View>
-          ) : null}
+            ) : null}
+          </ScrollView>
         </View>
 
         {wasInterrupted ? (
@@ -1856,14 +1965,118 @@ interface InterpreterAudioSpectrumProps {
 function InterpreterAudioSpectrum({ audioLevel, isListening }: InterpreterAudioSpectrumProps) {
   const appTheme = useAppTheme();
   const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
-  const bars = useMemo(() => [0.36, 0.62, 0.84, 0.54, 1, 0.72, 0.44, 0.68, 0.38], []);
-  const normalizedLevel = isListening ? Math.max(0.08, Math.min(1, audioLevel || 0.18)) : 0.08;
+  const pulse = useRef(new Animated.Value(0)).current;
+  const float = useRef(new Animated.Value(0)).current;
+  const bars = useMemo(() => [0.34, 0.56, 0.8, 0.62, 0.94, 0.72, 0.5, 0.86, 0.58, 0.76, 0.46, 0.66, 0.42, 0.6], []);
+  const dots = useMemo(() => Array.from({ length: 18 }, (_, index) => ({
+    color: ['#2dd4bf', '#60a5fa', '#a78bfa', '#f0abfc', '#34d399', '#22d3ee'][index % 6],
+    index
+  })), []);
+  const normalizedLevel = isListening ? Math.max(0.1, Math.min(1, audioLevel || 0.16)) : 0.08;
+  const pulseScale = pulse.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.9, 1.18]
+  });
+  const pulseOpacity = pulse.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.32, 0.04]
+  });
+  const floatScale = float.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.98, 1.03]
+  });
+  const orbGlowOpacity = Math.min(0.42, 0.16 + normalizedLevel * 0.28);
+
+  useEffect(() => {
+    const animation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, {
+          duration: 980,
+          toValue: 1,
+          useNativeDriver: true
+        }),
+        Animated.timing(pulse, {
+          duration: 0,
+          toValue: 0,
+          useNativeDriver: true
+        })
+      ])
+    );
+    const floatAnimation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(float, {
+          duration: 1100,
+          toValue: 1,
+          useNativeDriver: true
+        }),
+        Animated.timing(float, {
+          duration: 1100,
+          toValue: 0,
+          useNativeDriver: true
+        })
+      ])
+    );
+
+    if (isListening) {
+      animation.start();
+      floatAnimation.start();
+    } else {
+      pulse.stopAnimation();
+      float.stopAnimation();
+      pulse.setValue(0);
+      float.setValue(0);
+    }
+
+    return () => {
+      animation.stop();
+      floatAnimation.stop();
+    };
+  }, [float, isListening, pulse]);
 
   return (
     <View style={styles.audioSpectrumWrap}>
+      <Animated.View style={[styles.audioOrbShell, { transform: [{ scale: floatScale }] }]}>
+        <Animated.View
+          style={[
+            styles.audioOrbPulseRing,
+            {
+              opacity: pulseOpacity,
+              transform: [{ scale: pulseScale }]
+            }
+          ]}
+        />
+        <View style={[styles.audioOrbOuterGlow, { opacity: orbGlowOpacity }]} />
+        {dots.map((dot) => {
+          const angle = (dot.index / dots.length) * Math.PI * 2;
+          const radius = 72 + normalizedLevel * 18;
+          const size = 5 + normalizedLevel * 8 * ((dot.index % 4) / 4 + 0.45);
+          const x = Math.cos(angle) * radius;
+          const y = Math.sin(angle) * radius;
+
+          return (
+            <View
+              key={dot.index}
+              style={[
+                styles.audioOrbDot,
+                {
+                  backgroundColor: dot.color,
+                  height: size,
+                  opacity: isListening ? 0.32 + normalizedLevel * 0.55 : 0.12,
+                  transform: [{ translateX: x }, { translateY: y }],
+                  width: size
+                }
+              ]}
+            />
+          );
+        })}
+        <View style={styles.audioOrbGlass}>
+          <View style={styles.audioOrbHighlight} />
+          <Ionicons color="#fff" name={isListening ? 'mic' : 'mic-outline'} size={25} />
+        </View>
+      </Animated.View>
       <View style={styles.audioSpectrum}>
         {bars.map((bar, index) => {
-          const height = 18 + Math.round(92 * Math.min(1, normalizedLevel * (0.55 + bar)));
+          const height = 9 + Math.round(42 * Math.min(1, normalizedLevel * (0.48 + bar)));
 
           return (
             <View
@@ -1880,7 +2093,7 @@ function InterpreterAudioSpectrum({ audioLevel, isListening }: InterpreterAudioS
         })}
       </View>
       <Text style={styles.audioSpectrumLabel}>
-        {isListening ? 'Listening to microphone input' : 'Audio spectrum ready'}
+        {isListening ? 'Live microphone signal' : 'Microphone ready'}
       </Text>
     </View>
   );
@@ -2114,6 +2327,7 @@ function DiagnosticPill({ label, ready }: DiagnosticPillProps) {
 
 interface InterpreterCreateDraft {
   autoDetectSourceLanguage: boolean;
+  interpreterVoiceId: string;
   invitedUserIds: string[];
   isScheduled: boolean;
   languageCodes: string[];
@@ -2135,6 +2349,7 @@ interface InterpreterCreateModalProps {
   onError: (message: string, title?: string) => void;
   participants: InterpreterParticipant[];
   onSubmit: (draft: InterpreterCreateDraft) => Promise<void>;
+  voiceProfiles: InterpreterVoiceProfile[];
 }
 
 function InterpreterCreateModal({
@@ -2144,7 +2359,8 @@ function InterpreterCreateModal({
   onClose,
   onError,
   participants,
-  onSubmit
+  onSubmit,
+  voiceProfiles
 }: InterpreterCreateModalProps) {
   const appTheme = useAppTheme();
   const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
@@ -2155,6 +2371,7 @@ function InterpreterCreateModal({
   ];
   const [draft, setDraft] = useState<InterpreterCreateDraft>({
     autoDetectSourceLanguage: true,
+    interpreterVoiceId: DEFAULT_INTERPRETER_VOICE_ID,
     invitedUserIds: [],
     isScheduled: false,
     languageCodes: DEFAULT_LANGUAGE_CODES,
@@ -2169,6 +2386,7 @@ function InterpreterCreateModal({
   });
   const [languagePickerMode, setLanguagePickerMode] = useState<'interpret' | 'source' | null>(null);
   const [participantPickerOpen, setParticipantPickerOpen] = useState(false);
+  const [voicePickerOpen, setVoicePickerOpen] = useState(false);
   const [iosDatePickerMode, setIosDatePickerMode] = useState<'date' | 'time' | null>(null);
   const [iosPickerDate, setIosPickerDate] = useState<Date>(() => getDraftScheduleDate(null));
 
@@ -2176,6 +2394,7 @@ function InterpreterCreateModal({
     if (isOpen) {
       setDraft({
         autoDetectSourceLanguage: true,
+        interpreterVoiceId: DEFAULT_INTERPRETER_VOICE_ID,
         invitedUserIds: [],
         isScheduled: false,
         languageCodes: DEFAULT_LANGUAGE_CODES,
@@ -2190,6 +2409,7 @@ function InterpreterCreateModal({
       });
       setLanguagePickerMode(null);
       setParticipantPickerOpen(false);
+      setVoicePickerOpen(false);
       setIosDatePickerMode(null);
     }
   }, [isOpen]);
@@ -2353,6 +2573,23 @@ function InterpreterCreateModal({
                 </Pressable>
               ))}
             </View>
+
+            <Pressable
+              onPress={() => setVoicePickerOpen(true)}
+              style={({ pressed }) => [styles.dropdownRow, pressed && styles.pressed]}
+            >
+              <Ionicons color={appTheme.colors.primary} name="volume-high-outline" size={19} />
+              <View style={styles.selectionBody}>
+                <Text style={styles.sectionLabel}>Interpreter speaker</Text>
+                <Text style={styles.selectionTitle}>
+                  {getInterpreterVoiceProfile(voiceProfiles, draft.interpreterVoiceId).label}
+                </Text>
+                <Text style={styles.mutedText}>
+                  {getInterpreterVoiceProfile(voiceProfiles, draft.interpreterVoiceId).description}
+                </Text>
+              </View>
+              <Ionicons color={appTheme.colors.mutedStrong} name="chevron-down-outline" size={18} />
+            </Pressable>
 
             <Text style={styles.sectionLabel}>Interpret to</Text>
             <View style={styles.selectionList}>
@@ -2609,6 +2846,21 @@ function InterpreterCreateModal({
         onSelect={(participantUid) => {
           addParticipant(participantUid);
           setParticipantPickerOpen(false);
+        }}
+      />
+      <InterpreterOptionPickerModal
+        isOpen={voicePickerOpen}
+        onClose={() => setVoicePickerOpen(false)}
+        options={(voiceProfiles.length ? voiceProfiles : FALLBACK_INTERPRETER_VOICES).map((voice) => ({
+          iconName: 'volume-high-outline',
+          id: voice.id,
+          subtitle: voice.description,
+          title: voice.label
+        }))}
+        title="Interpreter speaker"
+        onSelect={(voiceId) => {
+          setDraft((currentDraft) => ({ ...currentDraft, interpreterVoiceId: voiceId }));
+          setVoicePickerOpen(false);
         }}
       />
       <ScheduleDateTimePickerModal
@@ -3131,6 +3383,18 @@ function getLanguageLabel(languages: InterpreterLanguage[], code: string): strin
   return languages.find((language) => language.code === code)?.label || code;
 }
 
+function getInterpreterVoiceProfile(
+  voiceProfiles: InterpreterVoiceProfile[],
+  voiceId?: string | null
+): InterpreterVoiceProfile {
+  const fallbackProfiles = voiceProfiles.length ? voiceProfiles : FALLBACK_INTERPRETER_VOICES;
+  const requestedVoiceId = voiceId || DEFAULT_INTERPRETER_VOICE_ID;
+
+  return fallbackProfiles.find((voice) => voice.id === requestedVoiceId) ||
+    fallbackProfiles.find((voice) => voice.id === DEFAULT_INTERPRETER_VOICE_ID) ||
+    FALLBACK_INTERPRETER_VOICES[0];
+}
+
 function formatScheduleDate(scheduledAtIso: string | null): string {
   const date = getDraftScheduleDate(scheduledAtIso);
 
@@ -3270,25 +3534,6 @@ function safePauseAudioPlayer(player: { pause: () => void }): void {
     player.pause();
   } catch {
     // The native audio object can be released during fast modal or route transitions.
-  }
-}
-
-function safePlayAudioPlayer(player: { play: () => void }): void {
-  try {
-    player.play();
-  } catch (error) {
-    throw error instanceof Error ? error : new Error('Unable to play this spoken audio.');
-  }
-}
-
-function safeReplaceAudioPlayerSource(
-  player: { replace: (source: { uri: string }) => void },
-  uri: string
-): void {
-  try {
-    player.replace({ uri });
-  } catch (error) {
-    throw error instanceof Error ? error : new Error('Unable to load this spoken audio.');
   }
 }
 
@@ -3595,23 +3840,73 @@ function createStyles(colors: AppColors) {
       justifyContent: 'center',
       width: 42
     },
+    audioOrbDot: {
+      backgroundColor: '#d946ef',
+      borderRadius: 999,
+      left: 88,
+      position: 'absolute',
+      top: 88
+    },
+    audioOrbGlass: {
+      alignItems: 'center',
+      backgroundColor: colors.primary,
+      borderRadius: 42,
+      height: 84,
+      justifyContent: 'center',
+      overflow: 'hidden',
+      shadowColor: colors.primary,
+      shadowOffset: { height: 14, width: 0 },
+      shadowOpacity: 0.28,
+      shadowRadius: 26,
+      width: 84
+    },
+    audioOrbHighlight: {
+      backgroundColor: 'rgba(255,255,255,0.28)',
+      borderRadius: 30,
+      height: 58,
+      left: 10,
+      opacity: 0.42,
+      position: 'absolute',
+      top: 7,
+      width: 34
+    },
+    audioOrbOuterGlow: {
+      backgroundColor: colors.primarySoft,
+      borderRadius: 72,
+      height: 144,
+      position: 'absolute',
+      width: 144
+    },
+    audioOrbPulseRing: {
+      backgroundColor: colors.primary,
+      borderRadius: 76,
+      height: 152,
+      position: 'absolute',
+      width: 152
+    },
+    audioOrbShell: {
+      alignItems: 'center',
+      height: 180,
+      justifyContent: 'center',
+      width: 180
+    },
     audioSpectrumWrap: {
       alignItems: 'center',
-      gap: 12,
-      marginBottom: 22
+      gap: 8,
+      marginBottom: 12
     },
     audioSpectrum: {
       alignItems: 'center',
       flexDirection: 'row',
       gap: 5,
-      height: 132,
+      height: 52,
       justifyContent: 'center',
-      width: 210
+      width: 220
     },
     audioSpectrumBar: {
       backgroundColor: colors.primary,
       borderRadius: 999,
-      width: 9
+      width: 8
     },
     audioSpectrumLabel: {
       color: colors.mutedStrong,
@@ -3624,8 +3919,8 @@ function createStyles(colors: AppColors) {
       flexDirection: 'row',
       gap: 8,
       justifyContent: 'center',
-      marginBottom: 24,
-      minHeight: 48,
+      marginBottom: 14,
+      minHeight: 44,
       minWidth: 158,
       paddingHorizontal: 22
     },
@@ -3798,7 +4093,7 @@ function createStyles(colors: AppColors) {
     },
     liveRoomLanguageArea: {
       gap: 10,
-      marginBottom: 18
+      marginBottom: 10
     },
     liveRoomMeta: {
       color: colors.muted,
@@ -3839,20 +4134,22 @@ function createStyles(colors: AppColors) {
     },
     liveRoomStage: {
       alignItems: 'center',
-      flex: 1,
+      flexShrink: 0,
       justifyContent: 'center',
-      paddingHorizontal: 12
+      minHeight: 270,
+      paddingHorizontal: 12,
+      paddingVertical: 14
     },
     liveRoomStateText: {
       color: colors.mutedStrong,
-      fontSize: 14,
-      lineHeight: 21,
-      marginTop: 8,
+      fontSize: 13,
+      lineHeight: 19,
+      marginTop: 6,
       textAlign: 'center'
     },
     liveRoomStateTitle: {
       color: colors.ink,
-      fontSize: 21
+      fontSize: 18
     },
     liveRoomTitle: {
       color: colors.ink,
@@ -3860,6 +4157,10 @@ function createStyles(colors: AppColors) {
     },
     liveRoomTitleWrap: {
       flex: 1
+    },
+    liveRoomVoiceText: {
+      color: colors.mutedStrong,
+      fontSize: 12
     },
     liveDetailScreen: {
       backgroundColor: colors.surface,
@@ -3889,9 +4190,16 @@ function createStyles(colors: AppColors) {
       borderBottomWidth: 1,
       borderTopColor: colors.divider,
       borderTopWidth: 1,
+      flex: 1,
       gap: 6,
       marginBottom: 16,
+      minHeight: 150
+    },
+    liveRoomTranscriptContent: {
       paddingVertical: 14
+    },
+    liveRoomTranscriptScroll: {
+      flex: 1
     },
     liveRoomTranscriptText: {
       color: colors.mutedStrong,

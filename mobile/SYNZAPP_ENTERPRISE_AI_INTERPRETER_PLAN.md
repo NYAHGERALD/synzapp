@@ -20,6 +20,55 @@ The experience should feel like a real interpreter:
 - It cleans up unclear speech into simple, natural spoken language without changing the intent.
 - It can summarize the meeting so far in one or more configured meeting languages.
 
+## Natural Interpreter Standard
+
+Synzapp must not behave like a literal word-for-word translation robot. The interpreter should produce the kind of speech a trained human interpreter would use in a workplace meeting.
+
+Required behavior:
+
+- Preserve the speaker's original meaning, urgency, intent, and workplace context.
+- Correct obvious grammar mistakes, vocabulary mistakes, filler words, false starts, and mumbling.
+- Use simple, natural spoken language that the listener can understand immediately.
+- Do not add facts, advice, opinions, or assistant-style commentary.
+- Do not read prompt instructions or technical labels aloud.
+- Generate a short dynamic spoken intro before each interpretation, then speak the interpretation.
+
+The backend should create a structured interpretation result before text-to-speech:
+
+- `introText`: one short natural sentence introducing the interpretation.
+- `interpretedText`: the corrected natural interpretation.
+
+The text-to-speech endpoint receives only the spoken intro and interpretation as input. Voice style guidance belongs in the provider instructions field, not in the text being spoken.
+
+## Interpreter Speaker Profiles
+
+Meeting creation includes an interpreter speaker profile. The selected profile is stored on the interpreter meeting and reused for live segment playback and spoken summaries.
+
+Initial enterprise voice profiles:
+
+- `Cedar`: calm executive interpreter.
+- `Marin`: clear multilingual facilitator.
+- `Coral`: warm natural 1-on-1 interpreter.
+- `Sage`: measured voice for sensitive meetings.
+- `Verse`: expressive voice for training and standups.
+- `Ash`: neutral operations voice.
+- `Nova`: bright modern voice.
+- `Shimmer`: smooth people-focused voice.
+
+The mobile app should render these as a picker backed by the backend-supported voice catalog. Unsupported voice IDs must be rejected or normalized server-side.
+
+## Live Signal UI Standard
+
+The live room should not use a basic equalizer-only waveform. The professional signal UI uses:
+
+- A center microphone orb.
+- Subtle animated rings while listening.
+- Colored signal particles around the orb.
+- A compact mic-level bar spectrum below the orb.
+- A transcript pane that scrolls independently from the rest of the room.
+
+The orb and spectrum must react to actual microphone level. When the interpreter is idle, the animation rests quietly and does not imply recording.
+
 ## Official OpenAI Direction
 
 The correct OpenAI API surface is the Realtime Translation API, not the Chat Completions API and not Synzapp Chat translation.
@@ -66,7 +115,7 @@ Environment variables:
   - `OPENAI_INTERPRETER_SUMMARY_TTS_VOICE=cedar`
   - `INTERPRETER_MAX_TARGET_LANGUAGES=6`
   - `INTERPRETER_RETENTION_DAYS=30`
-  - `INTERPRETER_AUDIO_RETENTION=disabled`
+  - `INTERPRETER_AUDIO_RETENTION=false`
   - `INTERPRETER_SUMMARY_ENABLED=true`
   - `INTERPRETER_SUMMARY_AUDIO_ENABLED=true`
 
