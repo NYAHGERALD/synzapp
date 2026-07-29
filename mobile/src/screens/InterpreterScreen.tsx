@@ -53,17 +53,14 @@ import {
   InterpreterVoicePreviewAudio,
   listInterpreterMeetings,
   listInterpreterParticipants,
-  runInterpreterRealtimeProviderDiagnostic,
   startInterpreterMeeting,
   updateInterpreterMeetingInvitations,
   updateInterpreterMeetingVoice
 } from '../services/interpreterApi';
 import {
   getInterpreterAudioReadiness,
-  getInterpreterRealtimeRuntimeReadiness,
   InterpreterAudioReadiness,
   InterpreterRealtimeSession,
-  InterpreterRealtimeRuntimeReadiness,
   InterpreterRealtimeStatus,
   requestInterpreterAudioReadiness,
   startInterpreterRealtimeSession
@@ -71,6 +68,7 @@ import {
 
 interface InterpreterScreenProps {
   getIdToken: () => Promise<string>;
+  onRoomActiveChange?: (isActive: boolean) => void;
 }
 
 const DEFAULT_LANGUAGE_CODES = ['en-US', 'es-MX'];
@@ -122,7 +120,7 @@ type InterpreterSummaryCreateResult = {
   summaryAudioByLanguage?: Record<string, InterpreterSummaryAudio>;
 };
 
-export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
+export function InterpreterScreen({ getIdToken, onRoomActiveChange }: InterpreterScreenProps) {
   const appTheme = useAppTheme();
   const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
   const insets = useSafeAreaInsets();
@@ -134,6 +132,7 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
   const [isLoading, setIsLoading] = useState(true);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
+  const isRoomActive = Boolean(selectedMeetingDetails);
 
   const showInterpreterError = useCallback((message: string, title = 'Interpreter needs attention') => {
     Alert.alert(title, message);
@@ -164,6 +163,14 @@ export function InterpreterScreen({ getIdToken }: InterpreterScreenProps) {
   useEffect(() => {
     void loadWorkspace();
   }, [loadWorkspace]);
+
+  useEffect(() => {
+    onRoomActiveChange?.(isRoomActive);
+
+    return () => {
+      onRoomActiveChange?.(false);
+    };
+  }, [isRoomActive, onRoomActiveChange]);
 
   async function handleCreateMeeting(input: InterpreterCreateDraft) {
     setIsBusy(true);
@@ -654,8 +661,6 @@ function InterpreterRoom({
   const [liveTranslation, setLiveTranslation] = useState('');
   const [liveStatus, setLiveStatus] = useState<InterpreterRealtimeStatus>('closed');
   const [audioReadiness, setAudioReadiness] = useState<InterpreterAudioReadiness | null>(null);
-  const [runtimeReadiness, setRuntimeReadiness] = useState<InterpreterRealtimeRuntimeReadiness | null>(null);
-  const [isCheckingRuntime, setIsCheckingRuntime] = useState(false);
   const [isSummaryModalOpen, setIsSummaryModalOpen] = useState(false);
   const [isLiveRoomOpen, setIsLiveRoomOpen] = useState(false);
   const [isLiveLanguageModalOpen, setIsLiveLanguageModalOpen] = useState(false);
@@ -888,16 +893,35 @@ function InterpreterRoom({
   useEffect(() => {
     let isMounted = true;
 
-    void getInterpreterAudioReadiness().then((readiness) => {
-      if (isMounted) {
-        setAudioReadiness(readiness);
+    void (async () => {
+      try {
+        const readiness = await getInterpreterAudioReadiness();
+
+        if (!isMounted) {
+          return;
+        }
+
+        if (readiness.granted) {
+          setAudioReadiness(readiness);
+          return;
+        }
+
+        const requestedReadiness = await requestInterpreterAudioReadiness();
+
+        if (isMounted) {
+          setAudioReadiness(requestedReadiness);
+        }
+      } catch (error) {
+        if (isMounted) {
+          onError(getErrorMessage(error), 'Microphone needs attention');
+        }
       }
-    });
+    })();
 
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [onError]);
 
   useEffect(() => {
     setInvitedUserIds(details.meeting.invitedUserIds || []);
@@ -950,47 +974,6 @@ function InterpreterRoom({
       setLiveMode('idle');
     }
   }, [languageSessionState]);
-
-  async function requestMicrophoneAccess() {
-    const readiness = await requestInterpreterAudioReadiness();
-
-    setAudioReadiness(readiness);
-    setRuntimeReadiness(null);
-
-    if (!readiness.granted) {
-      onError('Allow microphone access in device settings before starting the live interpreter.');
-    }
-  }
-
-  async function runDeviceReadinessCheck() {
-    setIsCheckingRuntime(true);
-
-    try {
-      const readiness = await getInterpreterRealtimeRuntimeReadiness();
-
-      setAudioReadiness(readiness.audio);
-      setRuntimeReadiness(readiness);
-
-      if (!readiness.canStart) {
-        onError(readiness.message, 'Device readiness needs attention');
-        return;
-      }
-
-      const idToken = await getIdToken();
-      const providerReadiness = await runInterpreterRealtimeProviderDiagnostic(idToken, selectedLanguageCode);
-
-      if (!providerReadiness.credentialAccepted) {
-        onError(providerReadiness.providerMessage, 'Interpreter provider needs attention');
-        return;
-      }
-
-      Alert.alert('Interpreter ready', 'Microphone, device audio, and secure realtime translation are ready.');
-    } catch (error) {
-      onError(getErrorMessage(error), 'Device readiness needs attention');
-    } finally {
-      setIsCheckingRuntime(false);
-    }
-  }
 
   async function startLiveInterpreter(languageCode = selectedLanguageCode) {
     closeRealtimeSessionPool();
@@ -1480,8 +1463,20 @@ function InterpreterRoom({
     setIsRoomVoicePickerOpen(false);
   }
 
+  const microphoneStatusLabel = audioReadiness?.granted
+    ? 'Ready'
+    : audioReadiness
+      ? 'Not granted'
+      : 'Requesting';
+  const microphoneStatusIcon: IoniconName = audioReadiness?.granted
+    ? 'checkmark-circle-outline'
+    : audioReadiness
+      ? 'alert-circle-outline'
+      : 'mic-outline';
+  const microphoneStatusColor = audioReadiness?.granted ? '#047857' : appTheme.colors.primary;
+
   return (
-    <View style={[styles.screen, { paddingBottom: Math.max(insets.bottom + 94, 112) }]}>
+    <View style={[styles.screen, styles.roomScreen, { paddingBottom: Math.max(insets.bottom + 12, 20) }]}>
       <View style={styles.roomHeader}>
         <Pressable onPress={onBack} style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}>
           <Ionicons color={appTheme.colors.ink} name="chevron-back" size={24} />
@@ -1501,78 +1496,38 @@ function InterpreterRoom({
         </Pressable>
       </View>
 
+      <ScrollView
+        contentContainerStyle={styles.roomContent}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
       <View style={styles.readinessRow}>
         <View style={styles.readinessCopy}>
           <Text style={styles.sectionLabel}>Microphone readiness</Text>
           <Text style={styles.mutedText}>
-            {audioReadiness?.granted ? 'Microphone access is ready for live interpretation.' : 'Microphone access is required before listening.'}
+            {audioReadiness?.granted
+              ? 'Microphone access is ready for live interpretation.'
+              : audioReadiness
+                ? 'Enable microphone access in device settings before listening.'
+                : 'Synzapp is requesting microphone access for this interpreter room.'}
           </Text>
         </View>
-        <Pressable
-          disabled={Boolean(audioReadiness?.granted)}
-          onPress={() => void requestMicrophoneAccess()}
-          style={({ pressed }) => [
-            styles.permissionButton,
-            audioReadiness?.granted && styles.permissionButtonReady,
-            pressed && styles.pressed
-          ]}
-        >
+        <View style={[
+          styles.permissionStatusPill,
+          audioReadiness?.granted && styles.permissionButtonReady
+        ]}>
           <Ionicons
-            color={audioReadiness?.granted ? '#047857' : appTheme.colors.primary}
-            name={audioReadiness?.granted ? 'checkmark-circle-outline' : 'mic-outline'}
+            color={microphoneStatusColor}
+            name={microphoneStatusIcon}
             size={17}
           />
           <Text style={[
             styles.permissionButtonText,
             audioReadiness?.granted && styles.permissionButtonTextReady
           ]}>
-            {audioReadiness?.granted ? 'Ready' : 'Allow'}
+            {microphoneStatusLabel}
           </Text>
-        </Pressable>
-      </View>
-
-      <View style={styles.deviceCheckPanel}>
-        <View style={styles.sectionHeaderRow}>
-          <View style={styles.readinessCopy}>
-            <Text style={styles.sectionLabel}>Device interpreter check</Text>
-            <Text style={styles.mutedText}>
-              {runtimeReadiness?.message || 'Run this before the real interpreting test on each device.'}
-            </Text>
-          </View>
-          <Pressable
-            disabled={isCheckingRuntime}
-            onPress={() => void runDeviceReadinessCheck()}
-            style={({ pressed }) => [
-              styles.deviceCheckButton,
-              runtimeReadiness?.canStart && styles.deviceCheckButtonReady,
-              pressed && styles.pressed
-            ]}
-          >
-            {isCheckingRuntime ? (
-              <ActivityIndicator color={appTheme.colors.primary} />
-            ) : (
-              <Ionicons
-                color={runtimeReadiness?.canStart ? '#047857' : appTheme.colors.primary}
-                name={runtimeReadiness?.canStart ? 'shield-checkmark-outline' : 'pulse-outline'}
-                size={17}
-              />
-            )}
-            <Text style={[
-              styles.deviceCheckButtonText,
-              runtimeReadiness?.canStart && styles.deviceCheckButtonTextReady
-            ]}>
-              {runtimeReadiness?.canStart ? 'Ready' : 'Check'}
-            </Text>
-          </Pressable>
         </View>
-        {runtimeReadiness ? (
-          <View style={styles.diagnosticGrid}>
-            <DiagnosticPill label="Microphone" ready={runtimeReadiness.audio.granted} />
-            <DiagnosticPill label="WebRTC" ready={runtimeReadiness.webRtcRuntimeAvailable} />
-            <DiagnosticPill label="Media capture" ready={runtimeReadiness.getUserMediaSupported} />
-            <DiagnosticPill label="Peer session" ready={runtimeReadiness.peerConnectionSupported} />
-          </View>
-        ) : null}
       </View>
 
       <View style={styles.accessPanel}>
@@ -1901,6 +1856,7 @@ function InterpreterRoom({
           <Text style={styles.mutedText}>No summary has been created yet.</Text>
         )}
       </View>
+      </ScrollView>
       <InterpreterSummaryLanguageModal
         isBusy={isBusy}
         isOpen={isSummaryModalOpen}
@@ -2693,35 +2649,6 @@ function InterpreterInterpretationHistoryModal({
         </ScrollView>
       </View>
     </Modal>
-  );
-}
-
-interface DiagnosticPillProps {
-  label: string;
-  ready: boolean;
-}
-
-function DiagnosticPill({ label, ready }: DiagnosticPillProps) {
-  const appTheme = useAppTheme();
-  const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
-
-  return (
-    <View style={[
-      styles.diagnosticPill,
-      ready ? styles.diagnosticPillReady : styles.diagnosticPillBlocked
-    ]}>
-      <Ionicons
-        color={ready ? '#047857' : '#b45309'}
-        name={ready ? 'checkmark-circle-outline' : 'alert-circle-outline'}
-        size={15}
-      />
-      <Text style={[
-        styles.diagnosticPillText,
-        ready ? styles.diagnosticPillTextReady : styles.diagnosticPillTextBlocked
-      ]}>
-        {label}
-      </Text>
-    </View>
   );
 }
 
@@ -4197,67 +4124,6 @@ function createStyles(colors: AppColors) {
     disabledButton: {
       opacity: 0.58
     },
-    deviceCheckButton: {
-      alignItems: 'center',
-      backgroundColor: colors.surface,
-      borderColor: colors.divider,
-      borderRadius: 999,
-      borderWidth: 1,
-      flexDirection: 'row',
-      gap: 6,
-      minHeight: 36,
-      paddingHorizontal: 12
-    },
-    deviceCheckButtonReady: {
-      backgroundColor: '#dcfce7',
-      borderColor: '#86efac'
-    },
-    deviceCheckButtonText: {
-      color: colors.primary,
-      fontSize: 13
-    },
-    deviceCheckButtonTextReady: {
-      color: '#047857'
-    },
-    deviceCheckPanel: {
-      backgroundColor: colors.surface,
-      borderBottomColor: colors.divider,
-      borderBottomWidth: 1,
-      gap: 10,
-      marginBottom: 12,
-      paddingBottom: 12
-    },
-    diagnosticGrid: {
-      flexDirection: 'row',
-      flexWrap: 'wrap',
-      gap: 8
-    },
-    diagnosticPill: {
-      alignItems: 'center',
-      borderRadius: 999,
-      borderWidth: 1,
-      flexDirection: 'row',
-      gap: 6,
-      paddingHorizontal: 10,
-      paddingVertical: 7
-    },
-    diagnosticPillBlocked: {
-      backgroundColor: '#fffbeb',
-      borderColor: '#fcd34d'
-    },
-    diagnosticPillReady: {
-      backgroundColor: '#ecfdf5',
-      borderColor: '#86efac'
-    },
-    diagnosticPillText: {
-      fontSize: 12
-    },
-    diagnosticPillTextBlocked: {
-      color: '#92400e'
-    },
-    diagnosticPillTextReady: {
-      color: '#047857'
-    },
     dropdownRow: {
       alignItems: 'center',
       backgroundColor: colors.surface,
@@ -5097,20 +4963,17 @@ function createStyles(colors: AppColors) {
       color: colors.primary,
       fontSize: 12
     },
-    permissionButton: {
+    permissionStatusPill: {
       alignItems: 'center',
       backgroundColor: colors.primarySoft,
-      borderColor: colors.primary,
       borderRadius: 999,
-      borderWidth: 1,
       flexDirection: 'row',
       gap: 6,
       minHeight: 36,
       paddingHorizontal: 12
     },
     permissionButtonReady: {
-      backgroundColor: '#dcfce7',
-      borderColor: '#86efac'
+      backgroundColor: '#dcfce7'
     },
     permissionButtonText: {
       color: colors.primary,
@@ -5300,9 +5163,18 @@ function createStyles(colors: AppColors) {
     },
     roomHeader: {
       alignItems: 'center',
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
       flexDirection: 'row',
       gap: 10,
-      marginBottom: 14
+      marginBottom: 8,
+      paddingBottom: 10
+    },
+    roomContent: {
+      paddingBottom: 22
+    },
+    roomScreen: {
+      paddingBottom: 12
     },
     datePickerSheet: {
       backgroundColor: colors.surface,
