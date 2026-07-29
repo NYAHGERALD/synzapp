@@ -31,6 +31,7 @@ import type { AppColors } from '../theme/colors';
 import {
   addInterpreterTranscriptSegment,
   addInterpreterTranslationSegment,
+  createInterpreterInterpretationAudio,
   createInterpreterMeeting,
   createInterpreterRealtimeClientSecret,
   createInterpreterSummary,
@@ -43,6 +44,7 @@ import {
   InterpreterMeeting,
   InterpreterMeetingDetails,
   InterpreterParticipant,
+  InterpreterSegmentAudio,
   InterpreterSummaryAudio,
   InterpreterMeetingType,
   listInterpreterMeetings,
@@ -78,6 +80,7 @@ const INTERPRETER_SUMMARY_AUDIO_MODE: AudioMode = {
   shouldRouteThroughEarpiece: false
 };
 const INTERPRETER_SUMMARY_AUDIO_CACHE_DIR = `${FileSystem.cacheDirectory || ''}synzapp-interpreter-summaries/`;
+const INTERPRETER_SEGMENT_AUDIO_CACHE_DIR = `${FileSystem.cacheDirectory || ''}synzapp-interpreter-segments/`;
 
 type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
 
@@ -614,12 +617,20 @@ function InterpreterRoom({
   const [summaryAudioCache, setSummaryAudioCache] = useState<Record<string, string>>({});
   const [activeSummaryAudioKey, setActiveSummaryAudioKey] = useState<string | null>(null);
   const [preparingSummaryAudioKey, setPreparingSummaryAudioKey] = useState<string | null>(null);
+  const [segmentAudioSourceUri, setSegmentAudioSourceUri] = useState<string | null>(null);
+  const [segmentAudioCache, setSegmentAudioCache] = useState<Record<string, string>>({});
+  const [activeSegmentAudioKey, setActiveSegmentAudioKey] = useState<string | null>(null);
+  const [isPreparingSegmentAudio, setIsPreparingSegmentAudio] = useState(false);
   const realtimeSessionPoolRef = useRef<Record<string, InterpreterRealtimeSession>>({});
   const [languageSessionState, setLanguageSessionState] = useState<Record<string, InterpreterLanguageSessionState>>({});
   const summaryAudioPlayer = useAudioPlayer(summaryAudioSourceUri ? { uri: summaryAudioSourceUri } : null, {
     updateInterval: 250
   });
   const summaryAudioStatus = useAudioPlayerStatus(summaryAudioPlayer);
+  const segmentAudioPlayer = useAudioPlayer(segmentAudioSourceUri ? { uri: segmentAudioSourceUri } : null, {
+    updateInterval: 250
+  });
+  const segmentAudioStatus = useAudioPlayerStatus(segmentAudioPlayer);
   const latestTranslation = [...details.translations].reverse()
     .find((translation) => translation.targetLanguageCode === selectedLanguageCode);
   const selectedLanguageSession = languageSessionState[selectedLanguageCode];
@@ -634,11 +645,25 @@ function InterpreterRoom({
     safePauseAudioPlayer(summaryAudioPlayer);
   }, [summaryAudioPlayer]);
 
+  useEffect(() => () => {
+    safePauseAudioPlayer(segmentAudioPlayer);
+  }, [segmentAudioPlayer]);
+
   useEffect(() => {
     if (summaryAudioStatus.didJustFinish) {
       setActiveSummaryAudioKey(null);
     }
   }, [summaryAudioStatus.didJustFinish]);
+
+  useEffect(() => {
+    if (segmentAudioStatus.didJustFinish) {
+      setActiveSegmentAudioKey(null);
+      setLiveStatus('ready');
+      if (respondingLanguageCode) {
+        updateLanguageSession(respondingLanguageCode, { status: 'ready' });
+      }
+    }
+  }, [respondingLanguageCode, segmentAudioStatus.didJustFinish]);
 
   useEffect(() => {
     let isMounted = true;
@@ -668,18 +693,6 @@ function InterpreterRoom({
   }, [selectedLanguageSession?.transcript, selectedLanguageSession?.translation]);
 
   useEffect(() => {
-    if (liveMode === 'responding' && respondingLanguageCode) {
-      recordLiveInterpretation(respondingLanguageCode);
-    }
-  }, [
-    liveMode,
-    respondingLanguageCode,
-    languageSessionState,
-    liveTranscript,
-    liveTranslation
-  ]);
-
-  useEffect(() => {
     const statuses = Object.values(languageSessionState).map((state) => state.status);
 
     if (!statuses.length) {
@@ -697,7 +710,7 @@ function InterpreterRoom({
 
       setLiveStatus(isChoosingLanguage ? 'ready' : 'listening');
       setLiveMode((currentMode) => {
-        if (currentMode === 'interrupted' || currentMode === 'choosing') {
+        if (currentMode === 'interrupted' || currentMode === 'choosing' || currentMode === 'responding') {
           return currentMode;
         }
 
@@ -867,58 +880,119 @@ function InterpreterRoom({
     setIsLiveLanguageModalOpen(true);
   }
 
-  function respondInSelectedLanguage(languageCode = selectedLanguageCode) {
-    setSelectedLanguageCode(languageCode);
-    setRespondingLanguageCode(languageCode);
-    setIsLiveLanguageModalOpen(false);
-    if (!realtimeSessionPoolRef.current[languageCode]) {
-      stopLiveInterpreter();
-      setTimeout(() => {
-        void startLiveInterpreterForLanguage(languageCode);
-      }, 0);
+  async function respondInSelectedLanguage(languageCode = selectedLanguageCode) {
+    const sourceText = getCapturedSourceText();
+    const realtimeTranslation = getCapturedTranslationText(languageCode);
+
+    if (!sourceText && !realtimeTranslation) {
+      setLiveStatus('ready');
+      setLiveMode('choosing');
+      onError(
+        'The interpreter received microphone signal, but no transcript was returned yet. Speak a little longer, then tap Stop again.',
+        'Interpreter needs attention'
+      );
       return;
     }
 
-    Object.entries(realtimeSessionPoolRef.current).forEach(([currentLanguageCode, session]) => {
-      if (currentLanguageCode === languageCode) {
-        session.respond();
-      } else {
-        session.pauseListening();
-      }
-    });
+    Object.values(realtimeSessionPoolRef.current).forEach((session) => session.pauseListening());
+    safePauseAudioPlayer(summaryAudioPlayer);
+    safePauseAudioPlayer(segmentAudioPlayer);
+    setSelectedLanguageCode(languageCode);
+    setRespondingLanguageCode(languageCode);
+    setIsLiveLanguageModalOpen(false);
+    setIsPreparingSegmentAudio(true);
+    setLiveStatus('speaking');
     setLiveMode('responding');
-    recordLiveInterpretation(languageCode);
+    updateLanguageSession(languageCode, {
+      status: 'speaking',
+      transcript: sourceText || realtimeTranslation,
+      translation: realtimeTranslation
+    });
+
+    try {
+      const idToken = await getIdToken();
+      const result = await createInterpreterInterpretationAudio(idToken, details.meeting.meetingId, {
+        sourceText: sourceText || realtimeTranslation,
+        targetLanguageCode: languageCode,
+        translatedText: realtimeTranslation || null
+      });
+
+      updateLanguageSession(languageCode, {
+        status: 'speaking',
+        transcript: result.audio.sourceText,
+        translation: result.audio.translatedText
+      });
+      setLiveTranscript(result.audio.sourceText);
+      setLiveTranslation(result.audio.translatedText);
+      recordLiveInterpretation(languageCode, result.audio.sourceText, result.audio.translatedText);
+      await playInterpreterSegmentAudioPayload(result.audio);
+    } catch (error) {
+      setLiveStatus('ready');
+      setLiveMode('choosing');
+      updateLanguageSession(languageCode, { status: 'ready' });
+      onError(getErrorMessage(error), 'Interpreter needs attention');
+    } finally {
+      setIsPreparingSegmentAudio(false);
+    }
   }
 
   function listenAgain() {
-    Object.values(realtimeSessionPoolRef.current).forEach((session) => session.cancelResponse());
-    setWasInterpretationInterrupted(liveMode === 'responding');
+    safePauseAudioPlayer(segmentAudioPlayer);
+    setActiveSegmentAudioKey(null);
+    setIsPreparingSegmentAudio(false);
+    setWasInterpretationInterrupted(liveMode === 'responding' && Boolean(liveTranslation.trim()));
     setIsLiveLanguageModalOpen(false);
     setAudioLevel(0);
+
+    if (!Object.keys(realtimeSessionPoolRef.current).length) {
+      void startLiveInterpreter(selectedLanguageCode);
+      return;
+    }
+
+    Object.values(realtimeSessionPoolRef.current).forEach((session) => session.cancelResponse());
     setLiveMode('listening');
     setLiveStatus('listening');
   }
 
   function continueInterruptedInterpretation() {
-    respondInSelectedLanguage(selectedLanguageCode);
+    void respondInSelectedLanguage(selectedLanguageCode);
     setWasInterpretationInterrupted(false);
   }
 
   function useCurrentInterpretation(languageCode = selectedLanguageCode) {
     Object.values(realtimeSessionPoolRef.current).forEach((session) => session.cancelResponse());
-    respondInSelectedLanguage(languageCode);
+    void respondInSelectedLanguage(languageCode);
     setWasInterpretationInterrupted(false);
   }
 
-  async function startLiveInterpreterForLanguage(languageCode: string) {
-    setSelectedLanguageCode(languageCode);
-    await startLiveInterpreter(languageCode);
+  function getCapturedSourceText(): string {
+    return [
+      liveTranscript,
+      languageSessionState[selectedLanguageCode]?.transcript,
+      ...Object.values(languageSessionState).map((session) => session.transcript),
+      liveTranslation,
+      ...Object.values(languageSessionState).map((session) => session.translation)
+    ].find((text) => text?.trim())?.trim() || '';
   }
 
-  function recordLiveInterpretation(languageCode: string) {
+  function getCapturedTranslationText(languageCode: string): string {
+    return [
+      languageSessionState[languageCode]?.translation,
+      languageCode === selectedLanguageCode ? liveTranslation : '',
+      ...Object.entries(languageSessionState)
+        .filter(([currentLanguageCode]) => currentLanguageCode === selectedLanguageCode)
+        .map(([, session]) => session.translation)
+    ].find((text) => text?.trim())?.trim() || '';
+  }
+
+  function recordLiveInterpretation(
+    languageCode: string,
+    sourceTextOverride?: string,
+    translatedTextOverride?: string
+  ) {
     const session = languageSessionState[languageCode];
-    const translatedText = session?.translation || liveTranslation;
-    const sourceText = session?.transcript || liveTranscript;
+    const translatedText = translatedTextOverride || session?.translation || liveTranslation;
+    const sourceText = sourceTextOverride || session?.transcript || liveTranscript;
 
     if (!translatedText.trim() && !sourceText.trim()) {
       return;
@@ -987,6 +1061,52 @@ function InterpreterRoom({
     await setAudioModeAsync(INTERPRETER_SUMMARY_AUDIO_MODE).catch(() => undefined);
     setActiveSummaryAudioKey(audioKey);
     safePlayAudioPlayer(summaryAudioPlayer);
+  }
+
+  async function playInterpreterSegmentAudioPayload(audio: InterpreterSegmentAudio) {
+    const audioKey = getInterpreterSegmentAudioKey(details.meeting.meetingId, audio.translationId, audio.languageCode);
+    const cachedUri = segmentAudioCache[audioKey] || await cacheInterpreterSegmentAudio(details.meeting.meetingId, audio);
+
+    setSegmentAudioCache((currentCache) => ({
+      ...currentCache,
+      [audioKey]: cachedUri
+    }));
+
+    if (cachedUri !== segmentAudioSourceUri) {
+      setSegmentAudioSourceUri(cachedUri);
+      safeReplaceAudioPlayerSource(segmentAudioPlayer, cachedUri);
+    }
+
+    await segmentAudioPlayer.seekTo(0).catch(() => undefined);
+    await setAudioModeAsync(INTERPRETER_SUMMARY_AUDIO_MODE).catch(() => undefined);
+    setActiveSegmentAudioKey(audioKey);
+    setLiveStatus('speaking');
+    setLiveMode('responding');
+    safePlayAudioPlayer(segmentAudioPlayer);
+  }
+
+  async function handleReplayInterpreterSegmentAudio() {
+    if (!segmentAudioSourceUri || isPreparingSegmentAudio) {
+      return;
+    }
+
+    try {
+      if (segmentAudioStatus.playing) {
+        safePauseAudioPlayer(segmentAudioPlayer);
+        setActiveSegmentAudioKey(null);
+        setLiveStatus('ready');
+        return;
+      }
+
+      await segmentAudioPlayer.seekTo(0).catch(() => undefined);
+      await setAudioModeAsync(INTERPRETER_SUMMARY_AUDIO_MODE).catch(() => undefined);
+      setActiveSegmentAudioKey(activeSegmentAudioKey || `current:${respondingLanguageCode || selectedLanguageCode}`);
+      setLiveStatus('speaking');
+      setLiveMode('responding');
+      safePlayAudioPlayer(segmentAudioPlayer);
+    } catch (error) {
+      onError(getErrorMessage(error), 'Interpreter playback needs attention');
+    }
   }
 
   async function handlePlayInterpreterSummary(
@@ -1226,7 +1346,7 @@ function InterpreterRoom({
                 setSelectedLanguageCode(language.code);
 
                 if (isRealtimeActive) {
-                  respondInSelectedLanguage(language.code);
+                  void respondInSelectedLanguage(language.code);
                 }
               }}
               style={[
@@ -1406,6 +1526,8 @@ function InterpreterRoom({
         audioLevel={audioLevel}
         details={details}
         historyItems={liveInterpretationHistory}
+        isInterpretationAudioPlaying={segmentAudioStatus.playing}
+        isPreparingInterpretationAudio={isPreparingSegmentAudio}
         isHistoryOpen={isLiveHistoryOpen}
         isLanguageModalOpen={isLiveLanguageModalOpen}
         isOpen={isLiveRoomOpen}
@@ -1425,6 +1547,7 @@ function InterpreterRoom({
         onOpenHistory={() => setIsLiveHistoryOpen(true)}
         onOpenLanguageModal={() => setIsLiveLanguageModalOpen(true)}
         onOpenTranscript={() => setIsLiveTranscriptOpen(true)}
+        onReplayInterpretationAudio={() => void handleReplayInterpreterSegmentAudio()}
         onListen={listenAgain}
         onLanguageModalClose={() => setIsLiveLanguageModalOpen(false)}
         onRespond={respondInSelectedLanguage}
@@ -1445,6 +1568,8 @@ interface InterpreterLiveRoomModalProps {
   audioLevel: number;
   details: InterpreterMeetingDetails;
   historyItems: InterpreterLiveHistoryItem[];
+  isInterpretationAudioPlaying: boolean;
+  isPreparingInterpretationAudio: boolean;
   isHistoryOpen: boolean;
   isLanguageModalOpen: boolean;
   isOpen: boolean;
@@ -1464,7 +1589,8 @@ interface InterpreterLiveRoomModalProps {
   onOpenHistory: () => void;
   onOpenLanguageModal: () => void;
   onOpenTranscript: () => void;
-  onRespond: (languageCode: string) => void;
+  onReplayInterpretationAudio: () => void;
+  onRespond: (languageCode: string) => void | Promise<void>;
   onStart: () => void;
   onStop: () => void;
   onTranscriptClose: () => void;
@@ -1478,6 +1604,8 @@ function InterpreterLiveRoomModal({
   audioLevel,
   details,
   historyItems,
+  isInterpretationAudioPlaying,
+  isPreparingInterpretationAudio,
   isHistoryOpen,
   isLanguageModalOpen,
   isOpen,
@@ -1497,6 +1625,7 @@ function InterpreterLiveRoomModal({
   onOpenHistory,
   onOpenLanguageModal,
   onOpenTranscript,
+  onReplayInterpretationAudio,
   onRespond,
   onStart,
   onStop,
@@ -1631,6 +1760,46 @@ function InterpreterLiveRoomModal({
           <Text style={styles.liveRoomTranslationText}>
             {liveTranslation || `Ready to interpret in ${selectedLanguage?.label || 'the selected language'}.`}
           </Text>
+          {isPreparingInterpretationAudio || liveMode === 'responding' ? (
+            <View style={styles.interpretationPlayerRow}>
+              <Pressable
+                disabled={isPreparingInterpretationAudio || !liveTranslation.trim()}
+                onPress={onReplayInterpretationAudio}
+                style={({ pressed }) => [
+                  styles.interpretationPlayerButton,
+                  isInterpretationAudioPlaying && styles.interpretationPlayerButtonActive,
+                  (isPreparingInterpretationAudio || !liveTranslation.trim()) && styles.disabledButton,
+                  pressed && styles.pressed
+                ]}
+              >
+                {isPreparingInterpretationAudio ? (
+                  <ActivityIndicator color={appTheme.colors.primary} size="small" />
+                ) : (
+                  <Ionicons
+                    color={isInterpretationAudioPlaying ? '#fff' : appTheme.colors.primary}
+                    name={isInterpretationAudioPlaying ? 'pause' : 'play'}
+                    size={16}
+                  />
+                )}
+              </Pressable>
+              <View style={styles.interpretationPlayerCopy}>
+                <Text style={styles.interpretationPlayerTitle}>Spoken interpretation</Text>
+                <Text style={styles.interpretationPlayerMeta}>
+                  {isPreparingInterpretationAudio
+                    ? `Preparing ${selectedLanguage?.label || 'language'} audio`
+                    : isInterpretationAudioPlaying
+                      ? `Playing in ${selectedLanguage?.label || 'selected language'}`
+                      : `Ready in ${selectedLanguage?.label || 'selected language'}`}
+                </Text>
+              </View>
+              <Pressable
+                onPress={onOpenLanguageModal}
+                style={({ pressed }) => [styles.interpretationLanguageButton, pressed && styles.pressed]}
+              >
+                <Ionicons color={appTheme.colors.primary} name="language-outline" size={17} />
+              </Pressable>
+            </View>
+          ) : null}
         </View>
 
         {wasInterrupted ? (
@@ -1657,7 +1826,7 @@ function InterpreterLiveRoomModal({
           onClose={onLanguageModalClose}
           onSelect={(languageCode) => {
             setSelectedLanguageCode(languageCode);
-            onRespond(languageCode);
+            void onRespond(languageCode);
           }}
           respondingLanguageCode={respondingLanguageCode}
           selectedLanguageCode={selectedLanguageCode}
@@ -3041,6 +3210,14 @@ function getInterpreterSummaryAudioKey(summaryId: string, languageCode: string):
   return `${summaryId}:${languageCode}`;
 }
 
+function getInterpreterSegmentAudioKey(
+  meetingId: string,
+  translationId: string,
+  languageCode: string
+): string {
+  return `${meetingId}:${translationId}:${languageCode}`;
+}
+
 async function cacheInterpreterSummaryAudio(
   summaryId: string,
   audio: InterpreterSummaryAudio
@@ -3064,6 +3241,30 @@ async function cacheInterpreterSummaryAudio(
   return fileUri;
 }
 
+async function cacheInterpreterSegmentAudio(
+  meetingId: string,
+  audio: InterpreterSegmentAudio
+): Promise<string> {
+  if (!FileSystem.cacheDirectory) {
+    throw new Error('Spoken interpretation playback is not available on this device.');
+  }
+
+  await FileSystem.makeDirectoryAsync(INTERPRETER_SEGMENT_AUDIO_CACHE_DIR, {
+    intermediates: true
+  }).catch(() => undefined);
+
+  const safeMeetingId = meetingId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
+  const safeTranslationId = audio.translationId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
+  const safeLanguageCode = audio.languageCode.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 24);
+  const fileUri = `${INTERPRETER_SEGMENT_AUDIO_CACHE_DIR}${safeMeetingId}-${safeTranslationId}-${safeLanguageCode}.mp3`;
+
+  await FileSystem.writeAsStringAsync(fileUri, audio.audioBase64, {
+    encoding: FileSystem.EncodingType.Base64
+  });
+
+  return fileUri;
+}
+
 function safePauseAudioPlayer(player: { pause: () => void }): void {
   try {
     player.pause();
@@ -3076,7 +3277,7 @@ function safePlayAudioPlayer(player: { play: () => void }): void {
   try {
     player.play();
   } catch (error) {
-    throw error instanceof Error ? error : new Error('Unable to play this spoken summary.');
+    throw error instanceof Error ? error : new Error('Unable to play this spoken audio.');
   }
 }
 
@@ -3087,7 +3288,7 @@ function safeReplaceAudioPlayerSource(
   try {
     player.replace({ uri });
   } catch (error) {
-    throw error instanceof Error ? error : new Error('Unable to load this spoken summary.');
+    throw error instanceof Error ? error : new Error('Unable to load this spoken audio.');
   }
 }
 
@@ -3701,6 +3902,46 @@ function createStyles(colors: AppColors) {
       color: colors.ink,
       fontSize: 16,
       lineHeight: 23
+    },
+    interpretationLanguageButton: {
+      alignItems: 'center',
+      backgroundColor: colors.primarySoft,
+      borderRadius: 999,
+      height: 34,
+      justifyContent: 'center',
+      width: 34
+    },
+    interpretationPlayerButton: {
+      alignItems: 'center',
+      backgroundColor: colors.primarySoft,
+      borderRadius: 999,
+      height: 36,
+      justifyContent: 'center',
+      width: 36
+    },
+    interpretationPlayerButtonActive: {
+      backgroundColor: colors.primary
+    },
+    interpretationPlayerCopy: {
+      flex: 1,
+      gap: 2
+    },
+    interpretationPlayerMeta: {
+      color: colors.mutedStrong,
+      fontSize: 12
+    },
+    interpretationPlayerRow: {
+      alignItems: 'center',
+      borderTopColor: colors.divider,
+      borderTopWidth: 1,
+      flexDirection: 'row',
+      gap: 10,
+      marginTop: 12,
+      paddingTop: 12
+    },
+    interpretationPlayerTitle: {
+      color: colors.ink,
+      fontSize: 14
     },
     liveSecondaryAction: {
       alignItems: 'center',

@@ -116,6 +116,8 @@ export async function startInterpreterRealtimeSession(
   const remoteTracks: Array<{ enabled?: boolean }> = [];
   const audioTracks = getAudioTracks(localStream);
   let audioLevelPollingCleanup: (() => void) | null = null;
+  let sourceTranscriptBuffer = '';
+  let translationTranscriptBuffer = '';
   let closed = false;
 
   if (!audioTracks.length) {
@@ -147,12 +149,14 @@ export async function startInterpreterRealtimeSession(
 
       callbacks.onEvent?.(parsed);
 
-      if (parsed.type.includes('transcript') && parsed.text) {
-        callbacks.onTranscript?.(parsed.text);
+      if (parsed.text && isSourceTranscriptEvent(parsed.type)) {
+        sourceTranscriptBuffer = mergeRealtimeText(sourceTranscriptBuffer, parsed.text, parsed.type);
+        callbacks.onTranscript?.(sourceTranscriptBuffer);
       }
 
-      if ((parsed.type.includes('translation') || parsed.type.includes('audio')) && parsed.text) {
-        callbacks.onTranslation?.(parsed.text);
+      if (parsed.text && isTranslationTranscriptEvent(parsed.type)) {
+        translationTranscriptBuffer = mergeRealtimeText(translationTranscriptBuffer, parsed.text, parsed.type);
+        callbacks.onTranslation?.(translationTranscriptBuffer);
       }
     };
   }
@@ -395,7 +399,7 @@ function parseRealtimeEvent(data: unknown): InterpreterRealtimeEvent | null {
   try {
     const raw = JSON.parse(data) as Record<string, unknown>;
     const type = typeof raw.type === 'string' ? raw.type : 'event';
-    const text = pickEventText(raw);
+    const text = pickEventText(raw, type);
 
     return { raw, text, type };
   } catch {
@@ -403,22 +407,58 @@ function parseRealtimeEvent(data: unknown): InterpreterRealtimeEvent | null {
   }
 }
 
-function pickEventText(raw: Record<string, unknown>): string | undefined {
+function pickEventText(raw: Record<string, unknown>, type: string): string | undefined {
+  const typeLower = type.toLowerCase();
   const candidates = [
     raw.text,
     raw.transcript,
-    raw.delta,
     raw.output_text,
     raw.translation
   ];
 
+  if (isTextDeltaEvent(typeLower)) {
+    candidates.push(raw.delta);
+  }
+
   for (const candidate of candidates) {
     if (typeof candidate === 'string' && candidate.trim()) {
-      return candidate.trim();
+      return candidate === raw.delta ? candidate : candidate.trim();
     }
   }
 
   return undefined;
+}
+
+function isTextDeltaEvent(type: string): boolean {
+  return type.includes('transcript') || type.includes('translation') || type.includes('text');
+}
+
+function isSourceTranscriptEvent(type: string): boolean {
+  const typeLower = type.toLowerCase();
+
+  return typeLower.includes('input_transcript') || typeLower.includes('input_audio_transcription');
+}
+
+function isTranslationTranscriptEvent(type: string): boolean {
+  const typeLower = type.toLowerCase();
+
+  return typeLower.includes('output_transcript') ||
+    typeLower.includes('translation') ||
+    (typeLower.includes('audio_transcript') && !isSourceTranscriptEvent(typeLower));
+}
+
+function mergeRealtimeText(currentText: string, nextText: string, type: string): string {
+  const cleanText = nextText;
+
+  if (!cleanText.trim()) {
+    return currentText;
+  }
+
+  if (!type.toLowerCase().includes('delta')) {
+    return cleanText.trim();
+  }
+
+  return `${currentText}${cleanText}`.replace(/[ \t]{2,}/g, ' ').trim();
 }
 
 function startAudioLevelPolling(

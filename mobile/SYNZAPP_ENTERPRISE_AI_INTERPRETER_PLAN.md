@@ -642,6 +642,10 @@ Completed:
 - Meeting summaries now use a language selection modal so managers choose exactly which languages to summarize.
 - Backend now supports spoken summary audio generation for selected summary languages, using server-side OpenAI TTS with no OpenAI key exposed to mobile.
 - Mobile now caches spoken summary audio locally and lets managers listen to summary audio in the selected language.
+- Backend now exposes `POST /api/interpreter/meetings/:meetingId/interpretation-audio` for spoken interpretation of the last captured segment. The backend translates missing target-language text, generates TTS audio server-side, stores the translation segment, and audits privacy-safe metadata without exposing the OpenAI key to mobile.
+- Mobile live interpretation now separates listening from playback: `Listen` starts microphone capture, `Stop` opens the response-language picker, and selecting a language prepares and plays a dedicated spoken interpretation audio clip instead of restarting the realtime listening session.
+- Mobile now includes a dedicated spoken-interpretation player in the live room with replay and language-switch controls, separate from the meeting summary audio player.
+- Mobile realtime event parsing now separates source transcript events from target translation events and avoids treating audio payload deltas as transcript text.
 - Local backend provider validation passed on July 28, 2026: `OPENAI_INTERPRETER_REALTIME_MODEL=gpt-realtime-translate` minted a Realtime Translation client secret, and the Realtime Translation calls endpoint accepted the credential and returned the expected invalid-offer response for a diagnostic SDP.
 - Render route reachability was verified on July 28, 2026: `POST /api/interpreter/realtime-diagnostics` is live and correctly returns `401 Missing authorization token` without a Firebase session.
 - Backend interpreter enterprise control tests are in place for route protection, participant access, validation, summary access, privacy-safe audit events, and short-lived client-secret handling.
@@ -666,11 +670,11 @@ Use this sequence when validating on a physical iPhone or Android device:
 
 2. One-on-one live interpreter test
    - Create a `1-on-1` meeting with English and Spanish.
-   - Start the live interpreter.
+   - Tap `Listen`.
    - Speak one short sentence in English.
-   - Tap Spanish.
-   - Tap `Respond`.
-   - Pass condition: the app stays responsive, status moves through listening/responding, and audio/text interpretation returns without exposing the OpenAI API key to mobile.
+   - Tap `Stop`.
+   - Choose Spanish in the response-language picker.
+   - Pass condition: the language picker closes, the spoken interpretation player appears, Spanish audio plays, the transcript/interpretation text updates, and the OpenAI API key is never exposed to mobile.
 
 3. Level 1 / Level 3 multi-language test
    - Create a Level 1 or Level 3 meeting with English, Spanish, and one additional language.

@@ -69,6 +69,13 @@ export interface InterpreterSummaryAudio {
   voice: string;
 }
 
+export interface InterpreterSegmentAudio extends InterpreterSummaryAudio {
+  sourceText: string;
+  translatedText: string;
+  translationId: string;
+  translationModel: string;
+}
+
 export interface InterpreterMeetingDetails {
   auditEvents: unknown[];
   meeting: InterpreterMeeting;
@@ -293,6 +300,24 @@ export async function addInterpreterTranslationSegment(
   });
 
   return response.json() as Promise<{ translation: InterpreterTranslationSegment }>;
+}
+
+export async function createInterpreterInterpretationAudio(
+  idToken: string,
+  meetingId: string,
+  input: {
+    sourceSegmentId?: string | null;
+    sourceText: string;
+    targetLanguageCode: string;
+    translatedText?: string | null;
+  }
+) {
+  const response = await interpreterFetch(idToken, `/meetings/${encodeURIComponent(meetingId)}/interpretation-audio`, {
+    body: JSON.stringify(input),
+    method: 'POST'
+  });
+
+  return response.json() as Promise<{ audio: InterpreterSegmentAudio }>;
 }
 
 export async function createInterpreterSummary(

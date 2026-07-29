@@ -53,6 +53,13 @@ export interface InterpreterSummaryAudioInput {
   summaryId: string;
 }
 
+export interface InterpreterSegmentAudioInput {
+  sourceSegmentId?: string | null;
+  sourceText: string;
+  targetLanguageCode: string;
+  translatedText?: string | null;
+}
+
 export interface InterpreterSummaryAudio {
   audioBase64: string;
   contentType: string;
@@ -60,6 +67,13 @@ export interface InterpreterSummaryAudio {
   languageCode: string;
   model: string;
   voice: string;
+}
+
+export interface InterpreterSegmentAudio extends InterpreterSummaryAudio {
+  sourceText: string;
+  translatedText: string;
+  translationId: string;
+  translationModel: string;
 }
 
 export interface UpdateInterpreterInvitationsInput {
@@ -766,6 +780,11 @@ async function requestOpenAiInterpreterRealtimeSession(
     body: JSON.stringify({
       session: {
         audio: {
+          input: {
+            transcription: {
+              model: env.openAiInterpreterTranscriptionModel
+            }
+          },
           output: {
             language: toOpenAiTranslationLanguage(targetLanguage.code)
           }
@@ -944,6 +963,96 @@ export async function createInterpreterSummaryAudio(
     },
     summary: `Created spoken interpreter meeting summary for "${meeting.meetingName}".`,
     type: 'INTERPRETER_SUMMARY_AUDIO_CREATED'
+  });
+
+  return { audio };
+}
+
+export async function createInterpreterSegmentAudio(
+  decodedToken: DecodedIdToken,
+  meetingId: string,
+  input: InterpreterSegmentAudioInput
+) {
+  const context = await getAuthorizedInterpreterContext(decodedToken);
+  assertRateLimit(`interpreter:segment-audio:${context.uid}`, 60_000, 30);
+  const meeting = await readAccessibleMeeting(context, meetingId);
+
+  if (!env.interpreterSegmentAudioEnabled) {
+    throw validationError('Interpreter spoken segment playback is disabled for this organization.');
+  }
+
+  if (meeting.status === 'ENDED') {
+    throw validationError('This interpreter meeting has already ended.');
+  }
+
+  const targetLanguage = getSupportedLanguage(input.targetLanguageCode);
+
+  if (!meeting.interpreterLanguages.some((language) => language.code === targetLanguage.code)) {
+    throw validationError('That language is not enabled for this interpreter meeting.');
+  }
+
+  const sourceText = input.sourceText.trim();
+
+  if (!sourceText) {
+    throw validationError('The interpreter did not capture any speech to interpret yet.');
+  }
+
+  const translatedText = input.translatedText?.trim() ||
+    await requestOpenAiInterpreterSegmentTranslation({
+      context,
+      meeting,
+      sourceText,
+      targetLanguage
+    });
+  const nowIso = new Date().toISOString();
+  const translationId = `itx_${randomUUID().replace(/-/g, '')}`;
+  const translation = stripUndefined({
+    createdAt: fieldValue.serverTimestamp(),
+    createdAtIso: nowIso,
+    createdByUid: context.uid,
+    meetingId,
+    sourceSegmentId: input.sourceSegmentId || null,
+    sourceText,
+    targetLanguageCode: targetLanguage.code,
+    tenantId: context.tenantId,
+    translatedText,
+    translationId
+  });
+
+  await context.organizationRef.collection(INTERPRETER_MEETINGS_COLLECTION).doc(meetingId)
+    .collection(TRANSLATION_COLLECTION).doc(translationId).set(translation);
+
+  const speechAudio = await requestOpenAiSegmentSpeechAudio({
+    context,
+    language: targetLanguage,
+    meeting,
+    translatedText
+  });
+  const audio: InterpreterSegmentAudio = {
+    ...speechAudio,
+    sourceText,
+    translatedText,
+    translationId,
+    translationModel: input.translatedText?.trim()
+      ? 'provided-by-realtime-session'
+      : env.openAiInterpreterSegmentModel
+  };
+
+  await writeInterpreterAuditEvent({
+    context,
+    meetingId,
+    metadata: {
+      sourceCharacterCount: sourceText.length,
+      sourceSegmentId: input.sourceSegmentId || null,
+      speechModel: env.openAiInterpreterSegmentTtsModel,
+      speechVoice: env.openAiInterpreterSegmentTtsVoice,
+      targetLanguageCode: targetLanguage.code,
+      translatedCharacterCount: translatedText.length,
+      translationId,
+      translationModel: audio.translationModel
+    },
+    summary: `Created spoken interpreter segment for "${meeting.meetingName}".`,
+    type: 'INTERPRETER_SEGMENT_AUDIO_CREATED'
   });
 
   return { audio };
@@ -1339,6 +1448,158 @@ async function requestOpenAiSummarySpeechAudio({
     model: env.openAiInterpreterSummaryTtsModel,
     voice: env.openAiInterpreterSummaryTtsVoice
   };
+}
+
+async function requestOpenAiInterpreterSegmentTranslation({
+  context,
+  meeting,
+  sourceText,
+  targetLanguage
+}: {
+  context: AuthorizedInterpreterContext;
+  meeting: InterpreterMeetingRecord;
+  sourceText: string;
+  targetLanguage: InterpreterLanguage;
+}): Promise<string> {
+  if (!env.openAiApiKey) {
+    throw serviceError('Interpreter segment translation is not configured on the backend.');
+  }
+
+  const response = await fetch('https://api.openai.com/v1/responses', {
+    body: JSON.stringify({
+      input: [
+        {
+          content: [
+            {
+              text: [
+                'You are Synzapp Interpreter.',
+                `Translate the workplace speech below into ${targetLanguage.label}.`,
+                'Use simple, natural spoken language as a professional human interpreter would.',
+                'Preserve the speaker meaning, remove filler words, and do not add new facts.',
+                `Meeting type: ${meeting.meetingType}.`,
+                '',
+                sourceText
+              ].join('\n'),
+              type: 'input_text'
+            }
+          ],
+          role: 'user'
+        }
+      ],
+      model: env.openAiInterpreterSegmentModel
+    }),
+    headers: {
+      Authorization: `Bearer ${env.openAiApiKey}`,
+      'Content-Type': 'application/json',
+      'OpenAI-Safety-Identifier': createSafetyIdentifier(context.tenantId, context.uid)
+    },
+    method: 'POST',
+    signal: AbortSignal.timeout(env.openAiRequestTimeoutMs)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    console.warn('OpenAI interpreter segment translation failed:', {
+      error: errorText.slice(0, 300),
+      model: env.openAiInterpreterSegmentModel,
+      status: response.status,
+      targetLanguageCode: targetLanguage.code
+    });
+    throw serviceError('Interpreter segment translation could not be prepared.');
+  }
+
+  const body = await response.json() as {
+    output_text?: string;
+    output?: Array<{ content?: Array<{ text?: string }> }>;
+  };
+  const translatedText = extractOpenAiTextOutput(body).trim();
+
+  if (!translatedText) {
+    throw serviceError('Interpreter segment translation was empty.');
+  }
+
+  return translatedText;
+}
+
+async function requestOpenAiSegmentSpeechAudio({
+  context,
+  language,
+  meeting,
+  translatedText
+}: {
+  context: AuthorizedInterpreterContext;
+  language: InterpreterLanguage;
+  meeting: InterpreterMeetingRecord;
+  translatedText: string;
+}): Promise<InterpreterSummaryAudio> {
+  if (!env.openAiApiKey) {
+    throw serviceError('Interpreter spoken segment playback is not configured on the backend.');
+  }
+
+  if (!env.interpreterSegmentAudioEnabled) {
+    throw validationError('Interpreter spoken segment playback is disabled for this organization.');
+  }
+
+  const cleanTranslatedText = translatedText.trim();
+
+  if (!cleanTranslatedText) {
+    throw validationError('There is no interpreted text to speak in this language yet.');
+  }
+
+  const response = await fetch('https://api.openai.com/v1/audio/speech', {
+    body: JSON.stringify({
+      input: [
+        `Speak this Synzapp live interpretation in ${language.label}.`,
+        'Use clear, calm, simple workplace language.',
+        'Speak only the interpreted message, with no preface.',
+        `Meeting name: ${meeting.meetingName}.`,
+        '',
+        cleanTranslatedText
+      ].join('\n'),
+      model: env.openAiInterpreterSegmentTtsModel,
+      response_format: 'mp3',
+      voice: env.openAiInterpreterSegmentTtsVoice
+    }),
+    headers: {
+      Authorization: `Bearer ${env.openAiApiKey}`,
+      'Content-Type': 'application/json',
+      'OpenAI-Safety-Identifier': createSafetyIdentifier(context.tenantId, context.uid)
+    },
+    method: 'POST',
+    signal: AbortSignal.timeout(env.openAiRequestTimeoutMs)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    console.warn('OpenAI interpreter segment speech failed:', {
+      error: errorText.slice(0, 300),
+      languageCode: language.code,
+      model: env.openAiInterpreterSegmentTtsModel,
+      status: response.status
+    });
+    throw serviceError('Interpreter spoken segment could not be created.');
+  }
+
+  const audioBuffer = Buffer.from(await response.arrayBuffer());
+  const contentType = response.headers.get('content-type') || 'audio/mpeg';
+
+  return {
+    audioBase64: audioBuffer.toString('base64'),
+    contentType,
+    format: 'mp3',
+    languageCode: language.code,
+    model: env.openAiInterpreterSegmentTtsModel,
+    voice: env.openAiInterpreterSegmentTtsVoice
+  };
+}
+
+function extractOpenAiTextOutput(body: {
+  output_text?: string;
+  output?: Array<{ content?: Array<{ text?: string }> }>;
+}): string {
+  return body.output_text ||
+    body.output?.flatMap((item) => item.content || []).map((content) => content.text).filter(Boolean).join('\n') ||
+    '';
 }
 
 async function readAccessibleMeeting(
