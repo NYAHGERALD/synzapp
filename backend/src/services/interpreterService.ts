@@ -13,6 +13,7 @@ export type InterpreterMeetingStatus = 'ENDED' | 'LIVE' | 'SCHEDULED';
 export interface InterpreterLanguage {
   code: string;
   label: string;
+  realtimeTargetSupported?: boolean;
 }
 
 export interface InterpreterVoiceProfile {
@@ -223,19 +224,80 @@ const TRANSCRIPT_COLLECTION = 'transcriptSegments';
 const TRANSLATION_COLLECTION = 'translationSegments';
 const SUMMARY_COLLECTION = 'summaries';
 
+const REALTIME_TARGET_LANGUAGE_CODES = new Set([
+  'de-DE',
+  'en-US',
+  'es-MX',
+  'fr-FR',
+  'hi-IN',
+  'id-ID',
+  'it-IT',
+  'ja-JP',
+  'ko-KR',
+  'pt-BR',
+  'pt-PT',
+  'ru-RU',
+  'vi-VN',
+  'zh-CN',
+  'zh-HK',
+  'zh-TW'
+]);
+
 const SUPPORTED_LANGUAGES: InterpreterLanguage[] = [
-  { code: 'en-US', label: 'English' },
-  { code: 'es-MX', label: 'Spanish' },
-  { code: 'fr-FR', label: 'French' },
-  { code: 'pt-BR', label: 'Portuguese' },
-  { code: 'de-DE', label: 'German' },
   { code: 'ar-SA', label: 'Arabic' },
-  { code: 'hi-IN', label: 'Hindi' },
-  { code: 'zh-CN', label: 'Chinese' },
+  { code: 'bn-BD', label: 'Bengali' },
+  { code: 'my-MM', label: 'Burmese' },
+  { code: 'zh-CN', label: 'Chinese (Simplified, China)' },
+  { code: 'zh-HK', label: 'Chinese (Traditional, Hong Kong)' },
+  { code: 'zh-TW', label: 'Chinese (Traditional, Taiwan)' },
   { code: 'yue-CN', label: 'Cantonese' },
+  { code: 'cs-CZ', label: 'Czech' },
+  { code: 'nl-NL', label: 'Dutch' },
+  { code: 'en-US', label: 'English' },
+  { code: 'fi-FI', label: 'Finnish' },
+  { code: 'fr-FR', label: 'French' },
+  { code: 'de-DE', label: 'German' },
+  { code: 'gu-IN', label: 'Gujarati' },
+  { code: 'ha-NG', label: 'Hausa' },
+  { code: 'hi-IN', label: 'Hindi' },
+  { code: 'hu-HU', label: 'Hungarian' },
+  { code: 'ig-NG', label: 'Igbo' },
+  { code: 'id-ID', label: 'Indonesian' },
+  { code: 'it-IT', label: 'Italian' },
+  { code: 'ja-JP', label: 'Japanese' },
+  { code: 'jv-ID', label: 'Javanese' },
+  { code: 'kn-IN', label: 'Kannada' },
   { code: 'ko-KR', label: 'Korean' },
-  { code: 'ja-JP', label: 'Japanese' }
-];
+  { code: 'la-VA', label: 'Latin' },
+  { code: 'ms-MY', label: 'Malay' },
+  { code: 'ml-IN', label: 'Malayalam' },
+  { code: 'mr-IN', label: 'Marathi' },
+  { code: 'or-IN', label: 'Odia' },
+  { code: 'ps-AF', label: 'Pashto' },
+  { code: 'pcm-NG', label: 'Nigerian Pidgin English' },
+  { code: 'pl-PL', label: 'Polish' },
+  { code: 'pt-BR', label: 'Portuguese (Brazil)' },
+  { code: 'pt-PT', label: 'Portuguese (Portugal)' },
+  { code: 'pa-IN', label: 'Punjabi' },
+  { code: 'ro-RO', label: 'Romanian' },
+  { code: 'ru-RU', label: 'Russian' },
+  { code: 'si-LK', label: 'Sinhala' },
+  { code: 'sk-SK', label: 'Slovak' },
+  { code: 'es-MX', label: 'Spanish' },
+  { code: 'sv-SE', label: 'Swedish' },
+  { code: 'tl-PH', label: 'Tagalog' },
+  { code: 'ta-IN', label: 'Tamil' },
+  { code: 'te-IN', label: 'Telugu' },
+  { code: 'th-TH', label: 'Thai' },
+  { code: 'tr-TR', label: 'Turkish' },
+  { code: 'ur-PK', label: 'Urdu' },
+  { code: 'vi-VN', label: 'Vietnamese' },
+  { code: 'yo-NG', label: 'Yoruba' },
+  { code: 'zu-ZA', label: 'Zulu' }
+].map((language) => ({
+  ...language,
+  realtimeTargetSupported: REALTIME_TARGET_LANGUAGE_CODES.has(language.code)
+}));
 
 const SUPPORTED_INTERPRETER_VOICES: InterpreterVoiceProfile[] = [
   { id: 'cedar', label: 'Cedar', description: 'Calm executive interpreter for workplace conversations.' },
@@ -931,6 +993,10 @@ async function requestOpenAiInterpreterRealtimeSession(
 ) {
   if (!env.openAiApiKey) {
     throw validationError('Interpreter AI is not configured on the backend.');
+  }
+
+  if (!targetLanguage.realtimeTargetSupported) {
+    throw validationError(`${targetLanguage.label} is available for captured spoken interpretation, but not for live realtime target audio.`);
   }
 
   const safetyIdentifier = createSafetyIdentifier(context.tenantId, context.uid);
@@ -2225,7 +2291,7 @@ function normalizeMeetingRecord(meeting: Partial<InterpreterMeetingRecord>): Int
     deletedAtIso: meeting.deletedAtIso || null,
     deletedByDisplayName: meeting.deletedByDisplayName || null,
     deletedByUid: meeting.deletedByUid || null,
-    interpreterLanguages: Array.isArray(meeting.interpreterLanguages) ? meeting.interpreterLanguages : [],
+    interpreterLanguages: normalizeStoredInterpreterLanguages(meeting.interpreterLanguages),
     interpreterVoiceId: normalizeInterpreterVoiceId(meeting.interpreterVoiceId),
     invitedUserIds: Array.isArray(meeting.invitedUserIds) ? meeting.invitedUserIds.filter((uid) => typeof uid === 'string') : [],
     reminderDeliveredCount: typeof meeting.reminderDeliveredCount === 'number' ? meeting.reminderDeliveredCount : 0,
@@ -2352,6 +2418,33 @@ function normalizeInterpreterLanguages(languageCodes: string[]): InterpreterLang
   }
 
   return languages as InterpreterLanguage[];
+}
+
+function normalizeStoredInterpreterLanguages(languages: unknown): InterpreterLanguage[] {
+  if (!Array.isArray(languages)) {
+    return normalizeInterpreterLanguages([]);
+  }
+
+  const languageCodes = languages
+    .map((language) => {
+      if (typeof language === 'string') {
+        return language;
+      }
+
+      if (
+        language &&
+        typeof language === 'object' &&
+        'code' in language &&
+        typeof (language as { code?: unknown }).code === 'string'
+      ) {
+        return (language as { code: string }).code;
+      }
+
+      return '';
+    })
+    .filter((languageCode) => languageCode && LANGUAGE_BY_CODE.has(languageCode));
+
+  return normalizeInterpreterLanguages(languageCodes);
 }
 
 function normalizeInterpreterVoiceId(voiceId?: string | null, fallbackVoiceId = env.openAiInterpreterSegmentTtsVoice): string {

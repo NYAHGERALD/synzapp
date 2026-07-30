@@ -1023,11 +1023,17 @@ function InterpreterRoom({
           onStatus: (status) => updateLanguageSession(language.code, { status }),
           onTranscript: (transcript) => {
             updateLanguageSession(language.code, { transcript });
-            setLiveTranscript((currentTranscript) => language.code === selectedLanguageCode ? transcript : currentTranscript);
+            setLiveTranscript((currentTranscript) =>
+              language.code === selectedLanguageCode || !realtimeSessionPoolRef.current[selectedLanguageCode]
+                ? transcript
+                : currentTranscript
+            );
           },
           onTranslation: (translation) => {
             updateLanguageSession(language.code, { translation });
-            setLiveTranslation((currentTranslation) => language.code === selectedLanguageCode ? translation : currentTranslation);
+            setLiveTranslation((currentTranslation) =>
+              language.code === selectedLanguageCode ? translation : currentTranslation
+            );
           }
         });
 
@@ -3257,6 +3263,7 @@ function InterpreterCreateModal({
           title: language.label
         }))}
         title={languagePickerMode === 'source' ? 'Speaker language' : 'Add interpretation language'}
+        searchPlaceholder="Search language"
         onSelect={(languageCode) => {
           if (languagePickerMode === 'source') {
             setDraft((currentDraft) => ({ ...currentDraft, sourceLanguageCode: languageCode }));
@@ -3279,6 +3286,7 @@ function InterpreterCreateModal({
             title: participant.displayName
           }))}
         title="Add meeting access"
+        searchPlaceholder="Search people"
         onSelect={(participantUid) => {
           addParticipant(participantUid);
           setParticipantPickerOpen(false);
@@ -3657,6 +3665,7 @@ interface InterpreterOptionPickerModalProps {
   onClose: () => void;
   onSelect: (id: string) => void;
   options: InterpreterOptionPickerOption[];
+  searchPlaceholder?: string;
   title: string;
 }
 
@@ -3665,11 +3674,31 @@ function InterpreterOptionPickerModal({
   onClose,
   onSelect,
   options,
+  searchPlaceholder = 'Search',
   title
 }: InterpreterOptionPickerModalProps) {
   const appTheme = useAppTheme();
   const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
   const insets = useSafeAreaInsets();
+  const [searchQuery, setSearchQuery] = useState('');
+  const filteredOptions = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+
+    if (!query) {
+      return options;
+    }
+
+    return options.filter((option) =>
+      option.title.toLowerCase().includes(query) ||
+      option.subtitle?.toLowerCase().includes(query)
+    );
+  }, [options, searchQuery]);
+
+  useEffect(() => {
+    if (isOpen) {
+      setSearchQuery('');
+    }
+  }, [isOpen]);
 
   return (
     <Modal animationType="fade" onRequestClose={onClose} transparent visible={isOpen}>
@@ -3682,12 +3711,26 @@ function InterpreterOptionPickerModal({
               <Ionicons color={appTheme.colors.ink} name="close" size={24} />
             </Pressable>
           </View>
+          {options.length > 8 ? (
+            <View style={styles.pickerSearchRow}>
+              <Ionicons color={appTheme.colors.mutedStrong} name="search-outline" size={18} />
+              <TextInput
+                autoCapitalize="none"
+                autoCorrect={false}
+                onChangeText={setSearchQuery}
+                placeholder={searchPlaceholder}
+                placeholderTextColor={appTheme.colors.muted}
+                style={styles.pickerSearchInput}
+                value={searchQuery}
+              />
+            </View>
+          ) : null}
           <ScrollView
             contentContainerStyle={styles.pickerList}
             keyboardShouldPersistTaps="handled"
             showsVerticalScrollIndicator={false}
           >
-            {options.length ? options.map((option) => (
+            {filteredOptions.length ? filteredOptions.map((option) => (
               <Pressable
                 key={option.id}
                 onPress={() => onSelect(option.id)}
@@ -3704,8 +3747,10 @@ function InterpreterOptionPickerModal({
               </Pressable>
             )) : (
               <View style={styles.emptyPickerState}>
-                <Ionicons color={appTheme.colors.mutedStrong} name="checkmark-circle-outline" size={28} />
-                <Text style={styles.mutedText}>All available options have already been added.</Text>
+                <Ionicons color={appTheme.colors.mutedStrong} name={options.length ? 'search-outline' : 'checkmark-circle-outline'} size={28} />
+                <Text style={styles.mutedText}>
+                  {options.length ? 'No matching languages found.' : 'All available options have already been added.'}
+                </Text>
               </View>
             )}
           </ScrollView>
@@ -3927,7 +3972,23 @@ function getSessionPoolLanguages(
   meeting: InterpreterMeeting,
   selectedLanguageCode: string
 ): InterpreterLanguage[] {
-  return meeting.interpreterLanguages.filter((language) => language.code === selectedLanguageCode);
+  const selectedLanguage = meeting.interpreterLanguages.find((language) => language.code === selectedLanguageCode);
+
+  if (selectedLanguage?.realtimeTargetSupported) {
+    return [selectedLanguage];
+  }
+
+  const defaultCaptureLanguage = meeting.interpreterLanguages.find((language) =>
+    language.code === 'en-US' && language.realtimeTargetSupported
+  );
+
+  if (defaultCaptureLanguage) {
+    return [defaultCaptureLanguage];
+  }
+
+  const firstRealtimeLanguage = meeting.interpreterLanguages.find((language) => language.realtimeTargetSupported);
+
+  return firstRealtimeLanguage ? [firstRealtimeLanguage] : [];
 }
 
 function areStringSetsEqual(firstValues: string[], secondValues: string[]): boolean {
@@ -5213,6 +5274,22 @@ function createStyles(colors: AppColors) {
       gap: 12,
       minHeight: 64,
       paddingVertical: 10
+    },
+    pickerSearchInput: {
+      color: colors.ink,
+      flex: 1,
+      fontSize: 15,
+      minHeight: 42,
+      paddingVertical: 0
+    },
+    pickerSearchRow: {
+      alignItems: 'center',
+      backgroundColor: colors.input,
+      borderRadius: 999,
+      flexDirection: 'row',
+      gap: 8,
+      marginBottom: 10,
+      paddingHorizontal: 14
     },
     voicePickerRow: {
       alignItems: 'center',

@@ -7,6 +7,7 @@ export type InterpreterMeetingStatus = 'ENDED' | 'LIVE' | 'SCHEDULED';
 export interface InterpreterLanguage {
   code: string;
   label: string;
+  realtimeTargetSupported?: boolean;
 }
 
 export interface InterpreterVoiceProfile {
