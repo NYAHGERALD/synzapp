@@ -439,37 +439,25 @@ export function InterpreterScreen({ getIdToken, onRoomActiveChange }: Interprete
   }
 
   return (
-    <View style={[styles.screen, { paddingBottom: Math.max(insets.bottom + 94, 112) }]}>
-      <View style={styles.hero}>
-        <View style={styles.heroIcon}>
-          <Ionicons color={appTheme.colors.primary} name="language-outline" size={28} />
-        </View>
-        <View style={styles.heroText}>
-          <Text style={styles.eyebrow}>AI INTERPRETER</Text>
-          <Text style={styles.title}>Live workplace interpreter</Text>
-          <Text style={styles.subtitle}>
-            Standalone voice interpretation for 1-on-1, Level 1, and Level 3 meetings.
-          </Text>
-        </View>
+    <View
+      style={[
+        styles.screen,
+        styles.workspaceScreen,
+        {
+          paddingBottom: Math.max(insets.bottom + 106, 124),
+          paddingTop: Math.max(insets.top + 6, 18)
+        }
+      ]}
+    >
+      <View style={styles.workspaceHeader}>
+        <Text style={styles.workspaceTitle}>Interpreter</Text>
       </View>
 
-      <View style={styles.actionRow}>
-        <Pressable
-          onPress={() => setIsCreateOpen(true)}
-          style={({ pressed }) => [styles.primaryButton, pressed && styles.pressed]}
+      {meetings.length ? (
+        <ScrollView
+          contentContainerStyle={styles.listContent}
+          showsVerticalScrollIndicator={false}
         >
-          <Ionicons color="#fff" name="add" size={17} />
-          <Text style={styles.primaryButtonText}>New meeting</Text>
-        </Pressable>
-      </View>
-
-      {isLoading ? (
-        <View style={styles.emptyState}>
-          <ActivityIndicator color={appTheme.colors.primary} />
-          <Text style={styles.mutedText}>Loading interpreter workspace...</Text>
-        </View>
-      ) : meetings.length ? (
-        <ScrollView contentContainerStyle={styles.listContent}>
           {meetings.map((meeting) => (
             <InterpreterMeetingSwipeRow
               key={meeting.meetingId}
@@ -480,13 +468,27 @@ export function InterpreterScreen({ getIdToken, onRoomActiveChange }: Interprete
             />
           ))}
         </ScrollView>
-      ) : (
+      ) : !isLoading ? (
         <View style={styles.emptyState}>
           <Ionicons color={appTheme.colors.mutedStrong} name="mic-circle-outline" size={40} />
           <Text style={styles.emptyTitle}>No interpreter meetings yet</Text>
           <Text style={styles.mutedText}>Create a controlled meeting before starting live interpretation.</Text>
         </View>
+      ) : (
+        <View style={styles.quietWorkspaceFill} />
       )}
+
+      <Pressable
+        accessibilityLabel="Create interpreter meeting"
+        onPress={() => setIsCreateOpen(true)}
+        style={({ pressed }) => [
+          styles.floatingCreateButton,
+          { bottom: Math.max(insets.bottom + 86, 98) },
+          pressed && styles.pressed
+        ]}
+      >
+        <Ionicons color="#fff" name="add" size={26} />
+      </Pressable>
 
       <InterpreterCreateModal
         getIdToken={getIdToken}
@@ -609,12 +611,17 @@ function InterpreterMeetingSwipeRow({
           onPress={() => void onOpen(meeting.meetingId)}
           style={({ pressed }) => [styles.meetingRow, pressed && styles.pressed]}
         >
-          <View style={styles.meetingStatusIcon}>
-            <Ionicons
-              color={getStatusColor(meeting.status)}
-              name={meeting.status === 'ENDED' ? 'checkmark-circle-outline' : 'radio-outline'}
-              size={22}
-            />
+          <View style={styles.meetingAvatarWrap}>
+            <View style={styles.meetingAvatar}>
+              <Ionicons color={appTheme.colors.primary} name="language-outline" size={21} />
+            </View>
+            <View style={[styles.meetingAvatarBadge, { backgroundColor: getStatusColor(meeting.status) }]}>
+              <Ionicons
+                color="#fff"
+                name={meeting.status === 'ENDED' ? 'checkmark' : 'radio'}
+                size={11}
+              />
+            </View>
           </View>
           <View style={styles.meetingBody}>
             <Text style={styles.meetingName}>{meeting.meetingName}</Text>
@@ -622,9 +629,16 @@ function InterpreterMeetingSwipeRow({
               {formatMeetingType(meeting.meetingType)} · {meeting.interpreterLanguages.map((language) => language.label).join(', ')}
             </Text>
           </View>
-          <Text style={[styles.statusPill, { color: getStatusColor(meeting.status) }]}>
-            {formatStatus(meeting.status)}
-          </Text>
+          <View style={[styles.statusPill, { backgroundColor: getStatusSoftColor(meeting.status, appTheme.colors) }]}>
+            <Ionicons
+              color={getStatusColor(meeting.status)}
+              name={meeting.status === 'ENDED' ? 'checkmark-circle-outline' : 'pulse-outline'}
+              size={13}
+            />
+            <Text style={[styles.statusPillText, { color: getStatusColor(meeting.status) }]}>
+              {formatStatus(meeting.status)}
+            </Text>
+          </View>
         </Pressable>
       </Animated.View>
     </View>
@@ -2497,7 +2511,7 @@ function InterpreterLiveTranscriptModal({
             <Text style={styles.liveRoomMeta}>{details.meeting.meetingName}</Text>
           </View>
         </View>
-        <ScrollView contentContainerStyle={styles.liveDetailList}>
+        <ScrollView contentContainerStyle={styles.liveDetailList} showsVerticalScrollIndicator={false}>
           {transcriptRows.length ? transcriptRows.map((segment, index) => (
             <View key={segment.segmentId || `${segment.createdAtIso}-${index}`} style={styles.liveDetailRow}>
               <Text style={styles.liveDetailMeta}>{formatDateTime(segment.createdAtIso)}</Text>
@@ -2550,7 +2564,7 @@ function InterpreterInterpretationHistoryModal({
             <Text style={styles.liveRoomMeta}>Grouped by meeting language</Text>
           </View>
         </View>
-        <ScrollView contentContainerStyle={styles.liveDetailList}>
+        <ScrollView contentContainerStyle={styles.liveDetailList} showsVerticalScrollIndicator={false}>
           {groupedHistory.length ? groupedHistory.map((group) => (
             <View key={group.language.code} style={styles.historyLanguageGroup}>
               <Text style={styles.liveRoomSectionLabel}>{group.language.label}</Text>
@@ -2935,7 +2949,11 @@ function InterpreterCreateModal({
             </Pressable>
           </View>
 
-          <ScrollView contentContainerStyle={styles.modalContent} keyboardShouldPersistTaps="handled">
+          <ScrollView
+            contentContainerStyle={styles.modalContent}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
             <TextInput
               onChangeText={(meetingName) => setDraft((currentDraft) => ({ ...currentDraft, meetingName }))}
               placeholder="Meeting name"
@@ -3437,7 +3455,11 @@ function InterpreterVoicePickerModal({
           <Text style={styles.subtitle}>
             Preview each interpreter speaker before assigning it to the meeting.
           </Text>
-          <ScrollView contentContainerStyle={styles.pickerList} keyboardShouldPersistTaps="handled">
+          <ScrollView
+            contentContainerStyle={styles.pickerList}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
             {voices.map((voice) => {
               const previewKey = getInterpreterVoicePreviewAudioKey(voice.id, previewLanguageCode);
               const isSelected = selectedVoiceId === voice.id;
@@ -3534,7 +3556,11 @@ function InterpreterOptionPickerModal({
               <Ionicons color={appTheme.colors.ink} name="close" size={24} />
             </Pressable>
           </View>
-          <ScrollView contentContainerStyle={styles.pickerList} keyboardShouldPersistTaps="handled">
+          <ScrollView
+            contentContainerStyle={styles.pickerList}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
             {options.length ? options.map((option) => (
               <Pressable
                 key={option.id}
@@ -3647,6 +3673,18 @@ function getStatusColor(status: InterpreterMeeting['status']): string {
   }
 
   return '#2563eb';
+}
+
+function getStatusSoftColor(status: InterpreterMeeting['status'], colors: AppColors): string {
+  if (status === 'LIVE') {
+    return colors.primarySoft;
+  }
+
+  if (status === 'ENDED') {
+    return colors.surfaceElevated;
+  }
+
+  return colors.blueSoft;
 }
 
 function formatRealtimeStatus(status: InterpreterRealtimeStatus): string {
@@ -4097,6 +4135,22 @@ function createStyles(colors: AppColors) {
       color: colors.ink,
       fontSize: 16
     },
+    floatingCreateButton: {
+      alignItems: 'center',
+      backgroundColor: colors.primary,
+      borderRadius: 28,
+      elevation: 8,
+      height: 56,
+      justifyContent: 'center',
+      position: 'absolute',
+      right: 22,
+      shadowColor: colors.primary,
+      shadowOffset: { height: 8, width: 0 },
+      shadowOpacity: 0.24,
+      shadowRadius: 14,
+      width: 56,
+      zIndex: 20
+    },
     endButton: {
       alignItems: 'center',
       borderColor: '#fecaca',
@@ -4226,7 +4280,7 @@ function createStyles(colors: AppColors) {
     },
     listContent: {
       gap: 10,
-      paddingBottom: 12
+      paddingBottom: 18
     },
     livePanel: {
       alignItems: 'center',
@@ -4789,6 +4843,31 @@ function createStyles(colors: AppColors) {
       flex: 1,
       gap: 5
     },
+    meetingAvatar: {
+      alignItems: 'center',
+      backgroundColor: colors.primarySoft,
+      borderRadius: 20,
+      height: 40,
+      justifyContent: 'center',
+      width: 40
+    },
+    meetingAvatarBadge: {
+      alignItems: 'center',
+      borderColor: colors.screen,
+      borderRadius: 9,
+      borderWidth: 2,
+      bottom: -1,
+      height: 18,
+      justifyContent: 'center',
+      position: 'absolute',
+      right: -2,
+      width: 18
+    },
+    meetingAvatarWrap: {
+      height: 44,
+      justifyContent: 'center',
+      width: 46
+    },
     meetingMeta: {
       color: colors.mutedStrong,
       fontSize: 12,
@@ -4833,14 +4912,6 @@ function createStyles(colors: AppColors) {
     meetingSwipeShell: {
       backgroundColor: colors.red,
       overflow: 'hidden'
-    },
-    meetingStatusIcon: {
-      alignItems: 'center',
-      backgroundColor: colors.primarySoft,
-      borderRadius: 18,
-      height: 42,
-      justifyContent: 'center',
-      width: 42
     },
     modalContent: {
       gap: 14,
@@ -5155,6 +5226,23 @@ function createStyles(colors: AppColors) {
       flex: 1,
       padding: 14
     },
+    workspaceHeader: {
+      alignItems: 'center',
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
+      justifyContent: 'center',
+      marginBottom: 10,
+      minHeight: 42
+    },
+    workspaceScreen: {
+      backgroundColor: colors.screen
+    },
+    workspaceTitle: {
+      color: colors.ink,
+      fontSize: 20,
+      lineHeight: 26,
+      textAlign: 'center'
+    },
     settingsContent: {
       gap: 18,
       paddingBottom: 24
@@ -5347,6 +5435,9 @@ function createStyles(colors: AppColors) {
       color: colors.primary,
       fontSize: 14
     },
+    quietWorkspaceFill: {
+      flex: 1
+    },
     schedulePanel: {
       backgroundColor: colors.surface,
       borderTopColor: colors.divider,
@@ -5355,12 +5446,16 @@ function createStyles(colors: AppColors) {
       paddingTop: 12
     },
     statusPill: {
+      alignItems: 'center',
       backgroundColor: colors.primarySoft,
       borderRadius: 999,
-      fontSize: 12,
-      overflow: 'hidden',
+      flexDirection: 'row',
+      gap: 5,
       paddingHorizontal: 10,
       paddingVertical: 6
+    },
+    statusPillText: {
+      fontSize: 12
     },
     statusDot: {
       borderRadius: 6,
