@@ -445,7 +445,7 @@ export function InterpreterScreen({ getIdToken, onRoomActiveChange }: Interprete
         styles.workspaceScreen,
         {
           paddingBottom: Math.max(insets.bottom + 106, 124),
-          paddingTop: Math.max(insets.top + 6, 18)
+          paddingTop: Math.max(insets.top + 2, 14)
         }
       ]}
     >
@@ -483,7 +483,7 @@ export function InterpreterScreen({ getIdToken, onRoomActiveChange }: Interprete
         onPress={() => setIsCreateOpen(true)}
         style={({ pressed }) => [
           styles.floatingCreateButton,
-          { bottom: Math.max(insets.bottom + 86, 98) },
+          { bottom: 18 },
           pressed && styles.pressed
         ]}
       >
@@ -1500,14 +1500,16 @@ function InterpreterRoom({
   return (
     <View style={styles.roomHost}>
       <InterpreterSummaryLanguageModal
+        activeAudioKey={activeSummaryAudioKey}
         isBusy={isBusy}
+        isAudioPlaying={summaryAudioStatus.playing}
         isOpen={isSummaryModalOpen}
         languages={details.meeting.interpreterLanguages}
         onClose={() => setIsSummaryModalOpen(false)}
         onError={onError}
+        onPlaySummary={(summary, languageCode) => void handlePlayInterpreterSummary(summary, languageCode)}
         onSubmit={async (languageCodes) => {
           const result = await onCreateSummary(languageCodes);
-          setIsSummaryModalOpen(false);
 
           if (!result) {
             return;
@@ -1530,6 +1532,8 @@ function InterpreterRoom({
             await handlePlayInterpreterSummary(result.summary, replayLanguageCode);
           }
         }}
+        preparingAudioKey={preparingSummaryAudioKey}
+        summaries={details.summaries}
       />
       <InterpreterLiveRoomModal
         audioLevel={audioLevel}
@@ -1558,6 +1562,7 @@ function InterpreterRoom({
         onOpenHistory={() => setIsLiveHistoryOpen(true)}
         onOpenLanguageModal={() => setIsLiveLanguageModalOpen(true)}
         onOpenSettings={() => setIsRoomSettingsOpen(true)}
+        onOpenSummary={() => setIsSummaryModalOpen(true)}
         onOpenTranscript={() => setIsLiveTranscriptOpen(true)}
         onReplayInterpretationAudio={() => void handleReplayInterpreterSegmentAudio()}
         onListen={listenAgain}
@@ -1597,6 +1602,7 @@ function InterpreterRoom({
             voices={voiceProfiles.length ? voiceProfiles : FALLBACK_INTERPRETER_VOICES}
           />
         )}
+        summaryCount={details.summaries.length}
         voiceProfile={selectedVoiceProfile}
         wasInterrupted={wasInterpretationInterrupted}
       />
@@ -1631,6 +1637,7 @@ interface InterpreterLiveRoomModalProps {
   onOpenHistory: () => void;
   onOpenLanguageModal: () => void;
   onOpenSettings: () => void;
+  onOpenSummary: () => void;
   onOpenTranscript: () => void;
   onPlayHistoryItem: (item: InterpreterLiveHistoryItem) => void;
   onReplayInterpretationAudio: () => void;
@@ -1643,6 +1650,7 @@ interface InterpreterLiveRoomModalProps {
   selectedLanguageCode: string;
   setSelectedLanguageCode: (languageCode: string) => void;
   settingsPanel: React.ReactNode;
+  summaryCount: number;
   voiceProfile: InterpreterVoiceProfile;
   wasInterrupted: boolean;
 }
@@ -1674,6 +1682,7 @@ function InterpreterLiveRoomModal({
   onOpenHistory,
   onOpenLanguageModal,
   onOpenSettings,
+  onOpenSummary,
   onOpenTranscript,
   onPlayHistoryItem,
   onReplayInterpretationAudio,
@@ -1686,6 +1695,7 @@ function InterpreterLiveRoomModal({
   selectedLanguageCode,
   setSelectedLanguageCode,
   settingsPanel,
+  summaryCount,
   voiceProfile,
   wasInterrupted
 }: InterpreterLiveRoomModalProps) {
@@ -1897,6 +1907,22 @@ function InterpreterLiveRoomModal({
             {getLiveFooterHint(liveMode)}
           </Text>
         </View>
+        <Pressable
+          accessibilityLabel="Open meeting summaries"
+          onPress={onOpenSummary}
+          style={({ pressed }) => [
+            styles.liveSummaryFab,
+            { bottom: Math.max(insets.bottom + 64, 78) },
+            pressed && styles.pressed
+          ]}
+        >
+          <Ionicons color="#fff" name="reader-outline" size={21} />
+          {summaryCount ? (
+            <View style={styles.liveSummaryFabBadge}>
+              <Text style={styles.liveSummaryFabBadgeText}>{summaryCount > 9 ? '9+' : summaryCount}</Text>
+            </View>
+          ) : null}
+        </Pressable>
         <InterpreterResponseLanguageModal
           isOpen={isLanguageModalOpen}
           languages={details.meeting.interpreterLanguages}
@@ -3285,32 +3311,49 @@ function InterpreterCreateModal({
 }
 
 interface InterpreterSummaryLanguageModalProps {
+  activeAudioKey: string | null;
   isBusy: boolean;
+  isAudioPlaying: boolean;
   isOpen: boolean;
   languages: InterpreterLanguage[];
   onClose: () => void;
   onError: (message: string, title?: string) => void;
+  onPlaySummary: (
+    summary: InterpreterMeetingDetails['summaries'][number],
+    languageCode: string
+  ) => void;
   onSubmit: (languageCodes: string[]) => Promise<void>;
+  preparingAudioKey: string | null;
+  summaries: InterpreterMeetingDetails['summaries'];
 }
 
 function InterpreterSummaryLanguageModal({
+  activeAudioKey,
   isBusy,
+  isAudioPlaying,
   isOpen,
   languages,
   onClose,
   onError,
-  onSubmit
+  onPlaySummary,
+  onSubmit,
+  preparingAudioKey,
+  summaries
 }: InterpreterSummaryLanguageModalProps) {
   const appTheme = useAppTheme();
   const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
   const insets = useSafeAreaInsets();
   const [selectedLanguageCodes, setSelectedLanguageCodes] = useState<string[]>([]);
+  const availableLanguages = useMemo(() => languages.length ? languages : [
+    { code: 'en-US', label: 'English' },
+    { code: 'es-MX', label: 'Spanish' }
+  ], [languages]);
 
   useEffect(() => {
     if (isOpen) {
-      setSelectedLanguageCodes(languages.map((language) => language.code));
+      setSelectedLanguageCodes(availableLanguages.map((language) => language.code));
     }
-  }, [isOpen, languages]);
+  }, [availableLanguages, isOpen]);
 
   function toggleLanguage(languageCode: string) {
     setSelectedLanguageCodes((currentCodes) =>
@@ -3330,56 +3373,138 @@ function InterpreterSummaryLanguageModal({
   }
 
   return (
-    <Modal animationType="slide" onRequestClose={onClose} transparent visible={isOpen}>
-      <View style={styles.modalOverlay}>
-        <View style={[styles.modalSheet, { paddingBottom: Math.max(insets.bottom + 18, 28) }]}>
-          <View style={styles.modalHandle} />
-          <View style={styles.modalHeader}>
-            <View>
-              <Text style={styles.eyebrow}>MEETING SUMMARY</Text>
-              <Text style={styles.modalTitle}>Choose languages</Text>
-            </View>
-            <Pressable onPress={onClose} style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}>
-              <Ionicons color={appTheme.colors.ink} name="close" size={24} />
-            </Pressable>
+    <Modal animationType="slide" onRequestClose={onClose} visible={isOpen}>
+      <View style={[styles.liveDetailScreen, { paddingBottom: Math.max(insets.bottom + 14, 24), paddingTop: Math.max(insets.top + 10, 22) }]}>
+        <View style={styles.liveRoomHeader}>
+          <Pressable onPress={onClose} style={({ pressed }) => [styles.liveIconButton, pressed && styles.pressed]}>
+            <Ionicons color={appTheme.colors.ink} name="chevron-down" size={24} />
+          </Pressable>
+          <View style={styles.liveRoomTitleWrap}>
+            <Text style={styles.liveRoomTitle}>Meeting summary</Text>
+            <Text style={styles.liveRoomMeta}>Create and replay spoken summaries</Text>
           </View>
-          <Text style={styles.subtitle}>
-            Synzapp will summarize only the selected languages using the secured meeting transcript memory.
-          </Text>
-          <View style={styles.summaryLanguageList}>
-            {languages.map((language) => {
-              const isSelected = selectedLanguageCodes.includes(language.code);
+        </View>
 
-              return (
-                <Pressable
-                  key={language.code}
-                  onPress={() => toggleLanguage(language.code)}
-                  style={[
-                    styles.summaryLanguageRow,
-                    isSelected && styles.summaryLanguageRowSelected
-                  ]}
-                >
-                  <View style={styles.summaryLanguageIcon}>
+        <ScrollView
+          contentContainerStyle={styles.summarySectionContent}
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={styles.summarySectionBlock}>
+            <Text style={styles.liveRoomSectionLabel}>Summary language</Text>
+            <Text style={styles.summarySectionHint}>
+              Choose the languages for a spoken, human-style recap of this meeting.
+            </Text>
+            <View style={styles.summaryLanguageChipWrap}>
+              {availableLanguages.map((language) => {
+                const isSelected = selectedLanguageCodes.includes(language.code);
+
+                return (
+                  <Pressable
+                    key={language.code}
+                    onPress={() => toggleLanguage(language.code)}
+                    style={[
+                      styles.summaryLanguageChip,
+                      isSelected && styles.summaryLanguageChipSelected
+                    ]}
+                  >
                     <Ionicons
                       color={isSelected ? appTheme.colors.primary : appTheme.colors.mutedStrong}
                       name={isSelected ? 'checkmark-circle' : 'ellipse-outline'}
-                      size={20}
+                      size={17}
                     />
-                  </View>
-                  <Text style={styles.summaryLanguageRowText}>{language.label}</Text>
-                </Pressable>
-              );
-            })}
+                    <Text
+                      style={[
+                        styles.summaryLanguageChipText,
+                        isSelected && styles.summaryLanguageChipTextSelected
+                      ]}
+                    >
+                      {language.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+            <Pressable
+              disabled={isBusy}
+              onPress={submit}
+              style={({ pressed }) => [
+                styles.summaryCreateButton,
+                isBusy && styles.disabledButton,
+                pressed && styles.pressed
+              ]}
+            >
+              {isBusy ? <ActivityIndicator color="#fff" size="small" /> : <Ionicons color="#fff" name="sparkles-outline" size={17} />}
+              <Text style={styles.summaryCreateButtonText}>Create spoken summary</Text>
+            </Pressable>
           </View>
-          <Pressable
-            disabled={isBusy}
-            onPress={submit}
-            style={({ pressed }) => [styles.primaryButtonWide, isBusy && styles.disabledButton, pressed && styles.pressed]}
-          >
-            {isBusy ? <ActivityIndicator color="#fff" /> : <Ionicons color="#fff" name="document-text-outline" size={20} />}
-            <Text style={styles.primaryButtonText}>Create and listen</Text>
-          </Pressable>
-        </View>
+
+          <View style={styles.summarySectionBlock}>
+            <View style={styles.summaryHistoryHeader}>
+              <View>
+                <Text style={styles.liveRoomSectionLabel}>Saved voice summaries</Text>
+                <Text style={styles.summarySectionHint}>
+                  Reopen any saved recap and play it in the meeting language.
+                </Text>
+              </View>
+              <View style={styles.summaryCountPill}>
+                <Text style={styles.summaryCountPillText}>{summaries.length}</Text>
+              </View>
+            </View>
+            {summaries.length ? summaries.map((summary) => (
+              <View key={summary.summaryId} style={styles.summaryHistoryRow}>
+                <Text style={styles.liveDetailMeta}>{formatDateTime(summary.createdAtIso)}</Text>
+                {summary.languageCodes.map((languageCode) => {
+                  const audioKey = getInterpreterSummaryAudioKey(summary.summaryId, languageCode);
+                  const languageLabel = getLanguageLabel(availableLanguages, languageCode);
+                  const isActive = activeAudioKey === audioKey && isAudioPlaying;
+                  const isPreparing = preparingAudioKey === audioKey;
+                  const previewText = summary.summaryTextByLanguage[languageCode] || '';
+
+                  return (
+                    <Pressable
+                      disabled={isPreparing}
+                      key={`${summary.summaryId}-${languageCode}`}
+                      onPress={() => onPlaySummary(summary, languageCode)}
+                      style={({ pressed }) => [
+                        styles.summaryHistoryLanguageRow,
+                        isActive && styles.summaryHistoryLanguageRowActive,
+                        pressed && styles.pressed
+                      ]}
+                    >
+                      <View style={[
+                        styles.summaryHistoryPlayButton,
+                        isActive && styles.summaryHistoryPlayButtonActive
+                      ]}>
+                        {isPreparing ? (
+                          <ActivityIndicator color={appTheme.colors.primary} size="small" />
+                        ) : (
+                          <Ionicons
+                            color={isActive ? '#fff' : appTheme.colors.primary}
+                            name={isActive ? 'pause' : 'play'}
+                            size={14}
+                          />
+                        )}
+                      </View>
+                      <View style={styles.summaryHistoryCopy}>
+                        <Text style={styles.summaryHistoryLanguageText}>{languageLabel}</Text>
+                        <Text numberOfLines={2} style={styles.summaryHistoryPreviewText}>
+                          {previewText || 'Summary text is saved for this language.'}
+                        </Text>
+                      </View>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            )) : (
+              <View style={styles.summaryEmptyRow}>
+                <Ionicons color={appTheme.colors.primary} name="reader-outline" size={22} />
+                <Text style={styles.summarySectionHint}>
+                  Saved spoken summaries appear here after you create one.
+                </Text>
+              </View>
+            )}
+          </View>
+        </ScrollView>
       </View>
     </Modal>
   );
@@ -4624,6 +4749,37 @@ function createStyles(colors: AppColors) {
       fontSize: 12,
       lineHeight: 18
     },
+    liveSummaryFab: {
+      alignItems: 'center',
+      backgroundColor: colors.primary,
+      borderRadius: 999,
+      elevation: 8,
+      height: 52,
+      justifyContent: 'center',
+      position: 'absolute',
+      right: 20,
+      shadowColor: colors.primary,
+      shadowOffset: { height: 8, width: 0 },
+      shadowOpacity: 0.22,
+      shadowRadius: 14,
+      width: 52,
+      zIndex: 24
+    },
+    liveSummaryFabBadge: {
+      alignItems: 'center',
+      backgroundColor: colors.red,
+      borderRadius: 999,
+      minWidth: 18,
+      paddingHorizontal: 5,
+      paddingVertical: 2,
+      position: 'absolute',
+      right: -3,
+      top: -4
+    },
+    liveSummaryFabBadgeText: {
+      color: '#fff',
+      fontSize: 10
+    },
     liveRoomHeader: {
       alignItems: 'center',
       flexDirection: 'row',
@@ -4702,7 +4858,7 @@ function createStyles(colors: AppColors) {
       fontSize: 12
     },
     liveDetailScreen: {
-      backgroundColor: colors.surface,
+      backgroundColor: colors.screen,
       flex: 1,
       paddingHorizontal: 18
     },
@@ -4879,7 +5035,7 @@ function createStyles(colors: AppColors) {
     },
     meetingRow: {
       alignItems: 'center',
-      backgroundColor: colors.surface,
+      backgroundColor: colors.screen,
       borderBottomColor: colors.divider,
       borderBottomWidth: 1,
       flexDirection: 'row',
@@ -4907,7 +5063,7 @@ function createStyles(colors: AppColors) {
       top: 0
     },
     meetingSwipeContent: {
-      backgroundColor: colors.surface
+      backgroundColor: colors.screen
     },
     meetingSwipeShell: {
       backgroundColor: colors.red,
@@ -5546,6 +5702,128 @@ function createStyles(colors: AppColors) {
     summaryLanguageRowText: {
       color: colors.ink,
       fontSize: 15
+    },
+    summarySectionContent: {
+      paddingBottom: 30
+    },
+    summarySectionBlock: {
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
+      gap: 12,
+      paddingBottom: 16,
+      paddingTop: 12
+    },
+    summarySectionHint: {
+      color: colors.mutedStrong,
+      fontSize: 13,
+      lineHeight: 19
+    },
+    summaryLanguageChipWrap: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 8
+    },
+    summaryLanguageChip: {
+      alignItems: 'center',
+      backgroundColor: colors.surfaceElevated,
+      borderRadius: 999,
+      flexDirection: 'row',
+      gap: 7,
+      minHeight: 36,
+      paddingHorizontal: 12
+    },
+    summaryLanguageChipSelected: {
+      backgroundColor: colors.primarySoft
+    },
+    summaryLanguageChipText: {
+      color: colors.mutedStrong,
+      fontSize: 13
+    },
+    summaryLanguageChipTextSelected: {
+      color: colors.primary
+    },
+    summaryCreateButton: {
+      alignItems: 'center',
+      alignSelf: 'flex-start',
+      backgroundColor: colors.primary,
+      borderRadius: 999,
+      flexDirection: 'row',
+      gap: 7,
+      minHeight: 38,
+      paddingHorizontal: 14
+    },
+    summaryCreateButtonText: {
+      color: '#fff',
+      fontSize: 13
+    },
+    summaryHistoryHeader: {
+      alignItems: 'flex-start',
+      flexDirection: 'row',
+      gap: 12,
+      justifyContent: 'space-between'
+    },
+    summaryCountPill: {
+      alignItems: 'center',
+      backgroundColor: colors.primarySoft,
+      borderRadius: 999,
+      minWidth: 30,
+      paddingHorizontal: 10,
+      paddingVertical: 6
+    },
+    summaryCountPillText: {
+      color: colors.primary,
+      fontSize: 12
+    },
+    summaryHistoryRow: {
+      borderTopColor: colors.divider,
+      borderTopWidth: 1,
+      gap: 8,
+      paddingTop: 12
+    },
+    summaryHistoryLanguageRow: {
+      alignItems: 'center',
+      backgroundColor: colors.screen,
+      borderRadius: 18,
+      flexDirection: 'row',
+      gap: 10,
+      minHeight: 62,
+      paddingHorizontal: 2,
+      paddingVertical: 6
+    },
+    summaryHistoryLanguageRowActive: {
+      backgroundColor: colors.primarySoft
+    },
+    summaryHistoryPlayButton: {
+      alignItems: 'center',
+      backgroundColor: colors.primarySoft,
+      borderRadius: 999,
+      height: 36,
+      justifyContent: 'center',
+      width: 36
+    },
+    summaryHistoryPlayButtonActive: {
+      backgroundColor: colors.primary
+    },
+    summaryHistoryCopy: {
+      flex: 1,
+      gap: 3
+    },
+    summaryHistoryLanguageText: {
+      color: colors.ink,
+      fontSize: 14
+    },
+    summaryHistoryPreviewText: {
+      color: colors.mutedStrong,
+      fontSize: 12,
+      lineHeight: 17
+    },
+    summaryEmptyRow: {
+      alignItems: 'center',
+      borderTopColor: colors.divider,
+      borderTopWidth: 1,
+      flexDirection: 'row',
+      gap: 10,
+      paddingTop: 14
     },
     switchKnob: {
       backgroundColor: colors.card,

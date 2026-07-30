@@ -1197,6 +1197,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
   );
   const isConversationSurfaceOpen = Boolean(selectedChat);
   const shouldHideMainShellForInterpreter = activeTab === 'Interpreter' && isInterpreterRoomOpen;
+  const shouldHideMainHeaderForInterpreter = activeTab === 'Interpreter';
   const isCompactAndroid = Platform.OS === 'android' && height < 720;
   const footerHeight = isCompactAndroid ? 64 : 68;
   const footerTabHeight = isCompactAndroid ? 56 : 60;
@@ -9924,7 +9925,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           ? appTheme.colors.surface
           : appTheme.colors.screen,
         paddingBottom: isConversationSurfaceOpen || shouldHideMainShellForInterpreter ? 0 : 98,
-        paddingTop: shouldHideMainShellForInterpreter
+        paddingTop: shouldHideMainHeaderForInterpreter
           ? 0
           : isConversationSurfaceOpen
             ? messageTopPadding
@@ -10017,7 +10018,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
           onDelete={handlePermanentDeleteAllSpamChats}
           spamCount={spamConversationChatItems.length}
         />
-      ) : shouldHideMainShellForInterpreter ? null : (
+      ) : shouldHideMainHeaderForInterpreter ? null : (
 	        <HeaderActions
 	          activeTab={activeTab}
 	          onOpenOptions={activeTab === 'Settings'
@@ -10035,7 +10036,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onSessionInvalid, verif
 
       {!selectedChat &&
       activeTab !== 'You' &&
-      !shouldHideMainShellForInterpreter &&
+      !shouldHideMainHeaderForInterpreter &&
       !(activeTab === 'Chats' && (isSpamScreenOpen || isArchiveScreenOpen)) ? (
         <Text style={[styles.title, { color: appTheme.colors.ink }]}>
           {activeTab === 'Settings' && settingsScreen === 'directory'

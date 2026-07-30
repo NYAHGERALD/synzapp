@@ -1540,11 +1540,16 @@ async function requestOpenAiMeetingSummary(
           content: [
             {
               text: [
-                'You are Synzapp Interpreter. Summarize this workplace meeting in simple spoken language.',
+                'You are Synzapp Interpreter, a professional human-style workplace interpreter and meeting facilitator.',
+                'Create a useful spoken recap, not a literal transcript compression.',
+                'Use natural, simple, professional language that employees can understand easily.',
+                'Preserve the speaker meaning and business context, even when the original speech has grammar, vocabulary, or filler-word issues.',
+                'Include the important topics, decisions, action items, owners, risks, blockers, and next steps only when they were actually discussed.',
                 'Do not add facts that were not discussed.',
                 `Meeting type: ${meeting.meetingType}.`,
                 `Return valid JSON keyed by these language codes: ${languageCodes.join(', ')}.`,
-                'Each value must be a concise summary in that language.',
+                'Each value must be a detailed but concise spoken summary in that language.',
+                'Write each value as text that can be read aloud naturally by an interpreter voice.',
                 '',
                 transcriptText
               ].join('\n'),
@@ -1678,9 +1683,9 @@ async function requestOpenAiSummarySpeechAudio({
     body: JSON.stringify({
       input: cleanSummaryText,
       instructions: [
-        `Speak this workplace meeting summary in ${language.label}.`,
-        'Use a calm professional interpreter tone.',
-        'Use clear, simple spoken language.',
+        `Speak this workplace meeting summary in ${language.label} as a real human workplace interpreter.`,
+        'Use a calm, natural, professional voice with clear pacing.',
+        'Use simple spoken language and make the recap sound conversational, not robotic.',
         'Do not add new facts.',
         `Meeting name: ${meeting.meetingName}.`
       ].join(' '),
