@@ -1499,42 +1499,6 @@ function InterpreterRoom({
 
   return (
     <View style={styles.roomHost}>
-      <InterpreterSummaryLanguageModal
-        activeAudioKey={activeSummaryAudioKey}
-        isBusy={isBusy}
-        isAudioPlaying={summaryAudioStatus.playing}
-        isOpen={isSummaryModalOpen}
-        languages={details.meeting.interpreterLanguages}
-        onClose={() => setIsSummaryModalOpen(false)}
-        onError={onError}
-        onPlaySummary={(summary, languageCode) => void handlePlayInterpreterSummary(summary, languageCode)}
-        onSubmit={async (languageCodes) => {
-          const result = await onCreateSummary(languageCodes);
-
-          if (!result) {
-            return;
-          }
-
-          const firstAudio = languageCodes
-            .map((languageCode) => result.summaryAudioByLanguage?.[languageCode])
-            .find((audio): audio is InterpreterSummaryAudio => Boolean(audio));
-
-          if (firstAudio) {
-            await playInterpreterSummaryAudioPayload(result.summary.summaryId, firstAudio);
-            return;
-          }
-
-          const replayLanguageCode = languageCodes.find((languageCode) =>
-            result.summary.languageCodes.includes(languageCode)
-          );
-
-          if (replayLanguageCode) {
-            await handlePlayInterpreterSummary(result.summary, replayLanguageCode);
-          }
-        }}
-        preparingAudioKey={preparingSummaryAudioKey}
-        summaries={details.summaries}
-      />
       <InterpreterLiveRoomModal
         audioLevel={audioLevel}
         activeHistoryAudioKey={activeSegmentAudioKey}
@@ -1605,6 +1569,42 @@ function InterpreterRoom({
         summaryCount={details.summaries.length}
         voiceProfile={selectedVoiceProfile}
         wasInterrupted={wasInterpretationInterrupted}
+      />
+      <InterpreterSummaryLanguageModal
+        activeAudioKey={activeSummaryAudioKey}
+        isBusy={isBusy}
+        isAudioPlaying={summaryAudioStatus.playing}
+        isOpen={isSummaryModalOpen}
+        languages={details.meeting.interpreterLanguages}
+        onClose={() => setIsSummaryModalOpen(false)}
+        onError={onError}
+        onPlaySummary={(summary, languageCode) => void handlePlayInterpreterSummary(summary, languageCode)}
+        onSubmit={async (languageCodes) => {
+          const result = await onCreateSummary(languageCodes);
+
+          if (!result) {
+            return;
+          }
+
+          const firstAudio = languageCodes
+            .map((languageCode) => result.summaryAudioByLanguage?.[languageCode])
+            .find((audio): audio is InterpreterSummaryAudio => Boolean(audio));
+
+          if (firstAudio) {
+            await playInterpreterSummaryAudioPayload(result.summary.summaryId, firstAudio);
+            return;
+          }
+
+          const replayLanguageCode = languageCodes.find((languageCode) =>
+            result.summary.languageCodes.includes(languageCode)
+          );
+
+          if (replayLanguageCode) {
+            await handlePlayInterpreterSummary(result.summary, replayLanguageCode);
+          }
+        }}
+        preparingAudioKey={preparingSummaryAudioKey}
+        summaries={details.summaries}
       />
     </View>
   );
@@ -1917,11 +1917,12 @@ function InterpreterLiveRoomModal({
           ]}
         >
           <Ionicons color="#fff" name="reader-outline" size={21} />
-          {summaryCount ? (
-            <View style={styles.liveSummaryFabBadge}>
-              <Text style={styles.liveSummaryFabBadgeText}>{summaryCount > 9 ? '9+' : summaryCount}</Text>
-            </View>
-          ) : null}
+          <View style={[
+            styles.liveSummaryFabBadge,
+            !summaryCount && styles.liveSummaryFabBadgeEmpty
+          ]}>
+            <Text style={styles.liveSummaryFabBadgeText}>{summaryCount > 9 ? '9+' : summaryCount}</Text>
+          </View>
         </Pressable>
         <InterpreterResponseLanguageModal
           isOpen={isLanguageModalOpen}
@@ -4767,7 +4768,7 @@ function createStyles(colors: AppColors) {
     },
     liveSummaryFabBadge: {
       alignItems: 'center',
-      backgroundColor: colors.red,
+      backgroundColor: colors.success,
       borderRadius: 999,
       minWidth: 18,
       paddingHorizontal: 5,
@@ -4775,6 +4776,9 @@ function createStyles(colors: AppColors) {
       position: 'absolute',
       right: -3,
       top: -4
+    },
+    liveSummaryFabBadgeEmpty: {
+      backgroundColor: colors.muted
     },
     liveSummaryFabBadgeText: {
       color: '#fff',
