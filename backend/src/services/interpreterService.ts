@@ -107,6 +107,11 @@ export interface UpdateInterpreterInvitationsInput {
   meetingId: string;
 }
 
+export interface UpdateInterpreterLanguagesInput {
+  interpreterLanguageCodes: string[];
+  meetingId: string;
+}
+
 export interface UpdateInterpreterVoiceInput {
   interpreterVoiceId: string;
   meetingId: string;
@@ -416,6 +421,53 @@ export async function updateInterpreterMeetingInvitations(
     meeting: {
       ...meeting,
       invitedUserIds,
+      updatedAtIso: nowIso
+    }
+  };
+}
+
+export async function updateInterpreterMeetingLanguages(
+  decodedToken: DecodedIdToken,
+  input: UpdateInterpreterLanguagesInput
+) {
+  const context = await getAuthorizedInterpreterContext(decodedToken);
+  const meeting = await readAccessibleMeeting(context, input.meetingId);
+
+  if (!canManageInterpreterMeeting(context, meeting)) {
+    throw authorizationError('Only the meeting owner or an interpreter administrator can change response languages.');
+  }
+
+  if (meeting.status === 'ENDED') {
+    throw validationError('Ended interpreter meetings cannot change response languages.');
+  }
+
+  const interpreterLanguages = normalizeInterpreterLanguages(input.interpreterLanguageCodes);
+  const nowIso = new Date().toISOString();
+
+  await context.organizationRef
+    .collection(INTERPRETER_MEETINGS_COLLECTION)
+    .doc(input.meetingId)
+    .update({
+      interpreterLanguages,
+      updatedAt: fieldValue.serverTimestamp(),
+      updatedAtIso: nowIso
+    });
+
+  await writeInterpreterAuditEvent({
+    context,
+    meetingId: input.meetingId,
+    metadata: {
+      afterInterpreterLanguageCodes: interpreterLanguages.map((language) => language.code),
+      beforeInterpreterLanguageCodes: meeting.interpreterLanguages.map((language) => language.code)
+    },
+    summary: `Updated interpreter response languages for "${meeting.meetingName}".`,
+    type: 'INTERPRETER_MEETING_LANGUAGES_UPDATED'
+  });
+
+  return {
+    meeting: {
+      ...meeting,
+      interpreterLanguages,
       updatedAtIso: nowIso
     }
   };

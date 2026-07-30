@@ -214,6 +214,19 @@ export async function updateInterpreterMeetingInvitations(
   return response.json() as Promise<{ meeting: InterpreterMeeting }>;
 }
 
+export async function updateInterpreterMeetingLanguages(
+  idToken: string,
+  meetingId: string,
+  interpreterLanguageCodes: string[]
+) {
+  const response = await interpreterFetch(idToken, `/meetings/${encodeURIComponent(meetingId)}/languages`, {
+    body: JSON.stringify({ interpreterLanguageCodes }),
+    method: 'POST'
+  });
+
+  return response.json() as Promise<{ meeting: InterpreterMeeting }>;
+}
+
 export async function updateInterpreterMeetingVoice(
   idToken: string,
   meetingId: string,

@@ -24,6 +24,7 @@ import {
   runInterpreterRealtimeProviderDiagnostic,
   startInterpreterMeeting,
   updateInterpreterMeetingInvitations,
+  updateInterpreterMeetingLanguages,
   updateInterpreterMeetingVoice
 } from '../services/interpreterService.js';
 
@@ -107,6 +108,10 @@ const voicePreviewBodySchema = z.object({
 
 const invitationsBodySchema = z.object({
   invitedUserIds: z.array(meetingIdSchema).max(50)
+});
+
+const meetingLanguagesBodySchema = z.object({
+  interpreterLanguageCodes: z.array(languageCodeSchema).min(1).max(10)
 });
 
 const meetingVoiceBodySchema = z.object({
@@ -224,6 +229,22 @@ interpreterRouter.post('/meetings/:meetingId/invitations', verifyAppCheck, async
     const body = invitationsBodySchema.parse(req.body);
     const result = await updateInterpreterMeetingInvitations(decodedToken, {
       invitedUserIds: body.invitedUserIds,
+      meetingId
+    });
+
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+interpreterRouter.post('/meetings/:meetingId/languages', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const meetingId = meetingIdSchema.parse(req.params.meetingId);
+    const body = meetingLanguagesBodySchema.parse(req.body);
+    const result = await updateInterpreterMeetingLanguages(decodedToken, {
+      interpreterLanguageCodes: body.interpreterLanguageCodes,
       meetingId
     });
 

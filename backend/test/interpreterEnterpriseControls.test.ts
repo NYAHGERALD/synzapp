@@ -64,6 +64,18 @@ describe('interpreter enterprise controls', () => {
     assert.match(interpreterService, /One or more selected interpreter participants are not active company users\./);
   });
 
+  it('supports controlled meeting response language updates with audit retention', () => {
+    assert.match(
+      interpreterRoutes,
+      /interpreterRouter\.post\('\/meetings\/:meetingId\/languages'/,
+      'Interpreter response languages must be updated through a dedicated secured endpoint.'
+    );
+    assert.match(interpreterService, /updateInterpreterMeetingLanguages/);
+    assert.match(interpreterService, /INTERPRETER_MEETING_LANGUAGES_UPDATED/);
+    assert.match(interpreterService, /beforeInterpreterLanguageCodes/);
+    assert.match(interpreterService, /afterInterpreterLanguageCodes/);
+  });
+
   it('validates source language, scheduled dates, and reminder dependencies before meeting creation', () => {
     assert.match(interpreterService, /validateCreateInterpreterMeetingInput\(input\)/);
     assert.match(interpreterService, /The selected speaker language is not supported yet\./);
