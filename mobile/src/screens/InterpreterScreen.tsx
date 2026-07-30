@@ -97,6 +97,7 @@ const INTERPRETER_SEGMENT_AUDIO_CACHE_DIR = `${FileSystem.cacheDirectory || ''}s
 const INTERPRETER_VOICE_PREVIEW_AUDIO_CACHE_DIR = `${FileSystem.cacheDirectory || ''}synzapp-interpreter-voices/`;
 
 type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
+const ROOM_SETTINGS_ICON_NAME: IoniconName = Platform.OS === 'ios' ? 'options-outline' : 'settings-outline';
 
 type InterpreterLanguageSessionState = {
   status: InterpreterRealtimeStatus;
@@ -658,7 +659,6 @@ function InterpreterRoom({
   const [isLiveTranscriptOpen, setIsLiveTranscriptOpen] = useState(false);
   const [isLiveHistoryOpen, setIsLiveHistoryOpen] = useState(false);
   const [isRoomSettingsOpen, setIsRoomSettingsOpen] = useState(false);
-  const [isRoomVoicePickerOpen, setIsRoomVoicePickerOpen] = useState(false);
   const [isExitingRoom, setIsExitingRoom] = useState(false);
   const [liveMode, setLiveMode] = useState<InterpreterLiveMode>('idle');
   const [wasInterpretationInterrupted, setWasInterpretationInterrupted] = useState(false);
@@ -1441,12 +1441,10 @@ function InterpreterRoom({
 
   async function handleSelectRoomVoice(interpreterVoiceId: string) {
     if (interpreterVoiceId === selectedVoiceId) {
-      setIsRoomVoicePickerOpen(false);
       return;
     }
 
     await onUpdateVoice(interpreterVoiceId);
-    setIsRoomVoicePickerOpen(false);
   }
 
   function confirmLeaveRoom() {
@@ -1560,38 +1558,33 @@ function InterpreterRoom({
         respondingLanguageCode={respondingLanguageCode}
         selectedLanguageCode={selectedLanguageCode}
         setSelectedLanguageCode={setSelectedLanguageCode}
+        settingsPanel={(
+          <InterpreterRoomSettingsPanel
+            activePreviewKey={activeRoomVoicePreviewKey}
+            availableLanguages={languages}
+            details={details}
+            invitedUserIds={invitedUserIds}
+            isBusy={isBusy}
+            isOpen={isRoomSettingsOpen}
+            onClose={() => setIsRoomSettingsOpen(false)}
+            onError={onError}
+            onPreviewVoice={(voice) => void handlePreviewRoomVoice(voice)}
+            onSelectVoice={(voiceId) => void handleSelectRoomVoice(voiceId)}
+            onUpdateInvitations={async (nextInvitedUserIds) => {
+              await onUpdateInvitations(nextInvitedUserIds);
+              setInvitedUserIds(nextInvitedUserIds);
+            }}
+            onUpdateLanguages={onUpdateLanguages}
+            participants={participants}
+            preparingPreviewKey={preparingRoomVoicePreviewKey}
+            previewLanguageCode={details.meeting.interpreterLanguages[0]?.code || selectedLanguageCode || 'en-US'}
+            selectedVoiceId={selectedVoiceId}
+            voiceProfile={selectedVoiceProfile}
+            voices={voiceProfiles.length ? voiceProfiles : FALLBACK_INTERPRETER_VOICES}
+          />
+        )}
         voiceProfile={selectedVoiceProfile}
         wasInterrupted={wasInterpretationInterrupted}
-      />
-      <InterpreterRoomSettingsModal
-        availableLanguages={languages}
-        details={details}
-        invitedUserIds={invitedUserIds}
-        isBusy={isBusy}
-        isOpen={isRoomSettingsOpen}
-        onClose={() => setIsRoomSettingsOpen(false)}
-        onError={onError}
-        onOpenVoicePicker={() => setIsRoomVoicePickerOpen(true)}
-        onUpdateInvitations={async (nextInvitedUserIds) => {
-          await onUpdateInvitations(nextInvitedUserIds);
-          setInvitedUserIds(nextInvitedUserIds);
-        }}
-        onUpdateLanguages={onUpdateLanguages}
-        participants={participants}
-        voiceProfile={selectedVoiceProfile}
-      />
-      <InterpreterVoicePickerModal
-        activePreviewKey={activeRoomVoicePreviewKey}
-        isOpen={isRoomVoicePickerOpen}
-        onClose={() => setIsRoomVoicePickerOpen(false)}
-        onPreview={(voice) => void handlePreviewRoomVoice(voice)}
-        onSelect={(voiceId) => {
-          void handleSelectRoomVoice(voiceId);
-        }}
-        preparingPreviewKey={preparingRoomVoicePreviewKey}
-        previewLanguageCode={details.meeting.interpreterLanguages[0]?.code || selectedLanguageCode || 'en-US'}
-        selectedVoiceId={selectedVoiceId}
-        voices={voiceProfiles.length ? voiceProfiles : FALLBACK_INTERPRETER_VOICES}
       />
     </View>
   );
@@ -1635,6 +1628,7 @@ interface InterpreterLiveRoomModalProps {
   respondingLanguageCode: string | null;
   selectedLanguageCode: string;
   setSelectedLanguageCode: (languageCode: string) => void;
+  settingsPanel: React.ReactNode;
   voiceProfile: InterpreterVoiceProfile;
   wasInterrupted: boolean;
 }
@@ -1677,6 +1671,7 @@ function InterpreterLiveRoomModal({
   respondingLanguageCode,
   selectedLanguageCode,
   setSelectedLanguageCode,
+  settingsPanel,
   voiceProfile,
   wasInterrupted
 }: InterpreterLiveRoomModalProps) {
@@ -1754,7 +1749,7 @@ function InterpreterLiveRoomModal({
             onPress={onOpenSettings}
             style={({ pressed }) => [styles.liveIconButton, pressed && styles.pressed]}
           >
-            <Ionicons color={appTheme.colors.ink} name="settings-outline" size={21} />
+            <Ionicons color={appTheme.colors.ink} name={ROOM_SETTINGS_ICON_NAME} size={21} />
           </Pressable>
           <Pressable onPress={onEnd} style={({ pressed }) => [styles.liveEndButton, pressed && styles.pressed]}>
             <Text style={styles.liveEndButtonText}>End</Text>
@@ -1915,12 +1910,14 @@ function InterpreterLiveRoomModal({
           onPlayItem={onPlayHistoryItem}
           preparingHistoryAudioKey={preparingHistoryAudioKey}
         />
+        {settingsPanel}
       </View>
     </Modal>
   );
 }
 
-interface InterpreterRoomSettingsModalProps {
+interface InterpreterRoomSettingsPanelProps {
+  activePreviewKey: string | null;
   availableLanguages: InterpreterLanguage[];
   details: InterpreterMeetingDetails;
   invitedUserIds: string[];
@@ -1928,14 +1925,20 @@ interface InterpreterRoomSettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   onError: (message: string, title?: string) => void;
-  onOpenVoicePicker: () => void;
+  onPreviewVoice: (voice: InterpreterVoiceProfile) => void;
+  onSelectVoice: (voiceId: string) => void;
   onUpdateInvitations: (invitedUserIds: string[]) => Promise<void>;
   onUpdateLanguages: (interpreterLanguageCodes: string[]) => Promise<void>;
   participants: InterpreterParticipant[];
+  preparingPreviewKey: string | null;
+  previewLanguageCode: string;
+  selectedVoiceId: string;
   voiceProfile: InterpreterVoiceProfile;
+  voices: InterpreterVoiceProfile[];
 }
 
-function InterpreterRoomSettingsModal({
+function InterpreterRoomSettingsPanel({
+  activePreviewKey,
   availableLanguages,
   details,
   invitedUserIds,
@@ -1943,12 +1946,17 @@ function InterpreterRoomSettingsModal({
   isOpen,
   onClose,
   onError,
-  onOpenVoicePicker,
+  onPreviewVoice,
+  onSelectVoice,
   onUpdateInvitations,
   onUpdateLanguages,
   participants,
-  voiceProfile
-}: InterpreterRoomSettingsModalProps) {
+  preparingPreviewKey,
+  previewLanguageCode,
+  selectedVoiceId,
+  voiceProfile,
+  voices
+}: InterpreterRoomSettingsPanelProps) {
   const appTheme = useAppTheme();
   const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
   const insets = useSafeAreaInsets();
@@ -1959,6 +1967,7 @@ function InterpreterRoomSettingsModal({
   const [draftInvitedUserIds, setDraftInvitedUserIds] = useState<string[]>(invitedUserIds);
   const [isLanguagePickerOpen, setIsLanguagePickerOpen] = useState(false);
   const [isParticipantPickerOpen, setIsParticipantPickerOpen] = useState(false);
+  const [isVoicePickerOpen, setIsVoicePickerOpen] = useState(false);
   const savedLanguageCodes = details.meeting.interpreterLanguages.map((language) => language.code);
   const hasLanguageChanges = !areStringSetsEqual(savedLanguageCodes, draftLanguageCodes);
   const hasAccessChanges = !areStringSetsEqual(invitedUserIds, draftInvitedUserIds);
@@ -1973,6 +1982,7 @@ function InterpreterRoomSettingsModal({
     setDraftInvitedUserIds(invitedUserIds);
     setIsLanguagePickerOpen(false);
     setIsParticipantPickerOpen(false);
+    setIsVoicePickerOpen(false);
   }, [details.meeting.interpreterLanguages, invitedUserIds, isOpen]);
 
   function addLanguage(languageCode: string) {
@@ -2019,149 +2029,208 @@ function InterpreterRoomSettingsModal({
     onClose();
   }
 
+  if (!isOpen) {
+    return null;
+  }
+
   return (
-    <Modal animationType="slide" onRequestClose={onClose} visible={isOpen}>
-      <View style={[styles.liveDetailScreen, { paddingBottom: Math.max(insets.bottom + 16, 28), paddingTop: Math.max(insets.top + 12, 24) }]}>
-        <View style={styles.liveRoomHeader}>
-          <Pressable onPress={onClose} style={({ pressed }) => [styles.liveIconButton, pressed && styles.pressed]}>
-            <Ionicons color={appTheme.colors.ink} name="chevron-down" size={24} />
-          </Pressable>
-          <View style={styles.liveRoomTitleWrap}>
-            <Text style={styles.liveRoomTitle}>Interpreter settings</Text>
-            <Text style={styles.liveRoomMeta}>{details.meeting.meetingName}</Text>
+    <View style={[styles.roomSettingsOverlay, { paddingBottom: Math.max(insets.bottom + 16, 28), paddingTop: Math.max(insets.top + 12, 24) }]}>
+      <View style={styles.liveRoomHeader}>
+        <Pressable onPress={onClose} style={({ pressed }) => [styles.liveIconButton, pressed && styles.pressed]}>
+          <Ionicons color={appTheme.colors.ink} name="chevron-back" size={23} />
+        </Pressable>
+        <View style={styles.liveRoomTitleWrap}>
+          <Text style={styles.liveRoomTitle}>Interpreter settings</Text>
+          <Text style={styles.liveRoomMeta}>{details.meeting.meetingName}</Text>
+        </View>
+        <Pressable
+          disabled={!canSave}
+          onPress={() => void saveSettings()}
+          style={({ pressed }) => [styles.settingsSaveButton, !canSave && styles.disabledButton, pressed && styles.pressed]}
+        >
+          {isBusy ? (
+            <ActivityIndicator color="#fff" size="small" />
+          ) : (
+            <Text style={styles.settingsSaveButtonText}>Save</Text>
+          )}
+        </Pressable>
+      </View>
+
+      <ScrollView contentContainerStyle={styles.settingsContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+        <View style={styles.settingsSection}>
+          <Text style={styles.sectionLabel}>Respond languages</Text>
+          <View style={styles.selectionList}>
+            {draftLanguageCodes.map((languageCode) => {
+              const language = languages.find((currentLanguage) => currentLanguage.code === languageCode) || {
+                code: languageCode,
+                label: languageCode
+              };
+
+              return (
+                <Pressable
+                  key={language.code}
+                  onPress={() => removeLanguage(language.code)}
+                  style={({ pressed }) => [styles.selectionRow, pressed && styles.pressed]}
+                >
+                  <Ionicons color={appTheme.colors.primary} name="language-outline" size={18} />
+                  <Text style={styles.selectionTitle}>{language.label}</Text>
+                  <Ionicons color={appTheme.colors.mutedStrong} name="remove-circle-outline" size={18} />
+                </Pressable>
+              );
+            })}
+            <Pressable
+              onPress={() => setIsLanguagePickerOpen((currentValue) => !currentValue)}
+              style={({ pressed }) => [styles.addSelectionRow, pressed && styles.pressed]}
+            >
+              <Ionicons color={appTheme.colors.primary} name={isLanguagePickerOpen ? 'chevron-up-outline' : 'add-circle-outline'} size={18} />
+              <Text style={styles.addSelectionText}>Add respond language</Text>
+            </Pressable>
+            {isLanguagePickerOpen ? (
+              <View style={styles.inlinePickerPanel}>
+                {languages
+                  .filter((language) => !draftLanguageCodes.includes(language.code))
+                  .map((language) => (
+                    <Pressable
+                      key={language.code}
+                      onPress={() => {
+                        addLanguage(language.code);
+                        setIsLanguagePickerOpen(false);
+                      }}
+                      style={({ pressed }) => [styles.inlinePickerRow, pressed && styles.pressed]}
+                    >
+                      <Ionicons color={appTheme.colors.primary} name="language-outline" size={18} />
+                      <View style={styles.selectionBody}>
+                        <Text style={styles.selectionTitle}>{language.label}</Text>
+                        <Text style={styles.participantMeta}>{language.code}</Text>
+                      </View>
+                      <Ionicons color={appTheme.colors.mutedStrong} name="add-circle-outline" size={19} />
+                    </Pressable>
+                  ))}
+              </View>
+            ) : null}
           </View>
-          <Pressable
-            disabled={!canSave}
-            onPress={() => void saveSettings()}
-            style={({ pressed }) => [styles.settingsSaveButton, !canSave && styles.disabledButton, pressed && styles.pressed]}
-          >
-            {isBusy ? (
-              <ActivityIndicator color="#fff" size="small" />
-            ) : (
-              <Text style={styles.settingsSaveButtonText}>Save</Text>
-            )}
-          </Pressable>
         </View>
 
-        <ScrollView contentContainerStyle={styles.settingsContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
-          <View style={styles.settingsSection}>
-            <Text style={styles.sectionLabel}>Respond languages</Text>
-            <View style={styles.selectionList}>
-              {draftLanguageCodes.map((languageCode) => {
-                const language = languages.find((currentLanguage) => currentLanguage.code === languageCode) || {
-                  code: languageCode,
-                  label: languageCode
-                };
+        <View style={styles.settingsSection}>
+          <Text style={styles.sectionLabel}>Meeting access</Text>
+          <View style={styles.selectionList}>
+            {draftInvitedUserIds.map((uid) => {
+              const participant = participants.find((currentParticipant) => currentParticipant.uid === uid);
 
-                return (
-                  <Pressable
-                    key={language.code}
-                    onPress={() => removeLanguage(language.code)}
-                    style={({ pressed }) => [styles.selectionRow, pressed && styles.pressed]}
-                  >
-                    <Ionicons color={appTheme.colors.primary} name="language-outline" size={18} />
-                    <Text style={styles.selectionTitle}>{language.label}</Text>
-                    <Ionicons color={appTheme.colors.mutedStrong} name="close-circle-outline" size={18} />
-                  </Pressable>
-                );
-              })}
-              <Pressable
-                onPress={() => setIsLanguagePickerOpen(true)}
-                style={({ pressed }) => [styles.addSelectionRow, pressed && styles.pressed]}
-              >
-                <Ionicons color={appTheme.colors.primary} name="add-circle-outline" size={18} />
-                <Text style={styles.addSelectionText}>Add respond language</Text>
-              </Pressable>
-            </View>
-          </View>
+              if (!participant) {
+                return null;
+              }
 
-          <View style={styles.settingsSection}>
-            <Text style={styles.sectionLabel}>Meeting access</Text>
-            <View style={styles.selectionList}>
-              {draftInvitedUserIds.map((uid) => {
-                const participant = participants.find((currentParticipant) => currentParticipant.uid === uid);
-
-                if (!participant) {
-                  return null;
-                }
-
-                return (
-                  <Pressable
-                    key={participant.uid}
-                    onPress={() => removeParticipant(participant.uid)}
-                    style={({ pressed }) => [styles.selectionRow, pressed && styles.pressed]}
-                  >
-                    <Ionicons color={appTheme.colors.primary} name="person-circle-outline" size={20} />
-                    <View style={styles.selectionBody}>
-                      <Text style={styles.participantName}>{participant.displayName}</Text>
-                      <Text style={styles.participantMeta}>{participant.roleName || participant.departmentName || 'Company user'}</Text>
-                    </View>
-                    <Ionicons color={appTheme.colors.mutedStrong} name="close-circle-outline" size={18} />
-                  </Pressable>
-                );
-              })}
-              <Pressable
-                onPress={() => setIsParticipantPickerOpen(true)}
-                style={({ pressed }) => [styles.addSelectionRow, pressed && styles.pressed]}
-              >
-                <Ionicons color={appTheme.colors.primary} name="person-add-outline" size={18} />
-                <Text style={styles.addSelectionText}>Add participant</Text>
-              </Pressable>
-            </View>
-          </View>
-
-          <View style={styles.settingsSection}>
-            <Text style={styles.sectionLabel}>Interpreter speaker</Text>
+              return (
+                <Pressable
+                  key={participant.uid}
+                  onPress={() => removeParticipant(participant.uid)}
+                  style={({ pressed }) => [styles.selectionRow, pressed && styles.pressed]}
+                >
+                  <Ionicons color={appTheme.colors.primary} name="person-circle-outline" size={20} />
+                  <View style={styles.selectionBody}>
+                    <Text style={styles.participantName}>{participant.displayName}</Text>
+                    <Text style={styles.participantMeta}>{participant.roleName || participant.departmentName || 'Company user'}</Text>
+                  </View>
+                  <Ionicons color={appTheme.colors.mutedStrong} name="remove-circle-outline" size={18} />
+                </Pressable>
+              );
+            })}
             <Pressable
-              onPress={onOpenVoicePicker}
-              style={({ pressed }) => [styles.dropdownRow, pressed && styles.pressed]}
+              onPress={() => setIsParticipantPickerOpen((currentValue) => !currentValue)}
+              style={({ pressed }) => [styles.addSelectionRow, pressed && styles.pressed]}
             >
-              <Ionicons color={appTheme.colors.primary} name="volume-high-outline" size={19} />
-              <View style={styles.selectionBody}>
-                <Text style={styles.selectionTitle}>{voiceProfile.label}</Text>
-                <Text style={styles.mutedText} numberOfLines={2}>{voiceProfile.description}</Text>
-              </View>
-              <Ionicons color={appTheme.colors.mutedStrong} name="chevron-forward-outline" size={18} />
+              <Ionicons color={appTheme.colors.primary} name={isParticipantPickerOpen ? 'chevron-up-outline' : 'person-add-outline'} size={18} />
+              <Text style={styles.addSelectionText}>Add participant</Text>
             </Pressable>
+            {isParticipantPickerOpen ? (
+              <View style={styles.inlinePickerPanel}>
+                {participants
+                  .filter((participant) => !draftInvitedUserIds.includes(participant.uid))
+                  .map((participant) => (
+                    <Pressable
+                      key={participant.uid}
+                      onPress={() => {
+                        addParticipant(participant.uid);
+                        setIsParticipantPickerOpen(false);
+                      }}
+                      style={({ pressed }) => [styles.inlinePickerRow, pressed && styles.pressed]}
+                    >
+                      <Ionicons color={appTheme.colors.primary} name="person-circle-outline" size={20} />
+                      <View style={styles.selectionBody}>
+                        <Text style={styles.participantName}>{participant.displayName}</Text>
+                        <Text style={styles.participantMeta}>{participant.roleName || participant.departmentName || 'Company user'}</Text>
+                      </View>
+                      <Ionicons color={appTheme.colors.mutedStrong} name="add-circle-outline" size={19} />
+                    </Pressable>
+                  ))}
+              </View>
+            ) : null}
           </View>
-        </ScrollView>
+        </View>
 
-        <InterpreterOptionPickerModal
-          isOpen={isLanguagePickerOpen}
-          onClose={() => setIsLanguagePickerOpen(false)}
-          onSelect={(languageCode) => {
-            addLanguage(languageCode);
-            setIsLanguagePickerOpen(false);
-          }}
-          options={languages
-            .filter((language) => !draftLanguageCodes.includes(language.code))
-            .map((language) => ({
-              iconName: 'language-outline',
-              id: language.code,
-              subtitle: language.code,
-              title: language.label
-            }))}
-          title="Add respond language"
-        />
-        <InterpreterOptionPickerModal
-          isOpen={isParticipantPickerOpen}
-          onClose={() => setIsParticipantPickerOpen(false)}
-          onSelect={(uid) => {
-            addParticipant(uid);
-            setIsParticipantPickerOpen(false);
-          }}
-          options={participants
-            .filter((participant) => !draftInvitedUserIds.includes(participant.uid))
-            .map((participant) => ({
-              iconName: 'person-circle-outline',
-              id: participant.uid,
-              subtitle: participant.roleName || participant.departmentName || 'Company user',
-              title: participant.displayName
-            }))}
-          title="Add participant"
-        />
-      </View>
-    </Modal>
+        <View style={styles.settingsSection}>
+          <Text style={styles.sectionLabel}>Interpreter speaker</Text>
+          <Pressable
+            onPress={() => setIsVoicePickerOpen((currentValue) => !currentValue)}
+            style={({ pressed }) => [styles.dropdownRow, pressed && styles.pressed]}
+          >
+            <Ionicons color={appTheme.colors.primary} name="volume-high-outline" size={19} />
+            <View style={styles.selectionBody}>
+              <Text style={styles.selectionTitle}>{voiceProfile.label}</Text>
+              <Text style={styles.mutedText} numberOfLines={2}>{voiceProfile.description}</Text>
+            </View>
+            <Ionicons color={appTheme.colors.mutedStrong} name={isVoicePickerOpen ? 'chevron-up-outline' : 'chevron-down-outline'} size={18} />
+          </Pressable>
+          {isVoicePickerOpen ? (
+            <View style={styles.inlinePickerPanel}>
+              {voices.map((voice) => {
+                const previewKey = getInterpreterVoicePreviewAudioKey(voice.id, previewLanguageCode);
+                const isSelected = selectedVoiceId === voice.id;
+                const isPreparingPreview = preparingPreviewKey === previewKey;
+                const isPreviewPlaying = activePreviewKey === previewKey;
+
+                return (
+                  <Pressable
+                    key={voice.id}
+                    onPress={() => onSelectVoice(voice.id)}
+                    style={({ pressed }) => [
+                      styles.inlinePickerRow,
+                      isSelected && styles.inlinePickerRowSelected,
+                      pressed && styles.pressed
+                    ]}
+                  >
+                    <Ionicons color={isSelected ? appTheme.colors.primary : appTheme.colors.mutedStrong} name={isSelected ? 'checkmark-circle-outline' : 'mic-outline'} size={20} />
+                    <View style={styles.selectionBody}>
+                      <Text style={styles.selectionTitle}>{voice.label}</Text>
+                      <Text style={styles.mutedText}>{voice.description}</Text>
+                    </View>
+                    <Pressable
+                      disabled={Boolean(isPreparingPreview)}
+                      onPress={(event) => {
+                        event.stopPropagation();
+                        onPreviewVoice(voice);
+                      }}
+                      style={({ pressed }) => [
+                        styles.voicePreviewButton,
+                        isPreviewPlaying && styles.voicePreviewButtonActive,
+                        pressed && styles.pressed
+                      ]}
+                    >
+                      {isPreparingPreview ? (
+                        <ActivityIndicator color={appTheme.colors.primary} size="small" />
+                      ) : (
+                        <Ionicons color={isPreviewPlaying ? '#fff' : appTheme.colors.primary} name={isPreviewPlaying ? 'pause' : 'play'} size={17} />
+                      )}
+                    </Pressable>
+                  </Pressable>
+                );
+              })}
+            </View>
+          ) : null}
+        </View>
+      </ScrollView>
+    </View>
   );
 }
 
@@ -5053,6 +5122,13 @@ function createStyles(colors: AppColors) {
       backgroundColor: colors.screen,
       flex: 1
     },
+    roomSettingsOverlay: {
+      ...StyleSheet.absoluteFillObject,
+      backgroundColor: colors.screen,
+      elevation: 30,
+      paddingHorizontal: 18,
+      zIndex: 30
+    },
     roomScreen: {
       paddingBottom: 12
     },
@@ -5236,6 +5312,25 @@ function createStyles(colors: AppColors) {
     inlineFieldRow: {
       flexDirection: 'row',
       gap: 10
+    },
+    inlinePickerPanel: {
+      backgroundColor: colors.surface,
+      borderTopColor: colors.divider,
+      borderTopWidth: 1
+    },
+    inlinePickerRow: {
+      alignItems: 'center',
+      backgroundColor: colors.surface,
+      borderBottomColor: colors.divider,
+      borderBottomWidth: 1,
+      flexDirection: 'row',
+      gap: 10,
+      minHeight: 56,
+      paddingHorizontal: 4,
+      paddingVertical: 9
+    },
+    inlinePickerRowSelected: {
+      backgroundColor: colors.primarySoft
     },
     inlineOption: {
       alignItems: 'center',
