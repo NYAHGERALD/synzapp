@@ -209,12 +209,13 @@ For Level 1 and Level 3:
 
 - English is always included by default.
 - The user can add multiple target languages during meeting creation.
-- The mobile app starts one active selected-language Realtime Translation lane first. This avoids duplicate microphone capture, duplicate WebRTC setup, and unstable multi-session startup on mobile devices.
-- Multi-language hot lanes should move to a backend-controlled or native audio fanout architecture before being treated as production-ready for Level 1 and Level 3 meetings.
+- The mobile app starts the configured realtime-supported target-language lanes when the manager taps `Listen`, then keeps those lanes warm for the listening segment.
+- Microphone capture must remain controlled by the `Listen` and `Stop` buttons. Selecting a response language must not tear down the live realtime runtime.
+- Multi-language hot lanes should move to a backend-controlled or native audio fanout architecture before very large Level 1 and Level 3 meetings are treated as production-ready.
 - Cap active target languages using `INTERPRETER_MAX_TARGET_LANGUAGES`.
 - If the language count is too high, keep only priority languages hot and warm the others on demand.
 
-Instant response is achieved by preparing translation while listening for the active selected language. When the supervisor switches language, Synzapp should stop the previous lane cleanly and open the new selected-language lane instead of running several mobile WebRTC sessions at the same time.
+Instant response is achieved by preparing configured target-language lanes while listening. When the supervisor selects a language after `Stop`, Synzapp should route that live target-language lane immediately and persist replay audio in the background.
 
 ### Response Latency Standard
 
@@ -223,8 +224,8 @@ The live room must behave like a realtime interpreter, not a file-generation wor
 When the manager taps `Stop` and selects a response language:
 
 - The matching realtime session starts speaking immediately when a live translation lane is available.
-- The backend then creates the polished natural interpretation and spoken MP3 in the background for durable replay/history.
-- If realtime audio is unavailable, the backend MP3 is used as the fallback spoken response.
+- The backend then creates the polished natural interpretation and spoken MP3 in the background for durable replay/history. This backend call must not block live speech.
+- If realtime audio is unavailable, the backend MP3 is used as the fallback spoken response and the UI must show a controlled preparing state.
 - The UI must keep the language choice visibly active while speech is being prepared or spoken.
 - Backend generated audio is cached locally and attached to the history row so the user can replay it later.
 
@@ -479,7 +480,7 @@ Required live-room behavior:
 - Display the configured meeting languages in the response-language picker, not as always-active ambiguous command buttons.
 - Tapping `Listen` starts microphone capture and changes the button to `Stop`.
 - Tapping `Stop` pauses microphone input, opens the response-language picker, and lets the manager choose the language to speak.
-- Selecting a response language closes the picker and opens the spoken interpretation gate for that language.
+- Selecting a response language closes the picker and routes the already-open realtime lane for that language when available.
 - While the interpreter is speaking, the primary control becomes `Listen`.
 - Tapping `Listen` stops the current interpretation audio and returns to live listening.
 - If the user cuts an interpretation short, show:
@@ -487,7 +488,7 @@ Required live-room behavior:
   - `Current`: discards the interrupted response and plays the latest prepared interpretation.
 - The app must not create a new OpenAI realtime session as a visible blocking step after the user chooses a language. If the selected language lane is not active yet, the UI must present a controlled preparation state and never look frozen.
 - Transcript and interpretation history must be available from header icons inside the live room.
-- Interpretation history is grouped by language. Text/audit history is available now; replayable interpreted audio requires the planned segment-audio endpoint or native remote-track recording path before it can be treated as complete.
+- Interpretation history is grouped by language. Text history appears immediately, and replayable audio attaches when the background backend replay artifact is ready.
 - Startup failures must expose the exact layer that failed:
   - Backend OpenAI configuration or model/session error.
   - Device microphone permission.
@@ -717,7 +718,7 @@ Completed:
 - Mobile now includes an isolated `interpreterRealtime` service for microphone capture, WebRTC session setup, event parsing, respond requests, and cleanup.
 - Mobile room UI now shows live connection state, Start/Stop interpreter, selected-language response, live transcript preview, and live translation preview.
 - Mobile Level 1 and Level 3 rooms now prepare a realtime session pool across all configured interpreter languages, with each language showing its own readiness state.
-- Mobile 1-on-1 rooms start only the selected target language session to preserve cost and battery while still keeping response behavior instant for the selected language.
+- Mobile rooms start configured realtime-supported target-language lanes from the meeting language list so language selection can route an already-warm realtime lane.
 - Mobile now checks microphone readiness, requests microphone access from the interpreter room, and explains the readiness state before listening.
 - Mobile now includes a device interpreter readiness check that verifies microphone permission and the installed native WebRTC runtime before real interpreting tests.
 - Mobile microphone readiness is now separated from the room title header so it stays readable on smaller devices.
@@ -726,8 +727,9 @@ Completed:
 - Backend now supports spoken summary audio generation for selected summary languages, using server-side OpenAI TTS with no OpenAI key exposed to mobile.
 - Mobile now caches spoken summary audio locally and lets managers listen to summary audio in the selected language.
 - Backend now exposes `POST /api/interpreter/meetings/:meetingId/interpretation-audio` for spoken interpretation of the last captured segment. The backend translates missing target-language text, generates TTS audio server-side, stores the translation segment, and audits privacy-safe metadata without exposing the OpenAI key to mobile.
-- Mobile live interpretation now separates listening from playback: `Listen` starts microphone capture, `Stop` opens the response-language picker, and selecting a language prepares and plays a dedicated spoken interpretation audio clip instead of restarting the realtime listening session.
+- Mobile live interpretation now separates listening from playback: `Listen` starts microphone capture, `Stop` opens the response-language picker, and selecting a language routes the live realtime lane immediately when available instead of restarting the realtime listening session.
 - Mobile now includes a dedicated spoken-interpretation player in the live room with replay and language-switch controls, separate from the meeting summary audio player.
+- Mobile now persists backend replay audio in the background after a realtime response so live interpretation is not delayed by archive generation.
 - Mobile realtime event parsing now separates source transcript events from target translation events and avoids treating audio payload deltas as transcript text.
 - Local backend provider validation passed on July 28, 2026: `OPENAI_INTERPRETER_REALTIME_MODEL=gpt-realtime-translate` minted a Realtime Translation client secret, and the Realtime Translation calls endpoint accepted the credential and returned the expected invalid-offer response for a diagnostic SDP.
 - Render route reachability was verified on July 28, 2026: `POST /api/interpreter/realtime-diagnostics` is live and correctly returns `401 Missing authorization token` without a Firebase session.

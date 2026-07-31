@@ -1,4 +1,7 @@
 dist/
 node_modules/
 .env
+.env.*
+!.env.example
+cloudrun.env.yaml
 firebase-service-account.json

@@ -101,8 +101,12 @@ export async function startInterpreterRealtimeSession(
 
   await ensureInterpreterAudioPermission();
   await AudioModule.setAudioModeAsync({
+    allowsBackgroundRecording: true,
     allowsRecording: true,
-    playsInSilentMode: true
+    interruptionMode: 'duckOthers',
+    playsInSilentMode: true,
+    shouldPlayInBackground: true,
+    shouldRouteThroughEarpiece: false
   }).catch(() => undefined);
 
   const localStream = await runtime.mediaDevices.getUserMedia({

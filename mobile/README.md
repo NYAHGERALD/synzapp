@@ -32,12 +32,12 @@ cd SYNZAPP/mobile
 npx eas-cli@20.1.0 env:create preview \
   --scope project \
   --name EXPO_PUBLIC_SYNZAPP_API_URL \
-  --value https://YOUR_RENDER_BACKEND_URL \
+  --value https://synzapp-backend-psqxb3sewa-uc.a.run.app \
   --type string \
   --visibility plaintext \
   --force
 
-EXPO_PUBLIC_SYNZAPP_API_URL=https://YOUR_RENDER_BACKEND_URL \
+EXPO_PUBLIC_SYNZAPP_API_URL=https://synzapp-backend-psqxb3sewa-uc.a.run.app \
   npx eas-cli@20.1.0 update \
   --channel preview \
   --message "Point preview app to hosted backend"

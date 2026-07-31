@@ -1,4 +1,4 @@
-export const SYNZAPP_HOSTED_API_URL = 'https://synzapp-backend.onrender.com';
+export const SYNZAPP_HOSTED_API_URL = 'https://synzapp-backend-psqxb3sewa-uc.a.run.app';
 
 export interface FirebaseWebConfig {
   apiKey: string;

@@ -101,7 +101,13 @@
         }
       ],
       "expo-secure-store",
-      "expo-audio",
+      [
+        "expo-audio",
+        {
+          "enableBackgroundRecording": true,
+          "microphonePermission": "Synzapp uses the microphone for secure workplace calls, voice notes, and live interpreter sessions."
+        }
+      ],
       "@react-native-firebase/app",
       "@react-native-firebase/auth",
       [
