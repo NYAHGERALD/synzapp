@@ -14,8 +14,8 @@ The experience should feel like a real interpreter:
 
 - The live room opens idle. Nothing is captured until the manager taps `Listen`.
 - `Listen` starts microphone capture and the realtime audio spectrum reacts to microphone input.
-- `Stop` pauses microphone capture and opens the response-language picker.
-- The interpreter does not speak until the manager selects one of the configured meeting languages.
+- The `Listen` control remains a listening-state indicator while capture is active; response is triggered by tapping a configured meeting language.
+- The interpreter does not speak until the manager selects one of the configured meeting languages, and that language selection pauses microphone capture for the spoken response.
 - It prepares the active translation lane while the person speaks so playback is immediate when requested.
 - It cleans up unclear speech into simple, natural spoken language without changing the intent.
 - It can summarize the meeting so far in one or more configured meeting languages.
@@ -210,22 +210,23 @@ For Level 1 and Level 3:
 - English is always included by default.
 - The user can add multiple target languages during meeting creation.
 - The mobile app starts the configured realtime-supported target-language lanes when the manager taps `Listen`, then keeps those lanes warm for the listening segment.
-- Microphone capture must remain controlled by the `Listen` and `Stop` buttons. Selecting a response language must not tear down the live realtime runtime.
+- Microphone capture must remain controlled by `Listen` and the selected response language. Selecting a response language pauses capture for speech playback but must not tear down the live realtime runtime.
 - Multi-language hot lanes should move to a backend-controlled or native audio fanout architecture before very large Level 1 and Level 3 meetings are treated as production-ready.
 - Cap active target languages using `INTERPRETER_MAX_TARGET_LANGUAGES`.
 - If the language count is too high, keep only priority languages hot and warm the others on demand.
 
-Instant response is achieved by preparing configured target-language lanes while listening. When the supervisor selects a language after `Stop`, Synzapp should route that live target-language lane immediately and persist replay audio in the background.
+Instant response is achieved by preparing configured target-language lanes while listening. When the supervisor selects a response language, Synzapp should speak the latest prepared interpretation immediately and keep the realtime session available for the next listening pass.
 
 ### Response Latency Standard
 
 The live room must behave like a realtime interpreter, not a file-generation workflow.
 
-When the manager taps `Stop` and selects a response language:
+When the manager selects a response language during an active listening segment:
 
-- The matching realtime session starts speaking immediately when a live translation lane is available.
-- The backend then creates the polished natural interpretation and spoken MP3 in the background for durable replay/history. This backend call must not block live speech.
-- If realtime audio is unavailable, the backend MP3 is used as the fallback spoken response and the UI must show a controlled preparing state.
+- Microphone capture pauses immediately so the room hears only the interpreter response.
+- The latest prepared spoken interpretation starts when a valid warm segment is available.
+- The backend creates or refreshes the polished natural interpretation and spoken MP3 for durable replay/history. This backend call should happen quietly while listening and must not block playback when a valid prepared segment exists.
+- If warm audio is unavailable or stale, the backend MP3 is used as the fallback spoken response and the UI must show a controlled preparing state.
 - The UI must keep the language choice visibly active while speech is being prepared or spoken.
 - Backend generated audio is cached locally and attached to the history row so the user can replay it later.
 
@@ -444,8 +445,8 @@ The room should feel focused and calm:
 - Current detected language.
 - Live source transcript preview.
 - A `Listen` button that starts capture only when the user intentionally taps it.
-- A `Stop` button state while active listening is running.
-- Native response-language picker after Stop.
+- A listening state that keeps the manager oriented without turning the primary control into a destructive stop action.
+- Response-language controls that can trigger a spoken response directly during listening.
 - Spoken interpretation in the selected configured meeting language.
 - Language icon/player control that can reopen the response-language picker for the last captured speech.
 - Transcript icon for structured captured speech text.
@@ -477,10 +478,10 @@ Required live-room behavior:
 - The room opens idle and must not start listening automatically.
 - Show a professional realtime audio spectrum while the AI is actively listening.
 - Show the privacy label inside the live room: interpreter only, not connected to Chat.
-- Display the configured meeting languages in the response-language picker, not as always-active ambiguous command buttons.
-- Tapping `Listen` starts microphone capture and changes the button to `Stop`.
-- Tapping `Stop` pauses microphone input, opens the response-language picker, and lets the manager choose the language to speak.
-- Selecting a response language closes the picker and routes the already-open realtime lane for that language when available.
+- Display the configured meeting languages as clear response controls during listening, plus a chooser for longer language lists.
+- Tapping `Listen` starts microphone capture and changes the primary label to `Listening...`.
+- Tapping a response language pauses microphone input and plays the latest prepared interpretation for that language.
+- Selecting a response language routes the prepared realtime-backed lane for that language when available.
 - While the interpreter is speaking, the primary control becomes `Listen`.
 - Tapping `Listen` stops the current interpretation audio and returns to live listening.
 - If the user cuts an interpretation short, show:
@@ -685,8 +686,7 @@ The feature is enterprise ready when:
 
 - A supervisor can create and start a meeting.
 - The interpreter remains idle until the supervisor taps `Listen`.
-- Tapping `Stop` opens the configured response-language picker.
-- Selecting a response language plays interpretation without a noticeable wait.
+- Tapping a configured response language during listening pauses capture and plays interpretation without a noticeable wait.
 - Level meetings support multiple target languages.
 - Summaries can be generated in selected configured languages.
 - Every sensitive action is audited.
@@ -716,7 +716,7 @@ Completed:
 - Mobile meeting list, create meeting modal, language selection, scheduling metadata, meeting room, summary display, and secure meeting memory console are implemented.
 - Mobile meeting creation and room access controls now allow users to add or remove invited company participants through backend-backed access grants.
 - Mobile now includes an isolated `interpreterRealtime` service for microphone capture, WebRTC session setup, event parsing, respond requests, and cleanup.
-- Mobile room UI now shows live connection state, Start/Stop interpreter, selected-language response, live transcript preview, and live translation preview.
+- Mobile room UI now shows live connection state, Listen-controlled capture, selected-language response, live transcript preview, and live translation preview.
 - Mobile Level 1 and Level 3 rooms now prepare a realtime session pool across all configured interpreter languages, with each language showing its own readiness state.
 - Mobile rooms start configured realtime-supported target-language lanes from the meeting language list so language selection can route an already-warm realtime lane.
 - Mobile now checks microphone readiness, requests microphone access from the interpreter room, and explains the readiness state before listening.
@@ -727,9 +727,9 @@ Completed:
 - Backend now supports spoken summary audio generation for selected summary languages, using server-side OpenAI TTS with no OpenAI key exposed to mobile.
 - Mobile now caches spoken summary audio locally and lets managers listen to summary audio in the selected language.
 - Backend now exposes `POST /api/interpreter/meetings/:meetingId/interpretation-audio` for spoken interpretation of the last captured segment. The backend translates missing target-language text, generates TTS audio server-side, stores the translation segment, and audits privacy-safe metadata without exposing the OpenAI key to mobile.
-- Mobile live interpretation now separates listening from playback: `Listen` starts microphone capture, `Stop` opens the response-language picker, and selecting a language routes the live realtime lane immediately when available instead of restarting the realtime listening session.
+- Mobile live interpretation now uses a controlled realtime-buffered response flow: `Listen` starts microphone capture, the live session keeps transcript and target-language text warm, and tapping a response language pauses microphone capture and speaks the latest prepared interpretation without restarting the realtime session.
 - Mobile now includes a dedicated spoken-interpretation player in the live room with replay and language-switch controls, separate from the meeting summary audio player.
-- Mobile now persists backend replay audio in the background after a realtime response so live interpretation is not delayed by archive generation.
+- Mobile now prepares backend spoken interpretation audio quietly while listening and validates that cached audio against the latest transcript, target language, and selected interpreter voice before playback. If a warm segment is stale or unavailable, the mobile app falls back to the secure backend audio endpoint.
 - Mobile realtime event parsing now separates source transcript events from target translation events and avoids treating audio payload deltas as transcript text.
 - Local backend provider validation passed on July 28, 2026: `OPENAI_INTERPRETER_REALTIME_MODEL=gpt-realtime-translate` minted a Realtime Translation client secret, and the Realtime Translation calls endpoint accepted the credential and returned the expected invalid-offer response for a diagnostic SDP.
 - Render route reachability was verified on July 28, 2026: `POST /api/interpreter/realtime-diagnostics` is live and correctly returns `401 Missing authorization token` without a Firebase session.
@@ -757,9 +757,8 @@ Use this sequence when validating on a physical iPhone or Android device:
    - Create a `1-on-1` meeting with English and Spanish.
    - Tap `Listen`.
    - Speak one short sentence in English.
-   - Tap `Stop`.
-   - Choose Spanish in the response-language picker.
-   - Pass condition: the language picker closes, the spoken interpretation player appears, Spanish audio plays, the transcript/interpretation text updates, and the OpenAI API key is never exposed to mobile.
+   - Tap Spanish in the response-language controls when the speaker finishes.
+   - Pass condition: microphone listening pauses, the spoken interpretation player appears quickly, Spanish audio plays, the transcript/interpretation text updates, and the OpenAI API key is never exposed to mobile.
 
 3. Level 1 / Level 3 multi-language test
    - Create a Level 1 or Level 3 meeting with English, Spanish, and one additional language.

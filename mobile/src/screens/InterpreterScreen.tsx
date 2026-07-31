@@ -95,6 +95,8 @@ const INTERPRETER_SUMMARY_AUDIO_MODE: AudioMode = {
 const INTERPRETER_SUMMARY_AUDIO_CACHE_DIR = `${FileSystem.cacheDirectory || ''}synzapp-interpreter-summaries/`;
 const INTERPRETER_SEGMENT_AUDIO_CACHE_DIR = `${FileSystem.cacheDirectory || ''}synzapp-interpreter-segments/`;
 const INTERPRETER_VOICE_PREVIEW_AUDIO_CACHE_DIR = `${FileSystem.cacheDirectory || ''}synzapp-interpreter-voices/`;
+const INTERPRETER_WARM_AUDIO_DEBOUNCE_MS = 1800;
+const INTERPRETER_WARM_AUDIO_MIN_TEXT_LENGTH = 12;
 
 type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
 const ROOM_SETTINGS_ICON_NAME: IoniconName = Platform.OS === 'ios' ? 'options-outline' : 'settings-outline';
@@ -113,6 +115,19 @@ type InterpreterLiveHistoryItem = {
   sourceText: string;
   translatedText: string;
   translationId?: string;
+};
+
+type InterpreterWarmAudioStatus = 'idle' | 'preparing' | 'ready' | 'error';
+
+type InterpreterWarmAudioEntry = {
+  audio?: InterpreterSegmentAudio;
+  error?: string;
+  preparedAtIso?: string;
+  requestId: number;
+  sourceFingerprint: string;
+  status: InterpreterWarmAudioStatus;
+  translatedFingerprint: string;
+  voiceId: string;
 };
 
 type InterpreterSummaryCreateResult = {
@@ -699,6 +714,10 @@ function InterpreterRoom({
   const [preparingRoomVoicePreviewKey, setPreparingRoomVoicePreviewKey] = useState<string | null>(null);
   const realtimeSessionPoolRef = useRef<Record<string, InterpreterRealtimeSession>>({});
   const [languageSessionState, setLanguageSessionState] = useState<Record<string, InterpreterLanguageSessionState>>({});
+  const warmAudioRequestSeqRef = useRef(0);
+  const warmAudioDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const warmAudioInFlightRef = useRef<Record<string, string>>({});
+  const [warmAudioByLanguage, setWarmAudioByLanguage] = useState<Record<string, InterpreterWarmAudioEntry>>({});
   const summaryAudioPlayer = useAudioPlayer(summaryAudioSourceUri ? { uri: summaryAudioSourceUri } : null, {
     updateInterval: 250
   });
@@ -722,7 +741,18 @@ function InterpreterRoom({
     : null;
   const activeSessionStatuses = Object.values(languageSessionState).map((state) => state.status);
   const isRealtimeActive = activeSessionStatuses.some(isActiveRealtimeStatus);
+  const warmAudioSignal = useMemo(() =>
+    Object.entries(languageSessionState)
+      .map(([languageCode, session]) =>
+        `${languageCode}:${createInterpreterTextFingerprint(session.transcript)}:${createInterpreterTextFingerprint(session.translation)}`
+      )
+      .join('|'),
+  [languageSessionState]);
   useEffect(() => () => {
+    if (warmAudioDebounceRef.current) {
+      clearTimeout(warmAudioDebounceRef.current);
+    }
+
     closeRealtimeSessionPool(false);
   }, []);
 
@@ -930,6 +960,8 @@ function InterpreterRoom({
 
   useEffect(() => {
     setLiveInterpretationHistory([]);
+    setWarmAudioByLanguage({});
+    warmAudioInFlightRef.current = {};
   }, [details.meeting.meetingId]);
 
   useEffect(() => {
@@ -975,6 +1007,40 @@ function InterpreterRoom({
       setLiveMode('idle');
     }
   }, [languageSessionState]);
+
+  useEffect(() => {
+    if (warmAudioDebounceRef.current) {
+      clearTimeout(warmAudioDebounceRef.current);
+      warmAudioDebounceRef.current = null;
+    }
+
+    if (!isRealtimeActive || liveMode !== 'listening') {
+      return;
+    }
+
+    warmAudioDebounceRef.current = setTimeout(() => {
+      const targetLanguages = getSessionPoolLanguages(details.meeting, selectedLanguageCode);
+
+      targetLanguages.forEach((language) => {
+        void prepareWarmInterpretationAudio(language.code);
+      });
+      warmAudioDebounceRef.current = null;
+    }, INTERPRETER_WARM_AUDIO_DEBOUNCE_MS);
+
+    return () => {
+      if (warmAudioDebounceRef.current) {
+        clearTimeout(warmAudioDebounceRef.current);
+        warmAudioDebounceRef.current = null;
+      }
+    };
+  }, [
+    details.meeting,
+    isRealtimeActive,
+    liveMode,
+    selectedLanguageCode,
+    selectedVoiceId,
+    warmAudioSignal
+  ]);
 
   async function startLiveInterpreter(languageCode = selectedLanguageCode) {
     closeRealtimeSessionPool();
@@ -1077,16 +1143,104 @@ function InterpreterRoom({
     setAudioLevel(0);
   }
 
-  function stopListeningAndChooseLanguage() {
-    if (!isRealtimeActive || liveMode !== 'listening') {
+  async function prepareWarmInterpretationAudio(languageCode: string) {
+    const candidate = getWarmInterpretationInput(languageCode);
+
+    if (!candidate) {
       return;
     }
 
-    Object.values(realtimeSessionPoolRef.current).forEach((session) => session.pauseListening());
-    setAudioLevel(0);
-    setLiveStatus('ready');
-    setLiveMode('choosing');
-    setIsLiveLanguageModalOpen(true);
+    const requestKey = [
+      languageCode,
+      selectedVoiceId,
+      candidate.sourceFingerprint,
+      candidate.translatedFingerprint
+    ].join(':');
+    const currentWarmEntry = warmAudioByLanguage[languageCode];
+
+    if (
+      currentWarmEntry?.status === 'ready' &&
+      currentWarmEntry.voiceId === selectedVoiceId &&
+      currentWarmEntry.sourceFingerprint === candidate.sourceFingerprint &&
+      currentWarmEntry.translatedFingerprint === candidate.translatedFingerprint
+    ) {
+      return;
+    }
+
+    if (warmAudioInFlightRef.current[languageCode] === requestKey) {
+      return;
+    }
+
+    const requestId = warmAudioRequestSeqRef.current + 1;
+
+    warmAudioRequestSeqRef.current = requestId;
+    warmAudioInFlightRef.current[languageCode] = requestKey;
+    setWarmAudioByLanguage((currentWarmAudio) => ({
+      ...currentWarmAudio,
+      [languageCode]: {
+        requestId,
+        sourceFingerprint: candidate.sourceFingerprint,
+        status: 'preparing',
+        translatedFingerprint: candidate.translatedFingerprint,
+        voiceId: selectedVoiceId
+      }
+    }));
+
+    try {
+      const idToken = await getIdToken();
+      const result = await createInterpreterInterpretationAudio(idToken, details.meeting.meetingId, {
+        sourceText: candidate.sourceText,
+        targetLanguageCode: languageCode,
+        translatedText: candidate.translatedText || null,
+        voiceId: selectedVoiceId
+      });
+
+      await cacheInterpreterSegmentAudioPayload(result.audio);
+      setWarmAudioByLanguage((currentWarmAudio) => {
+        const latestWarmEntry = currentWarmAudio[languageCode];
+
+        if (latestWarmEntry?.requestId !== requestId) {
+          return currentWarmAudio;
+        }
+
+        return {
+          ...currentWarmAudio,
+          [languageCode]: {
+            audio: result.audio,
+            preparedAtIso: new Date().toISOString(),
+            requestId,
+            sourceFingerprint: candidate.sourceFingerprint,
+            status: 'ready',
+            translatedFingerprint: candidate.translatedFingerprint,
+            voiceId: selectedVoiceId
+          }
+        };
+      });
+    } catch (error) {
+      setWarmAudioByLanguage((currentWarmAudio) => {
+        const latestWarmEntry = currentWarmAudio[languageCode];
+
+        if (latestWarmEntry?.requestId !== requestId) {
+          return currentWarmAudio;
+        }
+
+        return {
+          ...currentWarmAudio,
+          [languageCode]: {
+            error: getErrorMessage(error),
+            requestId,
+            sourceFingerprint: candidate.sourceFingerprint,
+            status: 'error',
+            translatedFingerprint: candidate.translatedFingerprint,
+            voiceId: selectedVoiceId
+          }
+        };
+      });
+    } finally {
+      if (warmAudioInFlightRef.current[languageCode] === requestKey) {
+        delete warmAudioInFlightRef.current[languageCode];
+      }
+    }
   }
 
   async function respondInSelectedLanguage(languageCode = selectedLanguageCode) {
@@ -1097,28 +1251,23 @@ function InterpreterRoom({
       setLiveStatus('ready');
       setLiveMode('choosing');
       onError(
-        'The interpreter received microphone signal, but no transcript was returned yet. Speak a little longer, then tap Stop again.',
+        'The interpreter received microphone signal, but no transcript was returned yet. Speak a little longer, then tap a response language again.',
         'Interpreter needs attention'
       );
       return;
     }
 
-    const realtimeSpeakerSession = realtimeSessionPoolRef.current[languageCode] || null;
-    const shouldUseRealtimeAudio = Boolean(realtimeSpeakerSession);
     const capturedSourceText = sourceText || realtimeTranslation;
     const capturedTranslatedText = realtimeTranslation;
+    const warmAudio = getReadyWarmInterpretationAudio(languageCode, capturedSourceText, capturedTranslatedText);
 
-    Object.entries(realtimeSessionPoolRef.current).forEach(([sessionLanguageCode, session]) => {
-      if (sessionLanguageCode !== languageCode) {
-        session.pauseListening();
-      }
-    });
+    Object.values(realtimeSessionPoolRef.current).forEach((session) => session.pauseListening());
     safePauseAudioPlayer(summaryAudioPlayer);
     safePauseAudioPlayer(segmentAudioPlayer);
     setSelectedLanguageCode(languageCode);
     setRespondingLanguageCode(languageCode);
     setIsLiveLanguageModalOpen(false);
-    setIsPreparingSegmentAudio(!shouldUseRealtimeAudio);
+    setIsPreparingSegmentAudio(!warmAudio);
     setLiveStatus('speaking');
     setLiveMode('responding');
     updateLanguageSession(languageCode, {
@@ -1127,38 +1276,28 @@ function InterpreterRoom({
       translation: capturedTranslatedText
     });
 
-    if (shouldUseRealtimeAudio) {
-      realtimeSpeakerSession.respond();
-      recordLiveInterpretation(languageCode, capturedSourceText, capturedTranslatedText);
-      persistRealtimeInterpretationReplayAudio(languageCode, capturedSourceText, capturedTranslatedText);
-      setIsPreparingSegmentAudio(false);
-      return;
-    }
-
     try {
-      const idToken = await getIdToken();
-      const result = await createInterpreterInterpretationAudio(idToken, details.meeting.meetingId, {
-        sourceText: capturedSourceText,
-        targetLanguageCode: languageCode,
-        translatedText: capturedTranslatedText || null,
-        voiceId: selectedVoiceId
-      });
+      const audio = warmAudio || await createFreshInterpreterSegmentAudio(
+        languageCode,
+        capturedSourceText,
+        capturedTranslatedText
+      );
 
       updateLanguageSession(languageCode, {
         status: 'speaking',
-        transcript: result.audio.sourceText,
-        translation: result.audio.translatedText
+        transcript: audio.sourceText,
+        translation: audio.translatedText
       });
-      setLiveTranscript(result.audio.sourceText);
-      setLiveTranslation(result.audio.translatedText);
+      setLiveTranscript(audio.sourceText);
+      setLiveTranslation(audio.translatedText);
       recordLiveInterpretation(
         languageCode,
-        result.audio.sourceText,
-        result.audio.translatedText,
-        result.audio.translationId
+        audio.sourceText,
+        audio.translatedText,
+        audio.translationId
       );
 
-      await playInterpreterSegmentAudioPayload(result.audio);
+      await playInterpreterSegmentAudioPayload(audio);
     } catch (error) {
       setLiveStatus('ready');
       setLiveMode('choosing');
@@ -1169,42 +1308,72 @@ function InterpreterRoom({
     }
   }
 
-  function persistRealtimeInterpretationReplayAudio(
+  async function createFreshInterpreterSegmentAudio(
     languageCode: string,
     sourceText: string,
     translatedText: string
-  ) {
-    if (!sourceText.trim() && !translatedText.trim()) {
-      return;
+  ): Promise<InterpreterSegmentAudio> {
+    const idToken = await getIdToken();
+    const result = await createInterpreterInterpretationAudio(idToken, details.meeting.meetingId, {
+      sourceText,
+      targetLanguageCode: languageCode,
+      translatedText: translatedText || null,
+      voiceId: selectedVoiceId
+    });
+
+    await cacheInterpreterSegmentAudioPayload(result.audio);
+
+    return result.audio;
+  }
+
+  function getReadyWarmInterpretationAudio(
+    languageCode: string,
+    sourceText: string,
+    translatedText: string
+  ): InterpreterSegmentAudio | null {
+    const warmEntry = warmAudioByLanguage[languageCode];
+
+    if (
+      !warmEntry?.audio ||
+      warmEntry.status !== 'ready' ||
+      warmEntry.voiceId !== selectedVoiceId
+    ) {
+      return null;
     }
 
-    void (async () => {
-      try {
-        const idToken = await getIdToken();
-        const result = await createInterpreterInterpretationAudio(idToken, details.meeting.meetingId, {
-          sourceText: sourceText || translatedText,
-          targetLanguageCode: languageCode,
-          translatedText: translatedText || null,
-          voiceId: selectedVoiceId
-        });
+    const sourceFingerprint = createInterpreterTextFingerprint(sourceText);
+    const translatedFingerprint = createInterpreterTextFingerprint(translatedText);
 
-        updateLanguageSession(languageCode, {
-          status: 'speaking',
-          transcript: result.audio.sourceText,
-          translation: result.audio.translatedText
-        });
+    if (
+      warmEntry.sourceFingerprint !== sourceFingerprint ||
+      warmEntry.translatedFingerprint !== translatedFingerprint
+    ) {
+      return null;
+    }
 
-        if (languageCode === selectedLanguageCode) {
-          setLiveTranscript(result.audio.sourceText);
-          setLiveTranslation(result.audio.translatedText);
-        }
+    return warmEntry.audio;
+  }
 
-        attachReplayAudioToLiveInterpretation(languageCode, sourceText, translatedText, result.audio);
-        await cacheInterpreterSegmentAudioPayload(result.audio);
-      } catch (error) {
-        console.warn('Interpreter replay audio could not be persisted after realtime response:', getErrorMessage(error));
-      }
-    })();
+  function getWarmInterpretationInput(languageCode: string): {
+    sourceFingerprint: string;
+    sourceText: string;
+    translatedFingerprint: string;
+    translatedText: string;
+  } | null {
+    const sourceText = getCapturedSourceTranscriptText();
+    const translatedText = getCapturedTranslationText(languageCode);
+    const sourceOrFallbackText = sourceText || translatedText;
+
+    if (sourceOrFallbackText.trim().length < INTERPRETER_WARM_AUDIO_MIN_TEXT_LENGTH) {
+      return null;
+    }
+
+    return {
+      sourceFingerprint: createInterpreterTextFingerprint(sourceOrFallbackText),
+      sourceText: sourceOrFallbackText,
+      translatedFingerprint: createInterpreterTextFingerprint(translatedText),
+      translatedText
+    };
   }
 
   function listenAgain() {
@@ -1237,12 +1406,23 @@ function InterpreterRoom({
   }
 
   function getCapturedSourceText(): string {
+    const sourceTranscript = getCapturedSourceTranscriptText();
+
+    if (sourceTranscript) {
+      return sourceTranscript;
+    }
+
+    return [
+      liveTranslation,
+      ...Object.values(languageSessionState).map((session) => session.translation)
+    ].find((text) => text?.trim())?.trim() || '';
+  }
+
+  function getCapturedSourceTranscriptText(): string {
     return [
       liveTranscript,
       languageSessionState[selectedLanguageCode]?.transcript,
-      ...Object.values(languageSessionState).map((session) => session.transcript),
-      liveTranslation,
-      ...Object.values(languageSessionState).map((session) => session.translation)
+      ...Object.values(languageSessionState).map((session) => session.transcript)
     ].find((text) => text?.trim())?.trim() || '';
   }
 
@@ -1288,49 +1468,6 @@ function InterpreterRoom({
         sourceText,
         translatedText,
         translationId
-      }, ...currentHistory].slice(0, 80);
-    });
-  }
-
-  function attachReplayAudioToLiveInterpretation(
-    languageCode: string,
-    originalSourceText: string,
-    originalTranslatedText: string,
-    audio: InterpreterSegmentAudio
-  ) {
-    setLiveInterpretationHistory((currentHistory) => {
-      let didAttachReplayAudio = false;
-      const updatedHistory = currentHistory.map((item) => {
-        const isPendingItem =
-          !item.translationId &&
-          item.languageCode === languageCode &&
-          item.sourceText === originalSourceText &&
-          item.translatedText === originalTranslatedText;
-
-        if (!isPendingItem) {
-          return item;
-        }
-
-        didAttachReplayAudio = true;
-
-        return {
-          ...item,
-          sourceText: audio.sourceText,
-          translatedText: audio.translatedText,
-          translationId: audio.translationId
-        };
-      });
-
-      if (didAttachReplayAudio) {
-        return updatedHistory;
-      }
-
-      return [{
-        createdAtIso: new Date().toISOString(),
-        languageCode,
-        sourceText: audio.sourceText,
-        translatedText: audio.translatedText,
-        translationId: audio.translationId
       }, ...currentHistory].slice(0, 80);
     });
   }
@@ -1620,7 +1757,6 @@ function InterpreterRoom({
         onLanguageModalClose={() => setIsLiveLanguageModalOpen(false)}
         onRespond={respondInSelectedLanguage}
         onStart={() => void startLiveInterpreter()}
-        onStop={stopListeningAndChooseLanguage}
         onTranscriptClose={() => setIsLiveTranscriptOpen(false)}
         onHistoryClose={() => setIsLiveHistoryOpen(false)}
         onPlayHistoryItem={(item) => void handlePlayInterpreterHistoryItem(item)}
@@ -1734,7 +1870,6 @@ interface InterpreterLiveRoomModalProps {
   onReplayInterpretationAudio: () => void;
   onRespond: (languageCode: string) => void | Promise<void>;
   onStart: () => void;
-  onStop: () => void;
   onTranscriptClose: () => void;
   preparingHistoryAudioKey: string | null;
   respondingLanguageCode: string | null;
@@ -1781,7 +1916,6 @@ function InterpreterLiveRoomModal({
   onReplayInterpretationAudio,
   onRespond,
   onStart,
-  onStop,
   onTranscriptClose,
   preparingHistoryAudioKey,
   respondingLanguageCode,
@@ -1800,20 +1934,15 @@ function InterpreterLiveRoomModal({
     || details.meeting.interpreterLanguages[0];
   const transcriptScrollRef = useRef<ScrollView | null>(null);
   const isActive = isActiveRealtimeStatus(liveStatus);
-  const canChooseLanguage = isActive && (liveMode === 'choosing' || liveMode === 'responding');
+  const canChooseLanguage = isActive && (liveMode === 'listening' || liveMode === 'choosing' || liveMode === 'responding');
   const primaryActionLabel = getLivePrimaryActionLabel(liveMode, liveStatus);
-  const primaryActionIcon: IoniconName = liveMode === 'listening'
-    ? 'stop-outline'
-    : liveMode === 'responding'
-      ? 'mic-outline'
-      : 'mic-outline';
+  const primaryActionIcon: IoniconName = 'mic-outline';
   const isRealtimeResponseActive = liveMode === 'responding' &&
     !isPreparingInterpretationAudio &&
     !isInterpretationAudioPlaying;
   const canReplayInterpretationAudio = hasReplayableInterpretationAudio && Boolean(liveTranslation.trim());
   const handlePrimaryAction = () => {
     if (liveMode === 'listening') {
-      onStop();
       return;
     }
 
@@ -1884,11 +2013,11 @@ function InterpreterLiveRoomModal({
             isListening={liveMode === 'listening'}
           />
           <Pressable
-            disabled={liveStatus === 'connecting'}
+            disabled={liveStatus === 'connecting' || liveMode === 'listening'}
             onPress={handlePrimaryAction}
             style={({ pressed }) => [
               styles.liveCenterAction,
-              liveMode === 'listening' && styles.liveCenterActionStop,
+              liveMode === 'listening' && styles.liveCenterActionListening,
               pressed && styles.pressed
             ]}
           >
@@ -1906,13 +2035,13 @@ function InterpreterLiveRoomModal({
           <View style={styles.liveLanguageSummaryRow}>
             <View style={styles.liveLanguageSummaryCopy}>
               <Text style={styles.liveRoomSectionLabel}>Interpreter languages</Text>
-            <Text style={styles.liveRoomLanguageSummaryText} numberOfLines={2}>
-              {details.meeting.interpreterLanguages.map((language) => language.label).join(', ')}
-            </Text>
-            <Text style={styles.liveRoomVoiceText} numberOfLines={1}>
-              Interpreter speaker: {voiceProfile.label}
-            </Text>
-          </View>
+              <Text style={styles.liveRoomLanguageSummaryText} numberOfLines={2}>
+                {details.meeting.interpreterLanguages.map((language) => language.label).join(', ')}
+              </Text>
+              <Text style={styles.liveRoomVoiceText} numberOfLines={1}>
+                Interpreter speaker: {voiceProfile.label}
+              </Text>
+            </View>
             <Pressable
               disabled={!canChooseLanguage}
               onPress={onOpenLanguageModal}
@@ -1926,6 +2055,50 @@ function InterpreterLiveRoomModal({
               <Text style={styles.liveLanguageChooseText}>Choose</Text>
             </Pressable>
           </View>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.liveLanguagePillScroll}
+          >
+            {details.meeting.interpreterLanguages.map((language) => {
+              const isSelected = language.code === selectedLanguageCode;
+              const isResponding = language.code === respondingLanguageCode && liveMode === 'responding';
+              const sessionStatus = languageSessionState[language.code]?.status || 'closed';
+
+              return (
+                <Pressable
+                  disabled={!canChooseLanguage || isPreparingInterpretationAudio}
+                  key={language.code}
+                  onPress={() => {
+                    setSelectedLanguageCode(language.code);
+                    void onRespond(language.code);
+                  }}
+                  style={({ pressed }) => [
+                    styles.liveLanguageButton,
+                    isSelected && styles.liveLanguageButtonActive,
+                    isResponding && styles.liveLanguageButtonResponding,
+                    (!canChooseLanguage || isPreparingInterpretationAudio) && styles.disabledButton,
+                    pressed && styles.pressed
+                  ]}
+                >
+                  <View style={[
+                    styles.liveLanguageStatus,
+                    { backgroundColor: getRealtimeStatusColor(sessionStatus) }
+                  ]} />
+                  <Text style={[
+                    styles.liveLanguageButtonText,
+                    isSelected && styles.liveLanguageButtonTextActive,
+                    isResponding && styles.liveLanguageButtonTextResponding
+                  ]}>
+                    {language.label}
+                  </Text>
+                  {isResponding ? (
+                    <Text style={styles.liveLanguageRespondingText}>Speaking</Text>
+                  ) : null}
+                </Pressable>
+              );
+            })}
+          </ScrollView>
         </View>
 
         <View style={styles.liveRoomTranscriptArea}>
@@ -3997,7 +4170,7 @@ function getRealtimeStatusDescription(status: InterpreterRealtimeStatus): string
     case 'connecting':
       return 'Creating the encrypted live interpreter session.';
     case 'listening':
-      return 'Speak naturally, then tap Stop when the speaker is finished.';
+      return 'Speak naturally. Tap a response language when the speaker is finished.';
     case 'speaking':
       return 'Playing the interpretation in the selected language.';
     case 'ready':
@@ -4015,7 +4188,7 @@ function getLiveModeDescription(mode: InterpreterLiveMode, languageLabel: string
     case 'connecting':
       return 'Synzapp is opening the secure realtime interpreter session.';
     case 'listening':
-      return 'The spectrum reacts to microphone input. Tap Stop when the speaker is finished.';
+      return 'The spectrum reacts to microphone input. Tap a language when it is time to speak.';
     case 'choosing':
       return 'Select the language your team should hear for the last listening segment.';
     case 'responding':
@@ -4034,7 +4207,7 @@ function getLivePrimaryActionLabel(mode: InterpreterLiveMode, status: Interprete
   }
 
   if (mode === 'listening') {
-    return 'Stop';
+    return 'Listening...';
   }
 
   if (mode === 'choosing') {
@@ -4049,11 +4222,11 @@ function getLiveFooterHint(mode: InterpreterLiveMode): string {
     case 'connecting':
       return 'Preparing the secure audio session.';
     case 'listening':
-      return 'Tap Stop when the speaker finishes. Synzapp will ask which meeting language to speak.';
+      return 'Tap a response language when the speaker finishes. Synzapp keeps the live session warm.';
     case 'choosing':
       return 'Choose a language to play the interpretation for the last captured speech.';
     case 'responding':
-      return 'Tap Listen to stop speaking and return to microphone listening.';
+      return 'Tap Listen to return to microphone listening.';
     case 'interrupted':
       return 'Use Continue for the paused interpretation, or Current for the latest captured speech.';
     case 'idle':
@@ -4109,6 +4282,13 @@ function getSessionPoolLanguages(
 
     return leftLanguage.label.localeCompare(rightLanguage.label);
   });
+}
+
+function createInterpreterTextFingerprint(text: string): string {
+  return text
+    .trim()
+    .replace(/\s+/g, ' ')
+    .slice(-1600);
 }
 
 function areStringSetsEqual(firstValues: string[], secondValues: string[]): boolean {
@@ -4770,12 +4950,15 @@ function createStyles(colors: AppColors) {
       minWidth: 158,
       paddingHorizontal: 22
     },
-    liveCenterActionStop: {
-      backgroundColor: '#b91c1c'
+    liveCenterActionListening: {
+      backgroundColor: colors.primary
     },
     liveCenterActionText: {
       color: '#fff',
       fontSize: 15
+    },
+    liveLanguagePillScroll: {
+      marginTop: 12
     },
     liveLanguageButton: {
       alignItems: 'center',
@@ -4907,14 +5090,6 @@ function createStyles(colors: AppColors) {
     liveRespondActionText: {
       color: '#fff',
       fontSize: 14
-    },
-    liveStopAction: {
-      alignItems: 'center',
-      backgroundColor: colors.redSoft,
-      borderRadius: 999,
-      height: 46,
-      justifyContent: 'center',
-      width: 52
     },
     liveRoomDivider: {
       backgroundColor: colors.divider,

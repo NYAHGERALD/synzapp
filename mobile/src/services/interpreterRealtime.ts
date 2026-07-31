@@ -223,7 +223,7 @@ export async function startInterpreterRealtimeSession(
     respond: () => {
       setStreamTracksEnabled(localStream, false);
       callbacks.onAudioLevel?.(0);
-      setTracksEnabled(remoteTracks, true);
+      setTracksEnabled(remoteTracks, false);
       callbacks.onStatus?.('speaking');
     },
     resumeListening: () => {
