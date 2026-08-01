@@ -8,7 +8,7 @@ The feature is for live workplace conversations such as:
 
 - 1-on-1 meetings between a supervisor and an employee.
 - Level 1 team meetings with one speaker and one or more listening languages.
-- Level 3 or multi-department meetings where the speaker may change language and the room needs several target languages ready.
+- Level 3 or multi-department meetings where the speaker may change language and the room needs several selected response languages ready.
 
 The experience should feel like a real interpreter:
 
@@ -121,7 +121,7 @@ Environment variables:
   - `OPENAI_INTERPRETER_SUMMARY_MODEL=gpt-4.1-mini`
   - `OPENAI_INTERPRETER_SUMMARY_TTS_MODEL=gpt-4o-mini-tts`
   - `OPENAI_INTERPRETER_SUMMARY_TTS_VOICE=cedar`
-  - `INTERPRETER_MAX_TARGET_LANGUAGES=6`
+  - `INTERPRETER_MAX_TARGET_LANGUAGES=4`
   - `INTERPRETER_RETENTION_DAYS=30`
   - `INTERPRETER_AUDIO_RETENTION=false`
   - `INTERPRETER_SUMMARY_ENABLED=true`
@@ -208,12 +208,17 @@ For 1-on-1:
 For Level 1 and Level 3:
 
 - English is always included by default.
-- The user can add multiple target languages during meeting creation.
+- The full interpreter language catalog remains available during meeting creation.
+- The user can select up to four response languages for one live session.
+- The mobile app allows up to four response languages per live session so listening, warm audio preparation, and playback remain responsive on mobile devices.
 - The mobile app starts the configured realtime-supported target-language lanes when the manager taps `Listen`, then keeps those lanes warm for the listening segment.
+- The mobile app also prepares backend spoken interpretation audio for every selected response language, including languages that are supported for spoken interpretation but not by the realtime translation lane.
+- Response-language taps must consume prepared buffered audio only. They must not start a fresh audio-generation request after the tap, because that recreates a record-then-wait workflow.
+- The live room must show whether each response language is `Buffering` or has prepared segments ready, and unavailable languages must be disabled until at least one prepared audio segment exists.
 - Microphone capture must remain controlled by `Listen` and the selected response language. Selecting a response language pauses capture for speech playback but must not tear down the live realtime runtime.
 - Multi-language hot lanes should move to a backend-controlled or native audio fanout architecture before very large Level 1 and Level 3 meetings are treated as production-ready.
-- Cap active target languages using `INTERPRETER_MAX_TARGET_LANGUAGES`.
-- If the language count is too high, keep only priority languages hot and warm the others on demand.
+- Cap selected response languages using `INTERPRETER_MAX_TARGET_LANGUAGES`.
+- If legacy meeting data contains more than four response languages, prioritize the selected language, English, and the next configured languages until the meeting is edited down to the enterprise cap.
 
 Instant response is achieved by preparing configured target-language lanes while listening. When the supervisor selects a response language, Synzapp should speak the latest prepared interpretation immediately and keep the realtime session available for the next listening pass.
 
@@ -687,7 +692,7 @@ The feature is enterprise ready when:
 - A supervisor can create and start a meeting.
 - The interpreter remains idle until the supervisor taps `Listen`.
 - Tapping a configured response language during listening pauses capture and plays interpretation without a noticeable wait.
-- Level meetings support multiple target languages.
+- Level meetings support multiple selected response languages.
 - Summaries can be generated in selected configured languages.
 - Every sensitive action is audited.
 - The OpenAI API key is never exposed to mobile.
@@ -735,6 +740,15 @@ Completed:
 - Render route reachability was verified on July 28, 2026: `POST /api/interpreter/realtime-diagnostics` is live and correctly returns `401 Missing authorization token` without a Firebase session.
 - Backend interpreter enterprise control tests are in place for route protection, participant access, validation, summary access, privacy-safe audit events, and short-lived client-secret handling.
 - Backend and mobile TypeScript checks pass.
+
+## Implementation Status - July 30, 2026
+
+- Backend and mobile defaults now cap interpreter response languages at four per live session.
+- Create-meeting and room-settings language pickers keep the full language catalog available while turning the 4-language session cap into inline guidance instead of a blocking modal.
+- Warm spoken-audio preparation now covers every selected response language, not only languages marked as realtime target lanes. This prevents languages such as Pashto or Zulu from waiting until the user taps the language before preparation begins.
+- Mobile live interpretation playback now uses a prepared audio queue per response language. Selecting a language consumes the next prepared segment and does not synthesize a fresh response in the tap path.
+- Language pills and the response-language modal now show buffered readiness and disable unavailable languages until audio is already prepared.
+- Realtime lanes still only start for languages supported by the realtime translation provider; non-realtime languages use the secure server-side spoken interpretation endpoint for warmed playback and history.
 
 Still required before production release:
 

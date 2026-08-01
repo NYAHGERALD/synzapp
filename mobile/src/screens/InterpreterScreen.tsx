@@ -95,7 +95,9 @@ const INTERPRETER_SUMMARY_AUDIO_MODE: AudioMode = {
 const INTERPRETER_SUMMARY_AUDIO_CACHE_DIR = `${FileSystem.cacheDirectory || ''}synzapp-interpreter-summaries/`;
 const INTERPRETER_SEGMENT_AUDIO_CACHE_DIR = `${FileSystem.cacheDirectory || ''}synzapp-interpreter-segments/`;
 const INTERPRETER_VOICE_PREVIEW_AUDIO_CACHE_DIR = `${FileSystem.cacheDirectory || ''}synzapp-interpreter-voices/`;
-const INTERPRETER_WARM_AUDIO_DEBOUNCE_MS = 1800;
+const INTERPRETER_MAX_RESPONSE_LANGUAGES = 4;
+const INTERPRETER_BUFFERED_AUDIO_MAX_CHUNKS = 4;
+const INTERPRETER_WARM_AUDIO_DEBOUNCE_MS = 900;
 const INTERPRETER_WARM_AUDIO_MIN_TEXT_LENGTH = 12;
 
 type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
@@ -403,7 +405,7 @@ export function InterpreterScreen({ getIdToken, onRoomActiveChange }: Interprete
     }
   }
 
-  async function handleCreateSummary(languageCodes: string[]) {
+  async function handleCreateSummary(languageCodes: string[], transcriptText?: string | null) {
     const meeting = selectedMeetingDetails?.meeting;
 
     if (!meeting) {
@@ -414,7 +416,7 @@ export function InterpreterScreen({ getIdToken, onRoomActiveChange }: Interprete
 
     try {
       const idToken = await getIdToken();
-      const result = await createInterpreterSummary(idToken, meeting.meetingId, languageCodes);
+      const result = await createInterpreterSummary(idToken, meeting.meetingId, languageCodes, transcriptText);
 
       setSelectedMeetingDetails((currentDetails) => currentDetails
         ? {
@@ -525,7 +527,10 @@ interface InterpreterRoomProps {
   getIdToken: () => Promise<string>;
   isBusy: boolean;
   onBack: () => void;
-  onCreateSummary: (languageCodes: string[]) => Promise<InterpreterSummaryCreateResult | null>;
+  onCreateSummary: (
+    languageCodes: string[],
+    transcriptText?: string | null
+  ) => Promise<InterpreterSummaryCreateResult | null>;
   onEndMeeting: () => Promise<void>;
   onError: (message: string, title?: string) => void;
   onCreateRealtimeSdpAnswer: (targetLanguageCode: string, offerSdp: string) => Promise<string | null>;
@@ -718,6 +723,11 @@ function InterpreterRoom({
   const warmAudioDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const warmAudioInFlightRef = useRef<Record<string, string>>({});
   const [warmAudioByLanguage, setWarmAudioByLanguage] = useState<Record<string, InterpreterWarmAudioEntry>>({});
+  const bufferedAudioByLanguageRef = useRef<Record<string, InterpreterSegmentAudio[]>>({});
+  const bufferedAudioCursorRef = useRef<Record<string, string>>({});
+  const bufferedAudioInFlightRef = useRef<Record<string, string>>({});
+  const activeBufferedPlaybackLanguageRef = useRef<string | null>(null);
+  const [bufferedAudioByLanguage, setBufferedAudioByLanguage] = useState<Record<string, InterpreterSegmentAudio[]>>({});
   const summaryAudioPlayer = useAudioPlayer(summaryAudioSourceUri ? { uri: summaryAudioSourceUri } : null, {
     updateInterval: 250
   });
@@ -748,6 +758,10 @@ function InterpreterRoom({
       )
       .join('|'),
   [languageSessionState]);
+  useEffect(() => {
+    bufferedAudioByLanguageRef.current = bufferedAudioByLanguage;
+  }, [bufferedAudioByLanguage]);
+
   useEffect(() => () => {
     if (warmAudioDebounceRef.current) {
       clearTimeout(warmAudioDebounceRef.current);
@@ -815,6 +829,17 @@ function InterpreterRoom({
 
   useEffect(() => {
     if (segmentAudioStatus.didJustFinish) {
+      const activeBufferedLanguage = activeBufferedPlaybackLanguageRef.current;
+      const nextBufferedAudio = activeBufferedLanguage
+        ? shiftBufferedInterpretationAudio(activeBufferedLanguage)
+        : null;
+
+      if (activeBufferedLanguage && nextBufferedAudio) {
+        void playBufferedInterpretationAudio(activeBufferedLanguage, nextBufferedAudio);
+        return;
+      }
+
+      activeBufferedPlaybackLanguageRef.current = null;
       setActiveSegmentAudioKey(null);
       setLiveStatus('ready');
       if (respondingLanguageCode) {
@@ -1019,10 +1044,10 @@ function InterpreterRoom({
     }
 
     warmAudioDebounceRef.current = setTimeout(() => {
-      const targetLanguages = getSessionPoolLanguages(details.meeting, selectedLanguageCode);
+      const targetLanguages = getWarmAudioLanguages(details.meeting, selectedLanguageCode);
 
       targetLanguages.forEach((language) => {
-        void prepareWarmInterpretationAudio(language.code);
+        void prepareBufferedInterpretationAudio(language.code);
       });
       warmAudioDebounceRef.current = null;
     }, INTERPRETER_WARM_AUDIO_DEBOUNCE_MS);
@@ -1053,6 +1078,7 @@ function InterpreterRoom({
     setWasInterpretationInterrupted(false);
     setRespondingLanguageCode(null);
     setIsLiveLanguageModalOpen(false);
+    resetBufferedInterpretationAudio();
 
     try {
       const targetLanguages = getSessionPoolLanguages(details.meeting, languageCode);
@@ -1141,10 +1167,53 @@ function InterpreterRoom({
     setRespondingLanguageCode(null);
     setIsLiveLanguageModalOpen(false);
     setAudioLevel(0);
+    resetBufferedInterpretationAudio();
   }
 
-  async function prepareWarmInterpretationAudio(languageCode: string) {
-    const candidate = getWarmInterpretationInput(languageCode);
+  function resetBufferedInterpretationAudio() {
+    bufferedAudioByLanguageRef.current = {};
+    bufferedAudioCursorRef.current = {};
+    bufferedAudioInFlightRef.current = {};
+    activeBufferedPlaybackLanguageRef.current = null;
+    warmAudioInFlightRef.current = {};
+    setBufferedAudioByLanguage({});
+    setWarmAudioByLanguage({});
+  }
+
+  function setBufferedInterpretationQueue(languageCode: string, queue: InterpreterSegmentAudio[]) {
+    const nextBufferedAudio = { ...bufferedAudioByLanguageRef.current };
+
+    if (queue.length) {
+      nextBufferedAudio[languageCode] = queue;
+    } else {
+      delete nextBufferedAudio[languageCode];
+    }
+
+    bufferedAudioByLanguageRef.current = nextBufferedAudio;
+    setBufferedAudioByLanguage(nextBufferedAudio);
+  }
+
+  function appendBufferedInterpretationAudio(languageCode: string, audio: InterpreterSegmentAudio) {
+    const currentQueue = bufferedAudioByLanguageRef.current[languageCode] || [];
+    const nextQueue = [...currentQueue, audio].slice(0, INTERPRETER_BUFFERED_AUDIO_MAX_CHUNKS);
+
+    setBufferedInterpretationQueue(languageCode, nextQueue);
+  }
+
+  function shiftBufferedInterpretationAudio(languageCode: string): InterpreterSegmentAudio | null {
+    const currentQueue = bufferedAudioByLanguageRef.current[languageCode] || [];
+    const [nextAudio, ...remainingQueue] = currentQueue;
+
+    if (!nextAudio) {
+      return null;
+    }
+
+    setBufferedInterpretationQueue(languageCode, remainingQueue);
+    return nextAudio;
+  }
+
+  async function prepareBufferedInterpretationAudio(languageCode: string) {
+    const candidate = getBufferedInterpretationInput(languageCode);
 
     if (!candidate) {
       return;
@@ -1154,34 +1223,24 @@ function InterpreterRoom({
       languageCode,
       selectedVoiceId,
       candidate.sourceFingerprint,
-      candidate.translatedFingerprint
+      candidate.cursorFingerprint
     ].join(':');
-    const currentWarmEntry = warmAudioByLanguage[languageCode];
 
-    if (
-      currentWarmEntry?.status === 'ready' &&
-      currentWarmEntry.voiceId === selectedVoiceId &&
-      currentWarmEntry.sourceFingerprint === candidate.sourceFingerprint &&
-      currentWarmEntry.translatedFingerprint === candidate.translatedFingerprint
-    ) {
-      return;
-    }
-
-    if (warmAudioInFlightRef.current[languageCode] === requestKey) {
+    if (bufferedAudioInFlightRef.current[languageCode] === requestKey) {
       return;
     }
 
     const requestId = warmAudioRequestSeqRef.current + 1;
 
     warmAudioRequestSeqRef.current = requestId;
-    warmAudioInFlightRef.current[languageCode] = requestKey;
+    bufferedAudioInFlightRef.current[languageCode] = requestKey;
     setWarmAudioByLanguage((currentWarmAudio) => ({
       ...currentWarmAudio,
       [languageCode]: {
         requestId,
         sourceFingerprint: candidate.sourceFingerprint,
         status: 'preparing',
-        translatedFingerprint: candidate.translatedFingerprint,
+        translatedFingerprint: candidate.cursorFingerprint,
         voiceId: selectedVoiceId
       }
     }));
@@ -1191,11 +1250,13 @@ function InterpreterRoom({
       const result = await createInterpreterInterpretationAudio(idToken, details.meeting.meetingId, {
         sourceText: candidate.sourceText,
         targetLanguageCode: languageCode,
-        translatedText: candidate.translatedText || null,
+        translatedText: null,
         voiceId: selectedVoiceId
       });
 
       await cacheInterpreterSegmentAudioPayload(result.audio);
+      appendBufferedInterpretationAudio(languageCode, result.audio);
+      bufferedAudioCursorRef.current[languageCode] = candidate.cursorText;
       setWarmAudioByLanguage((currentWarmAudio) => {
         const latestWarmEntry = currentWarmAudio[languageCode];
 
@@ -1211,7 +1272,7 @@ function InterpreterRoom({
             requestId,
             sourceFingerprint: candidate.sourceFingerprint,
             status: 'ready',
-            translatedFingerprint: candidate.translatedFingerprint,
+            translatedFingerprint: candidate.cursorFingerprint,
             voiceId: selectedVoiceId
           }
         };
@@ -1231,35 +1292,30 @@ function InterpreterRoom({
             requestId,
             sourceFingerprint: candidate.sourceFingerprint,
             status: 'error',
-            translatedFingerprint: candidate.translatedFingerprint,
+            translatedFingerprint: candidate.cursorFingerprint,
             voiceId: selectedVoiceId
           }
         };
       });
     } finally {
-      if (warmAudioInFlightRef.current[languageCode] === requestKey) {
-        delete warmAudioInFlightRef.current[languageCode];
+      if (bufferedAudioInFlightRef.current[languageCode] === requestKey) {
+        delete bufferedAudioInFlightRef.current[languageCode];
       }
     }
   }
 
   async function respondInSelectedLanguage(languageCode = selectedLanguageCode) {
-    const sourceText = getCapturedSourceText();
-    const realtimeTranslation = getCapturedTranslationText(languageCode);
+    const audio = shiftBufferedInterpretationAudio(languageCode);
 
-    if (!sourceText && !realtimeTranslation) {
+    if (!audio) {
       setLiveStatus('ready');
       setLiveMode('choosing');
       onError(
-        'The interpreter received microphone signal, but no transcript was returned yet. Speak a little longer, then tap a response language again.',
+        'That language is still preparing the live buffer. Keep listening until the language shows Ready, then tap it again.',
         'Interpreter needs attention'
       );
       return;
     }
-
-    const capturedSourceText = sourceText || realtimeTranslation;
-    const capturedTranslatedText = realtimeTranslation;
-    const warmAudio = getReadyWarmInterpretationAudio(languageCode, capturedSourceText, capturedTranslatedText);
 
     Object.values(realtimeSessionPoolRef.current).forEach((session) => session.pauseListening());
     safePauseAudioPlayer(summaryAudioPlayer);
@@ -1267,112 +1323,82 @@ function InterpreterRoom({
     setSelectedLanguageCode(languageCode);
     setRespondingLanguageCode(languageCode);
     setIsLiveLanguageModalOpen(false);
-    setIsPreparingSegmentAudio(!warmAudio);
+    setIsPreparingSegmentAudio(false);
     setLiveStatus('speaking');
     setLiveMode('responding');
-    updateLanguageSession(languageCode, {
-      status: 'speaking',
-      transcript: capturedSourceText,
-      translation: capturedTranslatedText
-    });
+    activeBufferedPlaybackLanguageRef.current = languageCode;
 
     try {
-      const audio = warmAudio || await createFreshInterpreterSegmentAudio(
-        languageCode,
-        capturedSourceText,
-        capturedTranslatedText
-      );
-
-      updateLanguageSession(languageCode, {
-        status: 'speaking',
-        transcript: audio.sourceText,
-        translation: audio.translatedText
-      });
-      setLiveTranscript(audio.sourceText);
-      setLiveTranslation(audio.translatedText);
-      recordLiveInterpretation(
-        languageCode,
-        audio.sourceText,
-        audio.translatedText,
-        audio.translationId
-      );
-
-      await playInterpreterSegmentAudioPayload(audio);
+      await playBufferedInterpretationAudio(languageCode, audio);
     } catch (error) {
       setLiveStatus('ready');
       setLiveMode('choosing');
       updateLanguageSession(languageCode, { status: 'ready' });
+      activeBufferedPlaybackLanguageRef.current = null;
       onError(getErrorMessage(error), 'Interpreter needs attention');
     } finally {
       setIsPreparingSegmentAudio(false);
     }
   }
 
-  async function createFreshInterpreterSegmentAudio(
+  async function playBufferedInterpretationAudio(
     languageCode: string,
-    sourceText: string,
-    translatedText: string
-  ): Promise<InterpreterSegmentAudio> {
-    const idToken = await getIdToken();
-    const result = await createInterpreterInterpretationAudio(idToken, details.meeting.meetingId, {
-      sourceText,
-      targetLanguageCode: languageCode,
-      translatedText: translatedText || null,
-      voiceId: selectedVoiceId
+    audio: InterpreterSegmentAudio
+  ) {
+    updateLanguageSession(languageCode, {
+      status: 'speaking',
+      transcript: audio.sourceText,
+      translation: audio.translatedText
     });
+    setSelectedLanguageCode(languageCode);
+    setRespondingLanguageCode(languageCode);
+    setLiveTranscript(audio.sourceText);
+    setLiveTranslation(audio.translatedText);
+    recordLiveInterpretation(
+      languageCode,
+      audio.sourceText,
+      audio.translatedText,
+      audio.translationId
+    );
 
-    await cacheInterpreterSegmentAudioPayload(result.audio);
-
-    return result.audio;
+    await playInterpreterSegmentAudioPayload(audio);
   }
 
-  function getReadyWarmInterpretationAudio(
-    languageCode: string,
-    sourceText: string,
-    translatedText: string
-  ): InterpreterSegmentAudio | null {
-    const warmEntry = warmAudioByLanguage[languageCode];
-
-    if (
-      !warmEntry?.audio ||
-      warmEntry.status !== 'ready' ||
-      warmEntry.voiceId !== selectedVoiceId
-    ) {
-      return null;
-    }
-
-    const sourceFingerprint = createInterpreterTextFingerprint(sourceText);
-    const translatedFingerprint = createInterpreterTextFingerprint(translatedText);
-
-    if (
-      warmEntry.sourceFingerprint !== sourceFingerprint ||
-      warmEntry.translatedFingerprint !== translatedFingerprint
-    ) {
-      return null;
-    }
-
-    return warmEntry.audio;
-  }
-
-  function getWarmInterpretationInput(languageCode: string): {
+  function getBufferedInterpretationInput(languageCode: string): {
+    cursorFingerprint: string;
+    cursorText: string;
     sourceFingerprint: string;
     sourceText: string;
-    translatedFingerprint: string;
-    translatedText: string;
   } | null {
     const sourceText = getCapturedSourceTranscriptText();
-    const translatedText = getCapturedTranslationText(languageCode);
-    const sourceOrFallbackText = sourceText || translatedText;
+    const preparedCursor = bufferedAudioCursorRef.current[languageCode] || '';
+    const queuedChunkCount = bufferedAudioByLanguageRef.current[languageCode]?.length || 0;
 
-    if (sourceOrFallbackText.trim().length < INTERPRETER_WARM_AUDIO_MIN_TEXT_LENGTH) {
+    if (!sourceText.trim()) {
       return null;
     }
 
+    if (queuedChunkCount >= INTERPRETER_BUFFERED_AUDIO_MAX_CHUNKS) {
+      return null;
+    }
+
+    let nextSourceText = sourceText.trim();
+
+    if (preparedCursor && sourceText.startsWith(preparedCursor)) {
+      nextSourceText = sourceText.slice(preparedCursor.length).trim();
+    }
+
+    if (nextSourceText.length < INTERPRETER_WARM_AUDIO_MIN_TEXT_LENGTH) {
+      return null;
+    }
+
+    const cursorText = sourceText;
+
     return {
-      sourceFingerprint: createInterpreterTextFingerprint(sourceOrFallbackText),
-      sourceText: sourceOrFallbackText,
-      translatedFingerprint: createInterpreterTextFingerprint(translatedText),
-      translatedText
+      cursorFingerprint: createInterpreterTextFingerprint(cursorText),
+      cursorText,
+      sourceFingerprint: createInterpreterTextFingerprint(nextSourceText),
+      sourceText: nextSourceText
     };
   }
 
@@ -1434,6 +1460,34 @@ function InterpreterRoom({
         .filter(([currentLanguageCode]) => currentLanguageCode === selectedLanguageCode)
         .map(([, session]) => session.translation)
     ].find((text) => text?.trim())?.trim() || '';
+  }
+
+  function getSummaryTranscriptSnapshotText(): string {
+    const lines = [
+      ...details.transcripts.map((segment) => segment.text),
+      ...details.translations.map((translation) => translation.sourceText),
+      liveTranscript,
+      ...Object.values(languageSessionState).map((session) => session.transcript),
+      ...liveInterpretationHistory.map((item) => item.sourceText)
+    ]
+      .map((text) => text?.trim())
+      .filter((text): text is string => Boolean(text));
+    const seen = new Set<string>();
+
+    return lines
+      .filter((line) => {
+        const normalizedLine = line.toLocaleLowerCase().replace(/\s+/g, ' ').trim();
+
+        if (!normalizedLine || seen.has(normalizedLine)) {
+          return false;
+        }
+
+        seen.add(normalizedLine);
+        return true;
+      })
+      .join('\n')
+      .slice(-24_000)
+      .trim();
   }
 
   function recordLiveInterpretation(
@@ -1725,6 +1779,7 @@ function InterpreterRoom({
       <InterpreterLiveRoomModal
         audioLevel={audioLevel}
         activeHistoryAudioKey={activeSegmentAudioKey}
+        bufferedAudioByLanguage={bufferedAudioByLanguage}
         details={details}
         hasReplayableInterpretationAudio={Boolean(segmentAudioSourceUri)}
         historyItems={liveInterpretationHistory}
@@ -1800,7 +1855,7 @@ function InterpreterRoom({
             onError={onError}
             onPlaySummary={(summary, languageCode) => void handlePlayInterpreterSummary(summary, languageCode)}
             onSubmit={async (languageCodes) => {
-              const result = await onCreateSummary(languageCodes);
+              const result = await onCreateSummary(languageCodes, getSummaryTranscriptSnapshotText());
 
               if (!result) {
                 return;
@@ -1824,7 +1879,6 @@ function InterpreterRoom({
               }
             }}
             preparingAudioKey={preparingSummaryAudioKey}
-            presentation="overlay"
             summaries={details.summaries}
           />
         )}
@@ -1839,6 +1893,7 @@ function InterpreterRoom({
 interface InterpreterLiveRoomModalProps {
   activeHistoryAudioKey: string | null;
   audioLevel: number;
+  bufferedAudioByLanguage: Record<string, InterpreterSegmentAudio[]>;
   details: InterpreterMeetingDetails;
   hasReplayableInterpretationAudio: boolean;
   historyItems: InterpreterLiveHistoryItem[];
@@ -1885,6 +1940,7 @@ interface InterpreterLiveRoomModalProps {
 function InterpreterLiveRoomModal({
   activeHistoryAudioKey,
   audioLevel,
+  bufferedAudioByLanguage,
   details,
   hasReplayableInterpretationAudio,
   historyItems,
@@ -2063,11 +2119,14 @@ function InterpreterLiveRoomModal({
             {details.meeting.interpreterLanguages.map((language) => {
               const isSelected = language.code === selectedLanguageCode;
               const isResponding = language.code === respondingLanguageCode && liveMode === 'responding';
+              const bufferedAudioCount = bufferedAudioByLanguage[language.code]?.length || 0;
+              const isBufferedReady = bufferedAudioCount > 0;
+              const isLanguageUnavailable = !canChooseLanguage || isPreparingInterpretationAudio || !isBufferedReady;
               const sessionStatus = languageSessionState[language.code]?.status || 'closed';
 
               return (
                 <Pressable
-                  disabled={!canChooseLanguage || isPreparingInterpretationAudio}
+                  disabled={isLanguageUnavailable}
                   key={language.code}
                   onPress={() => {
                     setSelectedLanguageCode(language.code);
@@ -2077,13 +2136,13 @@ function InterpreterLiveRoomModal({
                     styles.liveLanguageButton,
                     isSelected && styles.liveLanguageButtonActive,
                     isResponding && styles.liveLanguageButtonResponding,
-                    (!canChooseLanguage || isPreparingInterpretationAudio) && styles.disabledButton,
+                    isLanguageUnavailable && styles.disabledButton,
                     pressed && styles.pressed
                   ]}
                 >
                   <View style={[
                     styles.liveLanguageStatus,
-                    { backgroundColor: getRealtimeStatusColor(sessionStatus) }
+                    { backgroundColor: isBufferedReady ? appTheme.colors.success : getRealtimeStatusColor(sessionStatus) }
                   ]} />
                   <Text style={[
                     styles.liveLanguageButtonText,
@@ -2094,6 +2153,10 @@ function InterpreterLiveRoomModal({
                   </Text>
                   {isResponding ? (
                     <Text style={styles.liveLanguageRespondingText}>Speaking</Text>
+                  ) : isBufferedReady ? (
+                    <Text style={styles.liveLanguageReadyText}>{bufferedAudioCount} ready</Text>
+                  ) : liveMode === 'listening' ? (
+                    <Text style={styles.liveLanguageBufferingText}>Buffering</Text>
                   ) : null}
                 </Pressable>
               );
@@ -2143,7 +2206,7 @@ function InterpreterLiveRoomModal({
                   <Text style={styles.interpretationPlayerTitle}>Spoken interpretation</Text>
                   <Text style={styles.interpretationPlayerMeta}>
                     {isPreparingInterpretationAudio
-                      ? `Preparing ${selectedLanguage?.label || 'language'} audio`
+                      ? `Starting ${selectedLanguage?.label || 'language'} audio`
                       : isRealtimeResponseActive
                         ? `Speaking live in ${selectedLanguage?.label || 'selected language'}`
                         : isInterpretationAudioPlaying
@@ -2200,6 +2263,7 @@ function InterpreterLiveRoomModal({
           </View>
         </Pressable>
         <InterpreterResponseLanguageModal
+          bufferedAudioByLanguage={bufferedAudioByLanguage}
           isOpen={isLanguageModalOpen}
           languages={details.meeting.interpreterLanguages}
           onClose={onLanguageModalClose}
@@ -2303,9 +2367,17 @@ function InterpreterRoomSettingsPanel({
   }, [details.meeting.interpreterLanguages, invitedUserIds, isOpen]);
 
   function addLanguage(languageCode: string) {
-    setDraftLanguageCodes((currentCodes) =>
-      currentCodes.includes(languageCode) ? currentCodes : [...currentCodes, languageCode]
-    );
+    setDraftLanguageCodes((currentCodes) => {
+      if (currentCodes.includes(languageCode)) {
+        return currentCodes;
+      }
+
+      if (currentCodes.length >= INTERPRETER_MAX_RESPONSE_LANGUAGES) {
+        return currentCodes;
+      }
+
+      return [...currentCodes, languageCode];
+    });
   }
 
   function removeLanguage(languageCode: string) {
@@ -2396,12 +2468,22 @@ function InterpreterRoomSettingsPanel({
               );
             })}
             <Pressable
+              disabled={draftLanguageCodes.length >= INTERPRETER_MAX_RESPONSE_LANGUAGES}
               onPress={() => setIsLanguagePickerOpen((currentValue) => !currentValue)}
-              style={({ pressed }) => [styles.addSelectionRow, pressed && styles.pressed]}
+              style={({ pressed }) => [
+                styles.addSelectionRow,
+                draftLanguageCodes.length >= INTERPRETER_MAX_RESPONSE_LANGUAGES && styles.disabledButton,
+                pressed && styles.pressed
+              ]}
             >
               <Ionicons color={appTheme.colors.primary} name={isLanguagePickerOpen ? 'chevron-up-outline' : 'add-circle-outline'} size={18} />
               <Text style={styles.addSelectionText}>Add respond language</Text>
             </Pressable>
+            {draftLanguageCodes.length >= INTERPRETER_MAX_RESPONSE_LANGUAGES ? (
+              <Text style={styles.selectionLimitText}>
+                {INTERPRETER_MAX_RESPONSE_LANGUAGES} response languages selected. Remove one to choose another from the full language catalog.
+              </Text>
+            ) : null}
             {isLanguagePickerOpen ? (
               <View style={styles.inlinePickerPanel}>
                 {languages
@@ -2694,6 +2776,7 @@ function InterpreterAudioSpectrum({ audioLevel, isListening }: InterpreterAudioS
 }
 
 interface InterpreterResponseLanguageModalProps {
+  bufferedAudioByLanguage: Record<string, InterpreterSegmentAudio[]>;
   isOpen: boolean;
   languages: InterpreterLanguage[];
   onClose: () => void;
@@ -2703,6 +2786,7 @@ interface InterpreterResponseLanguageModalProps {
 }
 
 function InterpreterResponseLanguageModal({
+  bufferedAudioByLanguage,
   isOpen,
   languages,
   onClose,
@@ -2735,15 +2819,19 @@ function InterpreterResponseLanguageModal({
             {languages.map((language) => {
               const isSelected = language.code === selectedLanguageCode;
               const isResponding = language.code === respondingLanguageCode;
+              const bufferedAudioCount = bufferedAudioByLanguage[language.code]?.length || 0;
+              const isBufferedReady = bufferedAudioCount > 0;
 
               return (
                 <Pressable
+                  disabled={!isBufferedReady && !isResponding}
                   key={language.code}
                   onPress={() => onSelect(language.code)}
                   style={({ pressed }) => [
                     styles.responseLanguageButton,
                     isSelected && styles.responseLanguageButtonSelected,
                     isResponding && styles.responseLanguageButtonResponding,
+                    !isBufferedReady && !isResponding && styles.disabledButton,
                     pressed && styles.pressed
                   ]}
                 >
@@ -2763,7 +2851,11 @@ function InterpreterResponseLanguageModal({
                       styles.responseLanguageMeta,
                       isResponding && styles.responseLanguageTitleResponding
                     ]}>
-                      {isResponding ? 'Speaking now' : isSelected ? 'Current choice' : 'Tap to interpret'}
+                      {isResponding
+                        ? 'Speaking now'
+                        : isBufferedReady
+                          ? `${bufferedAudioCount} prepared ${bufferedAudioCount === 1 ? 'segment' : 'segments'}`
+                          : 'Preparing live buffer'}
                     </Text>
                   </View>
                 </Pressable>
@@ -3003,6 +3095,8 @@ function InterpreterCreateModal({
     updateInterval: 250
   });
   const voicePreviewStatus = useAudioPlayerStatus(voicePreviewPlayer);
+  const hasReachedResponseLanguageLimit = draft.languageCodes.length >= INTERPRETER_MAX_RESPONSE_LANGUAGES;
+  const hasTooManyResponseLanguages = draft.languageCodes.length > INTERPRETER_MAX_RESPONSE_LANGUAGES;
 
   useEffect(() => {
     if (isOpen) {
@@ -3084,6 +3178,10 @@ function InterpreterCreateModal({
   function toggleLanguage(code: string) {
     setDraft((currentDraft) => {
       if (currentDraft.languageCodes.includes(code)) {
+        return currentDraft;
+      }
+
+      if (currentDraft.languageCodes.length >= INTERPRETER_MAX_RESPONSE_LANGUAGES) {
         return currentDraft;
       }
 
@@ -3190,6 +3288,14 @@ function InterpreterCreateModal({
 
     if (!draft.languageCodes.length) {
       onError('Select at least one interpretation language.', 'Meeting needs attention');
+      return;
+    }
+
+    if (hasTooManyResponseLanguages) {
+      setDraft((currentDraft) => ({
+        ...currentDraft,
+        languageCodes: currentDraft.languageCodes.slice(0, INTERPRETER_MAX_RESPONSE_LANGUAGES)
+      }));
       return;
     }
 
@@ -3328,12 +3434,22 @@ function InterpreterCreateModal({
                 );
               })}
               <Pressable
+                disabled={hasReachedResponseLanguageLimit}
                 onPress={() => setLanguagePickerMode('interpret')}
-                style={({ pressed }) => [styles.addSelectionRow, pressed && styles.pressed]}
+                style={({ pressed }) => [
+                  styles.addSelectionRow,
+                  hasReachedResponseLanguageLimit && styles.disabledButton,
+                  pressed && styles.pressed
+                ]}
               >
                 <Ionicons color={appTheme.colors.primary} name="add-circle-outline" size={18} />
                 <Text style={styles.addSelectionText}>Add language</Text>
               </Pressable>
+              {hasReachedResponseLanguageLimit ? (
+                <Text style={styles.selectionLimitText}>
+                  {INTERPRETER_MAX_RESPONSE_LANGUAGES} response languages selected. Remove one to choose another from the full language catalog.
+                </Text>
+              ) : null}
             </View>
 
             <Text style={styles.sectionLabel}>Meeting access</Text>
@@ -3511,9 +3627,13 @@ function InterpreterCreateModal({
           </ScrollView>
 
           <Pressable
-            disabled={isBusy}
+            disabled={isBusy || hasTooManyResponseLanguages}
             onPress={submit}
-            style={({ pressed }) => [styles.primaryButtonWide, isBusy && styles.disabledButton, pressed && styles.pressed]}
+            style={({ pressed }) => [
+              styles.primaryButtonWide,
+              (isBusy || hasTooManyResponseLanguages) && styles.disabledButton,
+              pressed && styles.pressed
+            ]}
           >
             {isBusy ? <ActivityIndicator color="#fff" /> : <Ionicons color="#fff" name="shield-checkmark-outline" size={20} />}
             <Text style={styles.primaryButtonText}>Create interpreter meeting</Text>
@@ -4263,7 +4383,23 @@ function getSessionPoolLanguages(
 ): InterpreterLanguage[] {
   const realtimeLanguages = meeting.interpreterLanguages.filter((language) => language.realtimeTargetSupported);
 
-  return [...realtimeLanguages].sort((leftLanguage, rightLanguage) => {
+  return sortInterpreterLanguagesForPriority(realtimeLanguages, selectedLanguageCode)
+    .slice(0, INTERPRETER_MAX_RESPONSE_LANGUAGES);
+}
+
+function getWarmAudioLanguages(
+  meeting: InterpreterMeeting,
+  selectedLanguageCode: string
+): InterpreterLanguage[] {
+  return sortInterpreterLanguagesForPriority(meeting.interpreterLanguages, selectedLanguageCode)
+    .slice(0, INTERPRETER_MAX_RESPONSE_LANGUAGES);
+}
+
+function sortInterpreterLanguagesForPriority(
+  languages: InterpreterLanguage[],
+  selectedLanguageCode: string
+): InterpreterLanguage[] {
+  return [...languages].sort((leftLanguage, rightLanguage) => {
     if (leftLanguage.code === selectedLanguageCode) {
       return -1;
     }
@@ -4990,6 +5126,16 @@ function createStyles(colors: AppColors) {
       color: '#fff',
       fontSize: 11,
       opacity: 0.86
+    },
+    liveLanguageReadyText: {
+      color: colors.success,
+      fontSize: 11,
+      opacity: 0.88
+    },
+    liveLanguageBufferingText: {
+      color: colors.mutedStrong,
+      fontSize: 11,
+      opacity: 0.82
     },
     liveLanguageStatus: {
       borderRadius: 4,
@@ -5910,6 +6056,13 @@ function createStyles(colors: AppColors) {
       flexShrink: 1,
       fontSize: 14,
       lineHeight: 19
+    },
+    selectionLimitText: {
+      color: colors.mutedStrong,
+      fontSize: 12,
+      lineHeight: 17,
+      paddingHorizontal: 4,
+      paddingVertical: 9
     },
     addSelectionRow: {
       alignItems: 'center',

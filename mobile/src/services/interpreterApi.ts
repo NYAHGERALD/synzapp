@@ -402,10 +402,11 @@ export async function createInterpreterVoicePreviewAudio(
 export async function createInterpreterSummary(
   idToken: string,
   meetingId: string,
-  languageCodes: string[]
+  languageCodes: string[],
+  transcriptText?: string | null
 ) {
   const response = await interpreterFetch(idToken, `/meetings/${encodeURIComponent(meetingId)}/summaries`, {
-    body: JSON.stringify({ languageCodes }),
+    body: JSON.stringify({ languageCodes, transcriptText: transcriptText?.trim() || null }),
     method: 'POST'
   });
 

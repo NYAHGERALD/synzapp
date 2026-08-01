@@ -40,7 +40,7 @@ export const env = {
   openAiInterpreterSummaryTtsModel: process.env.OPENAI_INTERPRETER_SUMMARY_TTS_MODEL || 'gpt-4o-mini-tts',
   openAiInterpreterSummaryTtsVoice: process.env.OPENAI_INTERPRETER_SUMMARY_TTS_VOICE || 'cedar',
   openAiRequestTimeoutMs: numberFromEnv('OPENAI_REQUEST_TIMEOUT_MS', 25_000),
-  interpreterMaxTargetLanguages: numberFromEnv('INTERPRETER_MAX_TARGET_LANGUAGES', 6),
+  interpreterMaxTargetLanguages: numberFromEnv('INTERPRETER_MAX_TARGET_LANGUAGES', 4),
   interpreterRetentionDays: numberFromEnv('INTERPRETER_RETENTION_DAYS', 90),
   interpreterAudioRetention: booleanFromEnv('INTERPRETER_AUDIO_RETENTION', false),
   interpreterSegmentAudioEnabled: booleanFromEnv('INTERPRETER_SEGMENT_AUDIO_ENABLED', true),

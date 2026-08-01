@@ -89,7 +89,8 @@ const segmentAudioBodySchema = z.object({
 });
 
 const summaryBodySchema = z.object({
-  languageCodes: z.array(languageCodeSchema).min(1).max(10)
+  languageCodes: z.array(languageCodeSchema).min(1).max(10),
+  transcriptText: z.string().trim().min(1).max(24_000).nullable().optional()
 });
 
 const summaryAudioBodySchema = z.object({
@@ -389,7 +390,8 @@ interpreterRouter.post('/meetings/:meetingId/summaries', verifyAppCheck, async (
     const body = summaryBodySchema.parse(req.body);
     const result = await createInterpreterSummary(decodedToken, {
       languageCodes: body.languageCodes,
-      meetingId
+      meetingId,
+      transcriptText: body.transcriptText || null
     });
 
     res.status(201).json(result);

@@ -53,6 +53,7 @@ export interface InterpreterTranslationInput {
 export interface InterpreterSummaryInput {
   languageCodes: string[];
   meetingId: string;
+  transcriptText?: string | null;
 }
 
 export interface InterpreterSummaryAudioInput {
@@ -1072,7 +1073,7 @@ export async function createInterpreterSummary(
     .collection(TRANSCRIPT_COLLECTION)
     .limit(250)
     .get();
-  const transcriptText = transcriptSnapshot.docs
+  const savedTranscriptText = transcriptSnapshot.docs
     .map((doc) => doc.data())
     .sort(compareRecordsByIso('asc'))
     .map((data) => {
@@ -1080,6 +1081,7 @@ export async function createInterpreterSummary(
     })
     .filter((text): text is string => Boolean(text))
     .join('\n');
+  const transcriptText = combineInterpreterTranscriptText(savedTranscriptText, input.transcriptText);
 
   if (!transcriptText) {
     throw validationError('There is no interpreted conversation to summarize yet.');
@@ -1125,6 +1127,7 @@ export async function createInterpreterSummary(
       audioLanguageCodes: Object.keys(summaryAudioByLanguage),
       languageCodes,
       model: env.openAiInterpreterSummaryModel,
+      usedLiveTranscriptSnapshot: Boolean(input.transcriptText?.trim()),
       speechModel: env.openAiInterpreterSummaryTtsModel,
       speechVoice: getMeetingInterpreterVoiceId(meeting)
     },
@@ -1607,14 +1610,16 @@ async function requestOpenAiMeetingSummary(
             {
               text: [
                 'You are Synzapp Interpreter, a professional human-style workplace interpreter and meeting facilitator.',
-                'Create a useful spoken recap, not a literal transcript compression.',
+                'Create a useful comprehensive spoken recap for people who need to understand what happened after the meeting.',
                 'Use natural, simple, professional language that employees can understand easily.',
                 'Preserve the speaker meaning and business context, even when the original speech has grammar, vocabulary, or filler-word issues.',
-                'Include the important topics, decisions, action items, owners, risks, blockers, and next steps only when they were actually discussed.',
+                'Include the important topics, decisions, action items, owners, dates, numbers, risks, blockers, open questions, and next steps only when they were actually discussed.',
+                'Group related points cleanly so the spoken summary is easy to follow.',
+                'Do not make the summary so short that useful operational details are lost.',
                 'Do not add facts that were not discussed.',
                 `Meeting type: ${meeting.meetingType}.`,
                 `Return valid JSON keyed by these language codes: ${languageCodes.join(', ')}.`,
-                'Each value must be a detailed but concise spoken summary in that language.',
+                'Each value must be a detailed, practical spoken summary in that language.',
                 'Write each value as text that can be read aloud naturally by an interpreter voice.',
                 '',
                 transcriptText
@@ -1669,6 +1674,36 @@ async function requestOpenAiMeetingSummary(
       index === 0 ? outputText.trim() : 'Summary is not available in this language yet.'
     ]));
   }
+}
+
+function combineInterpreterTranscriptText(
+  savedTranscriptText: string,
+  liveTranscriptText?: string | null
+): string {
+  const savedLines = splitInterpreterTranscriptLines(savedTranscriptText);
+  const liveLines = splitInterpreterTranscriptLines(liveTranscriptText || '');
+  const seenLines = new Set<string>();
+  const combinedLines: string[] = [];
+
+  [...savedLines, ...liveLines].forEach((line) => {
+    const normalizedLine = line.toLocaleLowerCase().replace(/\s+/g, ' ').trim();
+
+    if (!normalizedLine || seenLines.has(normalizedLine)) {
+      return;
+    }
+
+    seenLines.add(normalizedLine);
+    combinedLines.push(line);
+  });
+
+  return combinedLines.join('\n').slice(-24_000).trim();
+}
+
+function splitInterpreterTranscriptLines(value: string): string[] {
+  return value
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
 }
 
 async function buildInterpreterSummaryAudioByLanguage(
@@ -1824,15 +1859,18 @@ async function requestOpenAiInterpreterSegmentTranslation({
             {
               text: [
                 'You are Synzapp AI Interpreter for a real workplace meeting.',
-                `Create a natural spoken interpretation in ${targetLanguagePrompt}.`,
-                'Do not translate word for word.',
+                `Create a faithful, natural spoken interpretation in ${targetLanguagePrompt}.`,
+                'This is an interpretation, not a summary. Do not compress the speaker into only the main point.',
+                'Keep the same meaning, sequence, intent, tone, urgency, important details, names, numbers, dates, places, conditions, and decisions.',
+                'Use your own clear spoken wording like a professional human interpreter, but do not shorten away meaningful content.',
+                'Do not translate word for word when the result would sound unnatural.',
                 'Correct obvious vocabulary mistakes, grammar mistakes, false starts, filler words, and mumbling.',
-                'Preserve the original meaning, intent, urgency, and workplace context.',
+                'If the speaker repeats themselves for emphasis, preserve the emphasis naturally without sounding robotic.',
                 'Use simple language that a team member can understand when listening.',
-                'Do not add facts, advice, opinions, or assistant-style explanations.',
+                'Do not add facts, advice, opinions, summaries, conclusions, or assistant-style explanations.',
                 'Return only valid JSON with keys introText and interpretedText.',
                 'introText must be one short natural sentence in the target language that introduces the interpretation.',
-                'interpretedText must be the clear spoken interpretation in the target language.',
+                'interpretedText must be the clear spoken interpretation in the target language with full coverage of the captured speech.',
                 `Meeting type: ${meeting.meetingType}.`,
                 '',
                 'Original captured speech:',
@@ -2402,14 +2440,10 @@ async function getAuthorizedInterpreterContext(decodedToken: DecodedIdToken): Pr
 }
 
 function normalizeInterpreterLanguages(languageCodes: string[]): InterpreterLanguage[] {
-  const requestedCodes = ['en-US', ...languageCodes]
+  const requestedCodes = (languageCodes.length ? languageCodes : ['en-US'])
     .map((code) => code.trim())
     .filter(Boolean);
-  const uniqueCodes = [...new Set(requestedCodes)];
-
-  if (uniqueCodes.length > env.interpreterMaxTargetLanguages) {
-    throw validationError(`Interpreter meetings support up to ${env.interpreterMaxTargetLanguages} target languages.`);
-  }
+  const uniqueCodes = [...new Set(requestedCodes)].slice(0, env.interpreterMaxTargetLanguages);
 
   const languages = uniqueCodes.map((code) => LANGUAGE_BY_CODE.get(code));
 
