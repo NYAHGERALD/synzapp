@@ -68,10 +68,10 @@ import { SidePanel, type SidePanelGroup, type SidePanelItemId } from './SidePane
 import './styles.css';
 
 
-type DashboardModule = 'account' | 'actions' | 'announcements' | 'audit' | 'dashboard' | 'lsw' | 'lsw-verification' | 'rails' | 'rca' | 'retention' | 'settings' | 'support';
+type DashboardModule = 'account' | 'actions' | 'announcements' | 'audit' | 'dashboard' | 'lsw' | 'rails' | 'rca' | 'retention' | 'settings' | 'support';
 type AccountPanelTab = 'account' | 'settings';
 
-const DASHBOARD_MODULES: DashboardModule[] = ['account', 'actions', 'announcements', 'audit', 'dashboard', 'lsw', 'lsw-verification', 'rca', 'rails', 'retention', 'settings', 'support'];
+const DASHBOARD_MODULES: DashboardModule[] = ['account', 'actions', 'announcements', 'audit', 'dashboard', 'lsw', 'rca', 'rails', 'retention', 'settings', 'support'];
 const DASHBOARD_MODULE_HASHES: Record<DashboardModule, string> = {
   account: '#account',
   actions: '#actions',
@@ -79,7 +79,6 @@ const DASHBOARD_MODULE_HASHES: Record<DashboardModule, string> = {
   audit: '#audit',
   dashboard: '#dashboard',
   lsw: '#lsw',
-  'lsw-verification': '#lsw-verification',
   rails: '#rails',
   rca: '#rca',
   retention: '#compliance',
@@ -89,14 +88,6 @@ const DASHBOARD_MODULE_HASHES: Record<DashboardModule, string> = {
 const DASHBOARD_MODULE_STORAGE_PREFIX = 'synzapp.dashboard.activeModule';
 const PANEL_COLLAPSED_STORAGE_KEY = 'synzapp.workspace.panelCollapsed';
 
-/**
- * The sections that take the whole window.
- *
- * Each is worked in for an hour at a time rather than glanced at, and every
- * pixel of navigation is taken from the thing being read. They come back
- * through one button, always in the same place.
- */
-const FULL_SCREEN_MODULES: DashboardModule[] = ['lsw', 'lsw-verification', 'rca', 'rails'];
 
 const countries = [
   {
@@ -789,7 +780,6 @@ function Dashboard({
   // Retention and legal hold are tenant-wide controls, so they stay with the
   // Org Admin rather than following the LSW verification audience.
   const canManageRetention = ['ORG_ADMIN', 'SYSTEM_ADMIN'].includes(roleCode);
-  const isFullScreenModule = FULL_SCREEN_MODULES.includes(activeModule);
 
   /**
    * What the panel offers, grouped the way somebody thinks about the work.
@@ -803,10 +793,9 @@ function Dashboard({
     {
       items: [
         { id: 'dashboard', label: 'Dashboard' },
-        { id: 'lsw', label: 'LSW', opensFullScreen: true },
-        { id: 'lsw-verification', label: 'LSW Verification', locked: !canViewLswVerification, opensFullScreen: true },
-        { id: 'rca', label: 'RCA', opensFullScreen: true },
-        { id: 'rails', label: 'RAILS', opensFullScreen: true },
+        { id: 'lsw', label: 'LSW' },
+        { id: 'rca', label: 'RCA' },
+        { id: 'rails', label: 'RAILS' },
         { id: 'actions', label: 'Actions' },
         { id: 'announcements', label: 'Announcements' }
       ],
@@ -846,12 +835,6 @@ function Dashboard({
   React.useEffect(() => {
     window.localStorage.setItem(PANEL_COLLAPSED_STORAGE_KEY, String(isPanelCollapsed));
   }, [isPanelCollapsed]);
-
-  React.useEffect(() => {
-    if (activeModule === 'lsw-verification' && !canViewLswVerification) {
-      setDashboardModule('dashboard');
-    }
-  }, [activeModule, canViewLswVerification, setDashboardModule]);
 
   React.useEffect(() => {
     function handleHashChange() {
@@ -914,39 +897,24 @@ function Dashboard({
   }
 
   return (
-    <main className={isFullScreenModule ? 'workspace-page is-fullscreen' : 'workspace-page'}>
-      {isFullScreenModule ? (
-        // No panel and no bar: these sections are worked in for an hour at a
-        // time and every pixel of chrome is taken from the thing being read.
-        // One way out, and it is always in the same place.
-        <button
-          aria-label="Back to the dashboard"
-          className="workspace-back"
-          onClick={() => setDashboardModule('dashboard')}
-          type="button"
-        >
-          <ArrowLeft aria-hidden="true" size={18} />
-          <span>Dashboard</span>
-        </button>
-      ) : (
-        <SidePanel
-          activeId={activeModule}
-          avatar={<Avatar className="side-panel-account-avatar" name={displayName} photoUrl={profilePhotoUrl} />}
-          companyName={companyName}
-          departmentName={departmentName}
-          displayName={displayName}
-          groups={sidePanelGroups}
-          isCollapsed={isPanelCollapsed}
-          isSettingsActive={activeModule === 'settings' || activeModule === 'account'}
-          onOpenAccount={() => setIsProfileMenuOpen((isOpen) => !isOpen)}
-          onOpenSettings={() => setDashboardModule('settings')}
-          onSelect={(id: SidePanelItemId) => setDashboardModule(id)}
-          onToggleCollapsed={() => setIsPanelCollapsed((collapsed) => !collapsed)}
-          role={role}
-        />
-      )}
+    <main className="workspace-page">
+      <SidePanel
+        activeId={activeModule}
+        avatar={<Avatar className="side-panel-account-avatar" name={displayName} photoUrl={profilePhotoUrl} />}
+        companyName={companyName}
+        departmentName={departmentName}
+        displayName={displayName}
+        groups={sidePanelGroups}
+        isCollapsed={isPanelCollapsed}
+        isSettingsActive={activeModule === 'settings' || activeModule === 'account'}
+        onOpenAccount={() => setIsProfileMenuOpen((isOpen) => !isOpen)}
+        onOpenSettings={() => setDashboardModule('settings')}
+        onSelect={(id: SidePanelItemId) => setDashboardModule(id)}
+        onToggleCollapsed={() => setIsPanelCollapsed((collapsed) => !collapsed)}
+        role={role}
+      />
 
-      {isProfileMenuOpen && !isFullScreenModule ? createPortal((
+      {isProfileMenuOpen ? createPortal((
         <div
           aria-label="Employee profile menu"
           className="dashboard-profile-menu side-panel-profile-menu"
@@ -1011,7 +979,6 @@ function Dashboard({
         {activeModule === 'announcements' ? <AnnouncementConsole /> : null}
         {activeModule === 'audit' ? <AuditConsole /> : null}
         {activeModule === 'lsw' ? <LswPrototype /> : null}
-        {activeModule === 'lsw-verification' && canViewLswVerification ? <LswPrototype view="verification" /> : null}
         {activeModule === 'rca' ? <RcaWorkspace key={rcaEntryKey} /> : null}
         {activeModule === 'rails' ? <RailsWorkspace /> : null}
         {activeModule === 'retention' && canManageRetention ? <RetentionConsole adminName={displayName} /> : null}

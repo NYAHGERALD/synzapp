@@ -14,7 +14,6 @@ import {
   Scale,
   Search,
   Settings,
-  ShieldCheck,
   Workflow
 } from 'lucide-react';
 
@@ -38,7 +37,6 @@ export type SidePanelItemId =
   | 'audit'
   | 'dashboard'
   | 'lsw'
-  | 'lsw-verification'
   | 'rails'
   | 'rca'
   | 'retention'
@@ -51,8 +49,6 @@ export interface SidePanelItem {
   label: string;
   /** Shown, but not reachable. Saying so beats a menu that changes shape per person. */
   locked?: boolean;
-  /** Opens without the panel, and comes back through a back button. */
-  opensFullScreen?: boolean;
 }
 
 export interface SidePanelGroup {
@@ -66,7 +62,6 @@ const ICONS: Record<SidePanelItemId, React.ComponentType<{ size?: number }>> = {
   audit: FileClock,
   dashboard: LayoutGrid,
   lsw: ClipboardCheck,
-  'lsw-verification': ShieldCheck,
   rails: Layers,
   rca: Workflow,
   retention: Scale,

@@ -22324,46 +22324,10 @@ h1 {
   grid-template-columns: 72px minmax(0, 1fr);
 }
 
-/* A full-screen section has no panel, so the content takes the window. */
-.workspace-page.is-fullscreen {
-  display: block;
-}
 
 .workspace-content {
   min-width: 0;
   overflow-x: hidden;
-}
-
-/* One way out, always in the same place, over the top-left of the section. */
-.workspace-back {
-  align-items: center;
-  background: var(--surface-card);
-  border: 1px solid var(--surface-border);
-  border-radius: 999px;
-  box-shadow: var(--surface-shadow);
-  color: var(--surface-heading);
-  cursor: pointer;
-  display: inline-flex;
-  font: inherit;
-  font-size: 13.5px;
-  gap: 7px;
-  left: 16px;
-  padding: 8px 14px 8px 11px;
-  position: fixed;
-  top: 16px;
-  transition: background 120ms ease, border-color 120ms ease;
-  z-index: 60;
-}
-
-.workspace-back:hover {
-  background: var(--surface-row-hover);
-  border-color: var(--synzapp-primary-blue);
-  color: var(--synzapp-primary-blue);
-}
-
-.workspace-back:focus-visible {
-  outline: 2px solid var(--synzapp-primary-blue);
-  outline-offset: 2px;
 }
 
 .side-panel {
