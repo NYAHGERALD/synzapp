@@ -33,6 +33,13 @@ import {
   subscribeChatPresenceUpdates,
   touchChatUserPresence
 } from './chatPresenceService.js';
+import {
+  canSeeTypingUpdate,
+  clearAllChatTypingForUser,
+  clearChatUserTyping,
+  markChatUserTyping,
+  subscribeChatTypingUpdates
+} from './chatTypingService.js';
 
 type FirestoreUnsubscribe = () => void;
 
@@ -45,6 +52,20 @@ interface AuthenticateMessage {
 interface SubscribeConversationMessage {
   contactId?: string;
   type: 'subscribeConversation';
+}
+
+/**
+ * Somebody is typing, or has stopped.
+ *
+ * `contactId` is the conversation from the sender's point of view: the person
+ * they are writing to, or the group. The server turns that into who may be told
+ * — the client never decides its own audience.
+ */
+interface TypingMessage {
+  chatType?: 'DIRECT' | 'GROUP';
+  contactId?: string;
+  isTyping?: boolean;
+  type: 'typing';
 }
 
 interface UnsubscribeConversationMessage {
@@ -61,6 +82,7 @@ type RealtimeClientMessage =
   | AuthenticateMessage
   | PresenceHeartbeatMessage
   | SubscribeConversationMessage
+  | TypingMessage
   | UnsubscribeConversationMessage;
 
 export function attachChatRealtimeServer(server: Server): void {
@@ -100,6 +122,8 @@ class ChatRealtimeConnection {
   private presenceUnsubscribe: (() => void) | null = null;
   private tenantId: string | null = null;
   private visibleContactIds = new Set<string>();
+  private typingUnsubscribe: (() => void) | null = null;
+  private displayName = '';
 
   constructor(private readonly webSocket: WebSocket) {}
 
@@ -151,6 +175,11 @@ class ChatRealtimeConnection {
       return;
     }
 
+    if (message.type === 'typing') {
+      this.handleTyping(message);
+      return;
+    }
+
     if (message.type === 'unsubscribeConversation') {
       this.unsubscribeConversation();
     }
@@ -164,6 +193,7 @@ class ChatRealtimeConnection {
         message.type === 'authenticate' ||
         message.type === 'presenceHeartbeat' ||
         message.type === 'subscribeConversation' ||
+        message.type === 'typing' ||
         message.type === 'unsubscribeConversation'
       ) {
         return message as RealtimeClientMessage;
@@ -184,6 +214,7 @@ class ChatRealtimeConnection {
       this.decodedToken = decodedToken;
       this.deviceId = activeDevice.deviceId;
       this.tenantId = profile.tenantId;
+      this.displayName = profile.displayName || 'Someone';
 
       if (this.authTimeout) {
         clearTimeout(this.authTimeout);
@@ -192,6 +223,7 @@ class ChatRealtimeConnection {
 
       await this.subscribeContactSummaries();
       this.subscribePresenceUpdates();
+      this.subscribeTypingUpdates();
       markChatUserOnline(decodedToken.uid, profile.tenantId);
       this.sendJson({ type: 'ready' });
     } catch {
@@ -293,6 +325,79 @@ class ChatRealtimeConnection {
         type: 'contactPresenceUpdated'
       });
     });
+  }
+
+  /**
+   * Records that this person is typing, and decides who may be told.
+   *
+   * The audience is worked out here rather than trusted from the client: a
+   * direct chat names its one recipient, and a group is left to the reader's
+   * own view of it, which is the same question as membership. A client that
+   * asked to broadcast to everybody would be ignored.
+   */
+  private handleTyping(message: TypingMessage): void {
+    if (!this.decodedToken || !this.tenantId) {
+      return;
+    }
+
+    const contactId = (message.contactId || '').trim();
+
+    // Only for a conversation this person can actually see. Without it, a
+    // crafted message could announce typing into somebody else's chat.
+    if (!contactId || !this.visibleContactIds.has(contactId)) {
+      return;
+    }
+
+    const chatType = message.chatType === 'GROUP' ? 'GROUP' : 'DIRECT';
+
+    if (!message.isTyping) {
+      clearChatUserTyping(this.decodedToken.uid, chatType === 'GROUP' ? contactId : this.decodedToken.uid);
+      return;
+    }
+
+    markChatUserTyping({
+      chatType,
+      // What the reader's own chat list keys it by: in a direct chat that is
+      // the typist, not the person being written to.
+      conversationKey: chatType === 'GROUP' ? contactId : this.decodedToken.uid,
+      recipientUids: chatType === 'GROUP' ? null : [contactId],
+      tenantId: this.tenantId,
+      typingName: this.displayName || 'Someone',
+      typingUid: this.decodedToken.uid
+    });
+  }
+
+  private subscribeTypingUpdates(): void {
+    this.unsubscribeTypingUpdates();
+
+    this.typingUnsubscribe = subscribeChatTypingUpdates((update) => {
+      if (!this.decodedToken || !this.tenantId) {
+        return;
+      }
+
+      if (!canSeeTypingUpdate({
+        readerTenantId: this.tenantId,
+        readerUid: this.decodedToken.uid,
+        update,
+        visibleConversationKeys: this.visibleContactIds
+      })) {
+        return;
+      }
+
+      this.sendJson({
+        chatType: update.chatType,
+        contactId: update.conversationKey,
+        isTyping: update.isTyping,
+        type: 'contactTypingUpdated',
+        typingName: update.typingName,
+        typingUid: update.typingUid
+      });
+    });
+  }
+
+  private unsubscribeTypingUpdates(): void {
+    this.typingUnsubscribe?.();
+    this.typingUnsubscribe = null;
   }
 
   private unsubscribePresenceUpdates(): void {
@@ -562,6 +667,15 @@ class ChatRealtimeConnection {
     this.unsubscribeContactSummaries();
     this.unsubscribeConversation();
     this.unsubscribePresenceUpdates();
+    this.unsubscribeTypingUpdates();
+
+    // Somebody whose phone loses signal mid-word never sends the "stopped"
+    // that would clear them. Their socket going is that signal, and without
+    // this the person they were writing to sees "typing..." until the entry's
+    // own deadline runs out.
+    if (uid) {
+      clearAllChatTypingForUser(uid);
+    }
 
     if (uid) {
       markChatUserOffline(uid);

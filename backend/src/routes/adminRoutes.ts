@@ -1,6 +1,10 @@
 import { Request, Router } from 'express';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import { z } from 'zod';
+import {
+  getAdminContactPolicyForCurrentUser,
+  updateAdminContactPolicy
+} from '../services/adminContactPolicyService.js';
 import { verifyAppCheck } from '../middleware/appCheck.js';
 import {
   createDepartment,
@@ -198,6 +202,10 @@ const actionReminderPolicyBodySchema = z.object({
   timeZone: z.string().trim().min(1).max(64),
   workingHoursEndHour: z.number().int().min(0).max(23),
   workingHoursStartHour: z.number().int().min(0).max(23)
+});
+
+const adminContactPolicyBodySchema = z.object({
+  showAdminPhoneNumber: z.boolean()
 });
 
 const scheduledMessagePolicyBodySchema = z.object({
@@ -706,6 +714,56 @@ adminRouter.patch('/action-reminder-policy', verifyAppCheck, async (req, res, ne
     await writeAuditEvent({
       action: 'ACTION_REMINDER_POLICY_UPDATED',
       reason: error instanceof Error ? error.message : 'Reminder policy update failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
+/**
+ * Whether an admin's phone number reaches the people they look after.
+ *
+ * Read by anybody in the tenant, because the main menu asks for it on every
+ * open; written only by an admin who may manage security. See section 4 of
+ * SYNZAPP_MAIN_MENU_PLAN.md.
+ */
+adminRouter.get('/admin-contact-policy', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const policy = await getAdminContactPolicyForCurrentUser(decodedToken);
+
+    res.json({ policy });
+  } catch (error) {
+    next(error);
+  }
+});
+
+adminRouter.patch('/admin-contact-policy', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const body = adminContactPolicyBodySchema.parse(req.body);
+    const policy = await updateAdminContactPolicy(decodedToken, body);
+
+    await writeAuditEvent({
+      action: 'ADMIN_CONTACT_POLICY_UPDATED',
+      metadata: {
+        showAdminPhoneNumber: policy.showAdminPhoneNumber
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: decodedToken.tenantId as string | undefined,
+      uid: decodedToken.uid
+    });
+
+    res.json({ policy });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'ADMIN_CONTACT_POLICY_UPDATED',
+      reason: error instanceof Error ? error.message : 'Admin contact policy update failed',
       req,
       status: 'FAILED'
     }).catch(() => undefined);

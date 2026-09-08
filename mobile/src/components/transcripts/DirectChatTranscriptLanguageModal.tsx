@@ -1,11 +1,25 @@
 import Feather from '@expo/vector-icons/Feather';
-import { ActivityIndicator, Modal, Platform, Pressable, ScrollView, Text, View } from 'react-native';
+import React from 'react';
+import {
+  ActivityIndicator,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View
+} from 'react-native';
+import { ANDROID_MAX_NAVIGATION_INSET } from '../../services/androidNavigationInset';
 import { ChatItem } from '../../components/groups/GroupInfoModal';
 import { ChatSearchBar, getKeyboardDismissMode } from '../../components/chatUiPrimitives';
 import { ChatTranscriptLanguageCode, ChatTranscriptLanguageSetting } from '../../services/chatApi';
+import { CircleIconButton, CircleIconSpacer } from '../../components/ui/CircleIconButton';
+import { ListSection } from '../../components/ui/GroupedList';
 import { TranscriptLanguageOption, chatTranscriptLanguageOptions } from '../../components/contacts/ContactInfoModal';
 import { getFullScreenModalTopPadding, getNativeFullHeightModalPresentationStyle } from '../../components/keyResults/KeyResultsSettings';
 import { normalizeSearchQuery } from '../../components/messages/MessageThread';
+import { resolveScreenBottomInset } from '../../services/rootSafeArea';
 import { styles } from '../../screens/adminChatStyles';
 import { useAppTheme } from '../../theme/AppThemeProvider';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -13,7 +27,17 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 /**
  * Transcript language selection.
  *
- * Lifted out of the chat screen unchanged.
+ * The app's grouped list: a tinted page, rounded cards, hairline dividers, and
+ * quiet section labels rather than headings that shout. The two groups are the
+ * only thing that matters on the screen — what this phone can already do, and
+ * what it would have to fetch — so they are what the cards separate.
+ *
+ * The search field stays above the scroll rather than in it. Twenty-three
+ * languages is more than a screen, and a search box that scrolls away is one
+ * nobody can reach by the time they want it.
+ *
+ * Full screen on Android, so the navigation bar is this screen's own problem;
+ * see `resolveScreenBottomInset`.
  */
 
 export function DirectChatTranscriptLanguageModal({
@@ -40,6 +64,13 @@ export function DirectChatTranscriptLanguageModal({
   const appTheme = useAppTheme();
   const insets = useSafeAreaInsets();
   const modalTopPadding = getFullScreenModalTopPadding(insets.top);
+  // The keyboard does open here, but it opens over a list that scrolls, not
+  // over anything pinned to the bottom, so this is only ever asked for the
+  // navigation bar. Clamped all the same.
+  const screenBottomInset = resolveScreenBottomInset({
+    androidNavigationInset: Math.min(insets.bottom, ANDROID_MAX_NAVIGATION_INSET),
+    platform: Platform.OS
+  });
 
   if (!chat || chat.chatType === 'GROUP') {
     return null;
@@ -66,30 +97,21 @@ export function DirectChatTranscriptLanguageModal({
       visible={isOpen}
     >
       <View style={[
-        styles.transcriptLanguageScreen,
+        languageStyles.screen,
         {
-          backgroundColor: appTheme.colors.screen,
+          backgroundColor: appTheme.colors.groupedBackground,
           paddingTop: modalTopPadding
         }
       ]}>
-        <View style={styles.transcriptLanguageTopBar}>
-          <Pressable
-            accessibilityLabel="Back to contact info"
-            accessibilityRole="button"
-            onPress={onClose}
-            style={({ pressed }) => [
-              styles.groupInfoTopButton,
-              { backgroundColor: appTheme.colors.surface },
-              pressed && styles.pressed
-            ]}
-          >
-            <Feather color={appTheme.colors.ink} name="x" size={22} />
-          </Pressable>
-          <Text numberOfLines={1} style={[styles.transcriptLanguageTitle, { color: appTheme.colors.ink }]}>Chat transcript language</Text>
-          <View style={styles.groupInfoTopButtonSpacer} />
+        <View style={languageStyles.header}>
+          <CircleIconButton action="close" label="Back to contact info" onPress={onClose} />
+          <Text numberOfLines={1} style={[languageStyles.headerTitle, { color: appTheme.colors.ink }]}>
+            Chat transcript language
+          </Text>
+          <CircleIconSpacer />
         </View>
 
-        <View style={styles.transcriptLanguageSearchWrap}>
+        <View style={languageStyles.searchWrap}>
           <ChatSearchBar
             onChangeText={onChangeSearch}
             placeholder="Search"
@@ -98,23 +120,27 @@ export function DirectChatTranscriptLanguageModal({
         </View>
 
         <ScrollView
-          contentContainerStyle={styles.transcriptLanguageContent}
+          contentContainerStyle={[
+            languageStyles.content,
+            { paddingBottom: Math.max(28, screenBottomInset + 24) }
+          ]}
           keyboardDismissMode={getKeyboardDismissMode()}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          <View style={[styles.transcriptLanguageNote, { backgroundColor: appTheme.colors.surfaceElevated }]}>
-            <Text style={[styles.transcriptLanguageNoteText, { color: appTheme.colors.muted }]}>
-              This language is for transcripts in this chat only. To change the language for all transcripts, go to Transcript language in Settings.
-            </Text>
-          </View>
+          {/* Explanatory text, on the page rather than in a card. A white slab
+              holding nothing but grey words reads as something to act on. */}
+          <Text style={[languageStyles.note, { color: appTheme.colors.muted }]}>
+            This language is for transcripts in this chat only. To change the language
+            for all transcripts, go to Transcript language in Settings.
+          </Text>
 
           <TranscriptLanguageSection
             disabled={isSaving}
             languages={onDeviceLanguages}
             onSelectLanguage={onSelectLanguage}
             selectedLanguageCode={selectedLanguage.languageCode}
-            title="On Device"
+            title="On device"
           />
 
           <TranscriptLanguageSection
@@ -126,7 +152,7 @@ export function DirectChatTranscriptLanguageModal({
           />
 
           {!hasMatches ? (
-            <Text style={[styles.transcriptLanguageEmpty, { color: appTheme.colors.muted }]}>No languages found</Text>
+            <Text style={[languageStyles.empty, { color: appTheme.colors.muted }]}>No languages found</Text>
           ) : null}
 
           {isLoading || isSaving ? (
@@ -156,27 +182,22 @@ function TranscriptLanguageSection({
   selectedLanguageCode: ChatTranscriptLanguageCode;
   title: string;
 }) {
-  const appTheme = useAppTheme();
-
   if (!languages.length) {
     return null;
   }
 
   return (
-    <View style={styles.transcriptLanguageSectionWrap}>
-      <Text style={[styles.transcriptLanguageSectionTitle, { color: appTheme.colors.muted }]}>{title}</Text>
-      <View style={[styles.transcriptLanguageSection, { backgroundColor: appTheme.colors.surfaceElevated }]}>
-        {languages.map((language) => (
-          <TranscriptLanguageRow
-            disabled={disabled}
-            isSelected={language.code === selectedLanguageCode}
-            key={language.code}
-            language={language}
-            onSelect={() => onSelectLanguage(language.code)}
-          />
-        ))}
-      </View>
-    </View>
+    <ListSection title={title}>
+      {languages.map((language) => (
+        <TranscriptLanguageRow
+          disabled={disabled}
+          isSelected={language.code === selectedLanguageCode}
+          key={language.code}
+          language={language}
+          onSelect={() => onSelectLanguage(language.code)}
+        />
+      ))}
+    </ListSection>
   );
 }
 
@@ -196,23 +217,21 @@ function TranscriptLanguageRow({
   return (
     <Pressable
       accessibilityLabel={language.label}
-      accessibilityRole="button"
-      accessibilityState={{ selected: isSelected }}
+      accessibilityRole="radio"
+      accessibilityState={{ checked: isSelected, disabled }}
       disabled={disabled}
       onPress={onSelect}
       style={({ pressed }) => [
-        styles.transcriptLanguageRow,
-        {
-          backgroundColor: appTheme.colors.surfaceElevated,
-          borderBottomColor: appTheme.colors.divider
-        },
-        pressed && styles.pressed,
-        disabled && styles.disabled
+        languageStyles.row,
+        pressed && { backgroundColor: appTheme.colors.groupedBackground },
+        disabled && languageStyles.disabled
       ]}
     >
-      <Text numberOfLines={1} style={[styles.transcriptLanguageRowText, { color: appTheme.colors.ink }]}>{language.label}</Text>
+      <Text numberOfLines={1} style={[languageStyles.rowText, { color: appTheme.colors.ink }]}>
+        {language.label}
+      </Text>
       {isSelected ? (
-        <Feather color={appTheme.colors.success} name="check" size={20} />
+        <Feather color={appTheme.colors.link} name="check" size={19} />
       ) : null}
     </Pressable>
   );
@@ -240,3 +259,60 @@ function filterTranscriptLanguageOptions(
     normalizeSearchQuery(`${language.label} ${language.code}`).includes(query)
   );
 }
+
+const languageStyles = StyleSheet.create({
+  screen: {
+    flex: 1
+  },
+  header: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: 15
+  },
+  headerTitle: {
+    flex: 1,
+    fontSize: 17,
+    lineHeight: 22,
+    paddingHorizontal: 10,
+    textAlign: 'center'
+  },
+  // Room around the field for its shadow to fall into. Crowded against the
+  // header above or the first card below, the lift stops reading as one.
+  searchWrap: {
+    paddingBottom: 4,
+    paddingHorizontal: 15,
+    paddingTop: 10
+  },
+  content: {
+    paddingTop: 6
+  },
+  note: {
+    fontSize: 13.5,
+    lineHeight: 19,
+    marginHorizontal: 15
+  },
+  row: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 12,
+    minHeight: 50,
+    paddingHorizontal: 16,
+    paddingVertical: 12
+  },
+  rowText: {
+    flex: 1,
+    fontSize: 16,
+    lineHeight: 21,
+    minWidth: 0
+  },
+  empty: {
+    fontSize: 15,
+    lineHeight: 20,
+    paddingVertical: 18,
+    textAlign: 'center'
+  },
+  disabled: {
+    opacity: 0.4
+  }
+});

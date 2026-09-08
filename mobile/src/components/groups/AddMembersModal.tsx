@@ -1,18 +1,28 @@
-import Feather from '@expo/vector-icons/Feather';
+import React from 'react';
+import { Modal, Platform, ScrollView, Text, View } from 'react-native';
+import { ANDROID_MAX_NAVIGATION_INSET } from '../../services/androidNavigationInset';
 import { ChatContact } from '../../services/chatApi';
-import { ChatMemberSelectRow, filterChatContacts } from '../../components/groups/GroupAddMembersModal';
+import {
+  ChatMemberSelectRow,
+  MemberPickerHeader,
+  SelectedMembersStrip,
+  filterChatContacts,
+  memberPickerStyles
+} from '../../components/groups/GroupAddMembersModal';
 import { ChatSearchBar } from '../../components/chatUiPrimitives';
-import { Modal, Platform, Pressable, ScrollView, Text, View } from 'react-native';
-import { ProfileAvatar } from '../../components/messages/MessageThread';
+import { ListSection } from '../../components/ui/GroupedList';
 import { getFullScreenModalTopPadding, getNativeFullHeightModalPresentationStyle } from '../../components/keyResults/KeyResultsSettings';
-import { styles } from '../../screens/adminChatStyles';
+import { resolveScreenBottomInset } from '../../services/rootSafeArea';
 import { useAppTheme } from '../../theme/AppThemeProvider';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 /**
- * Member selection.
+ * Member selection, on the way to a new group.
  *
- * Lifted out of the chat screen unchanged.
+ * The same screen as adding to a group that already exists, and built from the
+ * same pieces on purpose: the header, the strip of people picked so far and the
+ * selectable row all come from `GroupAddMembersModal`. Two lists that drift
+ * apart is how one of them ends up without a search box.
  */
 
 export function AddMembersModal({
@@ -46,6 +56,10 @@ export function AddMembersModal({
   const filteredContacts = filterChatContacts(contacts, search);
   const insets = useSafeAreaInsets();
   const modalTopPadding = getFullScreenModalTopPadding(insets.top);
+  const screenBottomInset = resolveScreenBottomInset({
+    androidNavigationInset: Math.min(insets.bottom, ANDROID_MAX_NAVIGATION_INSET),
+    platform: Platform.OS
+  });
 
   return (
     <Modal
@@ -57,105 +71,67 @@ export function AddMembersModal({
       visible={isOpen}
     >
       <View style={[
-        styles.newChatModalScreen,
+        memberPickerStyles.screen,
         {
-          backgroundColor: appTheme.colors.screen,
+          backgroundColor: appTheme.colors.groupedBackground,
           paddingTop: modalTopPadding
         }
       ]}>
-        <View style={styles.newChatHeader}>
-          <Pressable
-            accessibilityLabel="Close add members"
-            accessibilityRole="button"
-            onPress={onBack}
-            style={({ pressed }) => [styles.newChatHeaderIconButton, pressed && styles.pressed]}
-          >
-            <Feather color={appTheme.colors.ink} name="x" size={24} />
-          </Pressable>
-          <View style={styles.newChatCenteredTitleWrap}>
-            <Text style={[styles.newChatHeaderTitle, { color: appTheme.colors.ink }]}>Add members</Text>
-            {selectedCount > 0 ? (
-              <Text style={[styles.newChatHeaderSubtitle, { color: appTheme.colors.muted }]}>{selectedCount} selected</Text>
-            ) : null}
-          </View>
-          <Pressable
-            accessibilityLabel="Next"
-            accessibilityRole="button"
-            disabled={!selectedCount}
-            onPress={onNext}
-            style={({ pressed }) => [
-              styles.newChatNextButton,
-              pressed && selectedCount > 0 && styles.pressed,
-              !selectedCount && styles.disabled
-            ]}
-          >
-            <Text style={styles.newChatNextText}>Next</Text>
-          </Pressable>
-        </View>
-
-        <ChatSearchBar
-          onChangeText={onSearchChange}
-          placeholder="Search name or number"
-          value={search}
+        <MemberPickerHeader
+          actionLabel="Next"
+          canAct={selectedCount > 0}
+          closeLabel="Close add members"
+          isBusy={false}
+          onAct={onNext}
+          onClose={onBack}
+          selectedCount={selectedCount}
+          title="Add members"
         />
 
-        {selectedMembers.length ? (
-          <View style={[
-            styles.addMembersSelectedPanel,
-            { backgroundColor: appTheme.colors.surface }
-          ]}>
-            <ScrollView
-              contentContainerStyle={styles.addMembersSelectedContent}
-              horizontal
-              keyboardShouldPersistTaps="handled"
-              showsHorizontalScrollIndicator={false}
-            >
-              {selectedMembers.map((member) => (
-                <View key={member.contactId} style={styles.addMembersSelectedChip}>
-                  <View style={styles.groupMemberAvatarWrap}>
-                    <ProfileAvatar
-                      headers={profilePhotoHeaders}
-                      name={member.displayName}
-                      size={48}
-                      uri={member.profilePhotoUrl}
-                    />
-                    <Pressable
-                      accessibilityLabel={`Remove ${member.displayName}`}
-                      accessibilityRole="button"
-                      onPress={() => onRemoveMember(member.contactId)}
-                      style={({ pressed }) => [styles.groupMemberRemoveButton, pressed && styles.pressed]}
-                    >
-                      <Feather color="#FFFFFF" name="x" size={13} />
-                    </Pressable>
-                  </View>
-                  <Text numberOfLines={2} style={[styles.addMembersSelectedName, { color: appTheme.colors.ink }]}>{member.displayName}</Text>
-                </View>
-              ))}
-            </ScrollView>
-          </View>
-        ) : null}
+        <View style={memberPickerStyles.searchWrap}>
+          <ChatSearchBar
+            onChangeText={onSearchChange}
+            placeholder="Search name or number"
+            value={search}
+          />
+        </View>
 
         <ScrollView
+          contentContainerStyle={[
+            memberPickerStyles.content,
+            { paddingBottom: Math.max(28, screenBottomInset + 24) }
+          ]}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
-          style={styles.newChatContactList}
+          style={memberPickerStyles.list}
         >
-          <Text style={[styles.addMembersSectionTitle, { color: appTheme.colors.muted }]}>Frequently contacted</Text>
-          {filteredContacts.map((contact) => (
-            <ChatMemberSelectRow
-              contact={contact}
-              isSelected={Boolean(selectedMemberIds[contact.contactId])}
-              key={contact.contactId}
-              onToggle={() => onToggleMember(contact.contactId)}
+          {selectedMembers.length ? (
+            <SelectedMembersStrip
+              isBusy={false}
+              members={selectedMembers}
+              onRemoveMember={onRemoveMember}
               profilePhotoHeaders={profilePhotoHeaders}
             />
-          ))}
+          ) : null}
 
-          {!filteredContacts.length ? (
-            <Text style={[styles.batchEmpty, { color: appTheme.colors.muted }]}>
+          {filteredContacts.length ? (
+            <ListSection title="Frequently contacted">
+              {filteredContacts.map((contact) => (
+                <ChatMemberSelectRow
+                  contact={contact}
+                  insideCard
+                  isSelected={Boolean(selectedMemberIds[contact.contactId])}
+                  key={contact.contactId}
+                  onToggle={() => onToggleMember(contact.contactId)}
+                  profilePhotoHeaders={profilePhotoHeaders}
+                />
+              ))}
+            </ListSection>
+          ) : (
+            <Text style={[memberPickerStyles.empty, { color: appTheme.colors.muted }]}>
               {search.trim() ? 'No members found' : 'No organization members yet'}
             </Text>
-          ) : null}
+          )}
         </ScrollView>
       </View>
     </Modal>

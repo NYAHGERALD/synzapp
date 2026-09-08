@@ -38,6 +38,7 @@ export function SettingsList({
   onOpenOfflineChat,
   onOpenRolePermissions,
   onOpenActionReminders,
+  onOpenAdminContact,
   onOpenScheduledMessages,
   onOpenSecurity,
   themePreference
@@ -60,6 +61,7 @@ export function SettingsList({
   onOpenOfflineChat: () => void;
   onOpenRolePermissions: () => void;
   onOpenActionReminders: () => void;
+  onOpenAdminContact: () => void;
   onOpenScheduledMessages: () => void;
   onOpenSecurity: () => void;
   themePreference: AppThemePreference;
@@ -160,6 +162,12 @@ export function SettingsList({
             onPress: onOpenActionReminders,
             subtitle: 'How often people are reminded, and when overdue work escalates',
             title: 'Action reminders'
+          },
+          {
+            icon: 'user-check' as FeatherIconName,
+            onPress: onOpenAdminContact,
+            subtitle: 'Whether an admin phone number is shown to their people',
+            title: 'Who to ask'
           }
         ]
       : [])

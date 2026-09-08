@@ -1,9 +1,9 @@
 import type { ScheduledChatState } from '../../services/scheduledChatIndicators';
 import Feather from '@expo/vector-icons/Feather';
-import { ActivityIndicator, FlatList, Pressable, ScrollView, Text, View } from 'react-native';
+import { ActivityIndicator, FlatList, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { ChatItem } from '../../components/groups/GroupInfoModal';
 import { ChatRow } from '../../components/chatList/ChatRow';
-import { ChatSearchBar, androidIconRipple, getKeyboardDismissMode } from '../../components/chatUiPrimitives';
+import { ChatSearchBar, getKeyboardDismissMode } from '../../components/chatUiPrimitives';
 import { styles } from '../../screens/adminChatStyles';
 import { useAppTheme } from '../../theme/AppThemeProvider';
 
@@ -28,9 +28,9 @@ export function ChatsTab({
   onMoreChat,
   onOpenArchived,
   onOpenChat,
-  onOpenNewChat,
   onOpenSpam,
   scheduledChatStates,
+  typingTextByConversation,
   onSearchChange,
   onToggleFavoriteChat,
   onTogglePinChat,
@@ -52,7 +52,6 @@ export function ChatsTab({
   onMoreChat: (chat: ChatItem) => void;
   onOpenArchived: () => void;
   onOpenChat: (chat: ChatItem) => void;
-  onOpenNewChat: () => void;
   onOpenSpam: () => void;
   onSearchChange: (value: string) => void;
   onToggleFavoriteChat: (chat: ChatItem) => void;
@@ -60,6 +59,8 @@ export function ChatsTab({
   profilePhotoHeaders?: Record<string, string>;
   /** Which conversations have a message waiting, or one that failed. */
   scheduledChatStates?: Record<string, ScheduledChatState>;
+  /** "typing…" per conversation, replacing the preview line. */
+  typingTextByConversation?: Record<string, string>;
   search: string;
   spamCount: number;
   unreadCount: number;
@@ -72,58 +73,48 @@ export function ChatsTab({
         styles.chatsControls,
         { borderBottomColor: appTheme.colors.divider }
       ]}>
-        <ChatSearchBar
-          onChangeText={onSearchChange}
-          placeholder="Search chats"
-          value={search}
-        />
+        <View style={chatsTabStyles.searchWrap}>
+          <ChatSearchBar
+            onChangeText={onSearchChange}
+            placeholder="Search chats"
+            value={search}
+          />
+        </View>
 
-        <ScrollView
-          contentContainerStyle={styles.chatFilterContent}
-          horizontal
-          keyboardShouldPersistTaps="handled"
-          showsHorizontalScrollIndicator={false}
-          style={styles.chatFilterScroll}
-        >
-          <ChatFilterChip
-            isActive={activeFilter === 'all'}
-            label="All"
-            onPress={() => onChangeFilter('all')}
-          />
-          <ChatFilterChip
-            count={unreadCount}
-            isActive={activeFilter === 'unread'}
-            label="Unread"
-            onPress={() => onChangeFilter('unread')}
-          />
-          <ChatFilterChip
-            isActive={activeFilter === 'favorites'}
-            label="Favorites"
-            onPress={() => onChangeFilter('favorites')}
-          />
-          <ChatFilterChip
-            count={groupCount}
-            isActive={activeFilter === 'groups'}
-            label="Groups"
-            onPress={() => onChangeFilter('groups')}
-          />
-          <Pressable
-            accessibilityLabel="Start new chat"
-            accessibilityRole="button"
-            android_ripple={androidIconRipple}
-            onPress={onOpenNewChat}
-            style={({ pressed }) => [
-              styles.chatFilterAddButton,
-              {
-                backgroundColor: appTheme.colors.surfaceElevated,
-                borderColor: appTheme.colors.border
-              },
-              pressed && styles.pressed
-            ]}
+        {/* One card, and text rather than four outlined pills. The pills read
+            as buttons that do something; these choose what the list shows, and
+            the one in force says so with colour and a rule under it. */}
+        <View style={[chatsTabStyles.filterCard, { backgroundColor: appTheme.colors.groupedCard }]}>
+          <ScrollView
+            contentContainerStyle={chatsTabStyles.filterContent}
+            horizontal
+            keyboardShouldPersistTaps="handled"
+            showsHorizontalScrollIndicator={false}
           >
-            <Feather color={appTheme.colors.ink} name="plus" size={18} />
-          </Pressable>
-        </ScrollView>
+            <ChatFilterLink
+              isActive={activeFilter === 'all'}
+              label="All"
+              onPress={() => onChangeFilter('all')}
+            />
+            <ChatFilterLink
+              count={unreadCount}
+              isActive={activeFilter === 'unread'}
+              label="Unread"
+              onPress={() => onChangeFilter('unread')}
+            />
+            <ChatFilterLink
+              isActive={activeFilter === 'favorites'}
+              label="Favorites"
+              onPress={() => onChangeFilter('favorites')}
+            />
+            <ChatFilterLink
+              count={groupCount}
+              isActive={activeFilter === 'groups'}
+              label="Groups"
+              onPress={() => onChangeFilter('groups')}
+            />
+          </ScrollView>
+        </View>
 
         {spamCount > 0 ? (
           <ChatsUtilityRow
@@ -181,6 +172,7 @@ export function ChatsTab({
             onTogglePin={() => onTogglePinChat(chat)}
             profilePhotoHeaders={profilePhotoHeaders}
             scheduledState={scheduledChatStates?.[chat.contactId]}
+            typingText={typingTextByConversation?.[chat.contactId] || null}
           />
         )}
         showsVerticalScrollIndicator={false}
@@ -190,7 +182,14 @@ export function ChatsTab({
   );
 }
 
-function ChatFilterChip({
+/**
+ * One filter, as a text link.
+ *
+ * The one in force is the app's link blue with a rule under it; the rest are
+ * quiet. No fill, no outline: a filter is a choice about the list below, not a
+ * button that goes somewhere.
+ */
+function ChatFilterLink({
   count,
   isActive,
   label,
@@ -210,24 +209,21 @@ function ChatFilterChip({
       accessibilityRole="button"
       accessibilityState={{ selected: isActive }}
       onPress={onPress}
-      style={({ pressed }) => [
-        styles.chatFilterChip,
-        {
-          backgroundColor: isActive ? appTheme.colors.primarySoft : appTheme.colors.surfaceElevated,
-          borderColor: isActive ? appTheme.colors.primary : appTheme.colors.border
-        },
-        pressed && styles.pressed
-      ]}
+      style={({ pressed }) => [chatsTabStyles.filterLink, pressed && chatsTabStyles.pressed]}
     >
       <Text
         numberOfLines={1}
         style={[
-          styles.chatFilterChipText,
-          { color: isActive ? appTheme.colors.primary : appTheme.colors.mutedStrong }
+          chatsTabStyles.filterLinkText,
+          { color: isActive ? appTheme.colors.link : appTheme.colors.muted }
         ]}
       >
         {labelText}
       </Text>
+      <View style={[
+        chatsTabStyles.filterUnderline,
+        { backgroundColor: isActive ? appTheme.colors.link : 'transparent' }
+      ]} />
     </Pressable>
   );
 }
@@ -266,3 +262,39 @@ function ChatsUtilityRow({
     </Pressable>
   );
 }
+
+const chatsTabStyles = StyleSheet.create({
+  // The tab surface already pays 10, and a card sits 15 from the screen edge.
+  searchWrap: {
+    marginHorizontal: 5
+  },
+  filterCard: {
+    borderRadius: 22,
+    marginHorizontal: 5,
+    overflow: 'hidden'
+  },
+  filterContent: {
+    alignItems: 'stretch',
+    paddingHorizontal: 2
+  },
+  filterLink: {
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 11
+  },
+  filterLinkText: {
+    fontSize: 14.5,
+    lineHeight: 19
+  },
+  // Under the label, not around it. It marks the choice without drawing a
+  // second button shape inside the card.
+  filterUnderline: {
+    alignSelf: 'stretch',
+    borderRadius: 1,
+    height: 2,
+    marginTop: 6
+  },
+  pressed: {
+    opacity: 0.6
+  }
+});

@@ -38,7 +38,7 @@ export function CallHistoryRow({
   return (
     <View style={[
       styles.callHistoryRow,
-      { borderBottomColor: appTheme.colors.divider }
+      { borderBottomColor: appTheme.colors.separator }
     ]}>
       {isEditMode ? (
         <Pressable

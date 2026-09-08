@@ -3,7 +3,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import React, { useEffect, useMemo, useState } from 'react';
 import type { CompanyLibraryItem } from '../../services/companyLibraryApi';
 import type { ImageSourcePropType } from 'react-native';
-import { ActivityIndicator, FlatList, Image, Pressable, ScrollView, Text, View } from 'react-native';
+import { ActivityIndicator, FlatList, Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { ChatSearchBar, androidButtonRipple, androidIconRipple, getKeyboardDismissMode } from '../../components/chatUiPrimitives';
 import { CompanyLibraryKindFilter, companyLibraryDocumentThumbnailSources, formatCompanyLibraryDate, getCompanyLibraryDisplayName, getCompanyLibraryExtension, getCompanyLibraryKind, getCompanyLibraryKindLabel, getCompanyLibraryPhotoSource, normalizeCompanyLibraryBucketValue } from '../../services/companyLibraryDisplay';
 import { TenantGroup } from '../../services/adminApi';
@@ -29,7 +29,7 @@ type CompanyLibraryScopeFilter =
   | `department:${string}`
   | `group:${string}`;
 
-type CompanyLibraryViewMode = 'grid' | 'list';
+export type CompanyLibraryViewMode = 'grid' | 'list';
 
 interface CompanyLibraryBucket {
   count: number;
@@ -47,7 +47,8 @@ export function CompanyLibraryTab({
   onOpenPreview,
   onRefresh,
   onSearchChange,
-  search
+  search,
+  viewMode
 }: {
   currentUid: string;
   departmentName: string;
@@ -59,11 +60,16 @@ export function CompanyLibraryTab({
   onRefresh: () => void;
   onSearchChange: (value: string) => void;
   search: string;
+  /**
+   * Owned by the screen, not here, because the control that changes it now sits
+   * in the header beside the back button — where a screen's controls belong,
+   * and where it leaves the search field the whole width.
+   */
+  viewMode: CompanyLibraryViewMode;
 }) {
   const appTheme = useAppTheme();
   const [scopeFilter, setScopeFilter] = useState<CompanyLibraryScopeFilter>('company');
   const [kindFilter, setKindFilter] = useState<CompanyLibraryKindFilter>('all');
-  const [viewMode, setViewMode] = useState<CompanyLibraryViewMode>('grid');
   const libraryBuckets = useMemo(
     () => buildCompanyLibraryBuckets({
       currentUid,
@@ -117,75 +123,54 @@ export function CompanyLibraryTab({
         styles.companyLibraryControls,
         { borderBottomColor: appTheme.colors.divider }
       ]}>
-        <View style={styles.companyLibraryTopRow}>
-          <View style={styles.companyLibrarySearchWrap}>
-            <ChatSearchBar
-              onChangeText={onSearchChange}
-              placeholder="Search Library"
-              value={search}
-            />
-          </View>
-          <CompanyLibraryViewToggle
-            mode={viewMode}
-            onChangeMode={setViewMode}
+        {/* The whole width. The view toggle and refresh moved up to the header
+            row, which is where a screen's controls belong and what lets this
+            field match every other search field in the app. */}
+        <View style={libraryStyles.searchWrap}>
+          <ChatSearchBar
+            onChangeText={onSearchChange}
+            placeholder="Search Library"
+            value={search}
           />
-          <Pressable
-            accessibilityLabel="Refresh Library"
-            accessibilityRole="button"
-            android_ripple={androidIconRipple}
-            disabled={isLoading}
-            onPress={onRefresh}
-            style={({ pressed }) => [
-              styles.companyLibraryRefreshButton,
-              {
-                backgroundColor: appTheme.colors.surfaceElevated,
-                borderColor: appTheme.colors.border
-              },
-              pressed && !isLoading && styles.pressed,
-              isLoading && styles.disabled
-            ]}
-          >
-            {isLoading ? (
-              <ActivityIndicator color={appTheme.colors.primary} size="small" />
-            ) : (
-              <Feather color={appTheme.colors.primary} name="refresh-cw" size={18} />
-            )}
-          </Pressable>
         </View>
 
-        <ScrollView
-          contentContainerStyle={styles.companyLibraryChipRow}
-          horizontal
-          keyboardShouldPersistTaps="handled"
-          showsHorizontalScrollIndicator={false}
-        >
-          {libraryBuckets.map((bucket) => (
-            <CompanyLibraryChip
-              count={bucket.count}
-              isActive={scopeFilter === bucket.key}
-              key={bucket.key}
-              label={bucket.label}
-              onPress={() => setScopeFilter(bucket.key)}
-            />
-          ))}
-        </ScrollView>
+        <View style={[libraryStyles.filterCard, { backgroundColor: appTheme.colors.groupedCard }]}>
+          <ScrollView
+            contentContainerStyle={libraryStyles.filterContent}
+            horizontal
+            keyboardShouldPersistTaps="handled"
+            showsHorizontalScrollIndicator={false}
+          >
+            {libraryBuckets.map((bucket) => (
+              <CompanyLibraryFilterLink
+                count={bucket.count}
+                isActive={scopeFilter === bucket.key}
+                key={bucket.key}
+                label={bucket.label}
+                onPress={() => setScopeFilter(bucket.key)}
+              />
+            ))}
+          </ScrollView>
+        </View>
 
-        <ScrollView
-          contentContainerStyle={styles.companyLibraryChipRow}
-          horizontal
-          keyboardShouldPersistTaps="handled"
-          showsHorizontalScrollIndicator={false}
-        >
-          {(['all', 'documents', 'photos', 'videos', 'audio', 'other'] as CompanyLibraryKindFilter[]).map((kind) => (
-            <CompanyLibraryChip
-              count={kind === 'all' ? scopedItems.length : scopedItems.filter((item) => getCompanyLibraryKind(item) === kind).length}
-              isActive={kindFilter === kind}
-              key={kind}
-              label={kind === 'all' ? 'All' : getCompanyLibraryKindLabel(kind)}
-              onPress={() => setKindFilter(kind)}
-            />
-          ))}
-        </ScrollView>
+        <View style={[libraryStyles.filterCard, { backgroundColor: appTheme.colors.groupedCard }]}>
+          <ScrollView
+            contentContainerStyle={libraryStyles.filterContent}
+            horizontal
+            keyboardShouldPersistTaps="handled"
+            showsHorizontalScrollIndicator={false}
+          >
+            {(['all', 'documents', 'photos', 'videos', 'audio', 'other'] as CompanyLibraryKindFilter[]).map((kind) => (
+              <CompanyLibraryFilterLink
+                count={kind === 'all' ? scopedItems.length : scopedItems.filter((item) => getCompanyLibraryKind(item) === kind).length}
+                isActive={kindFilter === kind}
+                key={kind}
+                label={kind === 'all' ? 'All' : getCompanyLibraryKindLabel(kind)}
+                onPress={() => setKindFilter(kind)}
+              />
+            ))}
+          </ScrollView>
+        </View>
       </View>
 
       <FlatList
@@ -238,48 +223,120 @@ export function CompanyLibraryTab({
   );
 }
 
-function CompanyLibraryViewToggle({
+/**
+ * The Library's own controls, for the header row beside the back button.
+ *
+ * Grid or list, and a way to fetch again. They used to sit next to the search
+ * field and take a third of its width; a search box people cannot type a whole
+ * word into is a search box nobody uses.
+ */
+export function CompanyLibraryHeaderActions({
+  isLoading,
   mode,
-  onChangeMode
+  onChangeMode,
+  onRefresh
 }: {
+  isLoading: boolean;
   mode: CompanyLibraryViewMode;
   onChangeMode: (mode: CompanyLibraryViewMode) => void;
+  onRefresh: () => void;
 }) {
   const appTheme = useAppTheme();
 
   return (
-    <View style={[
-      styles.companyLibraryViewToggle,
-      {
-        backgroundColor: appTheme.colors.surfaceElevated,
-        borderColor: appTheme.colors.border
-      }
-    ]}>
-      {(['grid', 'list'] as CompanyLibraryViewMode[]).map((nextMode) => {
-        const isActive = mode === nextMode;
+    <View style={libraryStyles.headerActions}>
+      <View style={[libraryStyles.viewToggle, { backgroundColor: appTheme.colors.groupedCard }]}>
+        {(['grid', 'list'] as CompanyLibraryViewMode[]).map((nextMode) => {
+          const isActive = mode === nextMode;
 
-        return (
-          <Pressable
-            accessibilityLabel={`Show Library as ${nextMode}`}
-            accessibilityRole="button"
-            android_ripple={androidIconRipple}
-            key={nextMode}
-            onPress={() => onChangeMode(nextMode)}
-            style={({ pressed }) => [
-              styles.companyLibraryViewToggleButton,
-              isActive && { backgroundColor: appTheme.colors.primary },
-              pressed && styles.pressed
-            ]}
-          >
-            <Feather
-              color={isActive ? '#FFFFFF' : appTheme.colors.mutedStrong}
-              name={nextMode === 'grid' ? 'grid' : 'list'}
-              size={16}
-            />
-          </Pressable>
-        );
-      })}
+          return (
+            <Pressable
+              accessibilityLabel={`Show Library as ${nextMode}`}
+              accessibilityRole="button"
+              accessibilityState={{ selected: isActive }}
+              key={nextMode}
+              onPress={() => onChangeMode(nextMode)}
+              style={({ pressed }) => [
+                libraryStyles.viewToggleButton,
+                isActive && { backgroundColor: appTheme.colors.primarySoft },
+                pressed && libraryStyles.pressed
+              ]}
+            >
+              <Feather
+                color={isActive ? appTheme.colors.link : appTheme.colors.muted}
+                name={nextMode === 'grid' ? 'grid' : 'list'}
+                size={17}
+              />
+            </Pressable>
+          );
+        })}
+      </View>
+
+      <Pressable
+        accessibilityLabel="Refresh Library"
+        accessibilityRole="button"
+        disabled={isLoading}
+        hitSlop={6}
+        onPress={onRefresh}
+        style={({ pressed }) => [
+          libraryStyles.refreshButton,
+          pressed && !isLoading && libraryStyles.pressed,
+          isLoading && libraryStyles.disabled
+        ]}
+      >
+        {isLoading ? (
+          <ActivityIndicator color={appTheme.colors.link} size="small" />
+        ) : (
+          <Feather color={appTheme.colors.link} name="refresh-cw" size={19} />
+        )}
+      </Pressable>
     </View>
+  );
+}
+
+/**
+ * One filter, as a text link.
+ *
+ * The one in force is the app's link blue with a rule under it; the rest are
+ * quiet. An outlined pill per filter, twice over, was two rows of buttons above
+ * the thing they filter.
+ */
+function CompanyLibraryFilterLink({
+  count,
+  isActive,
+  label,
+  onPress
+}: {
+  count?: number;
+  isActive: boolean;
+  label: string;
+  onPress: () => void;
+}) {
+  const appTheme = useAppTheme();
+  const labelText = typeof count === 'number' ? `${label} ${count}` : label;
+
+  return (
+    <Pressable
+      accessibilityLabel={labelText}
+      accessibilityRole="button"
+      accessibilityState={{ selected: isActive }}
+      onPress={onPress}
+      style={({ pressed }) => [libraryStyles.filterLink, pressed && libraryStyles.pressed]}
+    >
+      <Text
+        numberOfLines={1}
+        style={[
+          libraryStyles.filterLinkText,
+          { color: isActive ? appTheme.colors.link : appTheme.colors.muted }
+        ]}
+      >
+        {labelText}
+      </Text>
+      <View style={[
+        libraryStyles.filterUnderline,
+        { backgroundColor: isActive ? appTheme.colors.link : 'transparent' }
+      ]} />
+    </Pressable>
   );
 }
 
@@ -704,3 +761,65 @@ function getCompanyLibraryImageSource(
   return companyLibraryDocumentThumbnailSources[extension] ||
     companyLibraryDocumentThumbnailSources.document;
 }
+
+const libraryStyles = StyleSheet.create({
+  // The tab surface already pays 10, and a card sits 15 from the screen edge.
+  searchWrap: {
+    marginHorizontal: 5
+  },
+  filterCard: {
+    borderRadius: 22,
+    marginHorizontal: 5,
+    overflow: 'hidden'
+  },
+  filterContent: {
+    alignItems: 'stretch',
+    paddingHorizontal: 2
+  },
+  filterLink: {
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 10
+  },
+  filterLinkText: {
+    fontSize: 14,
+    lineHeight: 19
+  },
+  filterUnderline: {
+    alignSelf: 'stretch',
+    borderRadius: 1,
+    height: 2,
+    marginTop: 6
+  },
+  headerActions: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 12
+  },
+  viewToggle: {
+    alignItems: 'center',
+    borderRadius: 19,
+    flexDirection: 'row',
+    gap: 2,
+    padding: 3
+  },
+  viewToggleButton: {
+    alignItems: 'center',
+    borderRadius: 16,
+    height: 32,
+    justifyContent: 'center',
+    width: 36
+  },
+  refreshButton: {
+    alignItems: 'center',
+    height: 36,
+    justifyContent: 'center',
+    width: 36
+  },
+  pressed: {
+    opacity: 0.6
+  },
+  disabled: {
+    opacity: 0.4
+  }
+});

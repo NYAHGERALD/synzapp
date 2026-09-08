@@ -33,7 +33,7 @@ import { getMessageMedia, getMessageMediaItems, toChatImageAttachment, uniqueCha
 
 export type ChatMoreActionTarget = ChatItem | null;
 
-export type SettingsScreen = 'list' | 'directory' | 'security' | 'chat-backup' | 'offline-chat' | 'my-devices' | 'company-profile' | 'key-results' | 'dept-admin-permissions' | 'groups' | 'role-permissions' | 'ai-usage' | 'scheduled-messages' | 'action-reminders';
+export type SettingsScreen = 'list' | 'directory' | 'security' | 'chat-backup' | 'offline-chat' | 'my-devices' | 'company-profile' | 'key-results' | 'dept-admin-permissions' | 'groups' | 'role-permissions' | 'ai-usage' | 'scheduled-messages' | 'action-reminders' | 'admin-contact';
 
 export type UserPermission =
   | 'announcements.send'

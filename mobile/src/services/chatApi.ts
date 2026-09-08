@@ -327,6 +327,15 @@ export type ChatRealtimeEvent =
   | { type: 'ready' }
   | { contact: ChatContact; envelopes: EncryptedChatEnvelope[]; messageReactions: ChatMessageReactionMap; type: 'chatContactUpdated' }
   | { contactId: string; isOnline: boolean; lastSeenAt: string | null; type: 'contactPresenceUpdated' }
+  | {
+    chatType: 'DIRECT' | 'GROUP';
+    /** The conversation this belongs to, as this phone's chat list keys it. */
+    contactId: string;
+    isTyping: boolean;
+    type: 'contactTypingUpdated';
+    typingName: string;
+    typingUid: string;
+  }
   | { contact: ChatContact; contactId: string; messages: ChatMessage[]; type: 'conversationMessages' }
   | { contact: ChatContact; contactId: string; envelopes: EncryptedChatEnvelope[]; messageReactions: ChatMessageReactionMap; type: 'conversationEncryptedEnvelopes' }
   | { code?: ChatRealtimeErrorCode; message: string; type: 'error' };
@@ -1345,6 +1354,37 @@ export function subscribeRealtimeConversation(socket: WebSocket, contactId: stri
   }));
 }
 
+/**
+ * Tells the server this person is still typing, or has stopped.
+ *
+ * Sent on a heartbeat rather than per keystroke — a message of two hundred
+ * characters would otherwise be two hundred broadcasts to every other phone in
+ * the conversation. The server decides who may be told; this only says which
+ * conversation it is about.
+ *
+ * Silent when the socket is not open. Typing is the least important thing on
+ * the wire, and it must never be the reason something throws.
+ */
+export function sendRealtimeTyping(
+  socket: WebSocket | null,
+  input: { chatType: 'DIRECT' | 'GROUP'; contactId: string; isTyping: boolean }
+): void {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
+  try {
+    socket.send(JSON.stringify({
+      chatType: input.chatType,
+      contactId: input.contactId,
+      isTyping: input.isTyping,
+      type: 'typing'
+    }));
+  } catch {
+    // A dropped typing notice is not worth surfacing to anybody.
+  }
+}
+
 export function unsubscribeRealtimeConversation(socket: WebSocket): void {
   if (socket.readyState !== WebSocket.OPEN) {
     return;
@@ -1390,6 +1430,21 @@ export function parseChatRealtimeEvent(payload: string): ChatRealtimeEvent | nul
         isOnline: event.isOnline === true,
         lastSeenAt: typeof event.lastSeenAt === 'string' ? event.lastSeenAt : null,
         type: 'contactPresenceUpdated'
+      };
+    }
+
+    if (
+      event.type === 'contactTypingUpdated' &&
+      typeof event.contactId === 'string' &&
+      typeof event.typingUid === 'string'
+    ) {
+      return {
+        chatType: event.chatType === 'GROUP' ? 'GROUP' : 'DIRECT',
+        contactId: event.contactId,
+        isTyping: event.isTyping === true,
+        type: 'contactTypingUpdated',
+        typingName: typeof event.typingName === 'string' ? event.typingName : 'Someone',
+        typingUid: event.typingUid
       };
     }
 

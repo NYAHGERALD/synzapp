@@ -1,5 +1,5 @@
 import Feather from '@expo/vector-icons/Feather';
-import { Platform, TextInput, View } from 'react-native';
+import { Platform, StyleSheet, TextInput, View } from 'react-native';
 import { styles } from '../screens/adminChatStyles';
 import { useAppTheme } from '../theme/AppThemeProvider';
 
@@ -20,6 +20,14 @@ export function getKeyboardDismissMode(): 'interactive' | 'on-drag' {
   return Platform.OS === 'ios' ? 'interactive' : 'on-drag';
 }
 
+/**
+ * The search field, and there is only one of it.
+ *
+ * Card white, a blue outline and a soft shadow, on every screen that searches.
+ * It began as an opt-in tone on two screens and became the house style, which
+ * is the right way round: a field that looks like a field everywhere is worth
+ * more than a screen keeping its own version.
+ */
 export function ChatSearchBar({
   onChangeText,
   placeholder,
@@ -34,9 +42,10 @@ export function ChatSearchBar({
   return (
     <View style={[
       styles.chatSearchBox,
+      searchBarStyles.floating,
       {
-        backgroundColor: appTheme.colors.input,
-        borderColor: appTheme.colors.border
+        backgroundColor: appTheme.colors.groupedCard,
+        borderColor: appTheme.colors.link
       }
     ]}>
       <Feather color={appTheme.colors.muted} name="search" size={18} />
@@ -52,3 +61,17 @@ export function ChatSearchBar({
     </View>
   );
 }
+
+const searchBarStyles = StyleSheet.create({
+  // A shadow, which almost nothing in this app is allowed. It is here because
+  // the field has to read as sitting above the page rather than drawn on it,
+  // and a border alone does not do that. Kept soft: this is a lift, not a slab.
+  floating: {
+    borderWidth: 1.5,
+    elevation: 3,
+    shadowColor: '#000000',
+    shadowOffset: { height: 3, width: 0 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8
+  }
+});

@@ -43,6 +43,13 @@ export interface AppColors {
   ink: string;
   /** Tinted text that acts as a button. The platform's own link blue. */
   link: string;
+  /**
+   * The same blue, softened, for an outline.
+   *
+   * A line has far more of it on screen than a word does, so link blue at full
+   * strength around a card shouts where the same colour on a label does not.
+   */
+  linkOutline: string;
   muted: string;
   mutedStrong: string;
   overlay: string;
@@ -81,6 +88,7 @@ export const lightColors: AppColors = {
   input: '#FBFCFE',
   ink: '#111827',
   link: '#0079FE',
+  linkOutline: 'rgba(0, 121, 254, 0.4)',
   muted: '#5D6675',
   mutedStrong: '#334155',
   overlay: 'rgba(15, 23, 42, 0.24)',
@@ -117,6 +125,7 @@ export const darkColors: AppColors = {
   input: '#111111',
   ink: '#F8FAFC',
   link: '#0A84FF',
+  linkOutline: 'rgba(10, 132, 255, 0.45)',
   muted: '#A1A1AA',
   mutedStrong: '#D4D4D8',
   overlay: 'rgba(0, 0, 0, 0.62)',

@@ -65,7 +65,9 @@ export const callStyles = StyleSheet.create({
   },
   callHistoryRow: {
     alignItems: 'center',
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    // A full point, not a hairline. At this density a hairline is a third of a
+    // pixel and all but disappears against the page.
+    borderBottomWidth: 1,
     flexDirection: 'row',
     gap: 10,
     minHeight: 68,
@@ -82,7 +84,6 @@ export const callStyles = StyleSheet.create({
   },
   callHistoryTitle: {
     fontSize: 16,
-    fontWeight: '700',
     lineHeight: 21
   },
   callHistorySubtitleRow: {
@@ -94,7 +95,6 @@ export const callStyles = StyleSheet.create({
   callHistorySubtitle: {
     flexShrink: 1,
     fontSize: 13,
-    fontWeight: '500',
     lineHeight: 17
   },
   callHistoryMeta: {
@@ -105,7 +105,6 @@ export const callStyles = StyleSheet.create({
   },
   callHistoryTime: {
     fontSize: 13,
-    fontWeight: '500',
     lineHeight: 17
   },
   callHistoryActions: {

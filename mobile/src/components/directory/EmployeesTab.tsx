@@ -1,6 +1,7 @@
-import { ActivityIndicator, FlatList, Text, View } from 'react-native';
+import { ActivityIndicator, FlatList, StyleSheet, Text, View } from 'react-native';
 import { EmployeeListItem, EmployeeRow } from '../../components/directory/EmployeeRow';
 import { InviteDraft, InviteDraftPanel } from '../../components/invites/InviteDraftPanel';
+import { describeEmployeesEmptyState } from '../../services/employeesDirectoryCopy';
 import { getKeyboardDismissMode } from '../../components/chatUiPrimitives';
 import { styles } from '../../screens/adminChatStyles';
 import { useAppTheme } from '../../theme/AppThemeProvider';
@@ -12,8 +13,11 @@ import { useAppTheme } from '../../theme/AppThemeProvider';
  */
 
 export function EmployeesTab({
+  canInviteEmployees,
   canManageUsers,
+  departmentName,
   employees,
+  isDepartmentScoped,
   inviteDraft,
   isLoading,
   isUpdatingLifecycle,
@@ -27,8 +31,12 @@ export function EmployeesTab({
   onSendDraft,
   profilePhotoHeaders
 }: {
+  canInviteEmployees: boolean;
   canManageUsers: boolean;
+  departmentName: string | null;
   employees: EmployeeListItem[];
+  /** A department admin only ever sees their own department, minus themselves. */
+  isDepartmentScoped: boolean;
   inviteDraft: InviteDraft | null;
   isLoading: boolean;
   isUpdatingLifecycle: boolean;
@@ -43,6 +51,11 @@ export function EmployeesTab({
   profilePhotoHeaders?: Record<string, string>;
 }) {
   const appTheme = useAppTheme();
+  const emptyState = describeEmployeesEmptyState({
+    canInviteEmployees,
+    departmentName,
+    isDepartmentScoped
+  });
 
   return (
     <View style={styles.fixedListTab}>
@@ -75,7 +88,12 @@ export function EmployeesTab({
             </View>
           ) : (
             <View style={styles.emptyState}>
-              <Text style={[styles.emptyTitle, { color: appTheme.colors.muted }]}>No employees yet</Text>
+              <Text style={[styles.emptyTitle, { color: appTheme.colors.muted }]}>
+                {emptyState.title}
+              </Text>
+              <Text style={[employeesTabStyles.emptyMessage, { color: appTheme.colors.muted }]}>
+                {emptyState.message}
+              </Text>
             </View>
           )
         }
@@ -97,3 +115,13 @@ export function EmployeesTab({
     </View>
   );
 }
+
+const employeesTabStyles = StyleSheet.create({
+  emptyMessage: {
+    fontSize: 14,
+    lineHeight: 19,
+    marginTop: 6,
+    maxWidth: 300,
+    textAlign: 'center'
+  }
+});

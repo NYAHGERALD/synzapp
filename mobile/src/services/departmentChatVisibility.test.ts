@@ -28,12 +28,17 @@ describe('what must always be listed', () => {
     expect(mustAlwaysAppearInChatList({ chatType: 'GROUP', isDepartmentDefault: true })).toBe(true);
   });
 
-  it('does not force an ordinary empty group into the list', () => {
-    expect(mustAlwaysAppearInChatList({ chatType: 'GROUP', isDepartmentDefault: false })).toBe(false);
+  it('lists an ordinary group that has never had a message', () => {
+    // Somebody made it and added you. Without the Groups tab, the chat list is
+    // the only way back to it, so a silent one cannot be allowed to hide.
+    expect(mustAlwaysAppearInChatList({ chatType: 'GROUP', isDepartmentDefault: false })).toBe(true);
+    expect(mustAlwaysAppearInChatList({ chatType: 'GROUP' })).toBe(true);
   });
 
   it('does not force an empty direct chat into the list', () => {
     // Everybody in the company would otherwise appear as a chat.
     expect(mustAlwaysAppearInChatList({ chatType: 'DIRECT' })).toBe(false);
+    expect(mustAlwaysAppearInChatList(null)).toBe(false);
+    expect(mustAlwaysAppearInChatList(undefined)).toBe(false);
   });
 });

@@ -31,6 +31,8 @@ import {
 } from './scrollToLatestCoalescer';
 import { reportMissingChatMedia } from '../../services/chatMediaRepairQueue';
 import { ComposerEmojiPicker } from './ComposerEmojiPicker';
+import { GroupTypingRow } from './GroupTypingRow';
+import { TYPING_HEARTBEAT_MS, type TypingParticipant } from '../../services/typingIndicator';
 import { ScheduleMessageSheet } from './ScheduleMessageSheet';
 import { ScheduledMessagesSheet } from './ScheduledMessagesSheet';
 import { describeScheduledCounts } from '../../services/scheduledMessageDisplay';
@@ -62,6 +64,9 @@ export const EMPTY_CHAT_REACTIONS: ChatMessageReaction[] = [];
 
 /** Shared so an absent list is the same array every render. */
 const EMPTY_SCHEDULED_MESSAGES: ScheduledChatMessage[] = [];
+
+/** Shared so an absent list is the same array every render. */
+const EMPTY_TYPING_PARTICIPANTS: TypingParticipant[] = [];
 
 const MESSAGE_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏', '👏'];
 
@@ -116,6 +121,8 @@ interface ChatSearchMatch {
 export function MessageThread({
   actions,
   bannerAboveMessages,
+  hasBannerAboveMessages = false,
+  topInset = 0,
   bottomInset,
   keyboardVerticalOffset,
   keyboardHeight = 0,
@@ -148,6 +155,8 @@ export function MessageThread({
   onDismissScheduledMessage,
   onDraftChange,
   onScheduleMessage,
+  onTypingChange,
+  typingParticipants = EMPTY_TYPING_PARTICIPANTS,
   onSendScheduledMessageNow,
   scheduledMessages = EMPTY_SCHEDULED_MESSAGES,
   onInfoMessage,
@@ -179,6 +188,14 @@ export function MessageThread({
   /** Actions raised in this conversation, shown among the messages. */
   actions?: ActionRecord[];
   bannerAboveMessages?: React.ReactNode;
+  /**
+   * Whether that banner actually draws anything. Both of its children return
+   * null when there is nothing to say, and a wrapper padded for a banner that
+   * is not there is a gap under the header nobody asked for.
+   */
+  hasBannerAboveMessages?: boolean;
+  /** Room at the top of the thread for the header floating over it. */
+  topInset?: number;
   onCreateAction: (message: ChatMessage) => void;
   onOpenAction?: (action: ActionRecord) => void;
   bottomInset: number;
@@ -214,6 +231,13 @@ export function MessageThread({
   /** Clears one that could not be sent, once its author has seen why. */
   onDismissScheduledMessage?: (scheduledMessage: ScheduledChatMessage) => Promise<void>;
   onDraftChange: (value: string) => void;
+  /**
+   * Told when this person starts or stops typing, on a heartbeat rather than
+   * per keystroke. Absent where the screen has no realtime socket.
+   */
+  onTypingChange?: (isTyping: boolean) => void;
+  /** Who is currently typing in this conversation. Groups only. */
+  typingParticipants?: TypingParticipant[];
   /**
    * Sends what is written at a chosen time.
    *
@@ -755,6 +779,34 @@ export function MessageThread({
     }
   }, [draft.length]);
 
+  /**
+   * Says "still typing" every few seconds while there is something in the box.
+   *
+   * On a heartbeat, not per keystroke: two hundred characters would otherwise
+   * be two hundred broadcasts. It stops the moment the box is empty, and the
+   * cleanup stops it when the thread closes — a person who navigates away
+   * mid-word must not be left typing forever on somebody else's screen.
+   */
+  useEffect(() => {
+    if (!onTypingChange) {
+      return;
+    }
+
+    if (!draft.trim()) {
+      onTypingChange(false);
+      return;
+    }
+
+    onTypingChange(true);
+
+    const timer = setInterval(() => onTypingChange(true), TYPING_HEARTBEAT_MS);
+
+    return () => {
+      clearInterval(timer);
+      onTypingChange(false);
+    };
+  }, [draft.trim().length > 0, onTypingChange]);
+
   const updateMessageInputHeight = (nextHeight: number) => {
     setMessageInputHeight((currentHeight) => (
       Math.abs(currentHeight - nextHeight) > 1 ? nextHeight : currentHeight
@@ -966,13 +1018,18 @@ export function MessageThread({
         />
       ) : null}
 
-      {bannerAboveMessages}
+      {/* A banner cannot hide beneath the floating header, so when there is one
+          it takes the inset and the messages run under it instead. */}
+      {hasBannerAboveMessages ? (
+        <View style={{ paddingTop: topInset }}>{bannerAboveMessages}</View>
+      ) : null}
 
       <FlatList
         contentContainerStyle={[
           styles.messageListContent,
           isDeleteMode && styles.messageListContentDeleting,
-          isSearchOpen && styles.messageListContentSearching
+          isSearchOpen && styles.messageListContentSearching,
+          !hasBannerAboveMessages && { paddingTop: topInset + 12 }
         ]}
         data={threadItems}
         initialNumToRender={18}
@@ -1173,6 +1230,14 @@ export function MessageThread({
             </Text>
           </Pressable>
         </View>
+      ) : null}
+
+      {isGroupChat && !isForwardMode && !isDeleteMode && !isSearchOpen ? (
+        <GroupTypingRow
+          members={groupMembers}
+          participants={typingParticipants}
+          profilePhotoHeaders={profilePhotoHeaders}
+        />
       ) : null}
 
       {scheduledMessages.length > 0 && !isForwardMode && !isDeleteMode && !isSearchOpen ? (
@@ -1472,37 +1537,24 @@ function EmptyChatSecurityNotice({
   onLearnMore: () => void;
 }) {
   const appTheme = useAppTheme();
-  const securityCardBackground = appTheme.isDark ? '#171203' : '#FFF7D6';
-  const securityCardBorder = appTheme.isDark ? '#3B2F0A' : 'rgba(124, 90, 18, 0.14)';
-  const securityTextColor = appTheme.isDark ? '#E7D9A8' : '#3F3215';
-  const securityIconColor = appTheme.isDark ? '#EAB308' : '#7C5A12';
 
   return (
     <View style={styles.emptyChatSecurityWrap}>
-      <View style={[
-        styles.emptyChatSecurityCard,
-        {
-          backgroundColor: securityCardBackground,
-          borderColor: securityCardBorder
-        }
-      ]}>
+      <View style={styles.emptyChatSecurityCard}>
         <View style={styles.emptyChatSecurityIcon}>
-          <Feather color={securityIconColor} name="lock" size={12} />
+          <Feather color={appTheme.colors.muted} name="lock" size={14} />
         </View>
-        <Text style={[styles.emptyChatSecurityText, { color: securityTextColor }]}>
+        <Text style={[styles.emptyChatSecurityText, { color: appTheme.colors.muted }]}>
           {isGroupChat
-            ? 'This group is protected with Synzapp secure messaging. Only approved members on registered devices can open the conversation content. '
-            : 'This chat is protected with Synzapp secure messaging. Only you and this contact can open the conversation content on registered devices. '}
-          <Text
-            accessibilityRole="link"
-            onPress={onLearnMore}
-            style={[
-              styles.emptyChatSecurityLink,
-              { color: appTheme.isDark ? '#5EEAD4' : '#2563EB' }
-            ]}
-          >
-            Learn more
-          </Text>
+            ? 'This group is protected with Synzapp secure messaging. Only approved members on registered devices can open the conversation content.'
+            : 'This chat is protected with Synzapp secure messaging. Only you and this contact can open the conversation content on registered devices.'}
+        </Text>
+        <Text
+          accessibilityRole="link"
+          onPress={onLearnMore}
+          style={[styles.emptyChatSecurityLink, { color: appTheme.colors.link }]}
+        >
+          Learn more
         </Text>
       </View>
     </View>

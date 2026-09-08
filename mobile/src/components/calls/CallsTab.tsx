@@ -5,7 +5,7 @@ import type { SynzappCallMode } from '../../services/callApi';
 import { CallHistoryRow, getCallHistoryStatusLabel } from '../../components/calls/CallHistoryRow';
 import { ChatContact } from '../../services/chatApi';
 import { ChatSearchBar, getKeyboardDismissMode } from '../../components/chatUiPrimitives';
-import { FlatList, Pressable, Text, View } from 'react-native';
+import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { styles } from '../../screens/adminChatStyles';
 import { useAppTheme } from '../../theme/AppThemeProvider';
 
@@ -55,20 +55,28 @@ export function CallsTab({
 
   return (
     <View style={[styles.callsTab, styles.fixedListTab]}>
-      <ChatSearchBar
-        onChangeText={onSearchChange}
-        placeholder="Search"
-        value={search}
-      />
+      <View style={callsStyles.searchWrap}>
+        <ChatSearchBar
+          onChangeText={onSearchChange}
+          placeholder="Search"
+          value={search}
+        />
+      </View>
 
-      <View style={styles.callQuickActions}>
+      {/* One card, four tinted actions, hairlines between them — the same shape
+          the call and contact screens use. Tinted discs were four filled
+          buttons in a row competing with the list under them. */}
+      <View style={[callsStyles.actionCard, { backgroundColor: appTheme.colors.groupedCard }]}>
         <CallQuickActionButton icon="phone" label="Call" onPress={onOpenNewCall} />
+        <View style={[callsStyles.actionDivider, { backgroundColor: appTheme.colors.separator }]} />
         <CallQuickActionButton badge={scheduledCount} icon="calendar" label="Schedule" onPress={onOpenSchedule} />
+        <View style={[callsStyles.actionDivider, { backgroundColor: appTheme.colors.separator }]} />
         <CallQuickActionButton icon="grid" label="Keypad" onPress={onOpenKeypad} />
+        <View style={[callsStyles.actionDivider, { backgroundColor: appTheme.colors.separator }]} />
         <CallQuickActionButton badge={favoriteCount} icon="heart" label="Favorites" onPress={onOpenFavorites} />
       </View>
 
-      <Text style={[styles.callsSectionTitle, { color: appTheme.colors.ink }]}>Recent</Text>
+      <Text style={[callsStyles.sectionTitle, { color: appTheme.colors.muted }]}>Recent</Text>
 
       <FlatList
         alwaysBounceVertical={false}
@@ -106,6 +114,13 @@ export function CallsTab({
   );
 }
 
+/**
+ * One of the four shortcuts.
+ *
+ * Tinted text under a tinted icon, sharing a card with the other three. The
+ * count rides beside the label rather than on a coloured pip: "Favorites 3"
+ * can be read, and a small green dot on a grey disc cannot.
+ */
 function CallQuickActionButton({
   badge = 0,
   icon,
@@ -118,25 +133,22 @@ function CallQuickActionButton({
   onPress: () => void;
 }) {
   const appTheme = useAppTheme();
+  const labelText = badge > 0 ? `${label} ${badge > 99 ? '99+' : badge}` : label;
 
   return (
     <Pressable
+      accessibilityLabel={labelText}
       accessibilityRole="button"
       onPress={onPress}
       style={({ pressed }) => [
-        styles.callQuickAction,
-        pressed && styles.pressed
+        callsStyles.action,
+        pressed && { backgroundColor: appTheme.colors.groupedBackground }
       ]}
     >
-      <View style={[styles.callQuickActionIcon, { backgroundColor: appTheme.colors.surface }]}>
-        <Feather color={appTheme.colors.ink} name={icon} size={21} />
-        {badge > 0 ? (
-          <View style={styles.callQuickActionBadge}>
-            <Text style={styles.callQuickActionBadgeText}>{badge > 99 ? '99+' : badge}</Text>
-          </View>
-        ) : null}
-      </View>
-      <Text style={[styles.callQuickActionLabel, { color: appTheme.colors.muted }]}>{label}</Text>
+      <Feather color={appTheme.colors.link} name={icon} size={21} />
+      <Text numberOfLines={1} style={[callsStyles.actionText, { color: appTheme.colors.link }]}>
+        {labelText}
+      </Text>
     </Pressable>
   );
 }
@@ -154,3 +166,41 @@ function filterCallHistory(history: SynzappCallHistoryEntry[], search: string): 
     getCallHistoryStatusLabel(entry).toLowerCase().includes(normalizedSearch)
   );
 }
+
+const callsStyles = StyleSheet.create({
+  // The tab surface already pays 10, and a card sits 15 from the screen edge.
+  searchWrap: {
+    marginHorizontal: 5
+  },
+  actionCard: {
+    alignItems: 'stretch',
+    borderRadius: 22,
+    flexDirection: 'row',
+    marginHorizontal: 5,
+    overflow: 'hidden'
+  },
+  action: {
+    alignItems: 'center',
+    flex: 1,
+    gap: 6,
+    justifyContent: 'center',
+    minWidth: 0,
+    paddingHorizontal: 4,
+    paddingVertical: 14
+  },
+  actionText: {
+    fontSize: 13,
+    lineHeight: 18,
+    textAlign: 'center'
+  },
+  // The card's own hairline, stood on its end and kept off the card edges.
+  actionDivider: {
+    marginVertical: 12,
+    width: 1
+  },
+  sectionTitle: {
+    fontSize: 13,
+    marginLeft: 15,
+    marginTop: 14
+  }
+});

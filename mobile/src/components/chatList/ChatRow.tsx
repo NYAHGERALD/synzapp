@@ -21,7 +21,8 @@ export function ChatRow({
   onToggleFavorite,
   onTogglePin,
   profilePhotoHeaders,
-  scheduledState
+  scheduledState,
+  typingText
 }: {
   chat: ChatItem;
   onArchive: () => void;
@@ -38,6 +39,8 @@ export function ChatRow({
    * opens, was invisible.
    */
   scheduledState?: { failed: number; waiting: number };
+  /** Replaces the preview while somebody is writing, the way every chat app does. */
+  typingText?: string | null;
 }) {
   const appTheme = useAppTheme();
   const translateX = useRef(new Animated.Value(0)).current;
@@ -231,7 +234,14 @@ export function ChatRow({
                 <Feather color={appTheme.colors.primary} name="clock" size={13} />
               ) : null}
             </View>
-            {getChatListPreviewText(chat) ? (
+            {typingText ? (
+              // Takes the preview's place rather than sitting beside it. The row
+              // has one line, and what somebody is about to say matters more
+              // than what was last said.
+              <Text numberOfLines={1} style={[styles.chatPreview, { color: appTheme.colors.primary }]}>
+                {typingText}
+              </Text>
+            ) : getChatListPreviewText(chat) ? (
               <Text numberOfLines={2} style={[styles.chatPreview, { color: appTheme.colors.muted }]}>
                 {getChatListPreviewText(chat)}
               </Text>

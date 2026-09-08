@@ -200,29 +200,32 @@ export function RetentionConsole({ adminName = 'Org Admin' }: RetentionConsolePr
 
   return (
     <div className="retention-console">
-      <nav aria-label="Compliance sections" className="retention-nav">
-        <p className="retention-nav-kicker">Compliance</p>
-        {NAV_ITEMS.map((item) => {
-          const Icon = item.icon;
-
-          return (
-            <button
-              aria-current={view === item.id ? 'page' : undefined}
-              className={view === item.id || (view === 'wizard' && item.id === 'policies')
-                ? 'retention-nav-item is-active'
-                : 'retention-nav-item'}
-              key={item.id}
-              onClick={() => setView(item.id)}
-              type="button"
-            >
-              <Icon aria-hidden size={16} />
-              <span>{item.label}</span>
-            </button>
-          );
-        })}
-      </nav>
-
       <div className="retention-body">
+        {/* Tabs, not a second sidebar. The workspace already has one on the
+            left, and two columns of navigation either side of the content ask
+            somebody to work out which list a thing belongs to before they can
+            look for it. */}
+        <nav aria-label="Compliance sections" className="retention-tabs">
+          {NAV_ITEMS.map((item) => {
+            const Icon = item.icon;
+
+            return (
+              <button
+                aria-current={view === item.id ? 'page' : undefined}
+                className={view === item.id || (view === 'wizard' && item.id === 'policies')
+                  ? 'retention-tab is-active'
+                  : 'retention-tab'}
+                key={item.id}
+                onClick={() => setView(item.id)}
+                type="button"
+              >
+                <Icon aria-hidden size={16} />
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+
         {needsPhoneVerification ? (
           <div className="retention-note is-warn" role="alert">
             <ShieldCheck aria-hidden size={17} />

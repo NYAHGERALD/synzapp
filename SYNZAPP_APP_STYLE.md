@@ -112,16 +112,37 @@ Use `mobile/src/components/ui/CircleIconButton.tsx`:
 
 - 44 point circle in `groupedCard` white, 23 point icon, `hitSlop` of 8 so a
   near miss still counts
-- **The only shadow in the app.** It floats above whatever it sits on, because
-  it has to be findable over a photo, a list or a card without changing colour
-  to suit each one. Nothing else gets a shadow
+- **One of the three things allowed a shadow**, with the search field and the
+  chat header. It floats above whatever it sits on, because it has to be
+  findable over a photo, a list or a card without changing colour to suit each
+  one. Nothing outside those three gets one
 - `tone="plain"` by default; `tone="accent"` fills it for the forward control
 - `CircleIconSpacer` balances the other side so a title stays centred
 
 A word has to be read and translated. A chevron is understood at a glance,
 which matters when the person holding the phone is wearing gloves.
 
-## 5. Movement
+## 5. The search field
+
+**One field, everywhere.** `ChatSearchBar` in
+`mobile/src/components/chatUiPrimitives.tsx`, and no screen keeps its own.
+
+- `groupedCard` white, so it reads as a card on the tinted page
+- **A blue outline**, `colors.link`, at 1.5
+- A soft shadow: 3 down, 10% opacity, 8 blur, elevation 3. It has to sit
+  **above** the page rather than be drawn on it, and a border alone does not do
+  that
+- Fully rounded ends, and the whole width of the page inside the usual 15
+
+It takes no props for its appearance. It began as an opt-in tone on two screens
+and became the house style, which is the right way round: a field that looks the
+same everywhere is worth more than any screen's own version of one.
+
+**Nothing shares the row with it.** Controls that used to sit beside a search
+field — a view toggle, a refresh — belong in the header. A search box somebody
+cannot type a whole word into is a search box nobody uses.
+
+## 6. Movement
 
 Screens should settle, not snap.
 
@@ -130,13 +151,13 @@ Screens should settle, not snap.
 - On Android, `UIManager.setLayoutAnimationEnabledExperimental(true)` must be
   called or nothing animates at all
 
-## 6. Keyboard
+## 7. Keyboard
 
 Any screen with a text field wraps its scrolling part in a `KeyboardAvoidingView`,
 `padding` on iOS and `height` on Android. A field near the bottom must ride
 above the keyboard, never hide behind it.
 
-## 7. Testing
+## 8. Testing
 
 Pure wording and colour logic lives in a service module with **no native
 import**. A helper that imports `react-native` or `expo-image-picker` cannot be
@@ -145,7 +166,7 @@ attachment size rules both had to be moved out afterwards.
 
 Put the rule in a service, test it there, and let the component only render it.
 
-## 8. Where this is applied
+## 9. Where this is applied
 
 Done:
 

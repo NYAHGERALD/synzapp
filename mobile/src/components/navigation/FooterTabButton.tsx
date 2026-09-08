@@ -7,6 +7,7 @@ import { FooterTab } from '../../components/guidedSetup/GuidedSetupCoachOverlay'
 import { ProfileAvatar } from '../../components/messages/MessageThread';
 import { styles } from '../../screens/adminChatStyles';
 import { useAppTheme } from '../../theme/AppThemeProvider';
+import { getFooterTabLabel } from '../../services/footerTabLabels';
 
 /**
  * A bottom navigation tab.
@@ -103,10 +104,11 @@ export function FooterTabButton({
             </View>
           ) : null}
         </View>
-        {/* One line always. "Announcements" is wider than a sixth of the screen
-            at this size, and wrapping it cut the word in half. It shrinks to
-            fit instead of being abbreviated, so the label still says what the
-            tab is. */}
+        {/* One line always. `adjustsFontSizeToFit` is iOS only, so on Android
+            the label never shrank and simply ran into its neighbour — which is
+            why the longest of them is shortened by name in
+            `getFooterTabLabel` rather than left to a prop that only helps half
+            the devices. */}
         <Text
           adjustsFontSizeToFit
           minimumFontScale={0.75}
@@ -117,7 +119,7 @@ export function FooterTabButton({
             { color: active ? appTheme.colors.primary : appTheme.colors.ink }
           ]}
         >
-          {tab}
+          {getFooterTabLabel(tab)}
         </Text>
       </Animated.View>
     </Pressable>

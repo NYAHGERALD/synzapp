@@ -664,6 +664,38 @@ export async function updateScheduledMessagePolicy(input: {
   return body.policy;
 }
 
+/**
+ * Whether an admin's phone number is shown to the people they look after.
+ *
+ * A per-company decision, set by that company's own admin. See section 4 of
+ * SYNZAPP_MAIN_MENU_PLAN.md.
+ */
+export interface AdminContactPolicy {
+  showAdminPhoneNumber: boolean;
+  updatedAt: string | null;
+  updatedByUid: string | null;
+}
+
+export async function getAdminContactPolicy(idToken: string): Promise<AdminContactPolicy> {
+  const response = await adminFetch('/api/admin/admin-contact-policy', idToken);
+  const body = await response.json() as { policy: AdminContactPolicy };
+
+  return body.policy;
+}
+
+export async function updateAdminContactPolicy(input: {
+  idToken: string;
+  showAdminPhoneNumber: boolean;
+}): Promise<AdminContactPolicy> {
+  const response = await adminFetch('/api/admin/admin-contact-policy', input.idToken, {
+    body: JSON.stringify({ showAdminPhoneNumber: input.showAdminPhoneNumber }),
+    method: 'PATCH'
+  });
+  const body = await response.json() as { policy: AdminContactPolicy };
+
+  return body.policy;
+}
+
 /** Deliberately has no field that could carry the message itself. */
 export interface TenantScheduledMessage {
   conversationId: string;

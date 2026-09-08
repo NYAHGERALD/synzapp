@@ -383,14 +383,11 @@ export const coreStyles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingTop: 6
   },
+  // No card. It is a note about the conversation, not a thing in it, so it sits
+  // on the chat's own background with nothing drawn around it.
   emptyChatSecurityCard: {
-    alignItems: 'flex-start',
+    alignItems: 'center',
     alignSelf: 'center',
-    backgroundColor: '#FFF7D6',
-    borderColor: 'rgba(124, 90, 18, 0.14)',
-    borderRadius: 8,
-    borderWidth: 1,
-    flexDirection: 'row',
     gap: 6,
     maxWidth: 330,
     paddingHorizontal: 10,
@@ -404,16 +401,18 @@ export const coreStyles = StyleSheet.create({
     width: 16
   },
   emptyChatSecurityText: {
-    color: '#3F3215',
-    flex: 1,
-    fontSize: 12,
-    fontWeight: '500',
-    lineHeight: 16,
+    fontSize: 13,
+    lineHeight: 19,
     textAlign: 'center'
   },
+  // On a line of its own, below. Trailing a link off the end of a paragraph
+  // leaves it wherever the last line happens to break — which is how it ended
+  // up as two orphaned words in the middle of nothing.
   emptyChatSecurityLink: {
-    color: '#2563EB',
-    fontWeight: '700'
+    fontSize: 13.5,
+    lineHeight: 19,
+    marginTop: 2,
+    textAlign: 'center'
   },
   threadSearchBox: {
     alignItems: 'center',

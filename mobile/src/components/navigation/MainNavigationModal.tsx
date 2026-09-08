@@ -1,15 +1,34 @@
-import Ionicons from '@expo/vector-icons/Ionicons';
-import { Modal, Platform, Pressable, Text, View, useWindowDimensions } from 'react-native';
-import { androidButtonRipple, androidIconRipple } from '../../components/chatUiPrimitives';
+import Feather from '@expo/vector-icons/Feather';
+import React from 'react';
+import { Modal, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ANDROID_MAX_NAVIGATION_INSET } from '../../services/androidNavigationInset';
+import { CircleIconButton, CircleIconSpacer } from '../../components/ui/CircleIconButton';
+import { ListSection } from '../../components/ui/GroupedList';
+import { ProfileAvatar } from '../../components/messages/MessageThread';
+import {
+  type MainNavigationKey,
+  describeAdminContactHeading,
+  describeAdminContactSubtitle,
+  describeOwnIdentityLines,
+  listMainNavigationItems
+} from '../../services/mainNavigationDetails';
+import type { CurrentUserProfile } from '../../services/profileApi';
 import { getFullScreenModalTopPadding, getNativeFullHeightModalPresentationStyle } from '../../components/keyResults/KeyResultsSettings';
-import { styles } from '../../screens/adminChatStyles';
+import { resolveScreenBottomInset } from '../../services/rootSafeArea';
 import { useAppTheme } from '../../theme/AppThemeProvider';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 /**
- * The main navigation menu.
+ * The main menu.
  *
- * Lifted out of the chat screen unchanged.
+ * It answers three things without anybody having to ask a colleague: who you
+ * are here, where you can go, and who to ask. Then it offers the one way out.
+ *
+ * Identity is first because it is what everything under it is scoped by — the
+ * sections you are shown and the admin you are given both follow from it.
+ * Log out is last and alone: never beside a link a thumb is already aiming at.
+ *
+ * See SYNZAPP_MAIN_MENU_PLAN.md.
  */
 
 export const mainNavigationLinks = [
@@ -24,18 +43,38 @@ export function MainNavigationModal({
   isOpen,
   links,
   onClose,
-  onSelect
+  onOpenAdminChat,
+  onSelect,
+  onSignOut,
+  profile,
+  profilePhotoHeaders
 }: {
   isOpen: boolean;
-  links: readonly (typeof mainNavigationLinks[number])[];
+  links: readonly MainNavigationKey[];
   onClose: () => void;
-  onSelect: (label: typeof mainNavigationLinks[number]) => void;
+  /** Absent when that person cannot be reached, which leaves the row inert. */
+  onOpenAdminChat?: (contactId: string) => void;
+  onSelect: (label: MainNavigationKey) => void;
+  onSignOut?: () => void;
+  profile: CurrentUserProfile | null;
+  profilePhotoHeaders?: Record<string, string>;
 }) {
   const appTheme = useAppTheme();
   const insets = useSafeAreaInsets();
-  const { height } = useWindowDimensions();
   const modalTopPadding = getFullScreenModalTopPadding(insets.top);
-  const navigationTopOffset = Math.max(76, Math.min(148, Math.round(height * 0.14)));
+  const screenBottomInset = resolveScreenBottomInset({
+    androidNavigationInset: Math.min(insets.bottom, ANDROID_MAX_NAVIGATION_INSET),
+    platform: Platform.OS
+  });
+  const items = listMainNavigationItems(links);
+  const admin = profile?.departmentAdmin || null;
+  const identityLines = profile
+    ? describeOwnIdentityLines({
+      departmentName: profile.departmentName,
+      phoneFormatted: profile.phoneFormatted,
+      roleName: profile.roleName
+    })
+    : [];
 
   return (
     <Modal
@@ -47,57 +86,266 @@ export function MainNavigationModal({
       visible={isOpen}
     >
       <View style={[
-        styles.mainNavigationScreen,
+        menuStyles.screen,
         {
-          backgroundColor: appTheme.colors.screen,
-          paddingBottom: Math.max(insets.bottom, 18),
+          backgroundColor: appTheme.colors.groupedBackground,
           paddingTop: modalTopPadding
         }
       ]}>
-        <View style={styles.mainNavigationHeader}>
-          <Pressable
-            accessibilityLabel="Close main navigation"
-            accessibilityRole="button"
-            android_ripple={androidIconRipple}
-            onPress={onClose}
-            style={({ pressed }) => [
-              styles.mainNavigationHeaderButton,
-              { backgroundColor: appTheme.colors.surface },
-              pressed && styles.pressed
-            ]}
-          >
-            <Ionicons color={appTheme.colors.ink} name="close" size={25} />
-          </Pressable>
-          <Text numberOfLines={1} style={[styles.mainNavigationTitle, { color: appTheme.colors.ink }]}>
-            Synzapp
+        <View style={menuStyles.header}>
+          <CircleIconButton action="close" label="Close main navigation" onPress={onClose} />
+          {/* The company's name, not the product's. Somebody in two tenants
+              needs to know which one they are looking at; the app's own name
+              is the one fact on this screen they already have. */}
+          <Text numberOfLines={1} style={[menuStyles.headerTitle, { color: appTheme.colors.ink }]}>
+            {profile?.companyName || 'Synzapp'}
           </Text>
-          <View style={styles.mainNavigationHeaderSpacer} />
+          <CircleIconSpacer />
         </View>
 
-        <View style={[styles.mainNavigationContent, { paddingTop: navigationTopOffset }]}>
-          {links.map((link, index) => (
-            <Pressable
-              accessibilityLabel={`Open ${link}`}
-              accessibilityRole="button"
-              android_ripple={androidButtonRipple}
-              key={link}
-              onPress={() => onSelect(link)}
-              style={({ pressed }) => [
-                styles.mainNavigationLink,
-                {
-                  borderBottomColor: appTheme.isDark ? '#3A3A3A' : '#D6DCE5',
-                  borderBottomWidth: index === links.length - 1 ? 0 : 1
-                },
-                pressed && styles.pressed
-              ]}
-            >
-              <Text numberOfLines={1} style={[styles.mainNavigationLinkText, { color: appTheme.colors.ink }]}>
-                {link}
-              </Text>
-            </Pressable>
-          ))}
+        {/* A plain view, not a scroll. The menu is a fixed set of things and
+            reads better as one screen than as something to be explored. */}
+        <View style={menuStyles.content}>
+          {profile ? (
+            <ListSection>
+              <View style={menuStyles.identityRow}>
+                <View style={menuStyles.identityText}>
+                  {/* Nothing here is cut off. A job title and a department can
+                      run long together, and "Supervisor · Department Admin · B…"
+                      hides the one word that says which department. */}
+                  <Text style={[menuStyles.identityName, { color: appTheme.colors.ink }]}>
+                    {profile.displayName}
+                  </Text>
+                  {identityLines.map((line) => (
+                    <Text
+                      key={line}
+                      style={[menuStyles.identityMeta, { color: appTheme.colors.muted }]}
+                    >
+                      {line}
+                    </Text>
+                  ))}
+                </View>
+
+                <ProfileAvatar
+                  headers={profilePhotoHeaders}
+                  name={profile.displayName}
+                  size={72}
+                  uri={profile.profilePhotoUrl}
+                />
+              </View>
+            </ListSection>
+          ) : null}
+
+          <ListSection>
+            {items.map((item) => (
+              <Pressable
+                accessibilityLabel={`Open ${item.label}`}
+                accessibilityRole="button"
+                key={item.key}
+                onPress={() => onSelect(item.key)}
+                style={({ pressed }) => [
+                  menuStyles.navRow,
+                  pressed && { backgroundColor: appTheme.colors.groupedBackground }
+                ]}
+              >
+                <View style={menuStyles.navIcon}>
+                  <Feather color={appTheme.colors.ink} name={item.icon} size={20} />
+                </View>
+                <Text numberOfLines={1} style={[menuStyles.navLabel, { color: appTheme.colors.ink }]}>
+                  {item.label}
+                </Text>
+                <Feather color={appTheme.colors.muted} name="chevron-right" size={19} />
+              </Pressable>
+            ))}
+          </ListSection>
+
+          {/* Drawn only when there is somebody to name. A card headed "Your
+              department admin" with nothing under it is worse than no card. */}
+          {admin ? (
+            <ListSection title={describeAdminContactHeading(admin.scope)}>
+              <Pressable
+                accessibilityHint={onOpenAdminChat ? 'Opens a chat with them' : undefined}
+                accessibilityLabel={`${admin.displayName}, ${admin.roleName}`}
+                accessibilityRole={onOpenAdminChat ? 'button' : 'text'}
+                disabled={!onOpenAdminChat}
+                onPress={() => onOpenAdminChat?.(admin.contactId)}
+                style={({ pressed }) => [
+                  menuStyles.adminRow,
+                  pressed && onOpenAdminChat && { backgroundColor: appTheme.colors.groupedBackground }
+                ]}
+              >
+                <ProfileAvatar
+                  headers={profilePhotoHeaders}
+                  name={admin.displayName}
+                  size={48}
+                  uri={admin.profilePhotoUrl}
+                />
+                <View style={menuStyles.adminText}>
+                  <Text numberOfLines={1} style={[menuStyles.adminName, { color: appTheme.colors.ink }]}>
+                    {admin.displayName}
+                  </Text>
+                  <Text numberOfLines={1} style={[menuStyles.adminMeta, { color: appTheme.colors.muted }]}>
+                    {describeAdminContactSubtitle({
+                      otherAdminCount: admin.otherAdminCount,
+                      roleName: admin.roleName
+                    })}
+                  </Text>
+                  {admin.phoneFormatted ? (
+                    <Text numberOfLines={1} style={[menuStyles.adminMeta, { color: appTheme.colors.muted }]}>
+                      {admin.phoneFormatted}
+                    </Text>
+                  ) : null}
+                </View>
+                {onOpenAdminChat ? (
+                  <Feather color={appTheme.colors.link} name="message-square" size={19} />
+                ) : null}
+              </Pressable>
+            </ListSection>
+          ) : null}
+
+          {onSignOut ? (
+            <ListSection>
+              <Pressable
+                accessibilityLabel="Log out"
+                accessibilityRole="button"
+                onPress={onSignOut}
+                style={({ pressed }) => [
+                  menuStyles.signOutRow,
+                  pressed && { backgroundColor: appTheme.colors.groupedBackground }
+                ]}
+              >
+                <Feather color={appTheme.colors.destructive} name="log-out" size={18} />
+                <Text style={[menuStyles.signOutText, { color: appTheme.colors.destructive }]}>
+                  Log out
+                </Text>
+              </Pressable>
+            </ListSection>
+          ) : null}
         </View>
+
+        {/* Held against the foot of the screen rather than following the
+            content, so it reads as the company's mark on the page and never
+            competes with the things above it. */}
+        {profile?.companyAddress ? (
+          <Text
+            numberOfLines={2}
+            style={[
+              menuStyles.address,
+              {
+                color: appTheme.colors.muted,
+                paddingBottom: Math.max(16, screenBottomInset + 12)
+              }
+            ]}
+          >
+            {profile.companyAddress}
+          </Text>
+        ) : (
+          <View style={{ height: Math.max(16, screenBottomInset + 12) }} />
+        )}
       </View>
     </Modal>
   );
 }
+
+const menuStyles = StyleSheet.create({
+  screen: {
+    flex: 1
+  },
+  header: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: 15
+  },
+  headerTitle: {
+    flex: 1,
+    fontSize: 17,
+    lineHeight: 22,
+    paddingHorizontal: 10,
+    textAlign: 'center'
+  },
+  content: {
+    flex: 1,
+    paddingTop: 2
+  },
+  address: {
+    fontSize: 11.5,
+    lineHeight: 16,
+    paddingHorizontal: 24,
+    paddingTop: 8,
+    textAlign: 'center'
+  },
+  identityRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 16
+  },
+  identityText: {
+    flex: 1,
+    gap: 3,
+    minWidth: 0
+  },
+  identityName: {
+    fontSize: 22,
+    lineHeight: 28
+  },
+  identityMeta: {
+    fontSize: 14.5,
+    lineHeight: 20
+  },
+  navRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 12,
+    minHeight: 54,
+    paddingHorizontal: 16,
+    paddingVertical: 11
+  },
+  navIcon: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 26
+  },
+  navLabel: {
+    flex: 1,
+    fontSize: 16,
+    lineHeight: 21,
+    minWidth: 0
+  },
+  adminRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 12,
+    minHeight: 68,
+    paddingHorizontal: 16,
+    paddingVertical: 12
+  },
+  adminText: {
+    flex: 1,
+    minWidth: 0
+  },
+  adminName: {
+    fontSize: 16,
+    lineHeight: 21
+  },
+  adminMeta: {
+    fontSize: 13,
+    lineHeight: 18,
+    marginTop: 1
+  },
+  signOutRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    justifyContent: 'center',
+    minHeight: 50,
+    paddingHorizontal: 16,
+    paddingVertical: 13
+  },
+  signOutText: {
+    fontSize: 16,
+    lineHeight: 21
+  }
+});

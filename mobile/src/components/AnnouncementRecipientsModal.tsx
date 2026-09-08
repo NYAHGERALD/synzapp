@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   FlatList,
   Modal,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -17,6 +18,10 @@ import {
   type AnnouncementRecipientStatus
 } from '../services/announcementApi';
 import { describeAcknowledgement } from '../services/announcementDisplay';
+import { ANDROID_MAX_NAVIGATION_INSET } from '../services/androidNavigationInset';
+import { CircleIconButton, CircleIconSpacer } from './ui/CircleIconButton';
+import { getFullScreenModalTopPadding } from './keyResults/KeyResultsSettings';
+import { resolveScreenBottomInset } from '../services/rootSafeArea';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 /**
@@ -29,6 +34,10 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
  * The counts at the top come from stored counters on the announcement, not from
  * counting these rows: counting five thousand rows to show one number, every
  * time somebody opens this, is how a screen like this dies.
+ *
+ * The rows are **one card**, built a row at a time. Five thousand separate
+ * cards is a page of stripes; a single card with hairlines between its rows
+ * stays legible however far it runs.
  */
 export function AnnouncementRecipientsModal({
   announcement,
@@ -55,6 +64,11 @@ export function AnnouncementRecipientsModal({
   const getIdTokenRef = useRef(getIdToken);
 
   getIdTokenRef.current = getIdToken;
+
+  const screenBottomInset = resolveScreenBottomInset({
+    androidNavigationInset: Math.min(insets.bottom, ANDROID_MAX_NAVIGATION_INSET),
+    platform: Platform.OS
+  });
 
   const load = useCallback(
     async (startAfterUid?: string) => {
@@ -95,16 +109,14 @@ export function AnnouncementRecipientsModal({
 
   return (
     <Modal animationType="slide" onRequestClose={onClose} presentationStyle="pageSheet" visible={visible}>
-      <View style={styles.sheet}>
-        <View style={[styles.head, { paddingTop: insets.top + 12 }]}>
-          <Pressable accessibilityRole="button" onPress={onClose}>
-            <Text style={styles.close}>Close</Text>
-          </Pressable>
-          <Text style={styles.title}>Who has confirmed</Text>
-          <View style={styles.headSpacer} />
+      <View style={[styles.sheet, { paddingTop: getFullScreenModalTopPadding(insets.top) }]}>
+        <View style={styles.head}>
+          <CircleIconButton action="close" label="Close" onPress={onClose} />
+          <Text numberOfLines={1} style={styles.title}>Who has confirmed</Text>
+          <CircleIconSpacer />
         </View>
 
-        <View style={styles.summary}>
+        <View style={styles.summaryCard}>
           <Text style={styles.subject}>{announcement.subject}</Text>
           <Text style={styles.counts}>{describeAcknowledgement(announcement)}</Text>
           {announcement.body ? (
@@ -114,7 +126,10 @@ export function AnnouncementRecipientsModal({
           ) : null}
         </View>
 
-        <View style={styles.filters}>
+        {/* One card, four text links. The one in force is the app's link blue
+            with a rule under it; outlined pills read as buttons that do
+            something, and these choose what the list below shows. */}
+        <View style={styles.filterCard}>
           {([
             ['ALL', 'Everyone'],
             ['ACKNOWLEDGED', 'Confirmed'],
@@ -122,18 +137,20 @@ export function AnnouncementRecipientsModal({
             ['DELIVERED', 'Not opened']
           ] as const).map(([value, label]) => (
             <Pressable
+              accessibilityLabel={label}
               accessibilityRole="button"
+              accessibilityState={{ selected: filter === value }}
               key={value}
               onPress={() => setFilter(value)}
-              style={({ pressed }) => [
-                styles.filter,
-                filter === value && styles.filterActive,
-                pressed && styles.pressed
-              ]}
+              style={({ pressed }) => [styles.filter, pressed && styles.pressed]}
             >
               <Text style={[styles.filterText, filter === value && styles.filterTextActive]}>
                 {label}
               </Text>
+              <View style={[
+                styles.filterUnderline,
+                filter === value && styles.filterUnderlineActive
+              ]} />
             </Pressable>
           ))}
         </View>
@@ -168,21 +185,32 @@ export function AnnouncementRecipientsModal({
             }}
             onEndReachedThreshold={0.4}
             removeClippedSubviews
-            renderItem={({ item }) => (
-              <View style={styles.row}>
-                <View style={styles.rowText}>
-                  <Text style={styles.rowName}>{item.displayName}</Text>
-                  <Text style={styles.rowStatus}>{describeRecipient(item)}</Text>
+            renderItem={({ index, item }) => (
+              <View style={[
+                styles.card,
+                index === 0 && styles.cardFirst,
+                index === recipients.length - 1 && styles.cardLast
+              ]}>
+                {index === 0 ? null : <View style={styles.divider} />}
+                <View style={styles.row}>
+                  <View style={styles.rowText}>
+                    <Text style={styles.rowName}>{item.displayName}</Text>
+                    <Text style={styles.rowStatus}>{describeRecipient(item)}</Text>
+                  </View>
+                  <View
+                    style={[
+                      styles.dot,
+                      item.status === 'ACKNOWLEDGED' && styles.dotConfirmed,
+                      item.status === 'READ' && styles.dotRead
+                    ]}
+                  />
                 </View>
-                <View
-                  style={[
-                    styles.dot,
-                    item.status === 'ACKNOWLEDGED' && styles.dotConfirmed,
-                    item.status === 'READ' && styles.dotRead
-                  ]}
-                />
               </View>
             )}
+            contentContainerStyle={[
+              styles.listContent,
+              { paddingBottom: Math.max(24, screenBottomInset + 20) }
+            ]}
             style={styles.list}
           />
         )}
@@ -207,44 +235,41 @@ function describeRecipient(recipient: AnnouncementRecipient): string {
 function createStyles(colors: AppColors) {
   return StyleSheet.create({
     sheet: {
-      backgroundColor: colors.screen,
+      backgroundColor: colors.groupedBackground,
       flex: 1
     },
+    // Same colour as the page and no rule under it.
     head: {
       alignItems: 'center',
-      borderBottomColor: colors.divider,
-      borderBottomWidth: 1,
       flexDirection: 'row',
+      gap: 10,
       justifyContent: 'space-between',
-      paddingHorizontal: 16,
-      paddingVertical: 14
+      paddingHorizontal: 15
     },
     title: {
       color: colors.ink,
+      flex: 1,
       fontSize: 17,
-      fontWeight: '500'
+      lineHeight: 22,
+      textAlign: 'center'
     },
-    close: {
-      color: colors.primary,
-      fontSize: 16
-    },
-    headSpacer: {
-      width: 48
-    },
-    summary: {
-      borderBottomColor: colors.divider,
-      borderBottomWidth: 1,
+    summaryCard: {
+      backgroundColor: colors.groupedCard,
+      borderRadius: 22,
+      marginHorizontal: 15,
+      marginTop: 10,
       paddingHorizontal: 16,
       paddingVertical: 14
     },
     subject: {
       color: colors.ink,
       fontSize: 16,
-      fontWeight: '500'
+      lineHeight: 21
     },
     counts: {
       color: colors.muted,
       fontSize: 14,
+      lineHeight: 19,
       marginTop: 4
     },
     bodyPreview: {
@@ -253,41 +278,78 @@ function createStyles(colors: AppColors) {
       lineHeight: 20,
       marginTop: 8
     },
-    filters: {
-      borderBottomColor: colors.divider,
-      borderBottomWidth: 1,
+    filterCard: {
+      backgroundColor: colors.groupedCard,
+      borderRadius: 22,
       flexDirection: 'row',
-      gap: 6,
-      paddingHorizontal: 12,
-      paddingVertical: 10
+      marginHorizontal: 15,
+      marginTop: 12,
+      overflow: 'hidden'
     },
     filter: {
-      borderRadius: 999,
-      paddingHorizontal: 12,
-      paddingVertical: 7
-    },
-    filterActive: {
-      backgroundColor: colors.primarySoft
+      alignItems: 'center',
+      flex: 1,
+      minWidth: 0,
+      paddingHorizontal: 6,
+      paddingVertical: 11
     },
     filterText: {
       color: colors.muted,
-      fontSize: 13.5
+      fontSize: 13.5,
+      lineHeight: 18,
+      textAlign: 'center'
     },
     filterTextActive: {
-      color: colors.primary,
-      fontWeight: '500'
+      color: colors.link
+    },
+    filterUnderline: {
+      alignSelf: 'stretch',
+      backgroundColor: 'transparent',
+      borderRadius: 1,
+      height: 2,
+      marginTop: 6
+    },
+    filterUnderlineActive: {
+      backgroundColor: colors.link
     },
     list: {
       flex: 1
     },
+    listContent: {
+      paddingTop: 14
+    },
+    /**
+     * One card, built a row at a time.
+     *
+     * The list is paged fifty at a time and an announcement can reach thousands,
+     * so it has no natural end. Each row carries the card's colour and margins
+     * and only the ends round their corners.
+     */
+    card: {
+      backgroundColor: colors.groupedCard,
+      marginHorizontal: 15,
+      overflow: 'hidden'
+    },
+    cardFirst: {
+      borderTopLeftRadius: 22,
+      borderTopRightRadius: 22
+    },
+    cardLast: {
+      borderBottomLeftRadius: 22,
+      borderBottomRightRadius: 22
+    },
+    divider: {
+      backgroundColor: colors.separator,
+      height: 1,
+      marginHorizontal: 15
+    },
     row: {
       alignItems: 'center',
-      borderBottomColor: colors.divider,
-      borderBottomWidth: 1,
       flexDirection: 'row',
       gap: 12,
+      minHeight: 62,
       paddingHorizontal: 16,
-      paddingVertical: 14
+      paddingVertical: 12
     },
     rowText: {
       flex: 1,
@@ -296,15 +358,16 @@ function createStyles(colors: AppColors) {
     rowName: {
       color: colors.ink,
       fontSize: 16,
-      fontWeight: '500'
+      lineHeight: 21
     },
     rowStatus: {
       color: colors.muted,
       fontSize: 13,
+      lineHeight: 18,
       marginTop: 2
     },
     dot: {
-      backgroundColor: colors.divider,
+      backgroundColor: colors.separator,
       borderRadius: 5,
       height: 10,
       width: 10

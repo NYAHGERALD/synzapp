@@ -8,14 +8,20 @@ import {
   RefreshControl,
   ScrollView,
   StyleSheet,
-  Switch,
   Text,
   TextInput,
   View
 } from 'react-native';
 import { useAppTheme } from '../theme/AppThemeProvider';
 import type { AppColors } from '../theme/colors';
+import { KeyboardAwareScrollView } from 'react-native-keyboard-controller';
+import { ChatSearchBar } from '../components/chatUiPrimitives';
+import { filterAnnouncements } from '../services/announcementSearch';
+import type { NoticesView } from '../components/NoticesOptionsMenu';
 import { AnnouncementRow } from '../components/AnnouncementRow';
+import { CircleIconButton, CircleIconSpacer } from '../components/ui/CircleIconButton';
+import { ListNavRow, ListSection, ListSwitchRow } from '../components/ui/GroupedList';
+import { getFullScreenModalTopPadding } from '../components/keyResults/KeyResultsSettings';
 import {
   acknowledgeAnnouncement,
   markAnnouncementRead,
@@ -39,7 +45,6 @@ import {
   summariseSelectionByKind,
   type AudienceChoice
 } from '../services/audiencePicker';
-import { AppSwitch } from '../components/ui/AppSwitch';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 /**
@@ -58,7 +63,10 @@ export function AnnouncementsTab({
   currentUid,
   departmentBackedGroups,
   getIdToken,
-  peopleDepartments
+  isComposeOpen,
+  onChangeComposeOpen,
+  peopleDepartments,
+  view
 }: {
   audienceOptions: AnnouncementAudienceOption[];
   canSend: boolean;
@@ -66,13 +74,20 @@ export function AnnouncementsTab({
   /** Groups that hold a whole department, as { groupId: departmentId }. */
   departmentBackedGroups: Record<string, string>;
   getIdToken: () => Promise<string>;
+  /**
+   * Owned by the screen, because the buttons that drive them now live in the
+   * header: the options menu chooses the view and the header's Add opens the
+   * composer.
+   */
+  isComposeOpen: boolean;
+  onChangeComposeOpen: (isOpen: boolean) => void;
   /** Which department each employee is in, as { uid: departmentId }. */
   peopleDepartments: Record<string, string>;
+  view: NoticesView;
 }) {
-  const [view, setView] = useState<'FOR_ME' | 'SENT'>('FOR_ME');
 
   const [showingRecipients, setShowingRecipients] = useState<Announcement | null>(null);
-  const [isComposeOpen, setIsComposeOpen] = useState(false);
+  const [search, setSearch] = useState('');
   const [subject, setSubject] = useState('');
   const [body, setBody] = useState('');
   const [requiresAcknowledgement, setRequiresAcknowledgement] = useState(true);
@@ -185,7 +200,7 @@ export function AnnouncementsTab({
         subject
       });
 
-      setIsComposeOpen(false);
+      onChangeComposeOpen(false);
       resetCompose();
       await refreshAnnouncements(() => getIdToken(), { force: true });
 
@@ -246,22 +261,47 @@ export function AnnouncementsTab({
     );
   }
 
-  const renderItem = useCallback(
-    ({ item }: { item: Announcement }) => (
-      <AnnouncementRow
-        announcement={item}
-        isSender={item.createdByUid === currentUid}
-        onOpen={() =>
-          item.createdByUid === currentUid
-            ? setShowingRecipients(item)
-            : showAnnouncementAlert({
-                announcement: item,
-                onAcknowledge: () => handleAcknowledge(item.announcementId)
-              })
-        }
-      />
+  const visibleAnnouncements = useMemo(
+    () => filterAnnouncements(
+      view === 'SENT'
+        ? announcements.filter((entry) => entry.createdByUid === currentUid)
+        : announcements.filter((entry) => entry.createdByUid !== currentUid),
+      search
     ),
-    [currentUid, handleAcknowledge]
+    [announcements, currentUid, search, view]
+  );
+
+  /**
+   * One card, built a row at a time.
+   *
+   * Notices only ever accumulate, so this list has no natural end. A card each
+   * would be a page of stripes; the rows carry the card's colour and margins
+   * and only the ends round their corners, so a year of them still reads as one
+   * continuous card.
+   */
+  const renderItem = useCallback(
+    ({ index, item }: { index: number; item: Announcement }) => (
+      <View style={[
+        styles.card,
+        index === 0 && styles.cardFirst,
+        index === visibleAnnouncements.length - 1 && styles.cardLast
+      ]}>
+        {index === 0 ? null : <View style={styles.divider} />}
+        <AnnouncementRow
+          announcement={item}
+          isSender={item.createdByUid === currentUid}
+          onOpen={() =>
+            item.createdByUid === currentUid
+              ? setShowingRecipients(item)
+              : showAnnouncementAlert({
+                  announcement: item,
+                  onAcknowledge: () => handleAcknowledge(item.announcementId)
+                })
+          }
+        />
+      </View>
+    ),
+    [currentUid, handleAcknowledge, styles, visibleAnnouncements.length]
   );
 
   const everyoneOption = useMemo(
@@ -269,14 +309,6 @@ export function AnnouncementsTab({
     [audienceOptions]
   );
   const isEveryoneChosen = audiences.some((entry) => entry.kind === 'ORGANIZATION');
-
-  const visibleAnnouncements = useMemo(
-    () =>
-      view === 'SENT'
-        ? announcements.filter((entry) => entry.createdByUid === currentUid)
-        : announcements.filter((entry) => entry.createdByUid !== currentUid),
-    [announcements, currentUid, view]
-  );
 
   if (isLoading) {
     return (
@@ -288,58 +320,40 @@ export function AnnouncementsTab({
 
   return (
     <View style={styles.screen}>
-      {canSend && audienceOptions.length ? (
-        <Pressable
-          accessibilityRole="button"
-          onPress={() => setIsComposeOpen(true)}
-          style={({ pressed }) => [styles.composeButton, pressed && styles.pressed]}
-        >
-          <Text style={styles.composeButtonText}>New announcement</Text>
-        </Pressable>
-      ) : null}
+      {/* A notice is remembered by who it went to, who sent it, or a phrase in
+          it. All three are searched; see `filterAnnouncements`. */}
+      <View style={styles.searchWrap}>
+        <ChatSearchBar
+          onChangeText={setSearch}
+          placeholder="Search department, name or words"
+          value={search}
+        />
+      </View>
 
       {error ? <Text style={styles.error}>{error}</Text> : null}
 
-      {canSend ? (
-        <View style={styles.viewSwitch}>
-          {(['FOR_ME', 'SENT'] as const).map((option) => (
-            <Pressable
-              accessibilityRole="button"
-              key={option}
-              onPress={() => setView(option)}
-              style={({ pressed }) => [
-                styles.viewSwitchButton,
-                view === option && styles.viewSwitchButtonActive,
-                pressed && styles.pressed
-              ]}
-            >
-              <Text
-                style={[
-                  styles.viewSwitchText,
-                  view === option && styles.viewSwitchTextActive
-                ]}
-              >
-                {option === 'FOR_ME' ? 'For me' : 'Sent'}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
-      ) : null}
-
       <FlatList
+        contentContainerStyle={styles.listContent}
         data={visibleAnnouncements}
         // Tuned so a long history costs the same to open as a short one.
         initialNumToRender={6}
         keyExtractor={(item) => item.announcementId}
         ListEmptyComponent={
           <View style={styles.centre}>
+            {/* "Nothing matches" and "there is nothing" are different problems,
+                and saying the second when it is the first sends somebody
+                looking for a notice that is there. */}
             <Text style={styles.emptyTitle}>
-              {view === 'SENT' ? 'Nothing sent yet' : 'Nothing to confirm'}
+              {search.trim()
+                ? 'Nothing matches that'
+                : view === 'SENT' ? 'Nothing sent yet' : 'Nothing to confirm'}
             </Text>
             <Text style={styles.emptyBody}>
-              {view === 'SENT'
-                ? 'Announcements you send will appear here, with who has confirmed them.'
-                : 'Announcements your company sends you will appear here.'}
+              {search.trim()
+                ? 'Try a department, somebody’s name, or a word from the notice.'
+                : view === 'SENT'
+                  ? 'Announcements you send will appear here, with who has confirmed them.'
+                  : 'Announcements your company sends you will appear here.'}
             </Text>
           </View>
         }
@@ -370,42 +384,66 @@ export function AnnouncementsTab({
 
       <Modal
         animationType="slide"
-        onRequestClose={() => setIsComposeOpen(false)}
+        onRequestClose={() => onChangeComposeOpen(false)}
         presentationStyle="pageSheet"
         visible={isComposeOpen}
       >
-        <View style={styles.composeSheet}>
-          <View style={[styles.composeHead, { paddingTop: insets.top + 12 }]}>
-            <Pressable accessibilityRole="button" onPress={() => setIsComposeOpen(false)}>
-              <Text style={styles.composeCancel}>Cancel</Text>
+        <View style={[styles.composeSheet, { paddingTop: getFullScreenModalTopPadding(insets.top) }]}>
+          {/* The one action lives here, as a word, beside the round close
+              button. A filled slab at the foot of a form is something people
+              scroll past to reach; the header is where it can always be seen. */}
+          <View style={styles.composeHead}>
+            <CircleIconButton
+              action="close"
+              disabled={isSending}
+              label="Cancel this announcement"
+              onPress={() => onChangeComposeOpen(false)}
+            />
+            <Text numberOfLines={1} style={styles.composeTitle}>New announcement</Text>
+            <Pressable
+              accessibilityLabel="Send announcement"
+              accessibilityRole="button"
+              accessibilityState={{ disabled: isSending }}
+              disabled={isSending}
+              hitSlop={8}
+              onPress={confirmThenSend}
+              style={({ pressed }) => [
+                styles.composeSendAction,
+                pressed && styles.pressed,
+                isSending && styles.disabled
+              ]}
+            >
+              {isSending ? (
+                <ActivityIndicator color={appTheme.colors.link} size="small" />
+              ) : (
+                <Text style={styles.composeSendText}>Send</Text>
+              )}
             </Pressable>
-            <Text style={styles.composeTitle}>New announcement</Text>
-            <View style={styles.composeHeadSpacer} />
           </View>
 
-          <ScrollView contentContainerStyle={styles.composeBody} keyboardShouldPersistTaps="handled">
-            <Text style={styles.fieldLabel}>Who is this for?</Text>
-
-            {everyoneOption ? (
-              <Pressable
-                accessibilityRole="switch"
-                accessibilityState={{ checked: isEveryoneChosen }}
-                onPress={() =>
-                  setAudiences((current) =>
-                    isEveryoneChosen
-                      ? current.filter((entry) => entry.kind !== 'ORGANIZATION')
-                      : [...current, everyoneOption]
-                  )
-                }
-                style={({ pressed }) => [styles.audienceRow, pressed && styles.pressed]}
-              >
-                <View style={styles.audienceRowText}>
-                  <Text style={styles.audienceName}>Everyone at the company</Text>
-                  <Text style={styles.audienceDescription}>
-                    {isEveryoneChosen ? 'Chosen' : 'Every active member of staff'}
-                  </Text>
-                </View>
-                <AppSwitch
+          {/*
+            * Lifts whatever is being typed into clear at the keyboard.
+            *
+            * React Native's own keyboard avoidance cannot do this: the app
+            * targets SDK 36, Android 16 enforces edge to edge, and that
+            * disables `adjustResize` — so the window height never changes and
+            * there is nothing for it to measure. This reads the real IME inset
+            * from the platform, the same as the chat composer. See the keyboard
+            * section of mobile/CLAUDE.md.
+            *
+            * `bottomOffset` keeps a gap between the caret and the top of the
+            * keyboard, so the line being typed is not flush against it.
+            */}
+          <KeyboardAwareScrollView
+            bottomOffset={24}
+            contentContainerStyle={styles.composeBody}
+            keyboardShouldPersistTaps="handled"
+          >
+            {/* The running count sits under the card as its footer, where a
+                grouped list puts the sentence that explains the rows above. */}
+            <ListSection footer={summariseSelectionByKind(audiences)} title="Who is this for?">
+              {everyoneOption ? (
+                <ListSwitchRow
                   onValueChange={() =>
                     setAudiences((current) =>
                       isEveryoneChosen
@@ -413,88 +451,63 @@ export function AnnouncementsTab({
                         : [...current, everyoneOption]
                     )
                   }
+                  subtitle={isEveryoneChosen ? 'Chosen' : 'Every active member of staff'}
+                  title="Everyone at the company"
                   value={isEveryoneChosen}
                 />
-              </Pressable>
-            ) : null}
+              ) : null}
 
-            {(['GROUPS', 'PEOPLE'] as const).map((kind) => {
-              const chosen = audiences.filter((entry) =>
-                kind === 'GROUPS' ? entry.kind === 'GROUP' : entry.kind === 'PERSON'
-              );
-              const label = kind === 'GROUPS' ? 'Groups' : 'Employees';
+              {(['GROUPS', 'PEOPLE'] as const).map((kind) => {
+                const chosen = audiences.filter((entry) =>
+                  kind === 'GROUPS' ? entry.kind === 'GROUP' : entry.kind === 'PERSON'
+                );
 
-              return (
-                <Pressable
-                  accessibilityRole="button"
-                  key={kind}
-                  onPress={() => setOpenPicker(kind)}
-                  style={({ pressed }) => [styles.audienceRow, pressed && styles.pressed]}
-                >
-                  <View style={styles.audienceRowText}>
-                    <Text style={styles.audienceName}>{label}</Text>
-                    <Text style={styles.audienceDescription}>
-                      {chosen.length
-                        ? chosen.map((entry) => entry.targetName).join(', ')
-                        : 'None chosen'}
-                    </Text>
-                  </View>
-                  <Text style={styles.audienceChevron}>›</Text>
-                </Pressable>
-              );
-            })}
+                return (
+                  <ListNavRow
+                    icon={kind === 'GROUPS' ? 'users' : 'user'}
+                    key={kind}
+                    onPress={() => setOpenPicker(kind)}
+                    subtitle={chosen.length
+                      ? chosen.map((entry) => entry.targetName).join(', ')
+                      : 'None chosen'}
+                    title={kind === 'GROUPS' ? 'Groups' : 'Employees'}
+                  />
+                );
+              })}
+            </ListSection>
 
-            <Text style={styles.audienceSummary}>{summariseSelectionByKind(audiences)}</Text>
+            <ListSection title="Subject">
+              <TextInput
+                onChangeText={setSubject}
+                placeholder="Allergen change on line 3"
+                placeholderTextColor={appTheme.colors.muted}
+                style={styles.input}
+                value={subject}
+              />
+            </ListSection>
 
-            <Text style={styles.fieldLabel}>Subject</Text>
-            <TextInput
-              onChangeText={setSubject}
-              placeholder="Allergen change on line 3"
-              placeholderTextColor={appTheme.colors.muted}
-              style={styles.input}
-              value={subject}
-            />
+            <ListSection title="What do people need to know?">
+              <TextInput
+                multiline
+                onChangeText={setBody}
+                placeholder="Say it plainly. This is what everyone will read."
+                placeholderTextColor={appTheme.colors.muted}
+                style={[styles.input, styles.inputMultiline]}
+                value={body}
+              />
+            </ListSection>
 
-            <Text style={styles.fieldLabel}>What do people need to know?</Text>
-            <TextInput
-              multiline
-              onChangeText={setBody}
-              placeholder="Say it plainly. This is what everyone will read."
-              placeholderTextColor={appTheme.colors.muted}
-              style={[styles.input, styles.inputMultiline]}
-              value={body}
-            />
-
-            <View style={styles.switchRow}>
-              <View style={styles.switchText}>
-                <Text style={styles.switchTitle}>Ask people to confirm</Text>
-                <Text style={styles.switchSubtitle}>
-                  Records who has read and confirmed it. Use this for anything that matters.
-                </Text>
-              </View>
-              <AppSwitch onValueChange={setRequiresAcknowledgement} value={requiresAcknowledgement} />
-            </View>
+            <ListSection>
+              <ListSwitchRow
+                onValueChange={setRequiresAcknowledgement}
+                subtitle="Records who has read and confirmed it. Use this for anything that matters."
+                title="Ask people to confirm"
+                value={requiresAcknowledgement}
+              />
+            </ListSection>
 
             {composeError ? <Text style={styles.error}>{composeError}</Text> : null}
-
-            <Pressable
-              accessibilityRole="button"
-              disabled={isSending}
-              onPress={confirmThenSend}
-              style={({ pressed }) => [
-                styles.composeButton,
-                styles.composeSend,
-                pressed && styles.pressed,
-                isSending && styles.disabled
-              ]}
-            >
-              {isSending ? (
-                <ActivityIndicator color="#ffffff" />
-              ) : (
-                <Text style={styles.composeButtonText}>Send announcement</Text>
-              )}
-            </Pressable>
-          </ScrollView>
+          </KeyboardAwareScrollView>
         </View>
 
         {openPicker ? (
@@ -533,8 +546,36 @@ export function AnnouncementsTab({
 function createStyles(colors: AppColors) {
   return StyleSheet.create({
     screen: {
-      backgroundColor: colors.screen,
+      backgroundColor: colors.groupedBackground,
       flex: 1
+    },
+    // The tab surface already pays 10, and a card sits 15 from the screen edge.
+    searchWrap: {
+      paddingBottom: 2,
+      paddingHorizontal: 5,
+      paddingTop: 8
+    },
+    listContent: {
+      paddingBottom: 24,
+      paddingTop: 8
+    },
+    card: {
+      backgroundColor: colors.groupedCard,
+      marginHorizontal: 5,
+      overflow: 'hidden'
+    },
+    cardFirst: {
+      borderTopLeftRadius: 22,
+      borderTopRightRadius: 22
+    },
+    cardLast: {
+      borderBottomLeftRadius: 22,
+      borderBottomRightRadius: 22
+    },
+    divider: {
+      backgroundColor: colors.separator,
+      height: 1,
+      marginHorizontal: 15
     },
     centre: {
       alignItems: 'center',
@@ -546,7 +587,7 @@ function createStyles(colors: AppColors) {
     emptyTitle: {
       color: colors.ink,
       fontSize: 17,
-      fontWeight: '500'
+      lineHeight: 22
     },
     emptyBody: {
       color: colors.muted,
@@ -572,8 +613,8 @@ function createStyles(colors: AppColors) {
     error: {
       color: colors.destructive,
       fontSize: 14,
-      paddingHorizontal: 16,
-      paddingVertical: 8
+      paddingHorizontal: 21,
+      paddingVertical: 10
     },
     disabled: {
       opacity: 0.6
@@ -602,22 +643,35 @@ function createStyles(colors: AppColors) {
       color: colors.ink
     },
     composeSheet: {
-      backgroundColor: colors.screen,
+      // The whole page is the tinted ground; only the cards on it are white.
+      backgroundColor: colors.groupedBackground,
       flex: 1
     },
+    // No rule under it. The header is part of the page, not a bar laid on it.
     composeHead: {
       alignItems: 'center',
-      borderBottomColor: colors.divider,
-      borderBottomWidth: 1,
       flexDirection: 'row',
+      gap: 10,
       justifyContent: 'space-between',
-      paddingHorizontal: 16,
-      paddingVertical: 14
+      paddingHorizontal: 15
+    },
+    composeSendAction: {
+      alignItems: 'flex-end',
+      justifyContent: 'center',
+      minHeight: 44,
+      minWidth: 44
+    },
+    composeSendText: {
+      color: colors.link,
+      fontSize: 16,
+      lineHeight: 21
     },
     composeTitle: {
       color: colors.ink,
+      flex: 1,
       fontSize: 17,
-      fontWeight: '500'
+      lineHeight: 22,
+      textAlign: 'center'
     },
     composeCancel: {
       color: colors.primary,
@@ -627,9 +681,8 @@ function createStyles(colors: AppColors) {
       width: 56
     },
     composeBody: {
-      gap: 10,
-      padding: 16,
-      paddingBottom: 48
+      paddingBottom: 48,
+      paddingTop: 2
     },
     fieldLabel: {
       color: colors.ink,
@@ -676,15 +729,14 @@ function createStyles(colors: AppColors) {
       fontSize: 13,
       marginTop: 2
     },
+    // Inside a card, so it draws no box of its own: the card is the box, and a
+    // bordered field within a bordered card is two frames around one thing.
     input: {
-      backgroundColor: colors.card,
-      borderColor: colors.divider,
-      borderRadius: 12,
-      borderWidth: 1,
       color: colors.ink,
       fontSize: 16,
-      paddingHorizontal: 14,
-      paddingVertical: 12
+      minHeight: 52,
+      paddingHorizontal: 16,
+      paddingVertical: 14
     },
     inputMultiline: {
       minHeight: 120,

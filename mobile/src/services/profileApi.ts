@@ -36,8 +36,31 @@ export interface EmployeeOnboardingContext {
   tenantId: string;
 }
 
+/**
+ * The one person this employee is told to ask.
+ *
+ * Their department admin, or the organization admin where the department has
+ * none — or where the reader is the department admin themselves. `contactId` is
+ * what lets the row open a chat: naming somebody without a way to reach them is
+ * a dead end.
+ */
+export interface CurrentUserAdminContact {
+  contactId: string;
+  displayName: string;
+  /** Other admins of the same standing, counted rather than named. */
+  otherAdminCount: number;
+  /** Null when the company has switched the number off. */
+  phoneFormatted: string | null;
+  profilePhotoCacheKey: string | null;
+  profilePhotoUrl: string | null;
+  roleName: string;
+  scope: 'DEPARTMENT' | 'ORGANIZATION';
+}
+
 export interface CurrentUserProfile {
+  companyAddress: string | null;
   companyName: string;
+  departmentAdmin: CurrentUserAdminContact | null;
   departmentId: string | null;
   departmentName: string | null;
   displayName: string;
@@ -273,9 +296,36 @@ async function getResponseErrorMessage(response: Response): Promise<string> {
 function normalizeCurrentUserProfile(profile: CurrentUserProfile): CurrentUserProfile {
   return {
     ...profile,
+    companyAddress: (profile.companyAddress || '').trim() || null,
+    departmentAdmin: normalizeAdminContact(profile.departmentAdmin),
     departmentId: profile.departmentId ?? null,
     isTenantOwner: profile.isTenantOwner === true,
     permissions: profile.permissions || [],
     profilePhotoUrl: normalizeSynzappApiUrl(profile.profilePhotoUrl)
+  };
+}
+
+/**
+ * An older build of the server sends no admin at all, so this has to survive
+ * the field being missing rather than assume it is there.
+ */
+function normalizeAdminContact(
+  contact?: CurrentUserAdminContact | null
+): CurrentUserAdminContact | null {
+  if (!contact || typeof contact.contactId !== 'string' || !contact.contactId.trim()) {
+    return null;
+  }
+
+  return {
+    contactId: contact.contactId,
+    displayName: contact.displayName || 'Your admin',
+    otherAdminCount: Number.isFinite(contact.otherAdminCount)
+      ? Math.max(0, Math.round(contact.otherAdminCount))
+      : 0,
+    phoneFormatted: contact.phoneFormatted || null,
+    profilePhotoCacheKey: contact.profilePhotoCacheKey || null,
+    profilePhotoUrl: normalizeSynzappApiUrl(contact.profilePhotoUrl),
+    roleName: contact.roleName || 'Admin',
+    scope: contact.scope === 'ORGANIZATION' ? 'ORGANIZATION' : 'DEPARTMENT'
   };
 }

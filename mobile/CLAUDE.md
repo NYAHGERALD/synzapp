@@ -43,9 +43,14 @@ row that has to stay a single Pressable.
   wider than the screen and pushes it off both edges rather than moving it.
   That was shipped once and had to be undone
 - Cards: 22px corners, **no shadows**
-- **The round icon button is the only thing in the app that casts a shadow.**
-  It is `groupedCard` white and floats above whatever it sits on. Nothing else
-  gets a shadow, ever
+- **Three things cast a shadow, and nothing else ever does:** the round icon
+  button, the search field and the chat header. All three are `groupedCard`
+  white and float above whatever they sit on
+- **The search field is `ChatSearchBar`, and it takes no appearance props.**
+  Card white, a **blue outline** (`colors.link`, 1.5) and a soft shadow, on
+  every screen that searches. Nothing shares its row: a view toggle or a
+  refresh belongs in the header, because a search box somebody cannot type a
+  whole word into is one nobody uses
 - Dividers: 1px `colors.separator`, inset **16 on both sides**, never touching
   a card edge. A border on a row cannot be inset; let the card draw the rule
 - **Rows inside a card have 16 of horizontal padding.** No text, value, icon or

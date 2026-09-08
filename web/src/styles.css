@@ -18781,51 +18781,55 @@ h1 {
 
   background: #f1f4f7;
   color: var(--rt-ink);
-  display: grid;
-  grid-template-columns: 232px minmax(0, 1fr);
+  display: block;
   height: 100%;
   min-height: 0;
   overflow: hidden;
 }
 
-.retention-nav {
+/*
+ * The compliance sections, along the top of the content.
+ *
+ * They were a second sidebar, on the other side of the workspace panel. Two
+ * columns of navigation either side of the page ask somebody to work out which
+ * list a thing belongs to before they can start looking for it.
+ *
+ * It scrolls sideways rather than wrapping, so the row stays one line deep on a
+ * narrow window and the page below it never shifts down.
+ */
+.retention-tabs {
   background: var(--rt-surface);
-  border-right: 1px solid var(--rt-line);
+  border-bottom: 1px solid var(--rt-line);
   display: flex;
-  flex-direction: column;
-  gap: 2px;
-  overflow-y: auto;
-  padding: 24px 12px;
+  gap: 4px;
+  /* Pulled out to the body's own padding so the row reaches both edges and
+     reads as a bar rather than a floating group of buttons. */
+  margin: -32px -40px 24px;
+  overflow-x: auto;
+  padding: 10px 40px;
+  scrollbar-width: none;
 }
 
-.retention-nav-kicker {
-  color: var(--rt-faint);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  margin: 0 0 12px;
-  padding-left: 12px;
-  text-transform: uppercase;
-}
+.retention-tabs::-webkit-scrollbar { display: none; }
 
-.retention-nav-item {
+.retention-tab {
   align-items: center;
   background: transparent;
   border: 0;
   border-radius: 8px;
   color: var(--rt-muted);
   cursor: pointer;
-  display: flex;
+  display: inline-flex;
+  font: inherit;
   font-size: 14px;
-  font-weight: 500;
-  gap: 10px;
-  padding: 9px 12px;
-  text-align: left;
-  width: 100%;
+  gap: 8px;
+  padding: 8px 12px;
+  white-space: nowrap;
 }
 
-.retention-nav-item:hover { background: var(--rt-surface-2); color: var(--rt-ink); }
-.retention-nav-item.is-active { background: var(--rt-accent-soft); color: var(--rt-accent); font-weight: 600; }
+.retention-tab:hover { background: var(--rt-surface-2); color: var(--rt-ink); }
+.retention-tab.is-active { background: var(--rt-accent-soft); color: var(--rt-accent); font-weight: 600; }
+.retention-tab:focus-visible { outline: 2px solid var(--rt-accent); outline-offset: 2px; }
 
 .retention-body {
   overflow-y: auto;

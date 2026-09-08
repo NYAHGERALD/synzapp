@@ -22,6 +22,11 @@ import {
   getChatArchiveSettings,
   shouldTreatChatAsArchived
 } from './chatArchiveSettingsService.js';
+import {
+  type AdminContactPolicy,
+  normalizeAdminContactPolicy,
+  selectProfileAdminContact
+} from './adminContactPolicy.js';
 import { getChatPresenceForUser } from './chatPresenceService.js';
 import { mergePermissions } from './permissionCatalog.js';
 import {
@@ -31,6 +36,8 @@ import {
 } from './tenantDefaults.js';
 
 interface OrganizationRecord {
+  adminContactPolicy?: Record<string, unknown>;
+  companyAddress?: string;
   companyName?: string;
   createdBy?: string;
   orgAdminName?: string;
@@ -118,8 +125,32 @@ export interface DirectChatContactDetails {
   status: string;
 }
 
+/**
+ * The one person this employee is told to ask.
+ *
+ * Their department admin where they have one, and the organization admin
+ * otherwise — see `selectProfileAdminContact` for why the fallback exists. The
+ * `contactId` is what lets the row open a chat: naming somebody to ask without
+ * a way to reach them is a dead end.
+ */
+export interface CurrentUserAdminContact {
+  contactId: string;
+  displayName: string;
+  /** Other admins of the same standing, counted rather than named. */
+  otherAdminCount: number;
+  /** Null when the tenant has switched the number off. Never sent, not hidden. */
+  phoneFormatted: string | null;
+  profilePhotoCacheKey: string | null;
+  profilePhotoUrl: string | null;
+  roleName: string;
+  scope: 'DEPARTMENT' | 'ORGANIZATION';
+}
+
 export interface CurrentUserProfile {
+  /** Shown at the foot of the main menu, so a person can say where they work. */
+  companyAddress: string | null;
   companyName: string;
+  departmentAdmin: CurrentUserAdminContact | null;
   departmentId: string | null;
   departmentName: string | null;
   displayName: string;
@@ -970,8 +1001,12 @@ async function buildCurrentUserProfile(
     ? normalizeE164Phone(decodedToken.phone_number)
     : '';
 
+  const departmentAdmin = await resolveCurrentUserAdminContact(decodedToken.uid, context);
+
   return {
+    companyAddress: (context.organization.companyAddress || '').trim() || null,
     companyName: context.organization.companyName || 'Your organization',
+    departmentAdmin,
     departmentId: context.user.departmentId || null,
     departmentName: context.user.departmentName || null,
     displayName: getDisplayName(context.user),
@@ -989,6 +1024,85 @@ async function buildCurrentUserProfile(
     tenantId: context.tenantId,
     uid: decodedToken.uid
   };
+}
+
+/**
+ * The admin card on the main menu.
+ *
+ * One query over the tenant's active people, then a pure choice. It costs the
+ * profile request one read of a collection it already has permission for, which
+ * is cheaper than a second endpoint the menu would have to wait on separately.
+ *
+ * A failure here returns null rather than throwing: the profile carries a
+ * person's own name, role and number, and losing the whole of that because one
+ * card could not be built is the wrong trade.
+ */
+async function resolveCurrentUserAdminContact(
+  readerUid: string,
+  context: Awaited<ReturnType<typeof getCurrentUserContext>>
+): Promise<CurrentUserAdminContact | null> {
+  try {
+    const policy: AdminContactPolicy = normalizeAdminContactPolicy(
+      context.organization.adminContactPolicy
+    );
+    const snapshot = await firestore
+      .collection('organizations')
+      .doc(context.tenantId)
+      .collection('users')
+      .where('status', '==', 'ACTIVE')
+      .get();
+    const recordByUid = new Map<string, TenantUserRecord>();
+
+    snapshot.docs.forEach((doc) => {
+      recordByUid.set(doc.id, doc.data() as TenantUserRecord);
+    });
+
+    const selected = selectProfileAdminContact({
+      candidates: snapshot.docs.map((doc) => {
+        const record = doc.data() as TenantUserRecord;
+
+        return {
+          departmentId: record.departmentId || null,
+          displayName: getDisplayName(record),
+          role: record.role,
+          status: record.status,
+          uid: doc.id
+        };
+      }),
+      readerDepartmentId: context.user.departmentId || null,
+      readerUid
+    });
+
+    if (!selected) {
+      return null;
+    }
+
+    const record = recordByUid.get(selected.contactId);
+    const phoneByUid = policy.showAdminPhoneNumber
+      ? await getAuthPhoneFormattedByUid([selected.contactId])
+      : new Map<string, string>();
+
+    return {
+      contactId: selected.contactId,
+      displayName: selected.displayName,
+      otherAdminCount: selected.otherAdminCount,
+      phoneFormatted: policy.showAdminPhoneNumber
+        ? phoneByUid.get(selected.contactId) || record?.phoneMasked || null
+        : null,
+      profilePhotoCacheKey: record?.profilePhotoStoragePath
+        ? buildProfilePhotoCacheKey(selected.contactId, record.profilePhotoVersion)
+        : null,
+      profilePhotoUrl: getChatContactProfilePhotoUrl(
+        selected.contactId,
+        record?.profilePhotoStoragePath,
+        record?.profilePhotoVersion
+      ),
+      roleName: formatProfileRoleName(record?.roleName, record?.role || 'EMPLOYEE'),
+      scope: selected.scope
+    };
+  } catch {
+    return null;
+  }
 }
 
 function getProfilePhotoUrl(storagePath?: string | null, version?: number | null): string | null {

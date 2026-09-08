@@ -93,10 +93,13 @@ import {
   listTenantGroups,
   cancelTenantScheduledMessage,
   getActionReminderPolicy,
+  type AdminContactPolicy,
+  getAdminContactPolicy,
   getScheduledMessagePolicy,
   listTenantDevices,
   listTenantScheduledMessages,
   updateActionReminderPolicy,
+  updateAdminContactPolicy,
   updateScheduledMessagePolicy,
   listRoles,
   OrganizationDeletionChallenge,
@@ -132,6 +135,11 @@ import {
 import type { ActionReminderPolicy, ScheduledMessagePolicy, TenantScheduledMessage } from '../services/adminApi';
 import { buildScheduledChatStates, type ScheduledChatState } from '../services/scheduledChatIndicators';
 import {
+  applyTypingUpdate,
+  describeTypingForChatList,
+  type TypingParticipant
+} from '../services/typingIndicator';
+import {
   openCallRealtimeSocket,
   parseCallRealtimeEvent,
   sendAnswerCall,
@@ -153,7 +161,6 @@ import {
   ArchiveUnarchiveBehavior,
   ArchiveUnreadDisplayMode,
   cancelScheduledChatMessage,
-  dismissScheduledChatMessage,
   ChatArchiveSettings,
   ChatContact,
   ChatDeliveryStatus,
@@ -175,6 +182,7 @@ import {
   decryptRealtimeEncryptedEnvelopes,
   deleteChatMessageForMe,
   DirectChatContactDetails,
+  dismissScheduledChatMessage,
   exitGroupChat,
   getChatArchiveSettings,
   getChatMessageIdentityKey,
@@ -193,6 +201,7 @@ import {
   scheduleChatMessage,
   sendChatMessage,
   sendRealtimePresenceHeartbeat,
+  sendRealtimeTyping,
   sendScheduledChatMessageNow,
   subscribeRealtimeConversation,
   unsubscribeRealtimeConversation,
@@ -270,6 +279,7 @@ import { DirectoryFilter, DirectorySettings } from '../components/settings/Direc
 import { GroupsSettings } from '../components/settings/GroupsSettings';
 import { ActionAttentionBanner } from '../components/actions/ActionAttentionBanner';
 import { ActionRemindersSettings } from '../components/settings/ActionRemindersSettings';
+import { AdminContactSettings } from '../components/settings/AdminContactSettings';
 import { ScheduledMessagesSettings } from '../components/settings/ScheduledMessagesSettings';
 import { StopReasonSheet } from '../components/settings/StopReasonSheet';
 import { WaitingMessagesModal } from '../components/settings/WaitingMessagesModal';
@@ -283,7 +293,6 @@ import { DepartmentAdminPermissionSettings } from '../components/permissions/Dep
 import { GroupPermissionsModal } from '../components/permissions/GroupPermissionsModal';
 import { NativeOptionPickerModal, NativeOptionPickerState } from '../components/pickers/NativeOptionPickerModal';
 import { NativeDateTimePromptModal, NativeDateTimePromptState, normalizeChatRailsDueDate } from '../components/pickers/NativeDateTimePromptModal';
-import { GroupsTab } from '../components/groups/GroupsTab';
 import { AddGroupModal } from '../components/groups/AddGroupModal';
 import { MainNavigationModal, mainNavigationLinks } from '../components/navigation/MainNavigationModal';
 import { ArchiveHeader } from '../components/chatHeader/ArchiveHeader';
@@ -304,7 +313,9 @@ import { ArchiveSelectionMap, ArchivedChatsScreen } from '../components/chatList
 import { countAnnouncementsNeedingAttention } from '../services/announcementDisplay';
 import { FooterTabButton } from '../components/navigation/FooterTabButton';
 import { HeaderActions } from '../components/chatHeader/HeaderActions';
-import { MessageHeader } from '../components/chatHeader/MessageHeader';
+import { MESSAGE_HEADER_HEIGHT, MessageHeader } from '../components/chatHeader/MessageHeader';
+import { getFooterTabLabel } from '../services/footerTabLabels';
+import { NoticesOptionsMenu, type NoticesView } from '../components/NoticesOptionsMenu';
 import { SpamChatStatusModal } from '../components/chatList/SpamChatStatusModal';
 import { ChatMoreActionsModal } from '../components/chatList/ChatMoreActionsModal';
 import { ThemePreferenceModal } from '../components/settings/ThemePreferenceModal';
@@ -370,7 +381,7 @@ import {
   refreshAnnouncements,
   subscribeToAnnouncements
 } from '../services/announcementStore';
-import { CompanyLibraryTab } from '../components/companyLibrary/CompanyLibraryTab';
+import { CompanyLibraryHeaderActions, CompanyLibraryTab, type CompanyLibraryViewMode } from '../components/companyLibrary/CompanyLibraryTab';
 import { CompanyLibraryKindFilter, companyLibraryDocumentThumbnailSources, formatCompanyLibraryDate, getCompanyLibraryDisplayName, getCompanyLibraryExtension, getCompanyLibraryKind, getCompanyLibraryKindLabel, getCompanyLibraryPhotoSource, normalizeCompanyLibraryBucketValue } from '../services/companyLibraryDisplay';
 import { ChatSearchBar, androidButtonRipple, androidIconRipple, getKeyboardDismissMode } from '../components/chatUiPrimitives';
 import { FooterTab, GuidedSetupCoachOverlay, GuidedSetupTargetKind, GuidedSetupTargetRect, OrgAdminSetupCoachStep } from '../components/guidedSetup/GuidedSetupCoachOverlay';
@@ -668,6 +679,9 @@ interface AdminChatScreenProps {
  */
 const SCHEDULED_MESSAGE_RELEASE_GRACE_MS = 20 * 1000;
 
+/** Shared so an absent list is the same array every render. */
+const EMPTY_TYPING_LIST: TypingParticipant[] = [];
+
 /**
  * The shortest gap between two of those questions.
  *
@@ -684,6 +698,15 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
   const [activeTab, setActiveTab] = useState<FooterTab>('Chats');
   const [isInterpreterRoomOpen, setIsInterpreterRoomOpen] = useState(false);
   const [settingsScreen, setSettingsScreen] = useState<SettingsScreen>('list');
+  const [companyLibraryViewMode, setCompanyLibraryViewMode] = useState<CompanyLibraryViewMode>('grid');
+  // Sent first. Somebody opening Notices from the header has almost always come
+  // to write one or to see who has read the last one.
+  const [noticesView, setNoticesView] = useState<NoticesView>('SENT');
+  const [isNoticesOptionsOpen, setIsNoticesOptionsOpen] = useState(false);
+  const [isNoticeComposeOpen, setIsNoticeComposeOpen] = useState(false);
+  const [adminContactPolicy, setAdminContactPolicy] = useState<AdminContactPolicy | null>(null);
+  const [isLoadingAdminContactPolicy, setIsLoadingAdminContactPolicy] = useState(false);
+  const [isSavingAdminContactPolicy, setIsSavingAdminContactPolicy] = useState(false);
   const [directoryFilter, setDirectoryFilter] = useState<DirectoryFilter>('Departments');
   const [approvedEmployees, setApprovedEmployees] = useState<ApprovedEmployee[]>([]);
   // Colleagues this user has not messaged yet. Kept apart from chatContacts so
@@ -1013,6 +1036,9 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
   const hasResolvedChatContactsRef = useRef(false);
   const realtimeReadyRef = useRef(false);
   const realtimeSocketRef = useRef<WebSocket | null>(null);
+  // Keyed by the conversation the typing belongs to, so the chat list can mark
+  // several rows at once while the open thread reads only its own.
+  const [typingByConversation, setTypingByConversation] = useState<Record<string, TypingParticipant[]>>({});
   const callKeepSetupRef = useRef(false);
   const callRealtimeReadyRef = useRef(false);
   const callRealtimeReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1084,8 +1110,11 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
     });
   }, []);
   const visibleFooterTabs: FooterTab[] = canViewEmployees
-    ? ['Chats', 'Calls', 'Groups', 'Announcements', 'Employees', 'Settings', 'You']
-    : ['Chats', 'Calls', 'Groups', 'Announcements', 'Settings', 'You'];
+    // No Groups tab. It listed the groups a person belongs to and opened the
+    // group chat, which is what the chat list already does — and every group
+    // now appears there whether or not anything has been said in it.
+    ? ['Chats', 'Calls', 'Announcements', 'Employees', 'Settings', 'You']
+    : ['Chats', 'Calls', 'Announcements', 'Settings', 'You'];
   // Sending is a permission. Receiving is not: everybody sees the tab, and
   // only those allowed to send are offered the compose button inside it.
   //
@@ -1533,6 +1562,14 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
       .sort((left, right) => left.displayName.localeCompare(right.displayName));
   }, [approvedEmployees, currentUid, startableDirectChatContacts]);
 
+  // Which conversations are groups, so a typing line can name somebody there
+  // and stay short in a one-to-one.
+  const groupChatContactIds = useMemo(
+    () => new Set(chatContacts
+      .filter((contact) => contact.chatType === 'GROUP')
+      .map((contact) => contact.contactId)),
+    [chatContacts]
+  );
   const groupChatContacts = useMemo(
     () => chatContacts.filter((contact) => contact.chatType === 'GROUP'),
     [chatContacts]
@@ -1573,16 +1610,6 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
   const unseenCallCount = useMemo(
     () => callHistory.filter((entry) => entry.unseen).length,
     [callHistory]
-  );
-  // Group conversations carrying something unread. The same thread is also
-  // counted by the chats badge, which is right: it is reachable from both tabs,
-  // and a badge answers "is there anything for me here", not "how many things
-  // exist in total".
-  const unreadGroupChatCount = useMemo(
-    () => activeConversationChatItems.filter(
-      (chat) => chat.chatType === 'GROUP' && Math.max(chat.unreadCount || 0, 0) > 0
-    ).length,
-    [activeConversationChatItems]
   );
   const announcementAttentionCount = useMemo(
     () => countAnnouncementsNeedingAttention(announcementsForMe, currentUid),
@@ -2488,14 +2515,6 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
   }, [activeTab, canManageGroups, settingsScreen]);
 
   useEffect(() => {
-    if (activeTab !== 'Groups') {
-      return;
-    }
-
-    void loadGroupSettings();
-  }, [activeTab]);
-
-  useEffect(() => {
     if (activeTab !== 'Settings' || settingsScreen !== 'security' || !canManageSecurity) {
       return;
     }
@@ -2656,6 +2675,10 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
     }
 
     if (settingsScreen === 'scheduled-messages' && !canManageSecurity) {
+      setSettingsScreen('list');
+    }
+
+    if (settingsScreen === 'admin-contact' && !canManageSecurity) {
       setSettingsScreen('list');
     }
 
@@ -4773,6 +4796,27 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
       return;
     }
 
+    if (event.type === 'contactTypingUpdated') {
+      setTypingByConversation((current) => {
+        const participants = current[event.contactId] || EMPTY_TYPING_LIST;
+        const next = applyTypingUpdate(participants, {
+          isTyping: event.isTyping,
+          name: event.typingName,
+          nowMs: Date.now(),
+          uid: event.typingUid
+        });
+
+        // The server renews every few seconds. Returning the same object when
+        // nothing changed keeps the chat list from re-rendering on each one.
+        if (next === participants) {
+          return current;
+        }
+
+        return { ...current, [event.contactId]: next };
+      });
+      return;
+    }
+
     if (event.type === 'chatContactUpdated') {
       const revivalInput = {
         hasIncomingMessages: event.envelopes.length > 0,
@@ -6090,6 +6134,13 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
 
   function handleOpenMainNavigation() {
     setIsMainNavigationOpen(true);
+    // Everything on that menu is profile data — the admin named on it, their
+    // number, and whether the company still allows the number at all. Held in
+    // memory it goes stale silently, so a company switching the number off
+    // would not reach a phone until the app was next launched. Refreshed
+    // without blocking: what is already known draws now, and is corrected when
+    // the answer arrives.
+    void loadUserProfile(false).catch(() => undefined);
   }
 
   function handleCloseLibraryToChats() {
@@ -6400,6 +6451,23 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
     setChatContacts((currentContacts) => upsertChatContact(currentContacts, contact));
     handleCloseNewChatModal();
     await handleOpenChat(mapChatContactToChatItem(contact));
+  }
+
+  /**
+   * Reaching the admin the main menu just named.
+   *
+   * Goes through the same path the new-chat picker uses, so a chat opened from
+   * the menu is the same chat in every respect. Nothing new is written for it.
+   */
+  function handleOpenAdminChatFromMenu(contactId: string) {
+    const contact = startableDirectChatContacts.find((entry) => entry.contactId === contactId);
+
+    if (!contact) {
+      return;
+    }
+
+    setIsMainNavigationOpen(false);
+    void handleOpenContactFromNewChat(contact);
   }
 
   function handleOpenAddMembersModal() {
@@ -9203,6 +9271,40 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
     }
   }
 
+  async function handleOpenAdminContactSettings() {
+    setError(null);
+    setSettingsScreen('admin-contact');
+    setIsLoadingAdminContactPolicy(true);
+
+    try {
+      setAdminContactPolicy(await getAdminContactPolicy(await getIdToken()));
+    } catch (nextError) {
+      setError(getErrorMessage(nextError, 'Unable to load this setting.'));
+    } finally {
+      setIsLoadingAdminContactPolicy(false);
+    }
+  }
+
+  async function handleUpdateAdminContactPolicy(showAdminPhoneNumber: boolean) {
+    setError(null);
+    setIsSavingAdminContactPolicy(true);
+
+    try {
+      const policy = await updateAdminContactPolicy({
+        idToken: await getIdToken(),
+        showAdminPhoneNumber
+      });
+
+      setAdminContactPolicy(policy);
+      // The menu carries the number, so it is stale the moment this changes.
+      await loadUserProfile(false).catch(() => undefined);
+    } catch (nextError) {
+      setError(getErrorMessage(nextError, 'Unable to save this setting.'));
+    } finally {
+      setIsSavingAdminContactPolicy(false);
+    }
+  }
+
   async function handleOpenScheduledMessagesSettings() {
     setError(null);
     setSettingsScreen('scheduled-messages');
@@ -9362,6 +9464,54 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
    * because a count could not be fetched is a worse outcome than a prompt that
    * is briefly missing.
    */
+  /**
+   * Tells the server this person is typing in the open conversation.
+   *
+   * Held in a callback rather than inline so the thread's heartbeat does not
+   * restart every time the draft changes — the effect there depends on this
+   * identity, and a new function per keystroke would defeat the throttle it
+   * exists to provide.
+   */
+  /**
+   * The line each chat list row shows while somebody is writing in it.
+   *
+   * Rebuilt only when the typing map changes, and re-read against the clock so
+   * a notice whose sender went quiet stops being shown rather than sitting
+   * there until the next socket event.
+   */
+  const typingTextByConversation = useMemo(() => {
+    const nowMs = Date.now();
+    const byConversation: Record<string, string> = {};
+
+    for (const [conversationId, participants] of Object.entries(typingByConversation)) {
+      const text = describeTypingForChatList({
+        isGroup: groupChatContactIds.has(conversationId),
+        nowMs,
+        participants
+      });
+
+      if (text) {
+        byConversation[conversationId] = text;
+      }
+    }
+
+    return byConversation;
+  }, [groupChatContactIds, typingByConversation]);
+
+  const handleTypingChange = useCallback((isTyping: boolean) => {
+    const chat = selectedChatRef.current;
+
+    if (!chat) {
+      return;
+    }
+
+    sendRealtimeTyping(realtimeSocketRef.current, {
+      chatType: chat.chatType === 'GROUP' ? 'GROUP' : 'DIRECT',
+      contactId: chat.contactId,
+      isTyping
+    });
+  }, []);
+
   async function refreshMyActionCounts() {
     try {
       setMyActionCounts(await getMyActionCounts({ idToken: await getIdToken() }));
@@ -13302,6 +13452,10 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
       ) : selectedChat && !isConversationSearchOpen ? (
         <MessageHeader
           chat={selectedChat}
+          // The status bar's room. The card floats out of the layout, so it
+          // never inherits the page's top padding and has to be told.
+          topOffset={messageTopPadding}
+          typingText={typingTextByConversation[selectedChat.contactId] || null}
           onlineCount={activeGroupOnlineCount}
           messageCount={uniqueChatMessages(messages).length}
           onBack={handleCloseChat}
@@ -13368,6 +13522,8 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
         <BackHeader onBack={() => setSettingsScreen('list')} />
       ) : activeTab === 'Settings' && settingsScreen === 'scheduled-messages' ? (
         <BackHeader onBack={() => setSettingsScreen('list')} />
+      ) : activeTab === 'Settings' && settingsScreen === 'admin-contact' ? (
+        <BackHeader onBack={() => setSettingsScreen('list')} />
       ) : activeTab === 'Settings' && settingsScreen === 'my-devices' ? (
         <BackHeader onBack={() => setSettingsScreen('list')} />
       ) : activeTab === 'Settings' && settingsScreen === 'chat-backup' ? (
@@ -13416,7 +13572,9 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
 		                ? handleToggleCallOptions
 		                : activeTab === 'Actions'
 		                  ? handleOpenActionsOptions
-		                  : undefined}
+		                  : activeTab === 'Announcements' && canSendAnnouncements
+		                    ? () => setIsNoticesOptionsOpen((isOpen) => !isOpen)
+		                    : undefined}
 			          onOpenMainNavigation={activeTab === 'Chats' ? handleOpenMainNavigation : undefined}
             onReturnToChats={activeTab === 'Library'
               ? handleCloseLibraryToChats
@@ -13425,6 +13583,19 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
                 : undefined}
 		          onOpenNewCall={handleOpenNewCallModal}
 		          onOpenNewChat={handleOpenNewChatModal}
+		          onOpenNewNotice={canSendAnnouncements && announcementAudiences.length
+		            ? () => setIsNoticeComposeOpen(true)
+		            : undefined}
+		          rightAccessory={activeTab === 'Library' ? (
+		            <CompanyLibraryHeaderActions
+		              isLoading={isLoadingCompanyLibrary}
+		              mode={companyLibraryViewMode}
+		              onChangeMode={setCompanyLibraryViewMode}
+		              onRefresh={() => {
+		                void loadCompanyLibrary();
+		              }}
+		            />
+		          ) : null}
 		        />
       )}
 
@@ -13454,7 +13625,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
                         ? 'My devices'
             : activeTab === 'Settings' && settingsScreen === 'chat-backup'
               ? 'Encrypted backup'
-              : activeTab}
+              : getFooterTabLabel(activeTab)}
         </Text>
       ) : null}
 
@@ -13471,6 +13642,12 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
       {selectedChat ? (
         <MessageThread
           actions={chatActions}
+          // The header floats over the thread, so the thread owes it the room
+          // back. Nothing is owed while the search header has replaced it.
+          topInset={isConversationSearchOpen ? 0 : MESSAGE_HEADER_HEIGHT + 10}
+          hasBannerAboveMessages={Boolean(pinnedChatAnnouncement)
+            || actionCounts.pending > 0
+            || actionCounts.unverified > 0}
           bannerAboveMessages={
             <>
               {pinnedChatAnnouncement ? (
@@ -13518,9 +13695,11 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
           onCancelScheduledMessage={handleCancelScheduledMessage}
           onDismissScheduledMessage={handleDismissScheduledMessage}
           onDraftChange={setMessageDraft}
+          onTypingChange={handleTypingChange}
           onScheduleMessage={selectedChat.chatType === 'GROUP' ? undefined : handleScheduleMessage}
           onSendScheduledMessageNow={handleSendScheduledMessageNow}
           scheduledMessages={scheduledMessages}
+          typingParticipants={typingByConversation[selectedChat.contactId] || EMPTY_TYPING_LIST}
           onInfoMessage={handleShowMessageInfo}
           onLoadOlderMessages={() => {
             void loadOlderCachedMessagesForActiveChat();
@@ -13595,11 +13774,11 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
             onOpenChat={(chat) => {
               void handleOpenChat(chat);
             }}
-            onOpenNewChat={handleOpenNewChatModal}
             onOpenSpam={handleOpenSpamScreen}
             onSearchChange={setChatSearch}
             profilePhotoHeaders={profilePhotoHeaders}
             scheduledChatStates={scheduledChatStates}
+            typingTextByConversation={typingTextByConversation}
             search={chatSearch}
             spamCount={spamConversationChatItems.length}
             unreadCount={unreadChatFilterCount}
@@ -13624,21 +13803,17 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
             scheduledCount={scheduledCalls.length}
           />
         </View>
-      ) : activeTab === 'Groups' ? (
-        <View style={styles.fixedTabSurface}>
-          <GroupsTab
-            groups={groups}
-            isLoading={isLoadingGroups}
-            onOpenGroup={(group) => {
-              void handleOpenGroupFromGroupsTab(group);
-            }}
-          />
-        </View>
       ) : activeTab === 'Employees' ? (
         <View style={styles.fixedTabSurface}>
           <EmployeesTab
+            canInviteEmployees={canInviteEmployees}
             canManageUsers={canManageUsers}
+            departmentName={userProfile?.departmentName || null}
             employees={employeeItems}
+            // A department admin's list is scoped to their own department and
+            // never includes them, which is why an empty one is not the same
+            // thing as a company with nobody in it.
+            isDepartmentScoped={userProfile?.role === 'DEPT_ADMIN'}
             inviteDraft={inviteDraft}
             isLoading={isLoadingEmployees}
             isUpdatingLifecycle={isUpdatingEmployeeLifecycle}
@@ -13674,7 +13849,10 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
             currentUid={currentUid}
             departmentBackedGroups={departmentBackedGroups}
             getIdToken={getAnnouncementIdToken}
+            isComposeOpen={isNoticeComposeOpen}
+            onChangeComposeOpen={setIsNoticeComposeOpen}
             peopleDepartments={peopleDepartments}
+            view={noticesView}
           />
         </View>
       ) : activeTab === 'Library' ? (
@@ -13694,6 +13872,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
             }}
             onSearchChange={setCompanyLibrarySearch}
             search={companyLibrarySearch}
+            viewMode={companyLibraryViewMode}
           />
         </View>
       ) : activeTab === 'LSW' ? (
@@ -13830,6 +14009,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
               onOpenOfflineChat={handleOpenOfflineChatSettings}
               onOpenRolePermissions={handleOpenRolePermissions}
               onOpenActionReminders={handleOpenActionRemindersSettings}
+          onOpenAdminContact={handleOpenAdminContactSettings}
           onOpenScheduledMessages={handleOpenScheduledMessagesSettings}
           onOpenSecurity={handleOpenSecuritySettings}
               themePreference={appTheme.preference}
@@ -13984,6 +14164,15 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
             />
           ) : null}
 
+          {activeTab === 'Settings' && settingsScreen === 'admin-contact' ? (
+            <AdminContactSettings
+              isLoading={isLoadingAdminContactPolicy}
+              isSaving={isSavingAdminContactPolicy}
+              onUpdate={handleUpdateAdminContactPolicy}
+              policy={adminContactPolicy}
+            />
+          ) : null}
+
           {activeTab === 'Settings' && settingsScreen === 'scheduled-messages' ? (
             <ScheduledMessagesSettings
               isLoading={isLoadingTenantScheduledMessages}
@@ -14110,11 +14299,9 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
 	              ? unreadChatBadgeCount
 	              : tab === 'Calls'
 	                ? unseenCallCount
-	                : tab === 'Groups'
-	                  ? unreadGroupChatCount
-	                  : tab === 'Announcements'
-	                    ? announcementAttentionCount
-	                    : 0}
+	                : tab === 'Announcements'
+	                  ? announcementAttentionCount
+	                  : 0}
 	            key={tab}
 	            minHeight={footerTabHeight}
             onLayout={getGuidedSetupFooterTargetKind(tab)
@@ -14326,11 +14513,36 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
 	        search={newChatSearch}
 	      />
 
+      <NoticesOptionsMenu
+        isOpen={isNoticesOptionsOpen}
+        // Just under the options button, which sits below the status bar the
+        // page has already paid for.
+        topOffset={headerTopPadding + 52}
+        onChangeView={(nextView) => {
+          setNoticesView(nextView);
+          setIsNoticesOptionsOpen(false);
+        }}
+        onClose={() => setIsNoticesOptionsOpen(false)}
+        view={noticesView}
+      />
+
       <MainNavigationModal
         isOpen={isMainNavigationOpen}
         links={mainNavigationLinks}
         onClose={handleCloseMainNavigation}
+        // Left off when that person is not somebody this account can start a
+        // chat with, which leaves the row readable rather than broken.
+        onOpenAdminChat={
+          userProfile?.departmentAdmin && startableDirectChatContacts.some(
+            (contact) => contact.contactId === userProfile.departmentAdmin?.contactId
+          )
+            ? handleOpenAdminChatFromMenu
+            : undefined
+        }
         onSelect={handleSelectMainNavigationLink}
+        onSignOut={handleRequestSignOut}
+        profile={userProfile}
+        profilePhotoHeaders={profilePhotoHeaders}
       />
 
       <CompanyLibraryImagePreviewModal

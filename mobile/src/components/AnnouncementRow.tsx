@@ -1,4 +1,5 @@
 import React, { useMemo } from 'react';
+import Feather from '@expo/vector-icons/Feather';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useAppTheme } from '../theme/AppThemeProvider';
 import type { AppColors } from '../theme/colors';
@@ -61,19 +62,20 @@ export function AnnouncementRow({
         </Text>
       </View>
 
-      <Text style={styles.chevron}>›</Text>
+      <Feather color={appTheme.colors.muted} name="chevron-right" size={19} />
     </Pressable>
   );
 }
 
 function createStyles(colors: AppColors) {
   return StyleSheet.create({
+    // No rule of its own. The card the rows sit in draws the lines between
+    // them, so a border here would cut across its rounded corners.
     row: {
       alignItems: 'center',
-      borderBottomColor: colors.divider,
-      borderBottomWidth: 1,
       flexDirection: 'row',
       gap: 12,
+      minHeight: 74,
       paddingHorizontal: 16,
       paddingVertical: 14
     },
@@ -95,27 +97,25 @@ function createStyles(colors: AppColors) {
     subject: {
       color: colors.ink,
       fontSize: 16,
-      fontWeight: '500'
+      lineHeight: 21
     },
     meta: {
       color: colors.muted,
       fontSize: 13,
+      lineHeight: 18,
       marginTop: 2
     },
     status: {
       color: colors.muted,
       fontSize: 13,
+      lineHeight: 18,
       marginTop: 2
     },
     statusWaiting: {
       color: colors.amber
     },
-    chevron: {
-      color: colors.muted,
-      fontSize: 24
-    },
     pressed: {
-      opacity: 0.85
+      backgroundColor: colors.groupedBackground
     }
   });
 }
