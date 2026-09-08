@@ -16,11 +16,40 @@ import {
   listTenantDevices,
   revokeTenantDevice
 } from '../services/adminDeviceService.js';
+import {
+  getActionReminderPolicyForCurrentUser,
+  updateActionReminderPolicy
+} from '../services/actionReminderService.js';
+import {
+  cancelScheduledMessage,
+  getScheduledMessagePolicyForCurrentUser,
+  listTenantScheduledMessages,
+  updateScheduledMessagePolicy
+} from '../services/scheduledMessageService.js';
 import { cleanupLegacyPlaintextChatMessages } from '../services/chatMaintenanceService.js';
 import {
   getChatBackupPolicyForCurrentUser,
   updateChatBackupPolicy
 } from '../services/chatBackupPolicyService.js';
+import {
+  decideRestoreRequestForAdmin,
+  listRestoreRequestsForAdmin
+} from '../services/chatBackupRestoreService.js';
+import { listAuditEvents } from '../services/auditQueryService.js';
+import {
+  getChatOfflinePolicyForCurrentUser,
+  updateChatOfflinePolicy
+} from '../services/chatOfflinePolicyService.js';
+import {
+  getTenantAiPolicy,
+  getTenantAiUsageDashboard,
+  listTenantAiFeatureCatalog,
+  updateTenantAiBudgetPolicy,
+  updateTenantAiDepartmentPolicy,
+  updateTenantAiEmployeePolicy,
+  updateTenantAiFeaturePolicy,
+  updateTenantCompanyAiPolicy
+} from '../services/tenantAiPolicyService.js';
 import {
   createTenantGroup,
   listTenantGroups
@@ -121,9 +150,61 @@ const legacyPlaintextCleanupBodySchema = z.object({
   mode: z.enum(['DELETE', 'DRY_RUN']).optional().default('DRY_RUN')
 });
 
+const auditEventQuerySchema = z.object({
+  /** Comma separated, so a filter survives a URL without repeated keys. */
+  actions: z.string().trim().max(2000).optional(),
+  fromMs: z.coerce.number().int().nonnegative().optional(),
+  startAfterId: z.string().trim().max(200).optional(),
+  toMs: z.coerce.number().int().nonnegative().optional()
+});
+const chatBackupRestoreDecisionSchema = z.object({
+  approve: z.boolean()
+});
 const chatBackupPolicyBodySchema = z.object({
   encryptedBackupsEnabled: z.boolean(),
   selfRestoreEnabled: z.boolean()
+});
+
+const chatOfflinePolicyBodySchema = z.object({
+  cacheRetentionDays: z.number().int().min(1).max(365),
+  fullMediaCacheBudgetBytes: z.number().int().min(256 * 1024 * 1024).max(5 * 1024 * 1024 * 1024),
+  mediaLimitBytes: z.object({
+    audio: z.number().int().min(1024 * 1024).max(64 * 1024 * 1024),
+    file: z.number().int().min(1024 * 1024).max(500 * 1024 * 1024),
+    image: z.number().int().min(1024 * 1024).max(250 * 1024 * 1024),
+    video: z.number().int().min(1024 * 1024).max(1024 * 1024 * 1024)
+  }).optional(),
+  offlineMediaCacheAllowed: z.boolean(),
+  purgeOnSignOut: z.boolean(),
+  wifiOnlyMediaPrefetch: z.boolean()
+});
+
+/**
+ * Stopping somebody's message needs a reason, because they are shown it.
+ *
+ * Validated again in the service, which is where the rule lives. This exists so
+ * the request is refused at the edge with the same words, rather than reaching
+ * a permission check first and failing for the wrong reason.
+ */
+const cancelScheduledMessageBodySchema = z.object({
+  reason: z.string().trim().min(8).max(400)
+});
+
+const actionReminderPolicyBodySchema = z.object({
+  escalateOverdueAfterHours: z.number().int().nullable(),
+  firstReminderHour: z.number().int().min(0).max(23),
+  frequency: z.enum(['OFF', 'ONCE', 'TWICE']),
+  secondReminderHour: z.number().int().min(0).max(23),
+  timeZone: z.string().trim().min(1).max(64),
+  workingHoursEndHour: z.number().int().min(0).max(23),
+  workingHoursStartHour: z.number().int().min(0).max(23)
+});
+
+const scheduledMessagePolicyBodySchema = z.object({
+  adminVisibilityEnabled: z.boolean(),
+  enabled: z.boolean(),
+  maxDaysAhead: z.number().int().min(1).max(365),
+  maxPendingPerUser: z.number().int().min(1).max(200)
 });
 
 const companyProfileBodySchema = z.object({
@@ -173,6 +254,33 @@ const organizationDeletionBodySchema = z.object({
 });
 
 const deviceIdParamSchema = z.string().trim().regex(/^[A-Za-z0-9_-]{16,128}$/);
+const aiFeatureIdParamSchema = z.enum([
+  'chat_translation',
+  'interpreter_realtime',
+  'interpreter_segment_translation',
+  'interpreter_spoken_summary',
+  'interpreter_summary',
+  'interpreter_transcript_audio',
+  'interpreter_voice_preview',
+  'lsw_ai',
+  'rails_ai',
+  'rca_ai'
+]);
+const aiMonthQuerySchema = z.object({
+  month: z.string().trim().regex(/^\d{4}-\d{2}$/).optional()
+});
+const aiToggleBodySchema = z.object({
+  enabled: z.boolean(),
+  hardLimitEnabled: z.boolean().optional(),
+  monthlyBudgetUsd: z.number().min(0).max(5_000_000).nullable().optional(),
+  reason: z.string().trim().max(240).optional()
+});
+const aiBudgetBodySchema = z.object({
+  hardLimitEnabled: z.boolean(),
+  monthlyBudgetUsd: z.number().min(0).max(5_000_000).nullable(),
+  softWarningPercent: z.number().int().min(50).max(100)
+});
+const aiScopeIdParamSchema = z.string().trim().min(2).max(160);
 
 adminRouter.get('/company-profile', verifyAppCheck, async (req, res, next) => {
   try {
@@ -381,6 +489,90 @@ adminRouter.post('/organization-deletion/confirm', verifyAppCheck, async (req, r
   }
 });
 
+/**
+ * Backup restore requests.
+ *
+ * A reinstalled device has no key and can only ask. Approving one hands that
+ * device the key to somebody's whole chat history, so it is held to the same
+ * bar as changing the backup policy: an org admin with `security.manage`. The
+ * decision and the name behind it go to the audit log, because a restore nobody
+ * can be asked about is not a control.
+ */
+/**
+ * The audit log, read only.
+ *
+ * There is no companion route that deletes, edits or clears one of these, and
+ * there must never be. An audit log an administrator can erase is a diary.
+ * Events age out by retention policy and by nothing else.
+ */
+adminRouter.get('/audit-events', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const query = auditEventQuerySchema.parse(req.query);
+    const page = await listAuditEvents(decodedToken, {
+      actions: query.actions ? query.actions.split(',') : undefined,
+      fromMs: query.fromMs ?? null,
+      startAfterId: query.startAfterId,
+      toMs: query.toMs ?? null
+    });
+
+    res.json(page);
+  } catch (error) {
+    next(error);
+  }
+});
+
+adminRouter.get('/chat-backup/restore-requests', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const requests = await listRestoreRequestsForAdmin(decodedToken);
+
+    res.json({ requests });
+  } catch (error) {
+    next(error);
+  }
+});
+
+adminRouter.post('/chat-backup/restore-requests/:requestId/decide', verifyAppCheck, async (req, res, next) => {
+  const requestId = String(req.params.requestId || '');
+
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const body = chatBackupRestoreDecisionSchema.parse(req.body);
+    const request = await decideRestoreRequestForAdmin(decodedToken, {
+      approve: body.approve,
+      requestId
+    });
+
+    await writeAuditEvent({
+      action: body.approve ? 'CHAT_BACKUP_RESTORE_APPROVED' : 'CHAT_BACKUP_RESTORE_DENIED',
+      metadata: {
+        deviceId: request?.deviceId,
+        requestId,
+        subjectUid: request?.uid
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: decodedToken.tenantId as string | undefined,
+      uid: decodedToken.uid
+    });
+
+    res.json({ request });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'CHAT_BACKUP_RESTORE_APPROVED',
+      metadata: { requestId },
+      reason: error instanceof Error ? error.message : 'Backup restore decision failed',
+      req,
+      status: 'FAILED'
+    });
+    next(error);
+  }
+});
+
 adminRouter.get('/chat-backup-policy', verifyAppCheck, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
@@ -418,6 +610,221 @@ adminRouter.patch('/chat-backup-policy', verifyAppCheck, async (req, res, next) 
     await writeAuditEvent({
       action: 'CHAT_BACKUP_POLICY_UPDATED',
       reason: error instanceof Error ? error.message : 'Chat backup policy update failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
+adminRouter.get('/chat-offline-policy', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const policy = await getChatOfflinePolicyForCurrentUser(decodedToken);
+
+    res.json({ policy });
+  } catch (error) {
+    next(error);
+  }
+});
+
+adminRouter.patch('/chat-offline-policy', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const body = chatOfflinePolicyBodySchema.parse(req.body);
+    const policy = await updateChatOfflinePolicy(decodedToken, body);
+
+    await writeAuditEvent({
+      action: 'CHAT_OFFLINE_POLICY_UPDATED',
+      metadata: {
+        cacheRetentionDays: policy.cacheRetentionDays,
+        fullMediaCacheBudgetBytes: policy.fullMediaCacheBudgetBytes,
+        mediaLimitBytes: policy.mediaLimitBytes,
+        offlineMediaCacheAllowed: policy.offlineMediaCacheAllowed,
+        purgeOnSignOut: policy.purgeOnSignOut,
+        wifiOnlyMediaPrefetch: policy.wifiOnlyMediaPrefetch
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: decodedToken.tenantId as string | undefined,
+      uid: decodedToken.uid
+    });
+
+    res.json({ policy });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'CHAT_OFFLINE_POLICY_UPDATED',
+      reason: error instanceof Error ? error.message : 'Offline chat policy update failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
+adminRouter.get('/action-reminder-policy', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const policy = await getActionReminderPolicyForCurrentUser(decodedToken);
+
+    res.json({ policy });
+  } catch (error) {
+    next(error);
+  }
+});
+
+adminRouter.patch('/action-reminder-policy', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const body = actionReminderPolicyBodySchema.parse(req.body);
+    const policy = await updateActionReminderPolicy(decodedToken, body);
+
+    await writeAuditEvent({
+      action: 'ACTION_REMINDER_POLICY_UPDATED',
+      metadata: {
+        escalateOverdueAfterHours: policy.escalateOverdueAfterHours ?? 'never',
+        firstReminderHour: policy.firstReminderHour,
+        frequency: policy.frequency,
+        secondReminderHour: policy.secondReminderHour,
+        timeZone: policy.timeZone,
+        workingHours: `${policy.workingHoursStartHour}-${policy.workingHoursEndHour}`
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: decodedToken.tenantId as string | undefined,
+      uid: decodedToken.uid
+    });
+
+    res.json({ policy });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'ACTION_REMINDER_POLICY_UPDATED',
+      reason: error instanceof Error ? error.message : 'Reminder policy update failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
+adminRouter.get('/scheduled-message-policy', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const policy = await getScheduledMessagePolicyForCurrentUser(decodedToken);
+
+    res.json({ policy });
+  } catch (error) {
+    next(error);
+  }
+});
+
+adminRouter.patch('/scheduled-message-policy', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const body = scheduledMessagePolicyBodySchema.parse(req.body);
+    const policy = await updateScheduledMessagePolicy(decodedToken, body);
+
+    await writeAuditEvent({
+      action: 'SCHEDULED_MESSAGE_POLICY_UPDATED',
+      metadata: {
+        adminVisibilityEnabled: policy.adminVisibilityEnabled,
+        enabled: policy.enabled,
+        maxDaysAhead: policy.maxDaysAhead,
+        maxPendingPerUser: policy.maxPendingPerUser
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: decodedToken.tenantId as string | undefined,
+      uid: decodedToken.uid
+    });
+
+    res.json({ policy });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'SCHEDULED_MESSAGE_POLICY_UPDATED',
+      reason: error instanceof Error ? error.message : 'Scheduled message policy update failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
+/**
+ * What is waiting to be sent across the organization.
+ *
+ * Metadata only. The response type carries no ciphertext and no key material,
+ * so an admin can see that a message is waiting, from whom and when — and
+ * cannot read it. That distinction is the whole point of the feature, and it is
+ * enforced by the shape of `TenantScheduledMessageResponse` rather than by
+ * remembering to strip fields here.
+ */
+adminRouter.get('/scheduled-messages', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const scheduledMessages = await listTenantScheduledMessages(decodedToken);
+
+    res.json({ scheduledMessages });
+  } catch (error) {
+    next(error);
+  }
+});
+
+adminRouter.post('/scheduled-messages/:scheduledMessageId/cancel', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const scheduledMessageId = Array.isArray(req.params.scheduledMessageId)
+      ? req.params.scheduledMessageId[0] || ''
+      : req.params.scheduledMessageId || '';
+    const body = cancelScheduledMessageBodySchema.parse(req.body);
+    const scheduledMessage = await cancelScheduledMessage(decodedToken, scheduledMessageId, {
+      asOrgAdmin: true,
+      reason: body.reason
+    });
+
+    await writeAuditEvent({
+      action: 'CHAT_MESSAGE_SCHEDULE_CANCELLED',
+      metadata: {
+        byOrgAdmin: true,
+        conversationId: scheduledMessage.conversationId,
+        // The reason is recorded because the audit answers "why", not only
+        // "who". A stop nobody can account for later is the thing this whole
+        // permission was written to avoid.
+        reasonGiven: scheduledMessage.cancellationReason,
+        scheduledMessageId: scheduledMessage.scheduledMessageId,
+        senderUid: scheduledMessage.senderUid
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: decodedToken.tenantId as string | undefined,
+      uid: decodedToken.uid
+    });
+
+    res.json({
+      scheduledMessage: {
+        scheduledMessageId: scheduledMessage.scheduledMessageId,
+        status: scheduledMessage.status
+      }
+    });
+  } catch (error) {
+    // A refused attempt is recorded too. An admin reaching for somebody's
+    // pending message and being turned away is exactly the event an audit log
+    // exists to hold.
+    await writeAuditEvent({
+      action: 'CHAT_MESSAGE_SCHEDULE_CANCELLED',
+      reason: error instanceof Error ? error.message : 'Scheduled message cancellation failed',
       req,
       status: 'FAILED'
     }).catch(() => undefined);
@@ -938,6 +1345,218 @@ adminRouter.patch('/employees/:approvedPhoneId/department-admin-permissions', ve
     await writeAuditEvent({
       action: 'DEPARTMENT_ADMIN_PERMISSIONS_UPDATED',
       reason: error instanceof Error ? error.message : 'Department admin permission update failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
+adminRouter.get('/ai-usage/summary', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const query = aiMonthQuerySchema.parse(req.query);
+    const dashboard = await getTenantAiUsageDashboard({
+      decodedToken,
+      month: query.month
+    });
+
+    res.json({ dashboard });
+  } catch (error) {
+    next(error);
+  }
+});
+
+adminRouter.get('/ai-policy', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const [policy, features] = await Promise.all([
+      getTenantAiPolicy(decodedToken),
+      Promise.resolve(listTenantAiFeatureCatalog())
+    ]);
+
+    res.json({ features, policy });
+  } catch (error) {
+    next(error);
+  }
+});
+
+adminRouter.patch('/ai-policy/company', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const body = aiToggleBodySchema.parse(req.body);
+    const policy = await updateTenantCompanyAiPolicy({
+      decodedToken,
+      enabled: body.enabled,
+      reason: body.reason
+    });
+
+    await writeAuditEvent({
+      action: body.enabled ? 'TENANT_AI_ENABLED' : 'TENANT_AI_DISABLED',
+      metadata: {
+        reason: body.reason || null
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: policy.tenantId,
+      uid: decodedToken.uid
+    });
+
+    res.json({ policy });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'TENANT_AI_POLICY_UPDATED',
+      reason: error instanceof Error ? error.message : 'AI company policy update failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
+adminRouter.patch('/ai-policy/budget', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const body = aiBudgetBodySchema.parse(req.body);
+    const policy = await updateTenantAiBudgetPolicy({
+      decodedToken,
+      hardLimitEnabled: body.hardLimitEnabled,
+      monthlyBudgetUsd: body.monthlyBudgetUsd,
+      softWarningPercent: body.softWarningPercent
+    });
+
+    await writeAuditEvent({
+      action: 'TENANT_AI_BUDGET_UPDATED',
+      metadata: {
+        hardLimitEnabled: body.hardLimitEnabled,
+        monthlyBudgetUsd: body.monthlyBudgetUsd,
+        softWarningPercent: body.softWarningPercent
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: policy.tenantId,
+      uid: decodedToken.uid
+    });
+
+    res.json({ policy });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'TENANT_AI_BUDGET_UPDATED',
+      reason: error instanceof Error ? error.message : 'AI budget policy update failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
+adminRouter.patch('/ai-policy/features/:featureId', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const featureId = aiFeatureIdParamSchema.parse(req.params.featureId);
+    const body = aiToggleBodySchema.parse(req.body);
+    const policy = await updateTenantAiFeaturePolicy({
+      decodedToken,
+      enabled: body.enabled,
+      featureId,
+      hardLimitEnabled: body.hardLimitEnabled,
+      monthlyBudgetUsd: body.monthlyBudgetUsd
+    });
+
+    await writeAuditEvent({
+      action: body.enabled ? 'TENANT_AI_FEATURE_ENABLED' : 'TENANT_AI_FEATURE_DISABLED',
+      metadata: { featureId },
+      req,
+      status: 'SUCCESS',
+      tenantId: policy.tenantId,
+      uid: decodedToken.uid
+    });
+
+    res.json({ policy });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'TENANT_AI_FEATURE_POLICY_UPDATED',
+      reason: error instanceof Error ? error.message : 'AI feature policy update failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
+adminRouter.patch('/ai-policy/departments/:departmentId', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const departmentId = aiScopeIdParamSchema.parse(req.params.departmentId);
+    const body = aiToggleBodySchema.parse(req.body);
+    const policy = await updateTenantAiDepartmentPolicy({
+      decodedToken,
+      departmentId,
+      enabled: body.enabled,
+      hardLimitEnabled: body.hardLimitEnabled,
+      monthlyBudgetUsd: body.monthlyBudgetUsd
+    });
+
+    await writeAuditEvent({
+      action: body.enabled ? 'TENANT_AI_DEPARTMENT_ENABLED' : 'TENANT_AI_DEPARTMENT_DISABLED',
+      metadata: { departmentId },
+      req,
+      status: 'SUCCESS',
+      tenantId: policy.tenantId,
+      uid: decodedToken.uid
+    });
+
+    res.json({ policy });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'TENANT_AI_DEPARTMENT_POLICY_UPDATED',
+      reason: error instanceof Error ? error.message : 'AI department policy update failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
+adminRouter.patch('/ai-policy/employees/:employeeUid', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const employeeUid = aiScopeIdParamSchema.parse(req.params.employeeUid);
+    const body = aiToggleBodySchema.parse(req.body);
+    const policy = await updateTenantAiEmployeePolicy({
+      decodedToken,
+      employeeUid,
+      enabled: body.enabled,
+      hardLimitEnabled: body.hardLimitEnabled,
+      monthlyBudgetUsd: body.monthlyBudgetUsd
+    });
+
+    await writeAuditEvent({
+      action: body.enabled ? 'TENANT_AI_EMPLOYEE_ENABLED' : 'TENANT_AI_EMPLOYEE_DISABLED',
+      metadata: { employeeUid },
+      req,
+      status: 'SUCCESS',
+      tenantId: policy.tenantId,
+      uid: decodedToken.uid
+    });
+
+    res.json({ policy });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'TENANT_AI_EMPLOYEE_POLICY_UPDATED',
+      reason: error instanceof Error ? error.message : 'AI employee policy update failed',
       req,
       status: 'FAILED'
     }).catch(() => undefined);

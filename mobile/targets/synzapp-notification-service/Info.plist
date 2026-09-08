@@ -8,6 +8,12 @@
       <dict>
         <key>NSExtensionActivationRule</key>
         <string>TRUEPREDICATE</string>
+        <!-- Without this the system will not treat our notifications as
+             communication, and the sender's face is never used. -->
+        <key>IntentsSupported</key>
+        <array>
+          <string>INSendMessageIntent</string>
+        </array>
       </dict>
       <key>NSExtensionPrincipalClass</key>
       <string>$(PRODUCT_MODULE_NAME).NotificationService</string>

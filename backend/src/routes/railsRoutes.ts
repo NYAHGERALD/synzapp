@@ -8,12 +8,16 @@ import {
   addRailsComment,
   addRailsEvidence,
   bulkUpdateRailsItems,
+  createRailsIntakeApprovalRequest,
   createRailsItem,
   exportRailsHistoryCsv,
   exportRailsHistoryJson,
   getRailsEvidenceFile,
+  getRailsEvidenceLibraryFile,
+  getRailsEvidenceLibraryThumbnail,
   getRailsReport,
   getRailsStandardizationDocumentVersionFile,
+  listRailsEvidenceLibrary,
   listRailsItemActivity,
   listRailsHistory,
   listRailsLswSourceCandidates,
@@ -26,6 +30,9 @@ import {
   convertRailsRcaTriageToIncident,
   deleteRailsAction,
   deleteRailsEvidence,
+  deleteRailsEvidenceLibrary,
+  addRailsEvidenceLibrary,
+  updateRailsEvidenceLibrary,
   updateRailsAction,
   updateRailsItem,
   reorderRailsAction
@@ -56,6 +63,15 @@ const railsItemBodySchema = z.object({
   reopenReason: z.string().trim().max(500).optional(),
   source: z.string().trim().max(80).optional(),
   title: z.string().trim().min(1).max(180).optional()
+});
+
+const railsIntakeRequestBodySchema = z.object({
+  dueDate: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  ownerUid: z.string().trim().max(128).optional(),
+  priority: railsPrioritySchema.optional(),
+  problem: z.string().trim().max(600).optional(),
+  source: z.string().trim().max(80).optional(),
+  title: z.string().trim().min(1).max(180)
 });
 
 const railsItemPatchSchema = z.object({
@@ -159,11 +175,15 @@ const railsRcaTriageReviewBodySchema = z.object({
 const railsEvidenceBodySchema = z.object({
   dataUrl: z.string().max(6_000_000).optional(),
   evidenceId: z.string().trim().max(128).optional(),
+  // A poster frame, not a second copy of the file. Bounded well below the file
+  // limit so this cannot become a way to smuggle large uploads past it.
+  thumbnailDataUrl: z.string().max(800_000).optional(),
   fileName: z.string().trim().max(180).optional(),
   label: z.string().trim().min(1).max(140).optional(),
   note: z.string().trim().max(360).optional(),
   purpose: z.enum(['general', 'standardization']).optional(),
   sourceEvidenceId: z.string().trim().max(128).nullable().optional(),
+  sourceEvidenceIds: z.array(z.string().trim().max(128)).max(30).optional(),
   status: z.enum(['Attached', 'Required', 'Review']).optional(),
   visibility: z.enum(['public', 'private']).optional()
 });
@@ -322,6 +342,18 @@ railsRouter.post('/items', verifyAppCheck, async (req, res, next) => {
   }
 });
 
+railsRouter.post('/intake-requests', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const body = railsIntakeRequestBodySchema.parse(req.body);
+    const request = await createRailsIntakeApprovalRequest(decodedToken, body);
+
+    res.status(201).json({ request });
+  } catch (error) {
+    next(error);
+  }
+});
+
 railsRouter.patch('/items/:itemId', verifyAppCheck, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
@@ -472,6 +504,82 @@ railsRouter.get('/items/:itemId/activity', verifyAppCheck, async (req, res, next
     const activity = await listRailsItemActivity(decodedToken, itemId);
 
     res.json(activity);
+  } catch (error) {
+    next(error);
+  }
+});
+
+railsRouter.get('/evidence-library', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const evidence = await listRailsEvidenceLibrary(decodedToken);
+
+    res.json(evidence);
+  } catch (error) {
+    next(error);
+  }
+});
+
+railsRouter.post('/evidence-library', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const body = railsEvidenceBodySchema.parse(req.body);
+    const evidence = await addRailsEvidenceLibrary(decodedToken, body);
+
+    res.status(201).json({ evidence });
+  } catch (error) {
+    next(error);
+  }
+});
+
+railsRouter.patch('/evidence-library/:evidenceId', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const evidenceId = z.string().trim().regex(/^ev_[A-Fa-f0-9]{32}$/).parse(req.params.evidenceId);
+    const body = railsEvidenceBodySchema.partial().parse(req.body);
+    const evidence = await updateRailsEvidenceLibrary(decodedToken, evidenceId, body);
+
+    res.json({ evidence });
+  } catch (error) {
+    next(error);
+  }
+});
+
+railsRouter.delete('/evidence-library/:evidenceId', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const evidenceId = z.string().trim().regex(/^ev_[A-Fa-f0-9]{32}$/).parse(req.params.evidenceId);
+    await deleteRailsEvidenceLibrary(decodedToken, evidenceId);
+
+    res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
+
+railsRouter.get('/evidence-library/:evidenceId/thumbnail', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const evidenceId = z.string().trim().regex(/^ev_[A-Fa-f0-9]{32}$/).parse(req.params.evidenceId);
+    const thumbnail = await getRailsEvidenceLibraryThumbnail(decodedToken, evidenceId);
+
+    res.setHeader('Content-Type', thumbnail.contentType);
+    res.setHeader('Cache-Control', 'private, max-age=86400');
+    res.send(thumbnail.payload);
+  } catch (error) {
+    next(error);
+  }
+});
+
+railsRouter.get('/evidence-library/:evidenceId', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const evidenceId = z.string().trim().regex(/^ev_[A-Fa-f0-9]{32}$/).parse(req.params.evidenceId);
+    const evidenceFile = await getRailsEvidenceLibraryFile(decodedToken, evidenceId);
+
+    res.setHeader('Content-Type', evidenceFile.contentType);
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(evidenceFile.fileName)}"`);
+    res.send(evidenceFile.payload);
   } catch (error) {
     next(error);
   }

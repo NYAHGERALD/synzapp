@@ -3,8 +3,104 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#08111f" />
-    <title>Synzapp Enterprise Performance Suite</title>
+    <!-- The page is white. A dark colour here tinted the browser chrome on
+         phones to match a design that no longer exists. -->
+    <meta name="theme-color" content="#ffffff" />
+
+    <title>Synzapp — Workplace chat, live interpreting and records</title>
+    <meta
+      name="description"
+      content="Enterprise workplace suite: chat your organization owns, a live interpreter across 245 languages, plus legal hold, search and export for compliance teams."
+    />
+    <link rel="canonical" href="https://synzapp.com/" />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
+
+    <!-- The tab icon, so browsers show the mark instead of a generic globe. -->
+    <!--
+      Google wants a favicon that is a multiple of 48px square, and it reads the
+      links in this head to find one. Only 16, 32 and the icon file were listed
+      here, so the largest thing on offer was 48 and the search result fell back
+      to a generic placeholder.
+
+      192 leads because it is 48x4 and the biggest multiple of 48 available —
+      512 is not one (512 / 48 is not whole), so it stays out of the icon list
+      and continues to serve the web manifest, where exact multiples do not
+      matter.
+    -->
+    <link rel="icon" type="image/png" sizes="192x192" href="/favicon-192.png" />
+    <link rel="icon" type="image/png" sizes="48x48" href="/favicon-48.png" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+
+    <!-- What a link to this page looks like when it is pasted into a chat,
+         a post or a search result. -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Synzapp" />
+    <meta property="og:url" content="https://synzapp.com/" />
+    <meta property="og:title" content="Synzapp — Enterprise Performance Suite" />
+    <meta
+      property="og:description"
+      content="Workplace chat the organization controls, a live interpreter across 245 languages, and the operating routines that keep a business improving."
+    />
+    <meta property="og:image" content="https://synzapp.com/synzapp-card.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="The Synzapp logo" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Synzapp — Enterprise Performance Suite" />
+    <meta
+      name="twitter:description"
+      content="Workplace chat the organization controls, a live interpreter across 245 languages, and the operating routines that keep a business improving."
+    />
+    <meta name="twitter:image" content="https://synzapp.com/synzapp-card.png" />
+
+    <!-- Tells search engines the company name, the logo to show beside it, and
+         that this page is the software itself rather than an article about it. -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "Organization",
+            "@id": "https://synzapp.com/#organization",
+            "name": "Synzapp",
+            "url": "https://synzapp.com/",
+            "logo": {
+              "@type": "ImageObject",
+              "url": "https://synzapp.com/favicon-512.png",
+              "width": 512,
+              "height": 512
+            }
+          },
+          {
+            "@type": "WebSite",
+            "@id": "https://synzapp.com/#website",
+            "name": "Synzapp",
+            "url": "https://synzapp.com/",
+            "publisher": { "@id": "https://synzapp.com/#organization" }
+          },
+          {
+            "@type": "SoftwareApplication",
+            "name": "Synzapp Enterprise Performance Suite",
+            "applicationCategory": "BusinessApplication",
+            "operatingSystem": "Web, iOS, Android",
+            "url": "https://synzapp.com/",
+            "publisher": { "@id": "https://synzapp.com/#organization" },
+            "featureList": [
+              "Organization controlled workplace chat",
+              "Live and realtime human-like interpreter across 245 languages",
+              "Leaders Standard Work",
+              "Root Cause Analysis",
+              "RAILS",
+              "Legal hold, compliance search and export"
+            ]
+          }
+        ]
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

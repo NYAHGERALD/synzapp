@@ -121,6 +121,30 @@ interface SendCallEndedPushNotificationsInput {
 interface SendRailsPushNotificationInput {
   actorUid: string;
   body: string;
+  /**
+   * Which part of the product this came from. Recorded on the event so a
+   * notification can be traced back to what raised it. Defaults to rails,
+   * which is what this was originally written for.
+   */
+  channel?: string;
+  /**
+   * The Android channel to deliver on — and, by its presence, the signal that
+   * this caller wants the app to render the notification itself.
+   *
+   * Two things follow from setting it. Android receives a data-only message, so
+   * the app's own code runs and can draw the actor's face. iOS receives
+   * `mutable-content`, which wakes the notification service extension for the
+   * same reason. Both are needed because the photo lives on the phone rather
+   * than in the payload.
+   *
+   * Optional, and absent for every caller that was here first — RAILS and
+   * announcements keep `rails-updates` and the system-drawn behaviour they have
+   * always had. Actions ask for their own channel so somebody can silence
+   * action reminders without silencing everything, which is the whole point:
+   * the only way to escape a reminder must not be to mute the app that also
+   * carries the overdue escalation.
+   */
+  androidChannelId?: string;
   itemId?: string | null;
   metadata?: Record<string, string>;
   notificationId: string;
@@ -427,6 +451,43 @@ export async function updateChatNotificationSettings(
   };
 }
 
+/**
+ * The Android channel the app creates for chat, at high importance.
+ *
+ * Sent in the data because a data-only message has no notification block for
+ * Firebase to read a channel from, and Expo's trigger falls back to
+ * `remoteMessage.data["channelId"]`. Without it the notice lands on Expo's
+ * generic fallback channel, which the person cannot recognise or tune.
+ */
+const ANDROID_CHAT_CHANNEL_ID = 'chat-messages';
+
+/**
+ * The keys Android needs to actually draw the notification.
+ *
+ * Named for Expo's receiver rather than for us, because it is the receiver that
+ * reads them. Everything already in the payload is kept: the app's own handler
+ * reads those, and this only adds what the tray needs.
+ */
+export function withAndroidNotificationDisplayKeys(
+  data: Record<string, string>,
+  display: { badgeCount: number; message: string; tag: string; title: string }
+): Record<string, string> {
+  return {
+    ...data,
+    badge: String(display.badgeCount),
+    channelId: ANDROID_CHAT_CHANNEL_ID,
+    message: display.message,
+    // A name for this notification that the phone can predict. Expo uses
+    // `tag` as the notification's identifier, so once the phone has opened the
+    // encrypted preview it can post the real message under the same name and
+    // Android replaces the placeholder rather than stacking a second notice
+    // beside it. Without it the identifier is Firebase's own message id, which
+    // the receiving code never sees.
+    tag: display.tag,
+    title: display.title
+  };
+}
+
 export async function sendChatMessagePushNotification(
   input: SendChatMessagePushNotificationInput
 ): Promise<void> {
@@ -556,7 +617,32 @@ export async function sendChatMessagePushNotification(
           android: {
             priority: 'high'
           },
-          data,
+          // Data only, with **no `notification` block**, and that is deliberate.
+          // A message carrying one is shown by the system itself and
+          // `onMessageReceived` is never called while the app is backgrounded,
+          // so the delivery-receipt task could not run and a message to a shut
+          // phone could never reach "Delivered". Data only means our code runs
+          // every time.
+          //
+          // The cost is that nothing is displayed unless we describe it, and
+          // that is what was broken: Android chat notifications arrived and
+          // showed **nothing**. Expo's receiver reads exactly `title`,
+          // `message`, `channelId` and `badge` out of the data map
+          // (`NotificationData.kt`), and this payload had none of them — it
+          // carried the same facts under names of our own, so every chat push
+          // built a notification with a null title and null text.
+          //
+          // These keys are **added beside** the existing ones rather than
+          // replacing them. A `body` key is pointedly not sent: Expo treats a
+          // JSON `body` as "this came from Expo's own service", stops filling
+          // `content.data`, and the app's foreground handler reads exactly
+          // that. Adding one would have fixed the tray and broken the app.
+          data: withAndroidNotificationDisplayKeys(data, {
+            badgeCount: unreadBadgeCount,
+            message: notificationPreview ? 'New encrypted message' : 'New message',
+            tag: input.envelopeId,
+            title
+          }),
           token: record.token || ''
         },
         record
@@ -629,7 +715,7 @@ export async function sendRailsPushNotification(input: SendRailsPushNotification
 
   await eventRef.set({
     actorUid: input.actorUid,
-    channel: 'rails',
+    channel: input.channel || 'rails',
     createdAt: fieldValue.serverTimestamp(),
     itemId: input.itemId || null,
     notificationId: input.notificationId,
@@ -676,15 +762,42 @@ export async function sendRailsPushNotification(input: SendRailsPushNotification
         ...(input.metadata || {})
       });
 
+      // Set by a caller that wants the app to render this notification: data-only
+      // on Android so its code runs, and mutable-content on iOS so the service
+      // extension does. Both exist so the actor's photo, which lives on the
+      // phone, can be put on the notification.
+      const drawnByApp = Boolean(input.androidChannelId);
+
       if (record.provider === 'fcm') {
+        // A message carrying a `notification` block is drawn by Android itself
+        // while the app is in the background, and the app's own code never
+        // runs — so it can never show the sender's face, which is cached on
+        // the phone rather than fetchable from a payload.
+        //
+        // A caller asking for its own channel is a caller that wants the app to
+        // draw it. Everything else — RAILS, announcements — keeps the block and
+        // behaves exactly as before.
         fcmTargets.push({
           message: {
             android: { priority: 'high' },
-            data,
-            notification: {
-              body: input.body,
-              title: input.title
-            },
+            data: drawnByApp
+              // Expo reads these to draw a plain version. It is the fallback
+              // for a phone whose app code declines to handle the message, so
+              // a fault in the richer path costs the photo and not the
+              // notification.
+              ? {
+                ...data,
+                body: input.body,
+                channelId: input.androidChannelId as string,
+                message: input.body
+              }
+              : data,
+            ...(drawnByApp ? {} : {
+              notification: {
+                body: input.body,
+                title: input.title
+              }
+            }),
             token: record.token || ''
           },
           record
@@ -693,8 +806,13 @@ export async function sendRailsPushNotification(input: SendRailsPushNotification
         expoTargets.push({
           message: {
             body: input.body,
-            channelId: 'rails-updates',
+            channelId: input.androidChannelId || 'rails-updates',
             data,
+            // Wakes the iOS notification service extension, which is the only
+            // place the actor's photo can be attached — it lives in the shared
+            // keychain on the phone, not in the payload. Only for callers that
+            // asked to render their own; RAILS and announcements are unchanged.
+            mutableContent: record.platform === 'ios' && drawnByApp,
             priority: 'high',
             sound: 'default',
             title: input.title,
@@ -1365,8 +1483,40 @@ async function sendExpoPushBatch(messages: ExpoPushMessage[]): Promise<ExpoPushT
   return body.data || [];
 }
 
+/**
+ * Sends a batch to Firebase, and **says so when Firebase refuses**.
+ *
+ * The silence here is why Android notifications were broken for so long. Every
+ * send was rejected with `messaging/mismatched-credential` — the service
+ * account had no `cloudmessaging.messages.create` permission, so not one push
+ * ever left Google — and the result was mapped into a ticket, filed in
+ * Firestore, and never mentioned anywhere anybody looks. The APNs path beside
+ * this one logs both its successes and its failures; this one logged nothing,
+ * so the fault was invisible from the logs and looked like a device problem.
+ *
+ * A failure that nobody is told about is a failure that lasts. Logged at
+ * `error` so it shows up in Cloud Logging without anybody knowing to go
+ * digging through Firestore for it.
+ */
 async function sendFcmPushBatch(messages: Message[]): Promise<ExpoPushTicket[]> {
   const response = await getMessaging(adminApp).sendEach(messages);
+
+  if (response.failureCount > 0) {
+    console.error('[SynzappPush] Firebase rejected push messages.', {
+      // The codes matter more than the count: a credential fault affects every
+      // device at once and is ours to fix, while an unregistered token affects
+      // one and clears itself.
+      errorCodes: [...new Set(
+        response.responses
+          .filter((result) => !result.success)
+          .map((result) => result.error?.code || 'unknown')
+      )],
+      failureCount: response.failureCount,
+      firstMessage: response.responses.find((result) => !result.success)?.error?.message || null,
+      successCount: response.successCount,
+      total: messages.length
+    });
+  }
 
   return response.responses.map((result) => (
     result.success
@@ -1738,6 +1888,44 @@ function getDisplayName(user: FirebaseFirestore.DocumentData | null | undefined)
   const fullName = [firstName, lastName].filter(Boolean).join(' ').trim();
 
   return displayName || fullName;
+}
+
+/**
+ * The cache key for one person's photo, or null if they have none.
+ *
+ * The photo itself never travels. The phone has already cached profile photos
+ * for the directory, so a key is enough for it to find one — and a payload
+ * carrying an image would be both slow and a copy of something private sitting
+ * in a push service's logs.
+ *
+ * Exported for notifications that want to show who did something, rather than
+ * only for chat, which is where the idea started.
+ */
+export async function readActorProfilePhotoCacheKey(
+  tenantId: string,
+  uid: string
+): Promise<string | null> {
+  try {
+    const snapshot = await firestore
+      .collection('organizations')
+      .doc(tenantId)
+      .collection('users')
+      .doc(uid)
+      .get();
+    const user = snapshot.data();
+    const storagePath = typeof user?.profilePhotoStoragePath === 'string'
+      ? user.profilePhotoStoragePath.trim()
+      : '';
+
+    if (!storagePath) {
+      return null;
+    }
+
+    return `profile-photo-${uid}-${getProfilePhotoVersion(user)}`;
+  } catch {
+    // A missing photo is not a reason to send no notification at all.
+    return null;
+  }
 }
 
 function getNotificationSenderProfilePhotoCacheKeys(

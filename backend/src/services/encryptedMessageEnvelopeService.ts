@@ -1,14 +1,19 @@
+import { buildDirectChatId } from './conversationIdentity.js';
 import { createHash } from 'node:crypto';
 import { DecodedIdToken } from 'firebase-admin/auth';
 import { fieldValue, firestore } from '../config/firebaseAdmin.js';
 import { SynzappRole } from '../types/auth.js';
 import { buildAuthSession } from './authSessionService.js';
+import type { DeviceActivityTimestamp } from './deviceDormancy.js';
+import { selectDevicesForDelivery } from './deviceIdentityService.js';
 import {
   getChatUserPreference,
   reviveChatUserPreferenceInTransaction
 } from './chatUserPreferenceService.js';
 import { getChatArchiveSettings } from './chatArchiveSettingsService.js';
 import { pickNotificationPreviewsForRecipientDevices } from './encryptedNotificationPreviewPolicy.js';
+import { registerChatMediaReferences } from './chatMediaRetentionService.js';
+import { getTenantArchivePublicKey } from './tenantArchiveKeyService.js';
 
 export interface SendEncryptedDirectEnvelopeInput {
   algorithm: string;
@@ -16,6 +21,17 @@ export interface SendEncryptedDirectEnvelopeInput {
   clientMessageId: string;
   encryptedKeysByDevice: Record<string, string>;
   keyVersion: number;
+  /**
+   * The media this message uses.
+   *
+   * Sent alongside the message rather than read from it, because the media ids
+   * live inside the encrypted payload and the server cannot see them. Without
+   * this the server has no way to know a photo is still in use, which is why
+   * photos used to disappear from conversations that still showed them.
+   *
+   * Only ids. Nothing about the content, and the photo itself stays unreadable.
+   */
+  mediaIds?: string[];
   nonce: string;
   notificationPreviewByDevice?: Record<string, EncryptedNotificationPreviewRecord>;
   recipientDeviceIds: string[];
@@ -55,6 +71,15 @@ export interface EncryptionDevicePublicKey {
 }
 
 export interface DirectEncryptionContextResponse {
+  /**
+   * The company's compliance archive, presented as a device.
+   *
+   * Absent when the company has no archive key, in which case sending works
+   * exactly as before. A sending app encrypts to it like any other recipient,
+   * which is what gives the company a readable record without the server ever
+   * seeing an unencrypted message.
+   */
+  archiveDevice?: EncryptionDevicePublicKey;
   recipientDevices: EncryptionDevicePublicKey[];
   senderDevice: EncryptionDevicePublicKey;
   senderDevices: EncryptionDevicePublicKey[];
@@ -98,10 +123,12 @@ interface TenantUserRecord {
 }
 
 interface DeviceKeyRecord {
+  createdAt?: DeviceActivityTimestamp | null;
   deviceId?: string;
   identityPublicKey?: string;
   keyAgreementPublicKey?: string;
   keyVersion?: number;
+  lastSeenAt?: DeviceActivityTimestamp | null;
   platform?: string;
   signingPublicKey?: string;
   status?: string;
@@ -141,6 +168,8 @@ interface EncryptedMessageMetadataRecord {
 }
 
 interface ListEncryptedDirectEnvelopeOptions {
+  afterSentAtMs?: number | null;
+  beforeSentAtMs?: number | null;
   limit?: number;
   markAsDelivered?: boolean;
   markAsRead?: boolean;
@@ -167,10 +196,35 @@ export async function getDirectEncryptionContext(
     throw validationError('The recipient does not have an active device yet.');
   }
 
+  const archiveKey = await getTenantArchivePublicKey(context.tenantId);
+
   return {
+    ...(archiveKey ? { archiveDevice: mapArchiveDevice(archiveKey) } : {}),
     recipientDevices: recipientDevices.map(mapDevicePublicKey),
     senderDevice: mapDevicePublicKey(senderDevice),
     senderDevices: senderDevices.map(mapDevicePublicKey)
+  };
+}
+
+/**
+ * Presents the archive key in the shape a device takes.
+ *
+ * The device id is prefixed so it is recognisable in an envelope's recipient
+ * list — an operator reading a message record should be able to see at a glance
+ * that the company archive was one of its readers.
+ */
+function mapArchiveDevice(archiveKey: {
+  keyAgreementPublicKey: string;
+  keyId: string;
+}): EncryptionDevicePublicKey {
+  return {
+    deviceId: `archive_${archiveKey.keyId}`,
+    identityPublicKey: '',
+    keyAgreementPublicKey: archiveKey.keyAgreementPublicKey,
+    keyVersion: 1,
+    platform: 'compliance-archive',
+    signingPublicKey: '',
+    uid: ''
   };
 }
 
@@ -219,9 +273,20 @@ export async function listEncryptedDirectEnvelopesForDevice(
     envelopesQuery = envelopesQuery.where('sentAtMs', '>', preference.clearedAtMs);
   }
 
+  const afterSentAtMs = normalizeEnvelopeCursorMs(options.afterSentAtMs);
+  const beforeSentAtMs = normalizeEnvelopeCursorMs(options.beforeSentAtMs);
+
+  if (afterSentAtMs !== null) {
+    envelopesQuery = envelopesQuery.where('sentAtMs', '>', afterSentAtMs);
+  }
+
+  if (beforeSentAtMs !== null) {
+    envelopesQuery = envelopesQuery.where('sentAtMs', '<', beforeSentAtMs);
+  }
+
   envelopesQuery = envelopesQuery.orderBy('sentAtMs', 'asc');
   const envelopesSnapshot = await envelopesQuery
-    .limit(options.limit || 100)
+    .limit(normalizeEnvelopePageLimit(options.limit, 100))
     .get();
   const nowMs = Date.now();
   const batch = firestore.batch();
@@ -336,6 +401,22 @@ export async function listEncryptedDirectEnvelopesForDevice(
   return envelopes;
 }
 
+function normalizeEnvelopeCursorMs(value: number | null | undefined): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+
+  return Math.max(0, Math.floor(value));
+}
+
+function normalizeEnvelopePageLimit(value: number | undefined, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return fallback;
+  }
+
+  return Math.max(1, Math.min(Math.floor(value), 500));
+}
+
 export async function markEncryptedDirectEnvelopesDeliveredForDevice(
   decodedToken: DecodedIdToken,
   contactId: string,
@@ -348,12 +429,54 @@ export async function markEncryptedDirectEnvelopesDeliveredForDevice(
   });
 }
 
+/**
+ * Sends a message somebody has just written.
+ *
+ * The work itself is in `deliverEncryptedDirectEnvelope`; this only settles who
+ * is sending, from their signed-in session.
+ */
 export async function sendEncryptedDirectEnvelope(
   decodedToken: DecodedIdToken,
   contactId: string,
   input: SendEncryptedDirectEnvelopeInput
 ): Promise<EncryptedDirectEnvelopeResponse> {
   const context = await getEncryptedDirectContext(decodedToken, contactId);
+
+  return deliverEncryptedDirectEnvelope(context, decodedToken.uid, input);
+}
+
+/**
+ * Sends a message written earlier, at the time its author asked for.
+ *
+ * Takes the sender as facts rather than as a token, because the worker that
+ * calls this was woken by a scheduler and has nobody signed in. Everything
+ * after that point is identical to an ordinary send — the same conversation
+ * checks, the same duplicate protection, the same record written the same way.
+ * That is deliberate: a scheduled message is not a second kind of message, and
+ * anything that treated it as one would be a second thing to keep correct.
+ */
+export async function releaseEncryptedDirectEnvelope(input: {
+  contactId: string;
+  envelope: SendEncryptedDirectEnvelopeInput;
+  role: SynzappRole;
+  senderUid: string;
+  tenantId: string;
+}): Promise<EncryptedDirectEnvelopeResponse> {
+  const context = await resolveEncryptedDirectContext({
+    contactId: input.contactId,
+    role: input.role,
+    senderUid: input.senderUid,
+    tenantId: input.tenantId
+  });
+
+  return deliverEncryptedDirectEnvelope(context, input.senderUid, input.envelope);
+}
+
+async function deliverEncryptedDirectEnvelope(
+  context: Awaited<ReturnType<typeof resolveEncryptedDirectContext>>,
+  senderUid: string,
+  input: SendEncryptedDirectEnvelopeInput
+): Promise<EncryptedDirectEnvelopeResponse> {
   const uniqueRecipientDeviceIds = Array.from(new Set(input.recipientDeviceIds));
 
   if (uniqueRecipientDeviceIds.length !== input.recipientDeviceIds.length) {
@@ -365,11 +488,11 @@ export async function sendEncryptedDirectEnvelope(
     uniqueRecipientDeviceIds
   );
 
-  await assertActiveDevice(context.tenantId, decodedToken.uid, input.senderDeviceId);
+  await assertActiveDevice(context.tenantId, senderUid, input.senderDeviceId);
   await assertActiveRecipientDevices(context.tenantId, context.contactId, uniqueRecipientDeviceIds);
   const [senderDevice, senderArchiveSettings, recipientArchiveSettings] = await Promise.all([
-    getActiveDevice(context.tenantId, decodedToken.uid, input.senderDeviceId),
-    getChatArchiveSettings(context.tenantId, decodedToken.uid),
+    getActiveDevice(context.tenantId, senderUid, input.senderDeviceId),
+    getChatArchiveSettings(context.tenantId, senderUid),
     getChatArchiveSettings(context.tenantId, context.contactId)
   ]);
 
@@ -382,7 +505,7 @@ export async function sendEncryptedDirectEnvelope(
     clientMessageId: input.clientMessageId,
     conversationId: context.chatId,
     senderKeyAgreementPublicKey: senderDevice.keyAgreementPublicKey,
-    senderUid: decodedToken.uid,
+    senderUid: senderUid,
     tenantId: context.tenantId
   });
 
@@ -399,9 +522,9 @@ export async function sendEncryptedDirectEnvelope(
   const envelopeRef = context.chatRef.collection('encryptedEnvelopes').doc();
   const messageMetadataRef = context.chatRef
     .collection('messageMetadata')
-    .doc(buildClientMessageMetadataId(decodedToken.uid, input.clientMessageId));
+    .doc(buildClientMessageMetadataId(senderUid, input.clientMessageId));
   const sentAtMs = Date.now();
-  const { participantIds, participants } = buildDirectChatParticipantData(decodedToken.uid, context.contactId);
+  const { participantIds, participants } = buildDirectChatParticipantData(senderUid, context.contactId);
   let transactionDuplicateEnvelope: EncryptedDirectEnvelopeResponse | null = null;
 
   await firestore.runTransaction(async (transaction) => {
@@ -417,7 +540,7 @@ export async function sendEncryptedDirectEnvelope(
       if (existingEnvelopeSnapshot?.exists) {
         const record = existingEnvelopeSnapshot.data() as EncryptedEnvelopeRecord;
 
-        if (record.senderUid === decodedToken.uid && record.clientMessageId === input.clientMessageId) {
+        if (record.senderUid === senderUid && record.clientMessageId === input.clientMessageId) {
           transactionDuplicateEnvelope = mapExistingDirectEnvelopeResponse({
             conversationId: context.chatId,
             envelopeId: existingEnvelopeSnapshot.id,
@@ -440,7 +563,7 @@ export async function sendEncryptedDirectEnvelope(
     reviveChatUserPreferenceInTransaction(
       transaction,
       context.tenantId,
-      decodedToken.uid,
+      senderUid,
       'DIRECT',
       context.contactId,
       { unarchive: shouldUnarchiveDirectChatOnNewMessage(senderArchiveSettings) }
@@ -451,7 +574,7 @@ export async function sendEncryptedDirectEnvelope(
       context.tenantId,
       context.contactId,
       'DIRECT',
-      decodedToken.uid,
+      senderUid,
       { unarchive: shouldUnarchiveDirectChatOnNewMessage(recipientArchiveSettings) }
     );
 
@@ -464,6 +587,7 @@ export async function sendEncryptedDirectEnvelope(
       envelopeId: envelopeRef.id,
       expiresAtMs: null,
       keyVersion: input.keyVersion,
+      mediaIds: input.mediaIds || [],
       nonce: input.nonce,
       ...(Object.keys(notificationPreviewByDevice).length
         ? { notificationPreviewByDevice }
@@ -472,7 +596,7 @@ export async function sendEncryptedDirectEnvelope(
       recipientUid: context.contactId,
       senderDeviceId: input.senderDeviceId,
       senderKeyAgreementPublicKey: senderDevice.keyAgreementPublicKey,
-      senderUid: decodedToken.uid,
+      senderUid: senderUid,
       sentAtMs,
       status: 'PENDING_DELIVERY',
       tenantId: context.tenantId,
@@ -486,7 +610,7 @@ export async function sendEncryptedDirectEnvelope(
       envelopeId: envelopeRef.id,
       participantIds,
       recipientUid: context.contactId,
-      senderUid: decodedToken.uid,
+      senderUid: senderUid,
       sentAtMs,
       status: 'ACTIVE',
       tenantId: context.tenantId,
@@ -503,7 +627,7 @@ export async function sendEncryptedDirectEnvelope(
       encryptionMode: 'E2EE',
       lastEncryptedEnvelopeId: envelopeRef.id,
       lastMessageId: envelopeRef.id,
-      lastMessageSenderUid: decodedToken.uid,
+      lastMessageSenderUid: senderUid,
       lastMessageSentAtMs: sentAtMs,
       lastMessageText: null,
       participantIds,
@@ -511,7 +635,7 @@ export async function sendEncryptedDirectEnvelope(
       serverEnvelopeExpiresAtMs: null,
       tenantId: context.tenantId,
       unreadCounts: {
-        [decodedToken.uid]: 0,
+        [senderUid]: 0,
         [context.contactId]: fieldValue.increment(1)
       },
       updatedAt: fieldValue.serverTimestamp()
@@ -521,6 +645,19 @@ export async function sendEncryptedDirectEnvelope(
   if (transactionDuplicateEnvelope) {
     return transactionDuplicateEnvelope;
   }
+
+  // After the message is stored, not inside the transaction: a failure to claim
+  // media must not lose the message. The claim is retried by the next send and
+  // the media keeps its original expiry in the meantime.
+  await registerChatMediaReferences({
+    chatRef: context.chatRef,
+    envelopeId: envelopeRef.id,
+    mediaIds: input.mediaIds || [],
+    // Kept for as long as the message. There is no separate media expiry, which
+    // is the whole point: a conversation that is kept keeps its photos.
+    purgeAfterMs: null,
+    retainUntilMs: sentAtMs
+  }).catch(() => undefined);
 
   return {
     algorithm: input.algorithm,
@@ -628,9 +765,13 @@ async function listActiveDevicesForUser(
     .where('status', '==', 'ACTIVE')
     .get();
 
-  return snapshot.docs
+  const registeredDevices = snapshot.docs
     .map((doc) => ({ ...(doc.data() as DeviceKeyRecord), deviceId: (doc.data() as DeviceKeyRecord).deviceId || doc.id }))
     .filter((device) => Boolean(device.keyAgreementPublicKey));
+
+  // A phone that was wiped or reinstalled left its registration behind, and
+  // without this every message to this person is still sealed for it forever.
+  return selectDevicesForDelivery(tenantId, registeredDevices);
 }
 
 async function getActiveDevice(
@@ -775,14 +916,42 @@ export async function getEncryptedDirectContext(decodedToken: DecodedIdToken, co
     throw authorizationError('Your profile is not active.');
   }
 
-  const safeContactId = contactId.trim();
+  return resolveEncryptedDirectContext({
+    contactId,
+    role,
+    senderUid: decodedToken.uid,
+    tenantId
+  });
+}
 
-  if (!safeContactId || safeContactId === decodedToken.uid) {
+/**
+ * The same conversation checks, for a sender identified without a token.
+ *
+ * A scheduled message is released by a worker that Cloud Scheduler woke, with
+ * nobody signed in. It still has to answer every question an ordinary send
+ * answers — is the organization active, is the sender still employed, is the
+ * recipient, are they allowed to talk to each other — and the only safe way to
+ * answer them the same way is to run the same code.
+ *
+ * This is where the offboarding guarantee actually lives: somebody deactivated
+ * at three o'clock fails `currentUser.status !== 'ACTIVE'` here, and a message
+ * they scheduled for five o'clock never goes.
+ */
+export async function resolveEncryptedDirectContext(input: {
+  contactId: string;
+  role: SynzappRole;
+  senderUid: string;
+  tenantId: string;
+}) {
+  const { role, senderUid, tenantId } = input;
+  const safeContactId = input.contactId.trim();
+
+  if (!safeContactId || safeContactId === senderUid) {
     throw notFoundError('Chat was not found.');
   }
 
   const organizationRef = firestore.collection('organizations').doc(tenantId);
-  const currentUserRef = organizationRef.collection('users').doc(decodedToken.uid);
+  const currentUserRef = organizationRef.collection('users').doc(senderUid);
   const contactRef = organizationRef.collection('users').doc(safeContactId);
   const [organizationSnapshot, currentUserSnapshot, contactSnapshot] = await Promise.all([
     organizationRef.get(),
@@ -809,7 +978,7 @@ export async function getEncryptedDirectContext(decodedToken: DecodedIdToken, co
     throw notFoundError('Chat was not found.');
   }
 
-  const chatId = buildDirectChatId(decodedToken.uid, safeContactId);
+  const chatId = buildDirectChatId(senderUid, safeContactId);
 
   return {
     chatId,
@@ -871,10 +1040,6 @@ async function assertActiveRecipientDevices(
   }));
 }
 
-function buildDirectChatId(uid: string, contactId: string): string {
-  const participantKey = [uid, contactId].sort().join('|');
-  return `direct_${createHash('sha256').update(participantKey).digest('hex')}`;
-}
 
 function getVisibleChatContactRoles(role: SynzappRole): SynzappRole[] {
   return ['ORG_ADMIN', 'DEPT_ADMIN', 'EMPLOYEE'];

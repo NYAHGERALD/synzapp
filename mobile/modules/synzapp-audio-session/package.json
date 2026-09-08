@@ -1,0 +1,11 @@
+{
+  "name": "synzapp-audio-session",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/index.ts",
+  "license": "MIT",
+  "peerDependencies": {
+    "expo": "*",
+    "react-native": "*"
+  }
+}

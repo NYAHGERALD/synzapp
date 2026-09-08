@@ -1,9 +1,10 @@
+import * as Crypto from 'expo-crypto';
 import {
   getSynzappApiBaseUrl,
   getSynzappRealtimeUrl,
   normalizeSynzappApiUrl
 } from './apiConfig';
-import { getRegisteredDeviceHeaders } from './deviceIdentity';
+import { getLocalDeviceKeyMaterial, getRegisteredDeviceHeaders } from './deviceIdentity';
 import {
   buildGroupHistoryKeyGrants,
   decryptChatEnvelopes,
@@ -38,6 +39,7 @@ export interface ChatContact {
   profilePhotoUrl: string | null;
   role: 'ORG_ADMIN' | 'DEPT_ADMIN' | 'EMPLOYEE' | 'SYSTEM_ADMIN';
   roleName: string;
+  permanentlyDeletedAt?: string | null;
   spammedAt?: string | null;
   status: string;
   trashSegments?: ChatTrashSegment[];
@@ -191,13 +193,17 @@ export type ChatMessageReactionMap = Record<string, ChatMessageReaction[]>;
 
 export type ChatMediaKind = 'audio' | 'file' | 'image' | 'video';
 export type ChatMediaQualityMode = 'hd' | 'standard';
-export type ChatMediaTransferStatus = 'available' | 'downloading' | 'failed' | 'queued' | 'uploading';
+export type ChatMediaTransferStatus = 'available' | 'downloading' | 'failed' | 'preparing' | 'queued' | 'uploading';
+export type ChatMediaEncryptionMode =
+  | 'chunked-secretbox-v1'
+  | 'native-chacha20poly1305-chunked-v1'
+  | 'secretbox-v1';
 
 export interface ChatMediaAttachment {
   chunkSizeBytes?: number;
   contentType: string;
   durationMs?: number;
-  encryptionMode?: 'chunked-secretbox-v1' | 'secretbox-v1';
+  encryptionMode?: ChatMediaEncryptionMode;
   encryptedSizeBytes?: number;
   fileName: string;
   height?: number;
@@ -205,6 +211,7 @@ export interface ChatMediaAttachment {
   kind: ChatMediaKind;
   localUri?: string;
   mediaId?: string;
+  nativeAssetIdentifier?: string;
   nonce?: string;
   partCount?: number;
   partNonces?: string[];
@@ -228,6 +235,18 @@ export interface ChatImageAttachment extends ChatMediaAttachment {
 }
 
 export interface ChatMessage {
+  // Client-generated identity that survives the queued -> sent transition. The
+  // server's messageId/envelopeId changes when a queued message is accepted, so
+  // this is the stable key used for de-duplication and React row identity.
+  clientMessageId?: string;
+  /**
+   * True when this device holds no key that opens the message.
+   *
+   * The message is still shown, as a placeholder. Dropping it instead leaves an
+   * unread badge pointing at a thread with nothing in it, and no way for anyone
+   * to tell whether a message was lost or never sent.
+   */
+  decryptionFailed?: boolean;
   deliveryStatus: ChatDeliveryStatus | null;
   forwarded?: boolean;
   image?: ChatImageAttachment | null;
@@ -242,15 +261,24 @@ export interface ChatMessage {
   text: string;
 }
 
+export { getChatMessageIdentityKey } from './chatMessageReconciliation';
+
 interface ChatThreadResponse {
   contact: ChatContact;
   messages: ChatMessage[];
   messageReactions: ChatMessageReactionMap;
+  sync?: ChatThreadSyncState;
 }
 
 interface SendChatMessageResponse {
   contact: ChatContact;
   message: ChatMessage;
+}
+
+export interface ChatThreadSyncState {
+  hasMore: boolean;
+  latestSentAtMs: number | null;
+  oldestSentAtMs: number | null;
 }
 
 export interface EncryptionDevicePublicKey {
@@ -264,6 +292,15 @@ export interface EncryptionDevicePublicKey {
 }
 
 export interface ChatEncryptionContext {
+  /**
+   * The company's compliance archive, presented as a device.
+   *
+   * Absent when the company has no archive, in which case nothing changes. When
+   * present, the message key is encrypted to it alongside the real devices, so
+   * the company keeps a readable record without the server ever holding an
+   * unencrypted message.
+   */
+  archiveDevice?: EncryptionDevicePublicKey;
   recipientDevices: EncryptionDevicePublicKey[];
   senderDevice: EncryptionDevicePublicKey;
   senderDevices?: EncryptionDevicePublicKey[];
@@ -294,9 +331,20 @@ export type ChatRealtimeEvent =
   | { contact: ChatContact; contactId: string; envelopes: EncryptedChatEnvelope[]; messageReactions: ChatMessageReactionMap; type: 'conversationEncryptedEnvelopes' }
   | { code?: ChatRealtimeErrorCode; message: string; type: 'error' };
 
-export async function listChatContacts(idToken: string): Promise<ChatContact[]> {
+/**
+ * Loads this user's chat contacts.
+ *
+ * `includeDirectory` also returns colleagues the user has never messaged, which
+ * is what "New chat" needs. It works for every role - unlike the employee
+ * directory, which is restricted to admins.
+ */
+export async function listChatContacts(
+  idToken: string,
+  options: { includeDirectory?: boolean } = {}
+): Promise<ChatContact[]> {
   const deviceHeaders = await getRegisteredDeviceHeaders(idToken);
-  const response = await fetch(`${getSynzappApiBaseUrl()}/api/profile/chat/contacts`, {
+  const query = options.includeDirectory ? '?includeDirectory=true' : '';
+  const response = await fetch(`${getSynzappApiBaseUrl()}/api/profile/chat/contacts${query}`, {
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${idToken}`,
@@ -731,19 +779,34 @@ export async function updateChatTranscriptLanguage(input: {
 }
 
 export async function getChatMessages(input: {
+  afterSentAtMs?: number | null;
+  beforeSentAtMs?: number | null;
   chatType?: 'DIRECT' | 'GROUP';
   contactId: string;
   currentUid: string;
   idToken: string;
+  limit?: number;
+  /**
+   * Whether this fetch counts as the user reading the conversation.
+   *
+   * Defaults to true, which is right when a chat is actually open. Background
+   * warming after a push must pass false, otherwise pulling the messages down
+   * clears the unread badge for a chat the user never opened.
+   */
+  markRead?: boolean;
   trashSegmentId?: string | null;
 }): Promise<ChatThreadResponse> {
   const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
   const path = input.chatType === 'GROUP'
     ? `/api/profile/chat/groups/${encodeURIComponent(input.contactId)}/encrypted-messages`
     : `/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/encrypted-messages`;
-  const query = input.trashSegmentId
-    ? `?trashSegmentId=${encodeURIComponent(input.trashSegmentId)}`
-    : '';
+  const query = buildChatMessagesQueryString({
+    afterSentAtMs: input.afterSentAtMs,
+    beforeSentAtMs: input.beforeSentAtMs,
+    limit: input.limit,
+    markRead: input.markRead,
+    trashSegmentId: input.trashSegmentId
+  });
   const response = await fetch(
     `${getSynzappApiBaseUrl()}${path}${query}`,
     {
@@ -764,6 +827,7 @@ export async function getChatMessages(input: {
     contact: ChatContact;
     envelopes?: EncryptedChatEnvelope[];
     messageReactions?: ChatMessageReactionMap;
+    sync?: ChatThreadSyncState;
   };
   const envelopes = (body.envelopes || []).map(normalizeEncryptedEnvelope);
   const messageReactions = normalizeMessageReactionMap(body.messageReactions);
@@ -784,7 +848,8 @@ export async function getChatMessages(input: {
   return {
     contact: normalizeChatContact(body.contact),
     messageReactions,
-    messages: applyMessageReactionMap(messages.map(normalizeChatMessage), messageReactions)
+    messages: applyMessageReactionMap(messages.map(normalizeChatMessage), messageReactions),
+    sync: normalizeChatThreadSyncState(body.sync)
   };
 }
 
@@ -877,6 +942,265 @@ export async function deleteChatMessageForMe(input: {
   };
 }
 
+/**
+ * A message written now and sent at a time its author picked.
+ *
+ * Sealed here, on this phone, exactly as an ordinary message is — the server
+ * stores a blob it cannot read and replays it later through the same send path.
+ * Which is why this shares `getChatEncryptionContext` and `encryptChatMessage`
+ * with `sendChatMessage` rather than having a sealing routine of its own.
+ *
+ * Direct chats and plain text only for now; the sheet does not offer scheduling
+ * for anything else.
+ */
+export async function scheduleChatMessage(input: {
+  contactId: string;
+  idToken: string;
+  releaseAtMs: number;
+  text: string;
+  timeZone: string;
+}): Promise<ScheduledChatMessage> {
+  const text = input.text.trim();
+
+  if (!text) {
+    throw new Error('Enter a message to schedule.');
+  }
+
+  const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
+  const context = await getChatEncryptionContext({
+    chatType: 'DIRECT',
+    contactId: input.contactId,
+    idToken: input.idToken
+  });
+  // Made here rather than asked of the caller. It is the key the server dedupes
+  // a release on, so it belongs with the sealing rather than with the screen
+  // that happened to start it.
+  const clientMessageId = `scheduled_${Date.now()}_${randomHex(8)}`;
+  const encryptedBody = await encryptChatMessage({
+    archiveDevice: context.archiveDevice,
+    clientMessageId,
+    idToken: input.idToken,
+    recipientDevices: context.recipientDevices,
+    senderDevice: context.senderDevice,
+    senderDevices: context.senderDevices,
+    text
+  });
+  const response = await fetch(
+    `${getSynzappApiBaseUrl()}/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/scheduled-messages`,
+    {
+      body: JSON.stringify({
+        ...encryptedBody,
+        releaseAtMs: input.releaseAtMs,
+        timeZone: input.timeZone
+      }),
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${input.idToken}`,
+        'Content-Type': 'application/json',
+        ...deviceHeaders
+      },
+      method: 'POST'
+    }
+  );
+
+  if (!response.ok) {
+    // The recipient's devices may have changed underneath us, exactly as they
+    // may on an ordinary send. Drop the cached context so a retry seals to
+    // current keys rather than repeating the failure.
+    clearChatEncryptionContextCache(input.contactId);
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  const body = await response.json() as { scheduledMessage: RawScheduledChatMessage };
+
+  return decorateScheduledChatMessage(body.scheduledMessage, input.idToken);
+}
+
+export async function getScheduledChatMessages(input: {
+  contactId?: string;
+  idToken: string;
+}): Promise<ScheduledChatMessage[]> {
+  const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
+  const query = input.contactId ? `?contactId=${encodeURIComponent(input.contactId)}` : '';
+  const response = await fetch(
+    `${getSynzappApiBaseUrl()}/api/profile/chat/scheduled-messages${query}`,
+    {
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${input.idToken}`,
+        ...deviceHeaders
+      },
+      method: 'GET'
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  const body = await response.json() as { scheduledMessages?: RawScheduledChatMessage[] };
+
+  return Promise.all((body.scheduledMessages || []).map((scheduledMessage) =>
+    decorateScheduledChatMessage(scheduledMessage, input.idToken)));
+}
+
+export async function cancelScheduledChatMessage(input: {
+  idToken: string;
+  scheduledMessageId: string;
+}): Promise<void> {
+  await postScheduledChatMessageAction(input.scheduledMessageId, 'cancel', input.idToken);
+}
+
+/** Clears a message that could not be sent off the author's list. */
+export async function dismissScheduledChatMessage(input: {
+  idToken: string;
+  scheduledMessageId: string;
+}): Promise<void> {
+  await postScheduledChatMessageAction(input.scheduledMessageId, 'dismiss', input.idToken);
+}
+
+export async function sendScheduledChatMessageNow(input: {
+  idToken: string;
+  scheduledMessageId: string;
+}): Promise<void> {
+  await postScheduledChatMessageAction(input.scheduledMessageId, 'send-now', input.idToken);
+}
+
+async function postScheduledChatMessageAction(
+  scheduledMessageId: string,
+  action: 'cancel' | 'dismiss' | 'send-now',
+  idToken: string
+): Promise<void> {
+  const deviceHeaders = await getRegisteredDeviceHeaders(idToken);
+  const response = await fetch(
+    `${getSynzappApiBaseUrl()}/api/profile/chat/scheduled-messages/${encodeURIComponent(scheduledMessageId)}/${action}`,
+    {
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${idToken}`,
+        ...deviceHeaders
+      },
+      method: 'POST'
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+}
+
+/**
+ * Opens a waiting message so its author can see which one it is.
+ *
+ * The list would otherwise be a set of times with nothing against them, and
+ * "cancel the 9am one" is not a decision anybody can make from that.
+ *
+ * A message this phone cannot open — because it was sealed on the person's
+ * other device, or before this one was reinstalled — is shown with no preview
+ * rather than dropped. It is still theirs to cancel, and hiding it would leave
+ * a message they cannot see going out anyway.
+ */
+async function decorateScheduledChatMessage(
+  raw: RawScheduledChatMessage,
+  idToken: string
+): Promise<ScheduledChatMessage> {
+  const base: ScheduledChatMessage = {
+    cancellationReason: raw.cancellationReason || null,
+    cancelledByAdmin: Boolean(raw.cancelledByAdmin),
+    contactId: raw.contactId,
+    conversationId: raw.conversationId,
+    lastError: raw.lastError || null,
+    releaseAt: raw.releaseAt,
+    releaseAtMs: raw.releaseAtMs,
+    scheduledMessageId: raw.scheduledMessageId,
+    status: raw.status,
+    text: null,
+    timeZone: raw.timeZone
+  };
+
+  try {
+    const localDevice = await getLocalDeviceKeyMaterial(idToken);
+    const encryptedKeyForDevice = raw.envelope.encryptedKeysByDevice[localDevice.deviceId];
+
+    if (!encryptedKeyForDevice) {
+      return base;
+    }
+
+    const [message] = await decryptChatEnvelopes({
+      currentUid: raw.senderUid,
+      envelopes: [{
+        algorithm: raw.envelope.algorithm,
+        ciphertext: raw.envelope.ciphertext,
+        clientMessageId: raw.clientMessageId,
+        deliveryStatus: null,
+        encryptedKeyForDevice,
+        envelopeId: `scheduled_${raw.scheduledMessageId}`,
+        keyVersion: raw.envelope.keyVersion,
+        nonce: raw.envelope.nonce,
+        senderDeviceId: raw.envelope.senderDeviceId,
+        senderKeyAgreementPublicKey: raw.envelope.senderKeyAgreementPublicKey,
+        senderUid: raw.senderUid,
+        sentAt: raw.releaseAt
+      }],
+      idToken
+    });
+
+    return {
+      ...base,
+      text: message && !message.decryptionFailed ? message.text : null
+    };
+  } catch {
+    return base;
+  }
+}
+
+export interface ScheduledChatMessage {
+  /** Why an administrator stopped it. Shown to the author, never guessed at. */
+  cancellationReason: string | null;
+  cancelledByAdmin: boolean;
+  contactId: string;
+  conversationId: string;
+  /** Why it could not be sent. Set only on a failure. */
+  lastError: string | null;
+  releaseAt: string;
+  releaseAtMs: number;
+  scheduledMessageId: string;
+  status: string;
+  /** Null when this device holds no key for it. It can still be cancelled. */
+  text: string | null;
+  timeZone: string;
+}
+
+function randomHex(byteCount: number): string {
+  return Array.from(Crypto.getRandomBytes(byteCount))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+interface RawScheduledChatMessage {
+  cancellationReason: string | null;
+  cancelledByAdmin: boolean;
+  clientMessageId: string;
+  contactId: string;
+  conversationId: string;
+  lastError: string | null;
+  envelope: {
+    algorithm: string;
+    ciphertext: string;
+    encryptedKeysByDevice: Record<string, string>;
+    keyVersion: number;
+    nonce: string;
+    senderDeviceId: string;
+    senderKeyAgreementPublicKey: string;
+  };
+  releaseAt: string;
+  releaseAtMs: number;
+  scheduledMessageId: string;
+  senderUid: string;
+  status: string;
+  timeZone: string;
+}
+
 export async function sendChatMessage(input: {
   chatType?: 'DIRECT' | 'GROUP';
   clientMessageId?: string;
@@ -912,19 +1236,29 @@ export async function sendChatMessage(input: {
     idToken: input.idToken,
     media,
     mediaItems,
+    archiveDevice: context.archiveDevice,
     recipientDevices: context.recipientDevices,
     replyTo: input.replyTo,
     senderDevice: context.senderDevice,
     senderDevices: context.senderDevices,
     text
   });
+  // The server cannot read the media ids inside the encrypted message, so it is
+  // told them separately. Without this it has no way to know a photo is still
+  // in use, and photos were being expired out of conversations that still
+  // showed them.
+  const referencedMediaIds = [...new Set(
+    [media, ...mediaItems]
+      .map((attachment) => attachment?.mediaId || '')
+      .filter(Boolean)
+  )];
   const path = input.chatType === 'GROUP'
     ? `/api/profile/chat/groups/${encodeURIComponent(input.contactId)}/encrypted-messages`
     : `/api/profile/chat/conversations/${encodeURIComponent(input.contactId)}/encrypted-messages`;
   const response = await fetch(
     `${getSynzappApiBaseUrl()}${path}`,
     {
-      body: JSON.stringify(encryptedBody),
+      body: JSON.stringify({ ...encryptedBody, mediaIds: referencedMediaIds }),
       headers: {
         Accept: 'application/json',
         Authorization: `Bearer ${input.idToken}`,
@@ -936,6 +1270,9 @@ export async function sendChatMessage(input: {
   );
 
   if (!response.ok) {
+    // The recipient's devices may have changed underneath us. Drop the cached
+    // context so a retry fetches current keys rather than repeating the failure.
+    clearChatEncryptionContextCache(input.contactId);
     throw new Error(await getResponseErrorMessage(response));
   }
 
@@ -950,6 +1287,10 @@ export async function sendChatMessage(input: {
   return {
     contact: normalizeChatContact(body.contact),
     message: normalizeChatMessage({
+        // Keep the client identity on the accepted message so it reconciles
+        // onto the bubble that is already on screen rather than appearing as a
+        // second message under the server-assigned envelope id.
+        clientMessageId: input.clientMessageId,
         deliveryStatus: 'sent',
         forwarded: Boolean(input.forwarded),
         image: primaryMedia?.kind === 'image' ? primaryMedia as ChatImageAttachment : null,
@@ -1087,11 +1428,62 @@ export function parseChatRealtimeEvent(payload: string): ChatRealtimeEvent | nul
   return null;
 }
 
+/**
+ * Recipient device keys, cached briefly.
+ *
+ * Every send needs these before it can encrypt, and fetching them is a full
+ * network round trip that happens *before* the round trip that actually
+ * delivers the message. Typing two messages in a row paid for it twice.
+ *
+ * The TTL is deliberately short. These change when someone registers a new
+ * device, and a stale entry means that device cannot decrypt the message — so
+ * this trades a small window of staleness for removing a round trip from every
+ * send, and any send failure clears the entry so the retry refetches.
+ */
+const CHAT_ENCRYPTION_CONTEXT_TTL_MS = 30_000;
+const chatEncryptionContextCache = new Map<string, {
+  context: ChatEncryptionContext;
+  expiresAtMs: number;
+}>();
+
+function buildChatEncryptionContextKey(chatType: string | undefined, contactId: string): string {
+  return `${chatType === 'GROUP' ? 'GROUP' : 'DIRECT'}:${contactId}`;
+}
+
+export function clearChatEncryptionContextCache(contactId?: string): void {
+  if (!contactId) {
+    chatEncryptionContextCache.clear();
+    return;
+  }
+
+  chatEncryptionContextCache.delete(buildChatEncryptionContextKey('DIRECT', contactId));
+  chatEncryptionContextCache.delete(buildChatEncryptionContextKey('GROUP', contactId));
+}
+
+/**
+ * Warms the cache so the first message in a conversation does not pay for the
+ * lookup. Safe to call on chat open; failures are ignored.
+ */
+export async function prefetchChatEncryptionContext(input: {
+  chatType?: 'DIRECT' | 'GROUP';
+  contactId: string;
+  idToken: string;
+}): Promise<void> {
+  await getChatEncryptionContext(input).catch(() => undefined);
+}
+
 async function getChatEncryptionContext(input: {
   chatType?: 'DIRECT' | 'GROUP';
   contactId: string;
   idToken: string;
 }): Promise<ChatEncryptionContext> {
+  const cacheKey = buildChatEncryptionContextKey(input.chatType, input.contactId);
+  const cached = chatEncryptionContextCache.get(cacheKey);
+
+  if (cached && cached.expiresAtMs > Date.now()) {
+    return cached.context;
+  }
+
   const deviceHeaders = await getRegisteredDeviceHeaders(input.idToken);
   const path = input.chatType === 'GROUP'
     ? `/api/profile/chat/groups/${encodeURIComponent(input.contactId)}/encryption-context`
@@ -1113,6 +1505,11 @@ async function getChatEncryptionContext(input: {
   }
 
   const body = await response.json() as { context: ChatEncryptionContext };
+
+  chatEncryptionContextCache.set(cacheKey, {
+    context: body.context,
+    expiresAtMs: Date.now() + CHAT_ENCRYPTION_CONTEXT_TTL_MS
+  });
 
   return body.context;
 }
@@ -1183,6 +1580,7 @@ function normalizeChatContact(contact: ChatContact): ChatContact {
     messagePermissionMode: contact.messagePermissionMode === 'ADMINS' ? 'ADMINS' : contact.messagePermissionMode === 'ALL_MEMBERS' ? 'ALL_MEMBERS' : undefined,
     phoneFormatted: typeof contact.phoneFormatted === 'string' && contact.phoneFormatted.trim() ? contact.phoneFormatted.trim() : null,
     phoneMasked: typeof contact.phoneMasked === 'string' && contact.phoneMasked.trim() ? contact.phoneMasked.trim() : null,
+    permanentlyDeletedAt: typeof contact.permanentlyDeletedAt === 'string' ? contact.permanentlyDeletedAt : null,
     profilePhotoUrl: normalizeSynzappApiUrl(contact.profilePhotoUrl),
     spammedAt: typeof contact.spammedAt === 'string' ? contact.spammedAt : null,
     trashSegments: normalizeChatTrashSegments(contact.trashSegments)
@@ -1620,7 +2018,7 @@ function normalizeChatMediaAttachment(
   const mediaId = typeof media.mediaId === 'string' ? media.mediaId.trim() : '';
   const key = typeof media.key === 'string' ? media.key.trim() : '';
   const nonce = typeof media.nonce === 'string' ? media.nonce.trim() : '';
-  const encryptionMode = media.encryptionMode === 'chunked-secretbox-v1' ? 'chunked-secretbox-v1' : media.encryptionMode === 'secretbox-v1' ? 'secretbox-v1' : undefined;
+  const encryptionMode = normalizeChatMediaEncryptionMode(media.encryptionMode);
   const partNonces = Array.isArray(media.partNonces)
     ? media.partNonces.filter((partNonce) => typeof partNonce === 'string' && partNonce.trim()).slice(0, 320)
     : [];
@@ -1677,12 +2075,21 @@ function normalizeChatMediaAttachment(
     transferStatus: media.transferStatus === 'available' ||
       media.transferStatus === 'downloading' ||
       media.transferStatus === 'failed' ||
+      media.transferStatus === 'preparing' ||
       media.transferStatus === 'queued' ||
       media.transferStatus === 'uploading'
         ? media.transferStatus
         : undefined,
     width: Number.isFinite(media.width) ? Math.max(Math.round(media.width || 0), 1) : undefined
   };
+}
+
+function normalizeChatMediaEncryptionMode(value: unknown): ChatMediaAttachment['encryptionMode'] | undefined {
+  return value === 'chunked-secretbox-v1' ||
+    value === 'native-chacha20poly1305-chunked-v1' ||
+    value === 'secretbox-v1'
+    ? value
+    : undefined;
 }
 
 function getDataUrlContentType(dataUrl: string): string | null {
@@ -1745,6 +2152,56 @@ function normalizeEncryptedEnvelope(envelope: EncryptedChatEnvelope): EncryptedC
     historyKeyRecipientDevices: Array.isArray(envelope.historyKeyRecipientDevices)
       ? envelope.historyKeyRecipientDevices.map(normalizeEncryptionDevicePublicKey).filter((device) => Boolean(device.deviceId))
       : undefined
+  };
+}
+
+function buildChatMessagesQueryString(input: {
+  afterSentAtMs?: number | null;
+  beforeSentAtMs?: number | null;
+  limit?: number;
+  markRead?: boolean;
+  trashSegmentId?: string | null;
+}): string {
+  const params = new URLSearchParams();
+
+  if (input.markRead === false) {
+    params.set('markRead', 'false');
+  }
+
+  if (input.trashSegmentId) {
+    params.set('trashSegmentId', input.trashSegmentId);
+  }
+
+  if (typeof input.afterSentAtMs === 'number' && Number.isFinite(input.afterSentAtMs)) {
+    params.set('afterSentAtMs', String(Math.max(0, Math.floor(input.afterSentAtMs))));
+  }
+
+  if (typeof input.beforeSentAtMs === 'number' && Number.isFinite(input.beforeSentAtMs)) {
+    params.set('beforeSentAtMs', String(Math.max(0, Math.floor(input.beforeSentAtMs))));
+  }
+
+  if (typeof input.limit === 'number' && Number.isFinite(input.limit)) {
+    params.set('limit', String(Math.max(1, Math.min(Math.floor(input.limit), 500))));
+  }
+
+  const query = params.toString();
+
+  return query ? `?${query}` : '';
+}
+
+function normalizeChatThreadSyncState(sync: ChatThreadSyncState | undefined): ChatThreadSyncState | undefined {
+  if (!sync || typeof sync !== 'object') {
+    return undefined;
+  }
+
+  return {
+    hasMore: sync.hasMore === true,
+    latestSentAtMs: typeof sync.latestSentAtMs === 'number' && Number.isFinite(sync.latestSentAtMs)
+      ? Math.max(0, Math.floor(sync.latestSentAtMs))
+      : null,
+    oldestSentAtMs: typeof sync.oldestSentAtMs === 'number' && Number.isFinite(sync.oldestSentAtMs)
+      ? Math.max(0, Math.floor(sync.oldestSentAtMs))
+      : null
   };
 }
 

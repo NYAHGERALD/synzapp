@@ -5,6 +5,8 @@ import { fieldValue, firestore, storageBucket } from '../config/firebaseAdmin.js
 import type { RegisteredDeviceIdentity } from './deviceIdentityService.js';
 import { getEncryptedDirectContext } from './encryptedMessageEnvelopeService.js';
 import { getGroupChatMediaContext } from './groupChatService.js';
+import { getChatOfflinePolicyForCurrentUser } from './chatOfflinePolicyService.js';
+import { isChatMediaRetrievable } from './chatMediaRetentionService.js';
 
 export type ChatMediaKind = 'audio' | 'file' | 'image' | 'video';
 
@@ -43,6 +45,9 @@ export interface EncryptedChatMediaDownloadSession {
 
 interface ChatMediaRecord {
   chatId?: string;
+  /** Set once a message claims this media. See chatMediaRetentionService. */
+  derivedRetainUntilMs?: number | null;
+  liveRefCount?: number | null;
   chatType?: ChatMediaScope;
   contentType?: string;
   encryptedSizeBytes?: number;
@@ -75,13 +80,14 @@ interface ChatMediaContext {
 const CHAT_MEDIA_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const CHAT_MEDIA_SIGNED_URL_TTL_MS = 15 * 60 * 1000;
 const CHAT_MEDIA_LIMITS: Record<ChatMediaKind, number> = {
-  audio: 16 * 1024 * 1024,
-  file: 100 * 1024 * 1024,
-  image: 100 * 1024 * 1024,
-  video: 260 * 1024 * 1024
+  audio: 64 * 1024 * 1024,
+  file: 500 * 1024 * 1024,
+  image: 250 * 1024 * 1024,
+  video: 1024 * 1024 * 1024
 };
 const CHAT_MEDIA_CHUNK_SIZE_BYTES = 4 * 1024 * 1024;
 const CHAT_MEDIA_MAX_CHUNK_COUNT = 320;
+const CHAT_MEDIA_ENCRYPTION_OVERHEAD_ALLOWANCE_BYTES = 8 * 1024 * 1024;
 
 export async function createEncryptedChatMediaUploadSession(
   decodedToken: DecodedIdToken,
@@ -91,16 +97,26 @@ export async function createEncryptedChatMediaUploadSession(
   chatType: ChatMediaScope = 'DIRECT'
 ): Promise<EncryptedChatMediaUploadSession> {
   const context = await getChatMediaContext(decodedToken, contactId, chatType);
+  const policy = await getChatOfflinePolicyForCurrentUser(decodedToken);
   const kind = input.kind;
-  const maxEncryptedSizeBytes = CHAT_MEDIA_LIMITS[kind];
+  const maxOriginalSizeBytes = Math.min(
+    policy.mediaLimitBytes[kind] || CHAT_MEDIA_LIMITS[kind],
+    CHAT_MEDIA_LIMITS[kind]
+  );
+  const originalSizeBytes = typeof input.originalSizeBytes === 'number'
+    ? Math.ceil(input.originalSizeBytes)
+    : 0;
+  const maxEncryptedSizeBytes = maxOriginalSizeBytes
+    ? maxOriginalSizeBytes + CHAT_MEDIA_ENCRYPTION_OVERHEAD_ALLOWANCE_BYTES
+    : 0;
   const encryptedSizeBytes = Math.ceil(input.encryptedSizeBytes);
 
-  if (!maxEncryptedSizeBytes) {
+  if (!maxOriginalSizeBytes) {
     throw validationError('Media type is not supported.');
   }
 
-  if (!encryptedSizeBytes || encryptedSizeBytes > maxEncryptedSizeBytes) {
-    throw validationError(getMediaTooLargeMessage(kind));
+  if (originalSizeBytes > maxOriginalSizeBytes || !encryptedSizeBytes || encryptedSizeBytes > maxEncryptedSizeBytes) {
+    throw validationError(getMediaTooLargeMessage(kind, maxOriginalSizeBytes));
   }
 
   const chunkCount = typeof input.chunkCount === 'number' ? Math.ceil(input.chunkCount) : 0;
@@ -148,7 +164,7 @@ export async function createEncryptedChatMediaUploadSession(
     fileName,
     groupId: context.chatType === 'GROUP' ? context.chatId : null,
     kind,
-    originalSizeBytes: input.originalSizeBytes || null,
+    originalSizeBytes: originalSizeBytes || null,
     partCount: isChunkedUpload ? chunkCount : null,
     partPaths: isChunkedUpload ? partPaths : [],
     participantIds: context.participantIds,
@@ -327,9 +343,11 @@ async function getAuthorizedMediaRecord(
   }
 
   const record = mediaSnapshot.data() as ChatMediaRecord;
-  const expiresAtMs = typeof record.expiresAtMs === 'number' ? record.expiresAtMs : null;
-  const isExpired = expiresAtMs !== null && expiresAtMs <= Date.now();
-  const isMissingRequiredExpiry = context.chatType === 'DIRECT' && expiresAtMs === null;
+  // A photo is served while any message still uses it, whatever its original
+  // 30-day expiry said. Refusing on the expiry alone is what left old chats
+  // showing empty grey boxes, and made a restored backup return the same.
+  const isExpired = !isChatMediaRetrievable(record, Date.now());
+  const isMissingRequiredExpiry = false;
 
   if (
     record.tenantId !== context.tenantId ||
@@ -468,20 +486,36 @@ function getDefaultImageFileNameForContentType(fileName: string): string {
   return 'photo.jpg';
 }
 
-function getMediaTooLargeMessage(kind: ChatMediaKind): string {
+function getMediaTooLargeMessage(kind: ChatMediaKind, limitBytes: number): string {
+  const limitLabel = formatByteCount(limitBytes);
+
   if (kind === 'image') {
-    return 'Photo is too large after compression.';
+    return `This photo is larger than your company's ${limitLabel} photo send limit.`;
   }
 
   if (kind === 'video') {
-    return 'Video is too large after compression.';
+    return `This video is larger than your company's ${limitLabel} video send limit.`;
   }
 
   if (kind === 'audio') {
-    return 'Voice note is too large to send.';
+    return `This voice note is larger than your company's ${limitLabel} audio send limit.`;
   }
 
-  return 'File is too large to send.';
+  return `This file is larger than your company's ${limitLabel} document send limit.`;
+}
+
+function formatByteCount(sizeBytes: number): string {
+  const safeSize = Number.isFinite(sizeBytes) ? Math.max(sizeBytes, 0) : 0;
+
+  if (safeSize >= 1024 * 1024) {
+    return `${(safeSize / (1024 * 1024)).toFixed(safeSize >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
+  }
+
+  if (safeSize >= 1024) {
+    return `${Math.round(safeSize / 1024)} KB`;
+  }
+
+  return `${Math.round(safeSize)} B`;
 }
 
 function isMissingStorageBucketError(error: unknown): boolean {

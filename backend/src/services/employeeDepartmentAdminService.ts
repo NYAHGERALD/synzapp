@@ -315,6 +315,7 @@ function mapAssignedEmployee(
     departmentName: record.departmentName || 'Department',
     displayName: record.displayName || null,
     departmentAdminPermissions: record.departmentAdminPermissions || [],
+    employeeUid: record.employeeUid || record.claimedByUid || null,
     phoneLast4: record.phoneLast4 || '',
     phoneMasked: record.phoneMasked || '*****',
     profilePhotoCacheKey: record.profilePhotoStoragePath

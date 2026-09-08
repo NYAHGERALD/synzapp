@@ -2,11 +2,26 @@ import { DecodedIdToken } from 'firebase-admin/auth';
 import { fieldValue, firestore } from '../config/firebaseAdmin.js';
 import { SynzappRole } from '../types/auth.js';
 import { buildAuthSession } from './authSessionService.js';
+import {
+  DormancyCandidate,
+  RETIRED_DEVICE_STATUS,
+  normalizeDormantDeviceRetirementDays,
+  partitionDormantDevices
+} from './deviceDormancy.js';
 
 export type DevicePlatform = 'android' | 'ios' | 'unknown' | 'web';
 
 export interface RegisterDeviceIdentityInput {
   appInstallationId: string;
+  /**
+   * The clock this phone is on.
+   *
+   * Optional, and used for one thing: an organization that has never had a time
+   * zone recorded takes it from the first organization admin to open the app.
+   * Without it "remind everybody at 08:00" means eight o'clock UTC, which is
+   * the middle of the night in half the places Synzapp is sold.
+   */
+  deviceTimeZone?: string;
   cryptoProvider: string;
   deviceId: string;
   identityPublicKey: string;
@@ -43,6 +58,12 @@ export interface SynzappAiDeviceStatusResponse {
 }
 
 interface OrganizationRecord {
+  actionReminderPolicy?: {
+    timeZone?: string;
+  };
+  deviceSecurityPolicy?: {
+    dormantDeviceRetirementDays?: number;
+  };
   status?: string;
 }
 
@@ -167,6 +188,13 @@ export async function registerDeviceIdentity(
       lastSeenAt: fieldValue.serverTimestamp(),
       platform: input.platform,
       protocolVersion: input.protocolVersion,
+      // Registering is how a retired device comes back: the app was opened on
+      // it, so it plainly exists. Clearing the retirement here rather than
+      // leaving it beside an active status is what stops the record from
+      // reading as two contradictory things at once.
+      retiredAfterDays: null,
+      retiredAt: null,
+      retirementReason: null,
       revokedAt: null,
       revokedByUid: null,
       revocationReason: null,
@@ -176,6 +204,21 @@ export async function registerDeviceIdentity(
       uid: decodedToken.uid,
       updatedAt: fieldValue.serverTimestamp()
     };
+
+    // Teaches the organization its own clock, once, from an administrator's
+    // phone. Written inside the transaction that already read the organization,
+    // so it costs no extra read — and only when nothing has ever been set, so
+    // an administrator who chose a zone is never overruled by somebody's phone
+    // in an airport.
+    if (
+      role === 'ORG_ADMIN' &&
+      input.deviceTimeZone &&
+      !organization.actionReminderPolicy?.timeZone
+    ) {
+      transaction.set(organizationRef, {
+        actionReminderPolicy: { timeZone: input.deviceTimeZone }
+      }, { merge: true });
+    }
 
     transaction.set(userDeviceRef, {
       ...createFields,
@@ -451,6 +494,124 @@ export async function revokeCurrentUserDevice(
     formatRoleName(role)
   );
 }
+
+/**
+ * The registrations of these people that are still worth sealing a copy for.
+ *
+ * Called wherever a message is about to be encrypted once per recipient device.
+ * It removes the registrations that have gone quiet past the organization's
+ * window, and retires them on the way past so that the device list an owner and
+ * an admin look at stops claiming a wiped handset is in somebody's pocket.
+ *
+ * The retirement itself is not waited for. A person pressing send is owed their
+ * message, not the tidying up behind it, and a retirement that fails is simply
+ * made again the next time somebody writes to the same person.
+ *
+ * Rules about what may be retired live in `deviceDormancy.ts`, away from
+ * Firestore, so they can be argued with in a test.
+ */
+export async function selectDevicesForDelivery<T extends DormancyCandidate>(
+  tenantId: string,
+  devices: T[]
+): Promise<T[]> {
+  if (devices.length < 2) {
+    // Nothing to choose between, and the rule never takes somebody's last
+    // device anyway, so this is the whole answer without reading a policy.
+    return devices;
+  }
+
+  const retirementDays = await getDormantDeviceRetirementDays(tenantId);
+  const { dormant, live } = partitionDormantDevices(devices, {
+    nowMs: Date.now(),
+    retirementDays
+  });
+
+  if (dormant.length) {
+    void retireDormantDevices(tenantId, dormant, retirementDays);
+  }
+
+  return live;
+}
+
+/**
+ * Marks these registrations retired, in both places a device is recorded.
+ *
+ * `RETIRED` rather than `REVOKED`: nobody decided this device was untrustworthy,
+ * it only stopped appearing. Registering again puts it straight back to active,
+ * which is what happens the moment the app is opened on it — see the
+ * registration path above, which refuses a revoked device and lets this one
+ * through.
+ */
+async function retireDormantDevices(
+  tenantId: string,
+  devices: DormancyCandidate[],
+  retirementDays: number
+): Promise<void> {
+  const organizationRef = firestore.collection('organizations').doc(tenantId);
+  const retirementFields = {
+    retiredAfterDays: retirementDays,
+    retiredAt: fieldValue.serverTimestamp(),
+    retirementReason: `No activity for more than ${retirementDays} days`,
+    status: RETIRED_DEVICE_STATUS,
+    updatedAt: fieldValue.serverTimestamp()
+  };
+
+  await Promise.all(devices.flatMap((device) => {
+    if (!device.deviceId || !device.uid) {
+      return [];
+    }
+
+    return [
+      organizationRef
+        .collection('deviceKeys')
+        .doc(device.deviceId)
+        .set(retirementFields, { merge: true }),
+      organizationRef
+        .collection('users')
+        .doc(device.uid)
+        .collection('devices')
+        .doc(device.deviceId)
+        .set(retirementFields, { merge: true })
+    ];
+  })).catch(() => undefined);
+}
+
+/**
+ * How long a device may stay quiet in this organization before it is retired.
+ *
+ * Kept briefly in memory because it is read on the path that sends a message
+ * and it changes about once a year. Five minutes is short enough that an
+ * administrator who changes it sees it take effect while they are still looking
+ * at the screen, and long enough that a busy conversation is not paying for a
+ * settings read per message.
+ */
+async function getDormantDeviceRetirementDays(tenantId: string): Promise<number> {
+  const cached = dormancyWindowCache.get(tenantId);
+
+  if (cached && cached.expiresAtMs > Date.now()) {
+    return cached.retirementDays;
+  }
+
+  const snapshot = await firestore
+    .collection('organizations')
+    .doc(tenantId)
+    .get()
+    .catch(() => null);
+  const organization = snapshot?.data() as OrganizationRecord | undefined;
+  const retirementDays = normalizeDormantDeviceRetirementDays(
+    organization?.deviceSecurityPolicy?.dormantDeviceRetirementDays
+  );
+
+  dormancyWindowCache.set(tenantId, {
+    expiresAtMs: Date.now() + DORMANCY_WINDOW_CACHE_MS,
+    retirementDays
+  });
+
+  return retirementDays;
+}
+
+const DORMANCY_WINDOW_CACHE_MS = 5 * 60 * 1000;
+const dormancyWindowCache = new Map<string, { expiresAtMs: number; retirementDays: number }>();
 
 function canReactivateLifecycleRevokedDevice(
   userDevice: DeviceRecord | null,

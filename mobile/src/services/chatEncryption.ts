@@ -2,6 +2,12 @@ import { fromByteArray, toByteArray } from 'base64-js';
 import { gcm } from '@noble/ciphers/aes.js';
 import * as Crypto from 'expo-crypto';
 import nacl from 'tweetnacl';
+import {
+  getCachedEnvelopePayload,
+  isKnownUndecryptableEnvelope,
+  markUndecryptableEnvelope,
+  setCachedEnvelopePayload
+} from './chatEnvelopePayloadCache';
 import type {
   ChatImageAttachment,
   ChatMediaAttachment,
@@ -102,6 +108,14 @@ export async function encryptChatText(input: {
 }
 
 export async function encryptChatMessage(input: {
+  /**
+   * The company's compliance archive, when it has one.
+   *
+   * Given a copy of the message key like any device, but deliberately kept out
+   * of `recipientDeviceIds`: that list drives delivery and read receipts, and an
+   * archive that never opens a chat would hold "delivered" back forever.
+   */
+  archiveDevice?: EncryptionDevicePublicKey;
   clientMessageId?: string;
   forwarded?: boolean;
   idToken: string;
@@ -172,6 +186,10 @@ export async function encryptChatMessage(input: {
   });
   devicesById.set(input.senderDevice.deviceId, input.senderDevice);
 
+  if (input.archiveDevice?.keyAgreementPublicKey) {
+    devicesById.set(input.archiveDevice.deviceId, input.archiveDevice);
+  }
+
   const encryptedKeysByDevice: Record<string, string> = {};
 
   devicesById.forEach((device) => {
@@ -224,17 +242,44 @@ export async function decryptChatEnvelopes(input: {
 }): Promise<ChatMessage[]> {
   const localDevice = await getLocalDeviceKeyMaterial(input.idToken);
   const decryptedMessages = await Promise.all(input.envelopes.map(async (envelope) => {
-    const decryptedPayload = await decryptChatEnvelope({
+    // An envelope's ciphertext never changes, so it is decrypted at most once.
+    // The server resends the whole recent thread with every realtime update, and
+    // re-doing this work each time is what put seconds between a message
+    // arriving and appearing.
+    // A failure is as repeatable as a success, and costs more — it only
+    // concludes after every candidate key has been tried. Re-attempting it on
+    // every realtime update is what made a device with unreadable history spend
+    // seconds per event decrypting nothing.
+    if (isKnownUndecryptableEnvelope(envelope.envelopeId)) {
+      return buildUndecryptableChatMessage(envelope, input.currentUid);
+    }
+
+    const cachedPayload = getCachedEnvelopePayload<EncryptedChatPayload>(envelope.envelopeId);
+    const decryptedPayload = cachedPayload || await decryptChatEnvelope({
       envelope,
       localDevicePrivateKey: localDevice.keyAgreementPrivateKey
     });
 
     if (!decryptedPayload) {
       logChatDecryptFailure(envelope);
-      return null;
+      markUndecryptableEnvelope(envelope.envelopeId);
+
+      return buildUndecryptableChatMessage(envelope, input.currentUid);
+    }
+
+    if (!cachedPayload) {
+      setCachedEnvelopePayload(envelope.envelopeId, decryptedPayload);
     }
 
     const message: ChatMessage = {
+      // Carry the sender's client id through decryption so a server echo of a
+      // message this device queued reconciles onto the existing bubble instead
+      // of arriving as a second message under the envelope id.
+      clientMessageId: normalizeClientMessageId(envelope.clientMessageId) || undefined,
+      // Written explicitly rather than left out: a merge spreads the new message
+      // over the old one, so an omitted field would let an earlier placeholder's
+      // flag survive and keep a message that now reads fine looking unreadable.
+      decryptionFailed: false,
       deliveryStatus: envelope.deliveryStatus as ChatDeliveryStatus | null,
       forwarded: Boolean(decryptedPayload.forwarded),
       image: decryptedPayload.type === 'image' ? decryptedPayload.image : null,
@@ -393,12 +438,53 @@ function getEnvelopeEncryptedKeyCandidates(envelope: EncryptedChatEnvelope): str
   return Array.from(new Set(candidates));
 }
 
-function logChatDecryptFailure(envelope: EncryptedChatEnvelope): void {
-  if (typeof __DEV__ === 'undefined' || !__DEV__) {
-    return;
-  }
+/**
+ * A stand-in for a message this device cannot open.
+ *
+ * Returned instead of nothing so the message keeps its place in the thread. A
+ * dropped message is worse than an unreadable one: the unread badge still counts
+ * it, so the user opens a chat that appears empty and has no way to tell whether
+ * something was lost, never sent, or is still on its way.
+ *
+ * It carries the envelope's real id and timestamp, so if this device later gains
+ * the key the decrypted message merges over the placeholder rather than
+ * appearing twice.
+ */
+function buildUndecryptableChatMessage(
+  envelope: EncryptedChatEnvelope,
+  currentUid: string
+): ChatMessage {
+  return {
+    clientMessageId: normalizeClientMessageId(envelope.clientMessageId) || undefined,
+    decryptionFailed: true,
+    deliveryStatus: envelope.deliveryStatus as ChatDeliveryStatus | null,
+    forwarded: false,
+    image: null,
+    isMine: envelope.senderUid === currentUid,
+    media: null,
+    mediaItems: [],
+    messageId: envelope.envelopeId,
+    replyTo: null,
+    senderUid: envelope.senderUid,
+    sentAt: envelope.sentAt,
+    text: ''
+  };
+}
 
-  console.warn('Unable to decrypt Synzapp chat envelope', {
+/**
+ * Records that an envelope could not be opened.
+ *
+ * Deliberately logged in release builds too. This failure produces no error and
+ * no crash — the message simply is not readable — so without a log there is
+ * nothing at all to work from, and it took a user reporting "the message is
+ * nowhere to be found" to discover it at all.
+ *
+ * `candidateKeyCount` is the part that identifies the cause: zero means the
+ * sender never encrypted to this device, and non-zero means a key was offered
+ * but this device's private key does not open it.
+ */
+function logChatDecryptFailure(envelope: EncryptedChatEnvelope): void {
+  console.warn('[SynzappChatDecrypt] Unable to open envelope', {
     candidateKeyCount: getEnvelopeEncryptedKeyCandidates(envelope).length,
     envelopeId: envelope.envelopeId,
     senderDeviceId: envelope.senderDeviceId,
@@ -518,7 +604,7 @@ function normalizeMediaAttachment(media?: Partial<ChatMediaAttachment> | null): 
   const mediaId = typeof media.mediaId === 'string' ? media.mediaId.trim() : '';
   const key = typeof media.key === 'string' ? media.key.trim() : '';
   const nonce = typeof media.nonce === 'string' ? media.nonce.trim() : '';
-  const encryptionMode = media.encryptionMode === 'chunked-secretbox-v1' ? 'chunked-secretbox-v1' : media.encryptionMode === 'secretbox-v1' ? 'secretbox-v1' : undefined;
+  const encryptionMode = normalizeMediaEncryptionMode(media.encryptionMode);
   const partNonces = Array.isArray(media.partNonces)
     ? media.partNonces.filter((partNonce) => typeof partNonce === 'string' && partNonce.trim()).slice(0, 320)
     : [];
@@ -531,13 +617,19 @@ function normalizeMediaAttachment(media?: Partial<ChatMediaAttachment> | null): 
   const thumbnailContentType = typeof media.thumbnailContentType === 'string'
     ? media.thumbnailContentType.trim().toLowerCase()
     : '';
-  const hasSinglePartEncryption = encryptionMode !== 'chunked-secretbox-v1' && Boolean(nonce);
+  const hasSinglePartEncryption = encryptionMode !== 'chunked-secretbox-v1' &&
+    encryptionMode !== 'native-chacha20poly1305-chunked-v1' &&
+    Boolean(nonce);
   const hasChunkedEncryption = encryptionMode === 'chunked-secretbox-v1' &&
     Boolean(chunkSizeBytes) &&
     Boolean(partCount) &&
     partNonces.length === partCount;
+  const hasNativeAeadEncryption = encryptionMode === 'native-chacha20poly1305-chunked-v1' &&
+    Boolean(chunkSizeBytes) &&
+    Boolean(partCount) &&
+    partNonces.length === partCount;
 
-  if (!kind || !mediaId || !key || !contentType || !fileName || (!hasSinglePartEncryption && !hasChunkedEncryption)) {
+  if (!kind || !mediaId || !key || !contentType || !fileName || (!hasSinglePartEncryption && !hasChunkedEncryption && !hasNativeAeadEncryption)) {
     return null;
   }
 
@@ -582,6 +674,14 @@ function normalizeMediaAttachments(mediaItems?: Partial<ChatMediaAttachment>[] |
     .map((media) => normalizeMediaAttachment(media))
     .filter((media): media is ChatMediaAttachment => Boolean(media))
     .slice(0, 10);
+}
+
+function normalizeMediaEncryptionMode(value: unknown): ChatMediaAttachment['encryptionMode'] | undefined {
+  return value === 'chunked-secretbox-v1' ||
+    value === 'native-chacha20poly1305-chunked-v1' ||
+    value === 'secretbox-v1'
+    ? value
+    : undefined;
 }
 
 function normalizeReplyReference(replyTo?: ChatReplyReference | null): ChatReplyReference | null {

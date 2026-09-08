@@ -11,6 +11,7 @@ export interface FirebasePhoneSession {
 export interface OrgAdminDraft {
   companyName: string;
   companyAddress: string;
+  companyEmail?: string;
   adminFirstName: string;
   adminLastName: string;
   calendarYearStartDate: string | null;

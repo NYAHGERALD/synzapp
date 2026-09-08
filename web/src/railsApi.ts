@@ -74,6 +74,12 @@ export interface RailsEvidence {
   purpose?: 'general' | 'standardization';
   status: 'Attached' | 'Required' | 'Review';
   sourceEvidenceId?: string | null;
+  sourceEvidenceIds?: string[];
+  uploadedByDepartmentName?: string | null;
+  uploadedByName?: string | null;
+  uploadedByProfilePhotoCacheKey?: string | null;
+  uploadedByProfilePhotoUrl?: string | null;
+  uploadedByRoleName?: string | null;
   uploadedAtIso?: string | null;
   uploadedByUid?: string | null;
   visibility?: 'public' | 'private';
@@ -367,6 +373,7 @@ export interface RailsEvidenceInput {
   note?: string;
   purpose?: RailsEvidence['purpose'];
   sourceEvidenceId?: string | null;
+  sourceEvidenceIds?: string[];
   status?: RailsEvidence['status'];
   visibility?: RailsEvidence['visibility'];
 }
@@ -622,6 +629,50 @@ export async function deleteRailsEvidence(itemId: string, evidenceId: string): P
   );
 
   return requireRailsItem(body);
+}
+
+export async function listRailsEvidenceLibrary(): Promise<RailsEvidence[]> {
+  const body = await requestRailsJson<{ evidence?: RailsEvidence[] }>('/api/rails/evidence-library');
+
+  return body.evidence || [];
+}
+
+export async function addRailsEvidenceLibrary(input: RailsEvidenceInput): Promise<RailsEvidence> {
+  const body = await requestRailsJson<{ evidence?: RailsEvidence }>('/api/rails/evidence-library', {
+    body: JSON.stringify(stripUndefinedValues(input)),
+    headers: { 'Content-Type': 'application/json' },
+    method: 'POST'
+  });
+
+  if (!body.evidence) {
+    throw new Error('The evidence file could not be added.');
+  }
+
+  return body.evidence;
+}
+
+export async function updateRailsEvidenceLibrary(evidenceId: string, input: RailsEvidenceInput): Promise<RailsEvidence> {
+  const body = await requestRailsJson<{ evidence?: RailsEvidence }>(
+    `/api/rails/evidence-library/${encodeURIComponent(evidenceId)}`,
+    {
+      body: JSON.stringify(stripUndefinedValues(input)),
+      headers: { 'Content-Type': 'application/json' },
+      method: 'PATCH'
+    }
+  );
+
+  if (!body.evidence) {
+    throw new Error('The evidence file could not be updated.');
+  }
+
+  return body.evidence;
+}
+
+export async function deleteRailsEvidenceLibrary(evidenceId: string): Promise<void> {
+  await requestRailsJson<void>(
+    `/api/rails/evidence-library/${encodeURIComponent(evidenceId)}`,
+    { method: 'DELETE' }
+  );
 }
 
 export async function addRailsComment(itemId: string, bodyText: string): Promise<RailsItem> {

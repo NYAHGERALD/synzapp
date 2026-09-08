@@ -21,6 +21,7 @@ import {
   listRcaSessions,
   recordRcaActivityLog,
   removeRcaCollaborator,
+  suggestRcaOccurrence,
   uploadRcaEvidenceFile,
   updateRcaIncident,
   updateRcaNode,
@@ -39,7 +40,7 @@ const rcaRouter = Router();
 const idParamSchema = z.string().trim().regex(/^[A-Za-z0-9_-]{8,128}$/);
 const methodologySchema = z.enum(['5_WHYS', 'ISHIKAWA', 'FAULT_TREE']);
 const sessionStatusSchema = z.enum(['ACTIVE', 'FREEZE', 'COMPLETED', 'CLOSED']);
-const nodeTypeSchema = z.enum(['WHY', 'ISHIKAWA_CATEGORY', 'CAUSE', 'SUB_CAUSE', 'FAULT_GATE', 'STICKY_NOTE']);
+const nodeTypeSchema = z.enum(['WHY', 'ISHIKAWA_CATEGORY', 'CAUSE', 'SUB_CAUSE', 'FAULT_GATE', 'STICKY_NOTE', 'COMMENT']);
 const auditIntentSchema = z.enum(['MULTI_DELETED', 'REDO', 'SPLINE_DELETED', 'UNDO']);
 const fiveWhysRoleSchema = z.enum([
   'INCIDENT_DETAILS',
@@ -71,6 +72,9 @@ const incidentBodySchema = z.object({
 });
 
 const incidentUpdateBodySchema = z.object({
+  assetId: z.string().trim().max(120).optional(),
+  riskFactors: riskFactorsSchema.optional(),
+  status: z.enum(['OPEN', 'INVESTIGATING', 'CLOSED']).optional(),
   title: z.string().trim().max(180).optional()
 });
 
@@ -139,9 +143,15 @@ const edgeStyleBodySchema = z.object({
   weight: z.number().min(1.5).max(5).nullable().optional()
 });
 
+const connectionHandlesBodySchema = z.object({
+  sourceHandle: z.string().trim().max(80).nullable().optional(),
+  targetHandle: z.string().trim().max(80).nullable().optional()
+});
+
 const nodeBodySchema = z.object({
   auditIntent: auditIntentSchema.optional(),
   attachedEvidence: z.array(evidenceBodySchema).max(24).optional(),
+  connectionHandles: connectionHandlesBodySchema.optional(),
   dimensions: z.object({
     height: z.number().finite().min(96).max(720).nullable().optional(),
     width: z.number().finite().min(160).max(720).nullable().optional()
@@ -151,6 +161,7 @@ const nodeBodySchema = z.object({
   isRootCause: z.boolean().optional(),
   isSuspectedCause: z.boolean().optional(),
   label: z.string().trim().max(240).optional(),
+  linkedNodeIds: z.array(idParamSchema).max(40).optional(),
   lockForEditing: z.boolean().optional(),
   nodeType: nodeTypeSchema.optional(),
   parentNodeId: z.string().trim().regex(/^[A-Za-z0-9_-]{8,128}$/).nullable().optional(),
@@ -219,6 +230,18 @@ rcaRouter.patch('/incidents/:incidentId', verifyAppCheck, async (req, res, next)
     const incident = await updateRcaIncident(decodedToken, incidentId, body);
 
     res.json({ incident });
+  } catch (error) {
+    next(error);
+  }
+});
+
+rcaRouter.get('/incidents/:incidentId/risk/occurrence-suggestion', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const incidentId = idParamSchema.parse(req.params.incidentId);
+    const suggestion = await suggestRcaOccurrence(decodedToken, incidentId);
+
+    res.json({ suggestion });
   } catch (error) {
     next(error);
   }

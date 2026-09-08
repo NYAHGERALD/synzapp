@@ -2,6 +2,7 @@ import { DecodedIdToken } from 'firebase-admin/auth';
 import { fieldValue, firestore } from '../config/firebaseAdmin.js';
 import { SynzappRole } from '../types/auth.js';
 import { buildAuthSession } from './authSessionService.js';
+import { createDeviceWipeCommand } from './companyDataWipeService.js';
 
 interface TenantAdminContext {
   permissions: string[];
@@ -140,6 +141,16 @@ export async function revokeTenantDevice(
   if (!refreshedDeviceSnapshot.exists) {
     throw notFoundError('Device was not found.');
   }
+
+  await createDeviceWipeCommand({
+    deviceId: safeDeviceId,
+    reason: 'DEVICE_REVOKED',
+    requestedByUid: context.uid,
+    tenantId: context.tenantId,
+    uid: targetUid
+  }).catch((error) => {
+    console.warn('Unable to create company data wipe command for revoked device:', error);
+  });
 
   return mapTenantDevice(
     refreshedDeviceSnapshot.data() as DeviceKeyRecord,

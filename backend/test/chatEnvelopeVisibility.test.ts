@@ -18,6 +18,10 @@ const preferenceService = readFileSync(
   resolve(backendRoot, 'src', 'services', 'chatUserPreferenceService.ts'),
   'utf8'
 );
+const userProfileService = readFileSync(
+  resolve(backendRoot, 'src', 'services', 'userProfileService.ts'),
+  'utf8'
+);
 
 describe('encrypted chat visibility after user clear/delete actions', () => {
   it('queries direct envelopes after the user clear timestamp before applying the read limit', () => {
@@ -54,5 +58,12 @@ describe('encrypted chat visibility after user clear/delete actions', () => {
     assert.match(groupChatService, /trashSegmentId\?: string \| null/);
     assert.match(groupChatService, /trashSegment\.startAtMs/);
     assert.match(groupChatService, /trashSegment\.endAtMs/);
+  });
+
+  it('keeps permanently deleted empty direct chats out of the chat list after reinstall', () => {
+    assert.match(preferenceService, /permanentlyDeletedAtMs: number \| null/);
+    assert.match(userProfileService, /shouldIncludeDirectChatContactInChatList/);
+    assert.match(userProfileService, /contact\.clearedAt && !contact\.permanentlyDeletedAt/);
+    assert.match(userProfileService, /includeDirectoryContacts/);
   });
 });

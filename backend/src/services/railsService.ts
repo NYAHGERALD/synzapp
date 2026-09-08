@@ -25,6 +25,7 @@ type RailsNotificationType =
   | 'RAILS_BULK_ACTION_COMPLETED'
   | 'RAILS_EVIDENCE_REQUIRED'
   | 'RAILS_EXPORT_CREATED'
+  | 'RAILS_INTAKE_APPROVAL_REQUESTED'
   | 'RAILS_LOOP_ASSIGNED'
   | 'RAILS_LOOP_CLOSED'
   | 'RAILS_LOOP_REOPENED'
@@ -49,6 +50,7 @@ type RailsAuditEventType =
   | 'RAILS_EVIDENCE_UPDATED'
   | 'RAILS_ESCALATED'
   | 'RAILS_EXPORT_CREATED'
+  | 'RAILS_INTAKE_APPROVAL_REQUESTED'
   | 'RAILS_LSW_LINKED'
   | 'RAILS_RCA_CONVERTED'
   | 'RAILS_RCA_DECISION_UPDATED'
@@ -266,12 +268,27 @@ export interface RailsEvidence {
   fileSizeBytes?: number | null;
   fileName?: string | null;
   fileUrl?: string | null;
+  /**
+   * Poster frame for video evidence.
+   *
+   * Supplied by the uploading client, which already holds the file locally and
+   * can capture a frame far more cheaply than the server could. Without it the
+   * only way to show a video thumbnail is to download the whole video, which is
+   * not viable for a list — a Library page can reference hundreds of megabytes.
+   */
+  thumbnailUrl?: string | null;
   evidenceId: string;
   label: string;
   note?: string;
   purpose?: RailsEvidencePurpose;
   status: 'Attached' | 'Required' | 'Review';
   sourceEvidenceId?: string | null;
+  sourceEvidenceIds?: string[];
+  uploadedByDepartmentName?: string | null;
+  uploadedByName?: string | null;
+  uploadedByProfilePhotoCacheKey?: string | null;
+  uploadedByProfilePhotoUrl?: string | null;
+  uploadedByRoleName?: string | null;
   uploadedAtIso?: string | null;
   uploadedByUid?: string | null;
   visibility?: RailsEvidenceVisibility;
@@ -281,6 +298,14 @@ export interface RailsEvidenceFile {
   contentType: string;
   fileName: string;
   payload: Buffer;
+}
+
+interface RailsEvidenceLibraryRecord extends RailsEvidence {
+  createdAtIso?: string;
+  storagePath?: string | null;
+  thumbnailStoragePath?: string | null;
+  tenantId?: string;
+  updatedAtIso?: string;
 }
 
 export interface RailsStandardizationDocumentVersion {
@@ -435,6 +460,64 @@ export interface RailsItemInput {
   title?: string;
 }
 
+type RailsIntakeRequestStatus =
+  | 'Pending Department Review'
+  | 'Pending Organization Review'
+  | 'Approved'
+  | 'Rejected'
+  | 'Cancelled';
+
+interface RailsIntakeApprovalRequestRecord {
+  approvedAtIso?: string | null;
+  approvedByUid?: string | null;
+  createdAtIso: string;
+  departmentId: string | null;
+  departmentName: string | null;
+  dueDate: string;
+  itemId?: string | null;
+  ownerDepartmentName: string | null;
+  ownerName: string | null;
+  ownerUid: string | null;
+  priority: RailsPriority;
+  problem: string;
+  rejectedAtIso?: string | null;
+  rejectedByUid?: string | null;
+  requestId: string;
+  requestedByUid: string;
+  requesterName: string;
+  requesterRole: SynzappRole;
+  reviewerUids: string[];
+  source: string;
+  status: RailsIntakeRequestStatus;
+  tenantId: string;
+  title: string;
+  updatedAtIso: string;
+}
+
+export interface RailsIntakeApprovalInput {
+  dueDate?: string;
+  ownerUid?: string;
+  priority?: RailsPriority;
+  problem?: string;
+  source?: string;
+  title: string;
+}
+
+export interface RailsIntakeApprovalRequest {
+  createdAtIso: string;
+  departmentName: string | null;
+  dueDate: string;
+  id: string;
+  ownerName: string | null;
+  ownerUid: string | null;
+  priority: RailsPriority;
+  requestId: string;
+  requesterName: string;
+  requesterUid: string;
+  status: RailsIntakeRequestStatus;
+  title: string;
+}
+
 export interface RailsItemPatch {
   approverUid?: string | null;
   archiveReason?: string;
@@ -543,10 +626,13 @@ export interface RailsEvidenceInput {
   dataUrl?: string;
   evidenceId?: string;
   fileName?: string;
+  /** Poster frame for video evidence, captured by the uploading client. */
+  thumbnailDataUrl?: string;
   label?: string;
   note?: string;
   purpose?: RailsEvidencePurpose;
   sourceEvidenceId?: string | null;
+  sourceEvidenceIds?: string[];
   status?: RailsEvidence['status'];
   visibility?: RailsEvidenceVisibility;
 }
@@ -635,6 +721,8 @@ export interface RailsWorkflowPolicyCheckResult {
 
 const RAILS_ITEMS_COLLECTION = 'railsItems';
 const RAILS_AUDIT_EVENTS_COLLECTION = 'railsAuditEvents';
+const RAILS_EVIDENCE_LIBRARY_COLLECTION = 'railsEvidenceLibrary';
+const RAILS_INTAKE_REQUESTS_COLLECTION = 'railsIntakeRequests';
 const RAILS_ITEM_ACTIVITY_COLLECTION = 'activity';
 const RAILS_NOTIFICATIONS_COLLECTION = 'railsNotificationQueue';
 const RCA_INCIDENTS_COLLECTION = 'rcaIncidents';
@@ -859,11 +947,106 @@ export function checkRailsWorkflowPolicy(input: RailsWorkflowPolicyCheckInput): 
   }
 }
 
+export async function createRailsIntakeApprovalRequest(
+  decodedToken: DecodedIdToken,
+  input: RailsIntakeApprovalInput
+): Promise<RailsIntakeApprovalRequest> {
+  const context = await getAuthorizedRailsContext(decodedToken);
+  const ownerUid = input.ownerUid ? safeUserId(input.ownerUid) : null;
+  const usersByUid = ownerUid ? await getRailsUserSummariesByUid(context, [ownerUid]) : new Map<string, RailsUserSummary>();
+  const selectedOwner = ownerUid ? usersByUid.get(ownerUid) || null : null;
+
+  if (ownerUid && !selectedOwner) {
+    throw validationError('Select an active company user as the responsible owner.');
+  }
+
+  const title = normalizeText(input.title, '', 180);
+
+  if (!title) {
+    throw validationError('Add a clear RAILS title before sending for approval.');
+  }
+
+  const nowIso = new Date().toISOString();
+  const reviewerUids = await getRailsIntakeReviewerUids(context);
+  const status: RailsIntakeRequestStatus = (
+    context.role === 'DEPT_ADMIN' ||
+    !context.department.departmentId ||
+    !reviewerUids.some((uid) => uid !== context.uid)
+  )
+    ? 'Pending Organization Review'
+    : 'Pending Department Review';
+  const requestRef = context.organizationRef.collection(RAILS_INTAKE_REQUESTS_COLLECTION).doc();
+  const requestRecord: RailsIntakeApprovalRequestRecord = {
+    approvedAtIso: null,
+    approvedByUid: null,
+    createdAtIso: nowIso,
+    departmentId: context.department.departmentId,
+    departmentName: context.department.name,
+    dueDate: normalizeDate(input.dueDate, getDefaultDueDate()),
+    itemId: null,
+    ownerDepartmentName: selectedOwner?.departmentName || null,
+    ownerName: selectedOwner?.displayName || null,
+    ownerUid,
+    priority: input.priority || 'Medium',
+    problem: normalizeText(input.problem, title, 600),
+    rejectedAtIso: null,
+    rejectedByUid: null,
+    requestId: requestRef.id,
+    requestedByUid: context.uid,
+    requesterName: getDisplayName(context.user),
+    requesterRole: context.role,
+    reviewerUids,
+    source: normalizeText(input.source, 'Chat message', 80),
+    status,
+    tenantId: context.tenantId,
+    title,
+    updatedAtIso: nowIso
+  };
+
+  await requestRef.set({
+    ...stripUndefinedAuditValues(requestRecord),
+    createdAt: fieldValue.serverTimestamp(),
+    updatedAt: fieldValue.serverTimestamp()
+  });
+
+  await writeRailsTenantAuditEvent({
+    context,
+    metadata: {
+      dueDate: requestRecord.dueDate,
+      ownerUid: requestRecord.ownerUid,
+      priority: requestRecord.priority,
+      requestId: requestRef.id,
+      status: requestRecord.status
+    },
+    summary: `Requested approval for RAILS intake ${requestRef.id}.`,
+    type: 'RAILS_INTAKE_APPROVAL_REQUESTED'
+  });
+
+  await queueRailsNotification({
+    context,
+    itemId: null,
+    message: `${requestRecord.requesterName} sent a RAILS approval request.`,
+    metadata: {
+      requestId: requestRef.id,
+      status: requestRecord.status
+    },
+    recipientUids: reviewerUids,
+    type: 'RAILS_INTAKE_APPROVAL_REQUESTED'
+  });
+
+  return mapRailsIntakeApprovalRequest(requestRef.id, requestRecord);
+}
+
 export async function createRailsItem(
   decodedToken: DecodedIdToken,
   input: RailsItemInput = {}
 ): Promise<RailsItem> {
   const context = await getAuthorizedRailsContext(decodedToken);
+
+  if (isChatRailsSource(input.source) && !isRailsAdminRole(context.role)) {
+    throw authorizationError('Send chat messages for RAILS approval before creating the RAILS item.');
+  }
+
   const ownerUid = safeUserId(input.ownerUid || context.uid);
   const nowIso = new Date().toISOString();
   const contributorUids = normalizeUserIds(input.contributorUids || []).filter((uid) => uid !== ownerUid);
@@ -1466,6 +1649,10 @@ export async function addRailsAction(
 ): Promise<RailsItem> {
   const { context, itemRef, itemRecord } = await getAuthorizedRailsItem(decodedToken, itemId);
   const ownerUid = safeUserId(input.ownerUid || itemRecord.ownerUid || context.uid);
+  const requestedEvidenceIds = normalizeMappedActionEvidenceIds(input.evidenceIds);
+  const existingEvidence = Array.isArray(itemRecord.evidence) ? itemRecord.evidence : [];
+  const visibleLibraryEvidence = requestedEvidenceIds.length ? await listVisibleRailsEvidenceLibrary(context) : [];
+  const combinedEvidence = mergeRailsEvidenceRecords(existingEvidence, visibleLibraryEvidence);
   const usersByUid = await getRailsUserSummariesByUid(context, [ownerUid]);
   if (!usersByUid.has(ownerUid)) {
     throw validationError('Select an active company user for this action.');
@@ -1482,7 +1669,7 @@ export async function addRailsAction(
     dueDate: normalizeDate(input.dueDate, itemRecord.dueDate || getDefaultDueDate()),
     effectivenessCriteria: normalizeText(input.effectivenessCriteria, '', 900),
     effectivenessResult: normalizeText(input.effectivenessResult, '', 900),
-    evidenceIds: normalizeActionEvidenceIds(input.evidenceIds, itemRecord.evidence || [], itemRecord.ownerUid || ''),
+    evidenceIds: normalizeActionEvidenceIds(input.evidenceIds, combinedEvidence, context.uid),
     implementationNote: normalizeText(input.implementationNote, '', 900),
     ownerUid,
     progressPercent: clampNumber(input.progressPercent, 0, 100, 0),
@@ -1500,14 +1687,16 @@ export async function addRailsAction(
   validateActionExecutionOverrides(action, input);
   applyActionProgressRules(action, input.progressPercent);
   if (action.status === 'Done' || getActionProgressPercent(action) >= 100) {
-    validateRailsActionCompletion(action, itemRecord.evidence || []);
+    validateRailsActionCompletion(action, combinedEvidence);
   }
+  const nextEvidence = mergeRailsEvidenceReferenceRecords(existingEvidence, visibleLibraryEvidence, action.evidenceIds || []);
   const actions = [...(itemRecord.actions || []), action];
   const comment = buildRailsComment(context.uid, `Added action: ${action.title}.`, nowIso);
   const nextRecord = updateRecordProgress({
     ...itemRecord,
     actions,
     comments: [...(itemRecord.comments || []), comment],
+    evidence: nextEvidence,
     updatedAtIso: nowIso
   });
 
@@ -1517,6 +1706,7 @@ export async function addRailsAction(
     actionsProgressPercent: nextRecord.actionsProgressPercent,
     actionsTotal: nextRecord.actionsTotal,
     comments: fieldValue.arrayUnion(comment),
+    evidence: nextEvidence,
     updatedAt: fieldValue.serverTimestamp(),
     updatedAtIso: nowIso
   }, { merge: true });
@@ -1573,6 +1763,9 @@ export async function updateRailsAction(
 
   const currentAction = actions[actionIndex];
   const nextAction: RailsActionRecord = { ...currentAction };
+  const existingEvidence = Array.isArray(itemRecord.evidence) ? itemRecord.evidence : [];
+  let nextEvidence = existingEvidence;
+  let combinedEvidence = existingEvidence;
 
   if (patch.title !== undefined) {
     nextAction.title = normalizeText(patch.title, currentAction.title, 180);
@@ -1607,7 +1800,11 @@ export async function updateRailsAction(
   }
 
   if (patch.evidenceIds !== undefined) {
-    nextAction.evidenceIds = normalizeActionEvidenceIds(patch.evidenceIds, itemRecord.evidence || [], itemRecord.ownerUid || '');
+    const requestedEvidenceIds = normalizeMappedActionEvidenceIds(patch.evidenceIds);
+    const visibleLibraryEvidence = requestedEvidenceIds.length ? await listVisibleRailsEvidenceLibrary(context) : [];
+    combinedEvidence = mergeRailsEvidenceRecords(existingEvidence, visibleLibraryEvidence);
+    nextAction.evidenceIds = normalizeActionEvidenceIds(patch.evidenceIds, combinedEvidence, context.uid);
+    nextEvidence = mergeRailsEvidenceReferenceRecords(existingEvidence, visibleLibraryEvidence, nextAction.evidenceIds || []);
   }
 
   applyActionExecutionPatch(nextAction, currentAction, patch);
@@ -1633,7 +1830,7 @@ export async function updateRailsAction(
   if (patch.status && RAILS_ACTION_STATUSES.has(patch.status)) {
     nextAction.status = patch.status;
     if (patch.status === 'Done') {
-      validateRailsActionCompletion(nextAction, itemRecord.evidence || []);
+      validateRailsActionCompletion(nextAction, combinedEvidence);
       nextAction.progressPercent = 100;
       nextAction.completedAtIso = currentAction.completedAtIso || new Date().toISOString();
       nextAction.completedByUid = nextAction.completedByUid || context.uid;
@@ -1656,7 +1853,7 @@ export async function updateRailsAction(
   if (patch.progressPercent !== undefined) {
     nextAction.progressPercent = clampNumber(patch.progressPercent, 0, 100, 0);
     if (nextAction.progressPercent >= 100) {
-      validateRailsActionCompletion(nextAction, itemRecord.evidence || []);
+      validateRailsActionCompletion(nextAction, combinedEvidence);
     }
     applyActionProgressRules(nextAction, patch.progressPercent);
     if (nextAction.progressPercent > 0) {
@@ -1675,7 +1872,7 @@ export async function updateRailsAction(
   actions[actionIndex] = nextAction;
   const nowIso = new Date().toISOString();
   const evidenceLinkChange = patch.evidenceIds !== undefined
-    ? buildRailsActionEvidenceLinkChange(currentAction, nextAction, itemRecord.evidence || [])
+    ? buildRailsActionEvidenceLinkChange(currentAction, nextAction, nextEvidence)
     : null;
   const actionChangeSummary = evidenceLinkChange?.summary || buildRailsActionUpdateSummary(currentAction, nextAction, patch);
   const comment = buildRailsComment(context.uid, actionChangeSummary, nowIso);
@@ -1683,6 +1880,7 @@ export async function updateRailsAction(
     ...itemRecord,
     actions,
     comments: [...(itemRecord.comments || []), comment],
+    evidence: nextEvidence,
     updatedAtIso: nowIso
   }), itemRecord.status);
 
@@ -1696,6 +1894,7 @@ export async function updateRailsAction(
     actionsProgressPercent: nextRecord.actionsProgressPercent,
     actionsTotal: nextRecord.actionsTotal,
     comments: fieldValue.arrayUnion(comment),
+    evidence: nextEvidence,
     status: nextRecord.status,
     updatedAt: fieldValue.serverTimestamp(),
     updatedAtIso: nowIso
@@ -1926,7 +2125,9 @@ export async function addRailsEvidence(
   let contentType: string | null = currentEvidence?.contentType || null;
   let fileSizeBytes: number | null = typeof currentEvidence?.fileSizeBytes === 'number' ? currentEvidence.fileSizeBytes : null;
   let storagePath: string | null = null;
-  let sourceEvidenceId = currentEvidence?.sourceEvidenceId || null;
+  let sourceEvidenceIds = getRailsRequiredEvidenceSourceIds(currentEvidence || undefined);
+  let sourceEvidenceId = sourceEvidenceIds[0] || currentEvidence?.sourceEvidenceId || null;
+  let visibleLibraryEvidenceForLinks: RailsEvidence[] = [];
 
   if (input.dataUrl) {
     const parsed = parseEvidenceDataUrl(input.dataUrl);
@@ -1949,31 +2150,23 @@ export async function addRailsEvidence(
       resumable: false
     });
     fileUrl = `/api/rails/items/${encodeURIComponent(itemRef.id)}/evidence/${encodeURIComponent(evidenceId)}`;
+    sourceEvidenceIds = [];
     sourceEvidenceId = null;
-  } else if (input.sourceEvidenceId !== undefined) {
-    const normalizedSourceEvidenceId = input.sourceEvidenceId ? safeDocumentId(input.sourceEvidenceId) : '';
-
+  } else if (input.sourceEvidenceIds !== undefined || input.sourceEvidenceId !== undefined) {
     if (!currentEvidence || currentEvidence.status !== 'Required') {
       throw validationError('Evidence Library linking is only available for required verification evidence.');
     }
 
-    if (!normalizedSourceEvidenceId) {
-      sourceEvidenceId = null;
-    } else {
-      const sourceEvidence = existingEvidence.find((entry) => safeDocumentId(entry.evidenceId) === normalizedSourceEvidenceId);
-
-      if (!sourceEvidence || sourceEvidence.status !== 'Attached' || !sourceEvidence.fileUrl || !sourceEvidence.fileName) {
-        throw validationError('Select an attached Evidence Library item.');
-      }
-
-      if ((sourceEvidence.visibility || 'public') === 'private' && sourceEvidence.uploadedByUid !== itemRecord.ownerUid) {
-        throw validationError('This private evidence is not visible for this RAILS loop.');
-      }
-
-      sourceEvidenceId = sourceEvidence.evidenceId;
-    }
+    const requestedSourceEvidenceIds = input.sourceEvidenceIds !== undefined
+      ? input.sourceEvidenceIds
+      : input.sourceEvidenceId ? [input.sourceEvidenceId] : [];
+    visibleLibraryEvidenceForLinks = requestedSourceEvidenceIds.length ? await listVisibleRailsEvidenceLibrary(context) : [];
+    const evidenceAvailableForLinking = mergeRailsEvidenceRecords(existingEvidence, visibleLibraryEvidenceForLinks);
+    sourceEvidenceIds = normalizeRequiredEvidenceLinkIds(requestedSourceEvidenceIds, evidenceAvailableForLinking, context.uid);
+    sourceEvidenceId = sourceEvidenceIds[0] || null;
   }
 
+  const evidenceStatus = input.dataUrl ? 'Attached' : input.status || currentEvidence?.status || 'Attached';
   const evidence: RailsEvidence = {
     contentType,
     evidenceId,
@@ -1984,7 +2177,8 @@ export async function addRailsEvidence(
     note: input.note !== undefined ? normalizeText(input.note, '', 360) : currentEvidence?.note || '',
     purpose: input.purpose || currentEvidence?.purpose || 'general',
     sourceEvidenceId,
-    status: input.dataUrl ? 'Attached' : input.status || currentEvidence?.status || 'Attached',
+    ...(evidenceStatus === 'Required' || sourceEvidenceIds.length ? { sourceEvidenceIds } : {}),
+    status: evidenceStatus,
     uploadedAtIso: input.dataUrl || !currentEvidence ? nowIso : currentEvidence.uploadedAtIso || nowIso,
     uploadedByUid: input.dataUrl || !currentEvidence ? context.uid : currentEvidence.uploadedByUid || context.uid,
     visibility: input.visibility || currentEvidence?.visibility || 'public'
@@ -1992,6 +2186,7 @@ export async function addRailsEvidence(
   const nextEvidence = targetEvidenceIndex >= 0
     ? existingEvidence.map((entry, index) => index === targetEvidenceIndex ? evidence : entry)
     : [...existingEvidence, evidence];
+  const nextEvidenceWithReferences = mergeRailsEvidenceReferenceRecords(nextEvidence, visibleLibraryEvidenceForLinks, sourceEvidenceIds);
   const existingVersions = Array.isArray(itemRecord.standardizationDocumentVersions) ? itemRecord.standardizationDocumentVersions : [];
   const standardizationVersion = evidence.purpose === 'standardization' && input.dataUrl && fileName && storagePath
     ? buildStandardizationDocumentVersion({
@@ -2010,7 +2205,7 @@ export async function addRailsEvidence(
   const nextRecord = {
     ...itemRecord,
     comments: [...(itemRecord.comments || []), comment],
-    evidence: nextEvidence,
+    evidence: nextEvidenceWithReferences,
     standardizationDocumentCurrentVersionId: standardizationVersion?.versionId || itemRecord.standardizationDocumentCurrentVersionId || null,
     standardizationDocumentVersions: standardizationVersion ? [...existingVersions, standardizationVersion] : existingVersions,
     updatedAtIso: nowIso
@@ -2094,6 +2289,353 @@ export async function addRailsEvidence(
   return mapRailsItem(itemRef.id, nextRecord, context, usersByUid);
 }
 
+export async function listRailsEvidenceLibrary(decodedToken: DecodedIdToken): Promise<{ evidence: RailsEvidence[] }> {
+  const context = await getAuthorizedRailsContext(decodedToken);
+  const evidence = await listVisibleRailsEvidenceLibrary(context);
+
+  return { evidence };
+}
+
+/**
+ * Stores a client-supplied poster frame for video evidence.
+ *
+ * Deliberately small and strictly validated: this is a decorative thumbnail, so
+ * anything that is not a modest image is dropped rather than trusted.
+ */
+async function saveRailsEvidenceThumbnail(input: {
+  evidenceId: string;
+  tenantId: string;
+  thumbnailDataUrl?: string;
+  uploadedAtIso: string;
+  uploadedByUid: string;
+}): Promise<string | null> {
+  const thumbnailDataUrl = (input.thumbnailDataUrl || '').trim();
+
+  if (!thumbnailDataUrl) {
+    return null;
+  }
+
+  const match = /^data:(image\/(?:jpeg|jpg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(thumbnailDataUrl);
+
+  if (!match) {
+    return null;
+  }
+
+  const payload = Buffer.from(match[2], 'base64');
+
+  // A poster has no business being large. Anything bigger is not a thumbnail.
+  if (!payload.length || payload.length > 512 * 1024) {
+    return null;
+  }
+
+  const contentType = match[1] === 'image/jpg' ? 'image/jpeg' : match[1];
+  const storagePath = `organizations/${input.tenantId}/rails-evidence-library/${input.evidenceId}/thumbnail.jpg`;
+
+  await storageBucket.file(storagePath).save(payload, {
+    contentType,
+    metadata: {
+      cacheControl: 'private, max-age=86400',
+      metadata: {
+        evidenceId: input.evidenceId,
+        tenantId: input.tenantId,
+        uploadedAtIso: input.uploadedAtIso,
+        uploadedByUid: input.uploadedByUid
+      }
+    },
+    resumable: false
+  });
+
+  return storagePath;
+}
+
+/** Reads a stored poster. Authorization matches the evidence file itself. */
+export async function getRailsEvidenceLibraryThumbnail(
+  decodedToken: DecodedIdToken,
+  evidenceId: string
+): Promise<RailsEvidenceFile> {
+  const context = await getAuthorizedRailsContext(decodedToken);
+  const snapshot = await context.organizationRef
+    .collection(RAILS_EVIDENCE_LIBRARY_COLLECTION)
+    .doc(evidenceId)
+    .get();
+
+  if (!snapshot.exists) {
+    throw notFoundError('Evidence was not found.');
+  }
+
+  const record = snapshot.data() as RailsEvidenceLibraryRecord;
+
+  if (!isRailsEvidenceLibraryRecordVisible(context, record)) {
+    throw notFoundError('Evidence was not found.');
+  }
+
+  if (!record.thumbnailStoragePath) {
+    throw notFoundError('This evidence has no thumbnail.');
+  }
+
+  const [payload] = await storageBucket.file(record.thumbnailStoragePath).download();
+
+  return {
+    contentType: 'image/jpeg',
+    fileName: `${evidenceId}-thumbnail.jpg`,
+    payload
+  };
+}
+
+export async function addRailsEvidenceLibrary(
+  decodedToken: DecodedIdToken,
+  input: RailsEvidenceInput = {}
+): Promise<RailsEvidence> {
+  const context = await getAuthorizedRailsContext(decodedToken);
+
+  if (!input.dataUrl) {
+    throw validationError('Choose a file before adding evidence.');
+  }
+
+  const nowIso = new Date().toISOString();
+  const evidenceId = `ev_${randomUUID().replace(/-/g, '')}`;
+  const parsed = parseEvidenceDataUrl(input.dataUrl);
+  const fileName = sanitizeFileName(input.fileName || 'rails-evidence');
+  const storagePath = getEvidenceLibraryStoragePath(context.tenantId, evidenceId, fileName);
+
+  await storageBucket.file(storagePath).save(parsed.payload, {
+    contentType: parsed.contentType,
+    metadata: {
+      cacheControl: 'private, max-age=3600',
+      metadata: {
+        evidenceId,
+        tenantId: context.tenantId,
+        uploadedAtIso: nowIso,
+        uploadedByUid: context.uid
+      }
+    },
+    resumable: false
+  });
+
+  const thumbnailStoragePath = await saveRailsEvidenceThumbnail({
+    evidenceId,
+    tenantId: context.tenantId,
+    thumbnailDataUrl: input.thumbnailDataUrl,
+    uploadedAtIso: nowIso,
+    uploadedByUid: context.uid
+  });
+
+  const evidenceRecord: RailsEvidenceLibraryRecord = {
+    contentType: parsed.contentType,
+    createdAtIso: nowIso,
+    evidenceId,
+    fileName,
+    fileSizeBytes: parsed.payload.length,
+    fileUrl: `/api/rails/evidence-library/${encodeURIComponent(evidenceId)}`,
+    thumbnailStoragePath,
+    thumbnailUrl: thumbnailStoragePath
+      ? `/api/rails/evidence-library/${encodeURIComponent(evidenceId)}/thumbnail`
+      : null,
+    label: normalizeText(input.label, fileName, 140),
+    note: normalizeText(input.note, '', 360),
+    purpose: input.purpose || 'general',
+    status: 'Attached',
+    storagePath,
+    tenantId: context.tenantId,
+    updatedAtIso: nowIso,
+    uploadedAtIso: nowIso,
+    uploadedByUid: context.uid,
+    visibility: input.visibility || 'public'
+  };
+
+  await context.organizationRef
+    .collection(RAILS_EVIDENCE_LIBRARY_COLLECTION)
+    .doc(evidenceId)
+    .set({
+      ...evidenceRecord,
+      createdAt: fieldValue.serverTimestamp(),
+      updatedAt: fieldValue.serverTimestamp()
+    });
+  await writeRailsTenantAuditEvent({
+    context,
+    metadata: {
+      evidenceId,
+      fileName,
+      fileSizeBytes: parsed.payload.length,
+      visibility: evidenceRecord.visibility
+    },
+    summary: `Added shared evidence: ${evidenceRecord.label}.`,
+    type: 'RAILS_EVIDENCE_ADDED'
+  });
+
+  return mapRailsEvidenceLibraryRecord(evidenceId, evidenceRecord);
+}
+
+export async function updateRailsEvidenceLibrary(
+  decodedToken: DecodedIdToken,
+  evidenceId: string,
+  input: RailsEvidenceInput = {}
+): Promise<RailsEvidence> {
+  const context = await getAuthorizedRailsContext(decodedToken);
+  const safeEvidenceId = safeUserId(evidenceId);
+  const evidenceRef = context.organizationRef.collection(RAILS_EVIDENCE_LIBRARY_COLLECTION).doc(safeEvidenceId);
+  const evidenceSnapshot = await evidenceRef.get();
+
+  if (!evidenceSnapshot.exists) {
+    throw notFoundError('This shared evidence file was not found.');
+  }
+
+  const currentEvidence = evidenceSnapshot.data() as RailsEvidenceLibraryRecord;
+  if (currentEvidence.tenantId !== context.tenantId) {
+    throw notFoundError('This shared evidence file was not found.');
+  }
+
+  if ((currentEvidence.uploadedByUid || '') !== context.uid) {
+    throw authorizationError('Only the user who uploaded this evidence can update it.');
+  }
+
+  const nowIso = new Date().toISOString();
+  let nextEvidence: RailsEvidenceLibraryRecord = {
+    ...currentEvidence,
+    updatedAtIso: nowIso
+  };
+
+  if (input.label !== undefined) {
+    nextEvidence.label = normalizeText(input.label, currentEvidence.label || currentEvidence.fileName || 'Evidence item', 140);
+  }
+
+  if (input.note !== undefined) {
+    nextEvidence.note = normalizeText(input.note, '', 360);
+  }
+
+  if (input.visibility !== undefined) {
+    nextEvidence.visibility = input.visibility;
+  }
+
+  if (input.dataUrl) {
+    const parsed = parseEvidenceDataUrl(input.dataUrl);
+    const fileName = sanitizeFileName(input.fileName || currentEvidence.fileName || 'rails-evidence');
+    const storagePath = getEvidenceLibraryStoragePath(context.tenantId, safeEvidenceId, fileName);
+
+    if (currentEvidence.storagePath && currentEvidence.storagePath !== storagePath) {
+      await storageBucket.file(currentEvidence.storagePath).delete({ ignoreNotFound: true });
+    }
+
+    await storageBucket.file(storagePath).save(parsed.payload, {
+      contentType: parsed.contentType,
+      metadata: {
+        cacheControl: 'private, max-age=3600',
+        metadata: {
+          evidenceId: safeEvidenceId,
+          tenantId: context.tenantId,
+          uploadedAtIso: currentEvidence.uploadedAtIso || nowIso,
+          uploadedByUid: context.uid
+        }
+      },
+      resumable: false
+    });
+
+    nextEvidence = {
+      ...nextEvidence,
+      contentType: parsed.contentType,
+      fileName,
+      fileSizeBytes: parsed.payload.length,
+      fileUrl: `/api/rails/evidence-library/${encodeURIComponent(safeEvidenceId)}`,
+      storagePath
+    };
+  }
+
+  await evidenceRef.set({
+    ...nextEvidence,
+    updatedAt: fieldValue.serverTimestamp()
+  }, { merge: true });
+  await syncRailsEvidenceLibraryReference(context, currentEvidence, nextEvidence);
+  await writeRailsTenantAuditEvent({
+    context,
+    metadata: {
+      changedFields: getRailsEvidenceChangedFields(currentEvidence, nextEvidence),
+      evidenceId: safeEvidenceId,
+      previousFileName: currentEvidence.fileName || null,
+      previousLabel: currentEvidence.label || null,
+      visibility: nextEvidence.visibility || 'public'
+    },
+    summary: buildRailsEvidenceUpdateSummary(currentEvidence, nextEvidence),
+    type: 'RAILS_EVIDENCE_UPDATED'
+  });
+
+  return mapRailsEvidenceLibraryRecord(safeEvidenceId, nextEvidence);
+}
+
+export async function deleteRailsEvidenceLibrary(
+  decodedToken: DecodedIdToken,
+  evidenceId: string
+): Promise<void> {
+  const context = await getAuthorizedRailsContext(decodedToken);
+  const safeEvidenceId = safeUserId(evidenceId);
+  const evidenceRef = context.organizationRef.collection(RAILS_EVIDENCE_LIBRARY_COLLECTION).doc(safeEvidenceId);
+  const evidenceSnapshot = await evidenceRef.get();
+
+  if (!evidenceSnapshot.exists) {
+    throw notFoundError('This shared evidence file was not found.');
+  }
+
+  const evidence = evidenceSnapshot.data() as RailsEvidenceLibraryRecord;
+  if (evidence.tenantId !== context.tenantId) {
+    throw notFoundError('This shared evidence file was not found.');
+  }
+
+  if ((evidence.uploadedByUid || '') !== context.uid) {
+    throw authorizationError('Only the user who uploaded this evidence can delete it.');
+  }
+
+  const unlinkedLoopCount = await unlinkRailsEvidenceLibraryReference(context, safeEvidenceId);
+  if (evidence.storagePath) {
+    await storageBucket.file(evidence.storagePath).delete({ ignoreNotFound: true });
+  }
+
+  await evidenceRef.delete();
+  await writeRailsTenantAuditEvent({
+    context,
+    metadata: {
+      deletedByOwnerUid: context.uid,
+      evidenceId: safeEvidenceId,
+      fileName: evidence.fileName || null,
+      unlinkedLoopCount
+    },
+    summary: `Owner deleted shared evidence "${evidence.label}" and unlinked it from ${unlinkedLoopCount} RAILS loop${unlinkedLoopCount === 1 ? '' : 's'}.`,
+    type: 'RAILS_EVIDENCE_DELETED'
+  });
+}
+
+export async function getRailsEvidenceLibraryFile(
+  decodedToken: DecodedIdToken,
+  evidenceId: string
+): Promise<RailsEvidenceFile> {
+  const context = await getAuthorizedRailsContext(decodedToken);
+  const safeEvidenceId = safeUserId(evidenceId);
+  const evidenceRef = context.organizationRef.collection(RAILS_EVIDENCE_LIBRARY_COLLECTION).doc(safeEvidenceId);
+  const evidenceSnapshot = await evidenceRef.get();
+
+  if (!evidenceSnapshot.exists) {
+    throw notFoundError('This shared evidence file was not found.');
+  }
+
+  const evidence = evidenceSnapshot.data() as RailsEvidenceLibraryRecord;
+  if (!isRailsEvidenceLibraryRecordVisible(context, evidence) || !evidence.storagePath || !evidence.fileName) {
+    throw notFoundError('This shared evidence file was not found.');
+  }
+
+  const file = storageBucket.file(evidence.storagePath);
+  const [exists] = await file.exists();
+
+  if (!exists) {
+    throw notFoundError('This shared evidence file was not found.');
+  }
+
+  const [payload] = await file.download();
+
+  return {
+    contentType: evidence.contentType || 'application/octet-stream',
+    fileName: evidence.fileName,
+    payload
+  };
+}
+
 export async function getRailsEvidenceFile(
   decodedToken: DecodedIdToken,
   itemId: string,
@@ -2105,6 +2647,10 @@ export async function getRailsEvidenceFile(
 
   if (!evidence?.fileName || !evidence.fileUrl) {
     throw notFoundError('This RAILS evidence file was not found.');
+  }
+
+  if (evidence.fileUrl.includes('/evidence-library/')) {
+    return getRailsEvidenceLibraryFile(decodedToken, safeEvidenceId);
   }
 
   const storagePath = getEvidenceStoragePath(itemRecord.tenantId || '', itemId, safeEvidenceId, evidence.fileName);
@@ -2145,7 +2691,20 @@ export async function deleteRailsEvidence(
   const nowIso = new Date().toISOString();
   const nextEvidence = existingEvidence
     .filter((entry) => entry.evidenceId !== safeEvidenceId)
-    .map((entry) => entry.sourceEvidenceId === safeEvidenceId ? { ...entry, sourceEvidenceId: null } : entry);
+    .map((entry) => {
+      const currentSourceEvidenceIds = getRailsRequiredEvidenceSourceIds(entry);
+
+      if (!currentSourceEvidenceIds.includes(safeEvidenceId)) {
+        return entry;
+      }
+
+      const sourceEvidenceIds = currentSourceEvidenceIds.filter((linkedEvidenceId) => linkedEvidenceId !== safeEvidenceId);
+      return {
+        ...entry,
+        sourceEvidenceId: sourceEvidenceIds[0] || null,
+        sourceEvidenceIds
+      };
+    });
   const actionsBefore = Array.isArray(itemRecord.actions) ? itemRecord.actions : [];
   const nextActions = actionsBefore.map((action) => ({
     ...action,
@@ -3049,6 +3608,8 @@ function mapRailsEvidence(itemId: string, evidence: RailsEvidence[]): RailsEvide
       contentType: entry.contentType || inferContentType(entry.fileName || ''),
       fileSizeBytes: typeof entry.fileSizeBytes === 'number' ? entry.fileSizeBytes : null,
       fileUrl,
+      sourceEvidenceId: entry.sourceEvidenceId || getRailsRequiredEvidenceSourceIds(entry)[0] || null,
+      sourceEvidenceIds: getRailsRequiredEvidenceSourceIds(entry),
       visibility: entry.visibility || 'public'
     };
   });
@@ -3172,14 +3733,50 @@ function normalizeActionEvidenceIds(evidenceIds: string[] | undefined, evidence:
     .filter((evidenceId) => attachedEvidenceIds.has(evidenceId))));
 }
 
+function getRailsRequiredEvidenceSourceIds(evidence: RailsEvidence | null | undefined): string[] {
+  if (!evidence) {
+    return [];
+  }
+
+  return Array.from(new Set([
+    ...(Array.isArray(evidence.sourceEvidenceIds) ? evidence.sourceEvidenceIds : []),
+    ...(evidence.sourceEvidenceId ? [evidence.sourceEvidenceId] : [])
+  ]
+    .map((evidenceId) => safeUserId(evidenceId))
+    .filter(Boolean)));
+}
+
+function normalizeRequiredEvidenceLinkIds(evidenceIds: string[], evidence: RailsEvidence[], itemOwnerUid = ''): string[] {
+  const normalizedEvidenceIds = Array.from(new Set(evidenceIds
+    .map((evidenceId) => safeUserId(evidenceId))
+    .filter(Boolean)));
+
+  const linkedEvidenceIds: string[] = [];
+  for (const evidenceId of normalizedEvidenceIds) {
+    const sourceEvidence = evidence.find((entry) => safeUserId(entry.evidenceId) === evidenceId);
+
+    if (!sourceEvidence || sourceEvidence.status !== 'Attached' || !sourceEvidence.fileUrl || !sourceEvidence.fileName) {
+      throw validationError('Select attached Evidence Library items only.');
+    }
+
+    if ((sourceEvidence.visibility || 'public') === 'private' && sourceEvidence.uploadedByUid !== itemOwnerUid) {
+      throw validationError('One or more private evidence records are not visible for this RAILS loop.');
+    }
+
+    linkedEvidenceIds.push(sourceEvidence.evidenceId);
+  }
+
+  return linkedEvidenceIds;
+}
+
 function isRequiredRailsEvidenceSatisfied(requiredEvidence: RailsEvidence, evidence: RailsEvidence[], itemOwnerUid = ''): boolean {
-  const linkedEvidenceId = requiredEvidence.sourceEvidenceId ? safeDocumentId(requiredEvidence.sourceEvidenceId) : '';
-  if (!linkedEvidenceId) {
+  const linkedEvidenceIds = getRailsRequiredEvidenceSourceIds(requiredEvidence);
+  if (!linkedEvidenceIds.length) {
     return false;
   }
 
   return evidence.some((entry) => (
-    safeDocumentId(entry.evidenceId) === linkedEvidenceId
+    linkedEvidenceIds.includes(safeUserId(entry.evidenceId))
     && entry.status === 'Attached'
     && Boolean(entry.fileUrl && entry.fileName)
     && ((entry.visibility || 'public') === 'public' || Boolean(itemOwnerUid && entry.uploadedByUid === itemOwnerUid))
@@ -3343,7 +3940,7 @@ function getRailsActionCompletionBlockers(action: RailsActionRecord, evidence: R
     }
 
     if (!linkedAttachedEvidenceIds.size) {
-      blockers.push('link effectiveness evidence to the action');
+      blockers.push('link effectiveness or standardization evidence to the action');
     }
   }
 
@@ -4350,6 +4947,70 @@ function buildRailsUserSummary(uid: string, user: TenantUserRecord): RailsUserSu
   };
 }
 
+async function getRailsIntakeReviewerUids(context: AuthorizedRailsContext): Promise<string[]> {
+  const snapshot = await context.organizationRef
+    .collection('users')
+    .where('status', '==', 'ACTIVE')
+    .get();
+  const departmentReviewerUids: string[] = [];
+  const organizationReviewerUids: string[] = [];
+
+  snapshot.docs.forEach((doc) => {
+    const user = doc.data() as TenantUserRecord;
+
+    if (user.tenantId !== context.tenantId || user.status !== 'ACTIVE') {
+      return;
+    }
+
+    const role = normalizeRailsTenantRole(user.role, user.roleName);
+
+    if (
+      role === 'DEPT_ADMIN' &&
+      context.department.departmentId &&
+      user.departmentId === context.department.departmentId
+    ) {
+      departmentReviewerUids.push(doc.id);
+      return;
+    }
+
+    if (role === 'ORG_ADMIN' || role === 'SYSTEM_ADMIN') {
+      organizationReviewerUids.push(doc.id);
+    }
+  });
+
+  return normalizeUserIds([...departmentReviewerUids, ...organizationReviewerUids]);
+}
+
+function mapRailsIntakeApprovalRequest(
+  id: string,
+  record: RailsIntakeApprovalRequestRecord
+): RailsIntakeApprovalRequest {
+  return {
+    createdAtIso: record.createdAtIso,
+    departmentName: record.departmentName || null,
+    dueDate: record.dueDate,
+    id,
+    ownerName: record.ownerName || null,
+    ownerUid: record.ownerUid || null,
+    priority: record.priority,
+    requestId: record.requestId || id,
+    requesterName: record.requesterName,
+    requesterUid: record.requestedByUid,
+    status: record.status,
+    title: record.title
+  };
+}
+
+function isRailsAdminRole(role: SynzappRole | undefined): boolean {
+  return role === 'ORG_ADMIN' || role === 'DEPT_ADMIN' || role === 'SYSTEM_ADMIN';
+}
+
+function isChatRailsSource(source: string | undefined): boolean {
+  const normalizedSource = (source || '').trim().toLowerCase();
+
+  return normalizedSource === 'chat message' || normalizedSource === 'chat';
+}
+
 function normalizeUserIds(userIds: string[]): string[] {
   return [...new Set(userIds.map(safeUserId).filter(Boolean))];
 }
@@ -4474,6 +5135,332 @@ function sanitizeFileName(fileName: string): string {
 
 function getEvidenceStoragePath(tenantId: string, itemId: string, evidenceId: string, fileName: string): string {
   return `organizations/${tenantId}/railsItems/${itemId}/evidence/${evidenceId}-${fileName}`;
+}
+
+function getEvidenceLibraryStoragePath(tenantId: string, evidenceId: string, fileName: string): string {
+  return `organizations/${tenantId}/railsEvidenceLibrary/${evidenceId}-${fileName}`;
+}
+
+function mapRailsEvidenceLibraryRecord(
+  evidenceId: string,
+  record: RailsEvidenceLibraryRecord,
+  usersByUid: Map<string, RailsUserSummary> = new Map()
+): RailsEvidence {
+  const uploader = record.uploadedByUid ? usersByUid.get(record.uploadedByUid) || null : null;
+
+  return {
+    contentType: record.contentType || null,
+    evidenceId,
+    fileName: record.fileName || null,
+    fileSizeBytes: typeof record.fileSizeBytes === 'number' ? record.fileSizeBytes : null,
+    fileUrl: `/api/rails/evidence-library/${encodeURIComponent(evidenceId)}`,
+    label: record.label || record.fileName || 'Evidence item',
+    note: record.note || '',
+    purpose: record.purpose || 'general',
+    status: 'Attached',
+    thumbnailUrl: record.thumbnailStoragePath
+      ? `/api/rails/evidence-library/${encodeURIComponent(evidenceId)}/thumbnail`
+      : null,
+    uploadedAtIso: record.uploadedAtIso || record.createdAtIso || null,
+    uploadedByUid: record.uploadedByUid || null,
+    uploadedByDepartmentName: uploader?.departmentName || null,
+    uploadedByName: uploader?.displayName || null,
+    uploadedByProfilePhotoCacheKey: uploader?.profilePhotoCacheKey || null,
+    uploadedByProfilePhotoUrl: uploader?.profilePhotoUrl || null,
+    uploadedByRoleName: uploader?.roleName || null,
+    visibility: record.visibility || 'public'
+  };
+}
+
+async function listVisibleRailsEvidenceLibrary(context: AuthorizedRailsContext): Promise<RailsEvidence[]> {
+  const snapshot = await context.organizationRef
+    .collection(RAILS_EVIDENCE_LIBRARY_COLLECTION)
+    .orderBy('uploadedAtIso', 'desc')
+    .limit(500)
+    .get();
+
+  const libraryRecords = snapshot.docs
+    .map((doc) => ({ evidenceId: doc.id, record: doc.data() as RailsEvidenceLibraryRecord }))
+    .filter(({ record }) => isRailsEvidenceLibraryRecordVisible(context, record));
+  const knownEvidenceIds = new Set(snapshot.docs.map((doc) => safeUserId(doc.id)).filter(Boolean));
+  const promotedEvidence = await promoteLegacyRailsEvidenceToSharedLibrary(context, knownEvidenceIds);
+  const uploaderIds = [
+    ...libraryRecords.map(({ record }) => record.uploadedByUid || ''),
+    ...promotedEvidence.map((record) => record.uploadedByUid || '')
+  ];
+  const usersByUid = await getRailsUserSummariesByUid(context, uploaderIds);
+  const libraryEvidence = libraryRecords.map(({ evidenceId, record }) => mapRailsEvidenceLibraryRecord(evidenceId, record, usersByUid));
+  const enrichedPromotedEvidence = promotedEvidence.map((record) => enrichRailsEvidenceUploader(record, usersByUid));
+
+  return [...libraryEvidence, ...enrichedPromotedEvidence]
+    .sort((first, second) => Date.parse(second.uploadedAtIso || '') - Date.parse(first.uploadedAtIso || ''));
+}
+
+function enrichRailsEvidenceUploader(evidence: RailsEvidence, usersByUid: Map<string, RailsUserSummary>): RailsEvidence {
+  const uploader = evidence.uploadedByUid ? usersByUid.get(evidence.uploadedByUid) || null : null;
+
+  if (!uploader) {
+    return evidence;
+  }
+
+  return {
+    ...evidence,
+    uploadedByDepartmentName: uploader.departmentName || null,
+    uploadedByName: uploader.displayName || null,
+    uploadedByProfilePhotoCacheKey: uploader.profilePhotoCacheKey || null,
+    uploadedByProfilePhotoUrl: uploader.profilePhotoUrl || null,
+    uploadedByRoleName: uploader.roleName || null
+  };
+}
+
+function isRailsEvidenceLibraryRecordVisible(context: AuthorizedRailsContext, evidence: RailsEvidenceLibraryRecord): boolean {
+  return evidence.tenantId === context.tenantId &&
+    ((evidence.visibility || 'public') === 'public' || evidence.uploadedByUid === context.uid);
+}
+
+async function promoteLegacyRailsEvidenceToSharedLibrary(
+  context: AuthorizedRailsContext,
+  knownEvidenceIds: Set<string>
+): Promise<RailsEvidence[]> {
+  const itemDocs = await listTenantRailsItemDocsForEvidencePromotion(context);
+  const nowIso = new Date().toISOString();
+  const promotedRecords: RailsEvidence[] = [];
+  const recordsToWrite: Array<{
+    evidenceId: string;
+    record: RailsEvidenceLibraryRecord;
+  }> = [];
+
+  for (const doc of itemDocs) {
+    const itemRecord = doc.data() as RailsItemRecord;
+    const evidenceRecords = Array.isArray(itemRecord.evidence) ? itemRecord.evidence : [];
+
+    for (const evidence of evidenceRecords) {
+      const evidenceId = safeUserId(evidence.evidenceId);
+      if (!evidenceId || knownEvidenceIds.has(evidenceId) || evidence.status !== 'Attached' || !evidence.fileName) {
+        continue;
+      }
+
+      const visibility = evidence.visibility || 'public';
+      const uploadedByUid = evidence.uploadedByUid || itemRecord.createdByUid || itemRecord.ownerUid || context.uid;
+      if (visibility !== 'public' && uploadedByUid !== context.uid) {
+        continue;
+      }
+
+      const storagePath = getLegacyRailsEvidenceStoragePath(context.tenantId, doc.id, evidence);
+      if (!storagePath) {
+        continue;
+      }
+
+      const uploadedAtIso = evidence.uploadedAtIso ||
+        toIso(itemRecord.createdAtIso || itemRecord.createdAt) ||
+        nowIso;
+      const record: RailsEvidenceLibraryRecord = {
+        contentType: evidence.contentType || inferContentType(evidence.fileName || ''),
+        createdAtIso: uploadedAtIso,
+        evidenceId,
+        fileName: evidence.fileName,
+        fileSizeBytes: typeof evidence.fileSizeBytes === 'number' ? evidence.fileSizeBytes : null,
+        fileUrl: `/api/rails/evidence-library/${encodeURIComponent(evidenceId)}`,
+        label: normalizeText(evidence.label, evidence.fileName || 'Evidence item', 140),
+        note: evidence.note || '',
+        purpose: evidence.purpose || 'general',
+        status: 'Attached',
+        storagePath,
+        tenantId: context.tenantId,
+        updatedAtIso: nowIso,
+        uploadedAtIso,
+        uploadedByUid,
+        visibility
+      };
+
+      knownEvidenceIds.add(evidenceId);
+      recordsToWrite.push({ evidenceId, record });
+      promotedRecords.push(mapRailsEvidenceLibraryRecord(evidenceId, record));
+    }
+  }
+
+  if (!recordsToWrite.length) {
+    return [];
+  }
+
+  await Promise.all(recordsToWrite.map(({ evidenceId, record }) => (
+    context.organizationRef
+      .collection(RAILS_EVIDENCE_LIBRARY_COLLECTION)
+      .doc(evidenceId)
+      .set({
+        ...record,
+        migratedFromLegacyRailsItem: true,
+        updatedAt: fieldValue.serverTimestamp()
+      }, { merge: true })
+  )));
+  await writeRailsTenantAuditEvent({
+    context,
+    metadata: {
+      migratedEvidenceCount: recordsToWrite.length,
+      source: 'legacy_rails_loop_evidence'
+    },
+    summary: `Promoted ${recordsToWrite.length} legacy RAILS evidence file${recordsToWrite.length === 1 ? '' : 's'} into the shared Evidence Library.`,
+    type: 'RAILS_EVIDENCE_ADDED'
+  });
+
+  return promotedRecords;
+}
+
+async function listTenantRailsItemDocsForEvidencePromotion(
+  context: AuthorizedRailsContext
+): Promise<FirebaseFirestore.QueryDocumentSnapshot[]> {
+  const snapshot = await context.organizationRef
+    .collection(RAILS_ITEMS_COLLECTION)
+    .where('tenantId', '==', context.tenantId)
+    .get();
+
+  return snapshot.docs
+    .filter((doc) => {
+      const record = doc.data() as RailsItemRecord;
+
+      return record.status !== 'Deleted';
+    })
+    .sort((first, second) => getUpdatedAtMs(second.data() as RailsItemRecord) - getUpdatedAtMs(first.data() as RailsItemRecord))
+    .slice(0, MAX_RAILS_ITEMS);
+}
+
+function getLegacyRailsEvidenceStoragePath(
+  tenantId: string,
+  itemId: string,
+  evidence: RailsEvidence
+): string | null {
+  const evidenceId = safeUserId(evidence.evidenceId);
+  if (!evidenceId || !evidence.fileName) {
+    return null;
+  }
+
+  if (evidence.fileUrl?.includes('/evidence-library/')) {
+    return getEvidenceLibraryStoragePath(tenantId, evidenceId, evidence.fileName);
+  }
+
+  return getEvidenceStoragePath(tenantId, itemId, evidenceId, evidence.fileName);
+}
+
+function mergeRailsEvidenceRecords(existingEvidence: RailsEvidence[], libraryEvidence: RailsEvidence[]): RailsEvidence[] {
+  const recordsById = new Map<string, RailsEvidence>();
+
+  existingEvidence.forEach((entry) => {
+    const evidenceId = safeUserId(entry.evidenceId);
+    if (evidenceId) {
+      recordsById.set(evidenceId, entry);
+    }
+  });
+
+  libraryEvidence.forEach((entry) => {
+    const evidenceId = safeUserId(entry.evidenceId);
+    if (evidenceId && !recordsById.has(evidenceId)) {
+      recordsById.set(evidenceId, entry);
+    }
+  });
+
+  return Array.from(recordsById.values());
+}
+
+function mergeRailsEvidenceReferenceRecords(
+  existingEvidence: RailsEvidence[],
+  libraryEvidence: RailsEvidence[],
+  linkedEvidenceIds: string[]
+): RailsEvidence[] {
+  if (!linkedEvidenceIds.length || !libraryEvidence.length) {
+    return existingEvidence;
+  }
+
+  const existingIds = new Set(existingEvidence.map((entry) => safeUserId(entry.evidenceId)).filter(Boolean));
+  const linkedIds = new Set(linkedEvidenceIds.map((evidenceId) => safeUserId(evidenceId)).filter(Boolean));
+  const referenceEvidence = libraryEvidence.filter((entry) => {
+    const evidenceId = safeUserId(entry.evidenceId);
+    return evidenceId && linkedIds.has(evidenceId) && !existingIds.has(evidenceId);
+  });
+
+  return referenceEvidence.length ? [...existingEvidence, ...referenceEvidence] : existingEvidence;
+}
+
+async function syncRailsEvidenceLibraryReference(
+  context: AuthorizedRailsContext,
+  beforeEvidence: RailsEvidenceLibraryRecord,
+  afterEvidence: RailsEvidenceLibraryRecord
+): Promise<void> {
+  const evidenceId = safeUserId(afterEvidence.evidenceId || beforeEvidence.evidenceId);
+  if (!evidenceId) {
+    return;
+  }
+
+  const itemSnapshot = await context.organizationRef.collection(RAILS_ITEMS_COLLECTION).get();
+  await Promise.all(itemSnapshot.docs.map(async (doc) => {
+    const record = doc.data() as RailsItemRecord;
+    if (record.tenantId !== context.tenantId || record.status === 'Deleted') {
+      return;
+    }
+
+    const evidence = Array.isArray(record.evidence) ? record.evidence : [];
+    const evidenceIndex = evidence.findIndex((entry) => safeUserId(entry.evidenceId) === evidenceId);
+    if (evidenceIndex < 0) {
+      return;
+    }
+
+    const nextEvidence = evidence.map((entry, index) => index === evidenceIndex
+      ? { ...entry, ...mapRailsEvidenceLibraryRecord(evidenceId, afterEvidence) }
+      : entry);
+
+    await doc.ref.set({
+      evidence: nextEvidence,
+      updatedAt: fieldValue.serverTimestamp(),
+      updatedAtIso: new Date().toISOString()
+    }, { merge: true });
+  }));
+}
+
+async function unlinkRailsEvidenceLibraryReference(context: AuthorizedRailsContext, evidenceId: string): Promise<number> {
+  const safeEvidenceId = safeUserId(evidenceId);
+  const itemSnapshot = await context.organizationRef.collection(RAILS_ITEMS_COLLECTION).get();
+  let affectedLoopCount = 0;
+
+  await Promise.all(itemSnapshot.docs.map(async (doc) => {
+    const record = doc.data() as RailsItemRecord;
+    if (record.tenantId !== context.tenantId || record.status === 'Deleted') {
+      return;
+    }
+
+    const evidence = Array.isArray(record.evidence) ? record.evidence : [];
+    const hasReference = evidence.some((entry) => safeUserId(entry.evidenceId) === safeEvidenceId) ||
+      evidence.some((entry) => getRailsRequiredEvidenceSourceIds(entry).includes(safeEvidenceId)) ||
+      (record.actions || []).some((action) => normalizeMappedActionEvidenceIds(action.evidenceIds).includes(safeEvidenceId));
+
+    if (!hasReference) {
+      return;
+    }
+
+    affectedLoopCount += 1;
+    const nextEvidence = evidence
+      .filter((entry) => safeUserId(entry.evidenceId) !== safeEvidenceId)
+      .map((entry) => {
+        const sourceEvidenceIds = getRailsRequiredEvidenceSourceIds(entry).filter((linkedEvidenceId) => linkedEvidenceId !== safeEvidenceId);
+        return {
+          ...entry,
+          sourceEvidenceId: sourceEvidenceIds[0] || null,
+          sourceEvidenceIds
+        };
+      });
+    const nextActions = (record.actions || []).map((action) => ({
+      ...action,
+      evidenceIds: normalizeMappedActionEvidenceIds(action.evidenceIds).filter((linkedEvidenceId) => linkedEvidenceId !== safeEvidenceId)
+    }));
+    const nowIso = new Date().toISOString();
+
+    await doc.ref.set({
+      actions: nextActions,
+      evidence: nextEvidence,
+      updatedAt: fieldValue.serverTimestamp(),
+      updatedAtIso: nowIso
+    }, { merge: true });
+  }));
+
+  return affectedLoopCount;
 }
 
 function buildStandardizationDocumentVersion({
@@ -4738,10 +5725,21 @@ function buildRailsEvidenceUpdateSummary(beforeEvidence: RailsEvidence | null, a
   }
 
   const changedFields = getRailsEvidenceChangedFields(beforeEvidence, afterEvidence);
-  if (changedFields.includes('sourceEvidenceId')) {
-    return afterEvidence.sourceEvidenceId
-      ? `Linked Evidence Library item to required verification evidence "${afterEvidence.label}".`
-      : `Unlinked Evidence Library item from required verification evidence "${afterEvidence.label}".`;
+  if (changedFields.includes('sourceEvidenceIds')) {
+    const beforeIds = getRailsRequiredEvidenceSourceIds(beforeEvidence);
+    const afterIds = getRailsRequiredEvidenceSourceIds(afterEvidence);
+    const linkedCount = afterIds.filter((evidenceId) => !beforeIds.includes(evidenceId)).length;
+    const unlinkedCount = beforeIds.filter((evidenceId) => !afterIds.includes(evidenceId)).length;
+
+    if (linkedCount && !unlinkedCount) {
+      return `Linked ${linkedCount} Evidence Library item${linkedCount === 1 ? '' : 's'} to required verification evidence "${afterEvidence.label}".`;
+    }
+
+    if (unlinkedCount && !linkedCount) {
+      return `Unlinked ${unlinkedCount} Evidence Library item${unlinkedCount === 1 ? '' : 's'} from required verification evidence "${afterEvidence.label}".`;
+    }
+
+    return `Updated Evidence Library links for required verification evidence "${afterEvidence.label}".`;
   }
 
   if (changedFields.includes('label')) {
@@ -4761,17 +5759,32 @@ function buildRailsEvidenceUpdateSummary(beforeEvidence: RailsEvidence | null, a
 }
 
 function getRailsEvidenceChangedFields(beforeEvidence: RailsEvidence, afterEvidence: RailsEvidence): string[] {
-  return ([
+  const changedFields: string[] = ([
     'contentType',
     'fileName',
     'fileSizeBytes',
     'label',
     'note',
     'purpose',
-    'sourceEvidenceId',
     'status',
     'visibility'
   ] as const).filter((field) => beforeEvidence[field] !== afterEvidence[field]);
+
+  const beforeSourceEvidenceIds = getRailsRequiredEvidenceSourceIds(beforeEvidence);
+  const afterSourceEvidenceIds = getRailsRequiredEvidenceSourceIds(afterEvidence);
+  if (!areStringArraysEqual(beforeSourceEvidenceIds, afterSourceEvidenceIds)) {
+    changedFields.push('sourceEvidenceIds');
+  }
+
+  return changedFields;
+}
+
+function areStringArraysEqual(first: string[], second: string[]): boolean {
+  if (first.length !== second.length) {
+    return false;
+  }
+
+  return first.every((value, index) => value === second[index]);
 }
 
 function buildRailsActionAuditChange(

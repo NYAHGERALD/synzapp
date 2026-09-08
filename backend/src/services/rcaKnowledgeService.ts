@@ -2,11 +2,17 @@ import { DecodedIdToken } from 'firebase-admin/auth';
 import { env } from '../config/env.js';
 import { assertRateLimit } from '../middleware/rateLimit.js';
 import {
+  estimateOpenAiCostUsd,
+  getAiUsageContext,
+  writeAiUsageEvent
+} from './aiUsageLedgerService.js';
+import {
   getRcaIncident,
   listRcaNodes,
   type RcaIncident,
   type RcaNode
 } from './rcaService.js';
+import { assertTenantAiAllowed } from './tenantAiPolicyService.js';
 
 interface RcaKnowledgeAskInput {
   incidentId?: string;
@@ -24,13 +30,15 @@ const RCA_KNOWLEDGE_SYSTEM_PROMPT = [
   'You are Synzapp RCA Guide, an enterprise Root Cause Analysis coach for a tenant-scoped node-based RCA system.',
   'You must answer using the Synzapp RCA product flow, not generic RCA theory.',
   'Synzapp RCA flow: create an RCA project, open the war-room canvas, create the Incident node first, then build the RCA in Main View using node-based canvas items.',
-  'Synzapp node system: Incident is the parent/root node. Other RCA nodes include Incident Details, Containment, Evidence, Problem, Why, Answer, Root Cause, CAPA, Corrective, Preventive, Risk Assessment, Effectiveness, Lessons Learned, and Approval & Closure.',
+  'Synzapp node system: Incident is the parent/root node. Other RCA nodes include Incident Details, Containment, Evidence, Problem Statement, Cause, 5 Whys, Root Cause, CAPA, Corrective, Preventive, Risk Assessment, Effectiveness, Lessons Learned, and Approval & Closure. The current user-facing flow uses Cause for likely causes, 5 Whys for verification, Root Cause for verified direct or contributing causes, then CAPA for action planning.',
+  'Synzapp field ownership: Incident and Incident Details capture the factual intake record for what happened, where, when, who, impact, category, product, lot, equipment, and production context. Problem is not a second incident intake form; it is the formal problem statement with expected standard, actual condition, measurable gap, RCA analysis scope, and exclusions.',
   'Synzapp canvas system: users add nodes from the right-click Add Node menu, connect output points to input points with selectable/reconnectable splines, use Fishbone structure for category-based cause mapping, use Sticky Notes for collaboration notes, and use Node Details for structured fields.',
-  'Synzapp connection rules: category links classify cause/root-cause nodes under Fishbone branches. Problem and Root Cause nodes are allowed to keep their classification or upstream link while also feeding multiple downstream outputs. A Root Cause can remain linked to its Fishbone category and also connect its output to CAPA. CAPA input should receive the arrow from the Root Cause output.',
-  'Synzapp connection direction: splines should be explained from source output to target input using the visible arrow direction. Do not tell users to connect CAPA output back into Root Cause when the intended flow is Root Cause output to CAPA input.',
-  'Synzapp evidence flow: Evidence nodes and evidence sections support attachments, thumbnails, photo viewer, and evidence links. Evidence should be attached to the node it proves. On the canvas, this means connecting Evidence node output to the supported node input; do not describe the supported node as feeding into Evidence.',
+  'Synzapp connection rules: category links classify Cause nodes under Fishbone branches. Incident Details output connects to Problem Statement input. For Fishbone methodology, Problem Statement output connects to Fault Gate input before category branch analysis. A Cause can remain linked to its Fishbone category and also connect to 5 Whys for cause testing. After verification, connect 5 Whys output to Root Cause input. Root Cause output connects to CAPA input. CAPA output connects to Corrective, Preventive, Risk Assessment, Effectiveness, and Lessons Learned. In Fishbone analysis, the final Approval & Closure node is case-level and connects from the Fault Gate, not from individual CAPA stages.',
+  'Synzapp 5 Whys governance: the standalone 5 Why methodology is separate from the Fishbone scaffold. In that path, Problem Statement output connects to 5 Whys input, 5 Whys output connects to Root Cause input, Evidence supports the Root Cause, Root Cause output connects to CAPA input, and CAPA expands to its stage nodes with Evidence supporting each stage. Because standalone 5 Why has no Fault Gate, its one Approval & Closure node sits to the right of the CAPA stage stack and accepts side-output links from Corrective Action, Preventive Action, Risk Assessment, Effectiveness, and Lessons Learned. 5 Whys is not a canvas replacement for five separate Answer nodes; it captures structured why answers, verification, evidence notes, and final cause disposition.',
+  'Synzapp connection direction: splines should be explained from source output to target input using the visible arrow direction. Do not tell users to connect CAPA output back into Root Cause when the intended flow is Root Cause output to CAPA input. Do not tell users to connect Problem back into Incident Details; the intended upstream flow is Incident Details output to Problem Statement input.',
+  'Synzapp evidence flow: Evidence nodes and evidence sections support attachments, thumbnails, photo viewer, and evidence links. Evidence should be attached to the node it proves. On the canvas, this means connecting Evidence node output to the supported node input; do not describe the supported node as feeding into Evidence. CAPA stage nodes also require evidence support: connect Evidence output into Corrective Action, Preventive Action, Risk Assessment, Effectiveness, or Lessons Learned inputs to prove completion, risk decisions, verification, or learning records.',
   'Synzapp collaboration flow: RCA projects are tenant-scoped, owner/collaborator based, realtime collaborative, and supported by invited users, activity logs, node editing/moving indicators, and live canvas presence.',
-  'Synzapp closure flow: root cause must be evidence-backed, then CAPA should progress through corrective action, preventive action, risk assessment, effectiveness verification, lessons learned, and approval/closure.',
+  'Synzapp closure flow: root cause must be evidence-backed, then CAPA should progress through corrective action, preventive action, risk assessment, effectiveness verification, and lessons learned. Each CAPA stage should have its own evidence support where applicable. Approval & Closure is one final case-level node connected from the Fault Gate and it reviews the entire RCA, not separate stage-to-closure splines.',
   'When the user asks where to start or what next, answer with the next concrete action inside the Synzapp UI and name the node/menu/panel they should use.',
   'Answer only questions about RCA workflow, node usage, evidence quality, containment, problem definition, fishbone cause mapping, 5 Whys thinking, CAPA, verification, lessons learned, approval, and canvas collaboration.',
   'Do not invent regulatory requirements, legal advice, medical advice, or confidential details not provided in the prompt.',
@@ -41,11 +49,12 @@ const RCA_KNOWLEDGE_SYSTEM_PROMPT = [
 
 const RCA_GUIDE_FALLBACK = [
   'Start with an Incident node, then capture Incident Details and Containment before building causes.',
+  'Use the Problem node only to define the formal problem statement: expected standard, actual condition, measurable gap, scope, and exclusions.',
   'Use Evidence nodes for photos, documents, links, measurements, interviews, and records that prove facts.',
   'Use Fishbone branches to separate possible causes by category instead of mixing people, process, equipment, materials, measurement, environment, and management-system causes.',
-  'Convert only evidence-backed causes into Root Cause candidates.',
-  'Use CAPA nodes to separate corrective action, preventive action, risk assessment, effectiveness verification, lessons learned, and approval or closure.',
-  'A strong RCA should show containment, verified facts, cause logic, chosen root cause, action ownership, due dates, and effectiveness evidence.'
+  'Use either Fishbone Analysis or standalone 5 Why Analysis from the Problem Statement. In Fishbone, convert suspected issues into Cause nodes, connect Cause output to 5 Whys for verification, then connect 5 Whys output to Root Cause when the cause is ruled in as direct or contributing. In standalone 5 Why, connect Problem Statement output to 5 Whys input, then 5 Whys to Root Cause, Root Cause to CAPA.',
+  'Use CAPA nodes to separate corrective action, preventive action, risk assessment, effectiveness verification, and lessons learned. Link Evidence into each CAPA stage that needs proof. Use one case-level Approval & Closure node connected from the Fault Gate for Fishbone, or one standalone 5 Why closure node linked from the CAPA stage outputs when no Fault Gate exists.',
+  'A strong RCA should show containment, verified facts, cause logic, chosen root cause, CAPA stage evidence, action ownership, due dates, effectiveness evidence, and one case-level closure decision.'
 ].join('\n');
 
 export async function askRcaKnowledgeBase(
@@ -66,8 +75,36 @@ export async function askRcaKnowledgeBase(
     };
   }
 
+  await assertTenantAiAllowed(decodedToken, {
+    featureId: 'rca_ai',
+    operationId: 'rca.knowledge.ask',
+    operationLabel: 'Ask RCA guide',
+    resourceId: input.incidentId || null,
+    resourceType: input.incidentId ? 'rca_incident' : 'rca_workspace'
+  });
+
+  const usageContext = await getAiUsageContext(decodedToken, { requireAdmin: false });
+  const startedAt = Date.now();
+
   try {
     const answer = await requestOpenAiRcaGuidance(question, context);
+    const inputTokens = estimateTokenCount(RCA_KNOWLEDGE_SYSTEM_PROMPT.length + context.length + question.length);
+    const outputTokens = estimateTokenCount(answer.length);
+
+    await writeAiUsageEvent({
+      ...usageContext,
+      durationMs: Date.now() - startedAt,
+      estimatedCostUsd: estimateOpenAiCostUsd({ inputTokens, outputTokens }),
+      featureId: 'rca_ai',
+      inputTokens,
+      model: env.openAiModel,
+      operationId: 'rca.knowledge.ask',
+      operationLabel: 'Ask RCA guide',
+      outputTokens,
+      resourceId: input.incidentId || null,
+      resourceType: input.incidentId ? 'rca_incident' : 'rca_workspace',
+      status: 'succeeded'
+    }).catch(() => undefined);
 
     return {
       answer,
@@ -76,6 +113,18 @@ export async function askRcaKnowledgeBase(
     };
   } catch (error) {
     console.warn('RCA knowledge AI fallback:', error instanceof Error ? error.message : error);
+    await writeAiUsageEvent({
+      ...usageContext,
+      durationMs: Date.now() - startedAt,
+      errorCategory: getAiKnowledgeErrorCategory(error),
+      featureId: 'rca_ai',
+      model: env.openAiModel,
+      operationId: 'rca.knowledge.ask',
+      operationLabel: 'Ask RCA guide',
+      resourceId: input.incidentId || null,
+      resourceType: input.incidentId ? 'rca_incident' : 'rca_workspace',
+      status: 'failed'
+    }).catch(() => undefined);
 
     return {
       answer: buildDeterministicKnowledgeAnswer(question, context),
@@ -163,6 +212,22 @@ async function requestOpenAiRcaGuidance(question: string, context: string): Prom
 }
 
 function summarizeRcaCanvasForAi(incident: RcaIncident, nodes: RcaNode[]): string {
+  const activeNodes = nodes.filter((node) => node.status !== 'DELETED');
+  const activeNodeById = new Map(activeNodes.map((node) => [node.id, node]));
+  const childrenByParentId = new Map<string, RcaNode[]>();
+
+  activeNodes.forEach((node) => {
+    if (!node.parentNodeId || !activeNodeById.has(node.parentNodeId)) {
+      return;
+    }
+
+    const siblings = childrenByParentId.get(node.parentNodeId) || [];
+    siblings.push(node);
+    childrenByParentId.set(node.parentNodeId, siblings);
+  });
+
+  const capaStageNodes = activeNodes.filter(isRcaKnowledgeCapaStageNode);
+  const capaStagesWithoutEvidence = capaStageNodes.filter((node) => !hasRcaKnowledgeEvidenceSupport(node, childrenByParentId, activeNodeById));
   const nodeSummaries = nodes
     .slice(0, 80)
     .map((node) => {
@@ -183,8 +248,66 @@ function summarizeRcaCanvasForAi(incident: RcaIncident, nodes: RcaNode[]): strin
     `Department: ${normalizeContextText(incident.departmentName, 100)}`,
     `RPN: ${incident.rpnScore}`,
     `Node count: ${nodes.length}`,
+    `CAPA stage count: ${capaStageNodes.length}`,
+    `CAPA stages missing linked evidence: ${capaStagesWithoutEvidence.length}`,
     nodeSummaries ? `Nodes:\n${nodeSummaries}` : 'Nodes: none yet.'
   ].join('\n');
+}
+
+function isRcaKnowledgeEvidenceNode(node: RcaNode | null | undefined): boolean {
+  return Boolean(node && node.status !== 'DELETED' && node.nodeType === 'WHY' && node.fiveWhysRole === 'EVIDENCE');
+}
+
+function isRcaKnowledgeCapaStageNode(node: RcaNode | null | undefined): boolean {
+  return Boolean(
+    node &&
+    node.status !== 'DELETED' &&
+    node.nodeType === 'WHY' &&
+    [
+      'CORRECTIVE_ACTION',
+      'PREVENTIVE_ACTION',
+      'RISK_ASSESSMENT',
+      'EFFECTIVENESS',
+      'LESSONS_LEARNED'
+    ].includes(node.fiveWhysRole || '')
+  );
+}
+
+function hasRcaKnowledgeEvidenceSupport(
+  node: RcaNode,
+  childrenByParentId: Map<string, RcaNode[]>,
+  nodeById: Map<string, RcaNode>
+): boolean {
+  if (node.attachedEvidence.length) {
+    return true;
+  }
+
+  if ((childrenByParentId.get(node.id) || []).some((childNode) => isRcaKnowledgeEvidenceNode(childNode) || childNode.attachedEvidence.length > 0)) {
+    return true;
+  }
+
+  if (node.parentNodeId) {
+    const parentNode = nodeById.get(node.parentNodeId);
+
+    if (isRcaKnowledgeEvidenceNode(parentNode)) {
+      return true;
+    }
+  }
+
+  return normalizeRcaKnowledgeLinkedNodeIds(node.linkedNodeIds)
+    .map((linkedNodeId) => nodeById.get(linkedNodeId))
+    .some((linkedNode) => Boolean(linkedNode && (isRcaKnowledgeEvidenceNode(linkedNode) || linkedNode.attachedEvidence.length > 0)));
+}
+
+function normalizeRcaKnowledgeLinkedNodeIds(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return [...new Set(value
+    .map((item) => String(item ?? '').trim())
+    .filter(Boolean)
+  )];
 }
 
 function buildDeterministicKnowledgeAnswer(question: string, context: string): string {
@@ -197,10 +320,13 @@ function buildDeterministicKnowledgeAnswer(question: string, context: string): s
       '1. Create the Incident node first. This is the parent node for the RCA.',
       '2. Right-click the canvas and add Incident Details. Use Node Details to capture what happened, where, when, who discovered it, and impact.',
       '3. Add Containment to record immediate controls such as hold, stop, isolate, clean, repair, or notify.',
-      '4. Add Evidence nodes or use the Evidence section to attach photos, links, records, measurements, interviews, and logs to the exact node they prove.',
-      '5. Use Main View/Fishbone to organize suspected causes under the correct branches.',
-      '6. Mark only evidence-backed causes as Root Cause candidates.',
-      '7. Build CAPA through corrective action, preventive action, risk assessment, effectiveness verification, lessons learned, and approval/closure.',
+      '4. Add Problem to convert the incident facts into one clear problem statement: expected standard, actual condition, measurable gap, scope, and exclusions.',
+      '5. Connect Incident Details output to Problem input so the formal problem statement is visibly based on the verified incident facts.',
+      '6. Choose the methodology from Connection Recommendations. For Fishbone, connect Problem output to Fault Gate input before organizing suspected causes under branches. For standalone 5 Why Analysis, connect Problem output to 5 Whys input, then 5 Whys to Root Cause.',
+      '7. Add Evidence nodes or use the Evidence section to attach photos, links, records, measurements, interviews, and logs to the exact node they prove.',
+      '8. Use Main View/Fishbone to organize suspected causes under the correct branches, or use standalone 5 Why Analysis when branch categorization is not the selected method.',
+      '9. Mark only evidence-backed causes as Root Cause candidates and connect Evidence into the Root Cause node that it proves.',
+      '10. Build CAPA from Root Cause through corrective action, preventive action, risk assessment, effectiveness verification, and lessons learned. Connect Evidence output into each CAPA stage that needs proof, then use one Approval & Closure node from the Fault Gate for Fishbone closeout or the governed closure workflow for standalone 5 Why cases.',
       hasCanvasContext ? 'I can also use the active canvas context to help review gaps in the current RCA.' : 'Open an RCA canvas and ask again for guidance specific to that project.'
     ].join('\n');
   }
@@ -210,7 +336,7 @@ function buildDeterministicKnowledgeAnswer(question: string, context: string): s
   }
 
   if (normalizedQuestion.includes('capa') || normalizedQuestion.includes('corrective') || normalizedQuestion.includes('preventive')) {
-    return 'CAPA should separate correction from prevention: corrective action fixes the verified root cause, preventive action reduces recurrence risk, risk assessment confirms residual risk, effectiveness checks prove the action worked, lessons learned capture system changes, and approval closes the RCA.';
+    return 'CAPA should separate correction from prevention: corrective action fixes the verified root cause, preventive action reduces recurrence risk, risk assessment confirms residual risk, effectiveness checks prove the action worked, and lessons learned capture system changes. Each CAPA stage should be evidence-backed by connecting Evidence output into the stage input. The final Approval & Closure node is one case-level closeout connected from the Fault Gate, not from every CAPA stage.';
   }
 
   return [
@@ -237,4 +363,34 @@ function normalizeContextText(value: unknown, maxLength: number): string {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, maxLength);
+}
+
+function estimateTokenCount(characterCount: number): number {
+  return Math.max(1, Math.ceil(characterCount / 4));
+}
+
+function getAiKnowledgeErrorCategory(error: unknown) {
+  const message = error instanceof Error ? error.message.toLowerCase() : '';
+
+  if (message.includes('quota') || message.includes('credit') || message.includes('billing')) {
+    return 'provider_credit_exhausted' as const;
+  }
+
+  if (message.includes('rate')) {
+    return 'provider_rate_limited' as const;
+  }
+
+  if (message.includes('abort') || message.includes('timeout')) {
+    return 'provider_timeout' as const;
+  }
+
+  if (message.includes('401') || message.includes('403') || message.includes('auth')) {
+    return 'provider_auth_error' as const;
+  }
+
+  if (message.includes('404') || message.includes('model')) {
+    return 'provider_model_unavailable' as const;
+  }
+
+  return 'unknown' as const;
 }

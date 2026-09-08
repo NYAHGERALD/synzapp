@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { verifyAppCheck } from '../middleware/appCheck.js';
 import { verifyFirebaseSession } from '../services/authSessionService.js';
 import { getCompanyKeyResultsForCurrentUser } from '../services/keyResultsService.js';
+import { writeAuditEvent } from '../services/auditService.js';
+import { generateLswExcelExport } from '../services/lswExcelExportService.js';
 import {
   createLswDailyTask,
   createLswFollowUp,
@@ -21,6 +23,11 @@ import {
   deleteLswScheduledTask,
   deleteLswTodoTask,
   getLswContext,
+  getLswObservationStatus,
+  getLswWeeklyVerificationSummary,
+  createLswObservationNote,
+  listLswObservationCandidates,
+  listLswObservationNotes,
   listLswDailyTasks,
   listLswFollowUps,
   listLswImprovementProjects,
@@ -30,6 +37,8 @@ import {
   listLswScheduledTasks,
   listLswTodoTasks,
   updateLswDailyTask,
+  recordLswObservationView,
+  updateLswObservationAvailability,
   updateLswFollowUp,
   updateLswImprovementProject,
   updateLswMeetingRail,
@@ -37,15 +46,25 @@ import {
   updateLswRcaTrigger,
   updateLswScheduledTask,
   updateLswTodoTask,
-  updateLswSettings
+  updateLswSettings,
+  withdrawLswObservationNote
 } from '../services/lswService.js';
 
 const lswRouter = Router();
 
 const lswContextQuerySchema = z.object({
+  observeUserId: z.string().trim().regex(/^[A-Za-z0-9_-]{8,128}$/).optional(),
   timeZone: z.string().trim().max(80).optional(),
   week: z.coerce.number().int().min(-60).max(120).optional(),
   year: z.coerce.number().int().min(1900).max(2100).optional()
+});
+
+const lswExportQuerySchema = lswContextQuerySchema.extend({
+  includePastDueFollowUps: z.coerce.boolean().optional(),
+  includePastDueGoals: z.coerce.boolean().optional(),
+  includePastDueRails: z.coerce.boolean().optional(),
+  includePastDueScheduledTasks: z.coerce.boolean().optional(),
+  includePastDueTriggers: z.coerce.boolean().optional()
 });
 
 const daySelectionSchema = z.object({
@@ -144,6 +163,17 @@ const improvementProjectBodySchema = z.object({
 });
 
 const scheduledTaskFrequencySchema = z.enum(['BI_WEEKLY', 'MONTHLY', 'QUARTERLY', 'ANNUALLY']);
+const lswObservationAvailabilitySchema = z.enum(['ACTIVE', 'ON_LEAVE', 'TEMPORARILY_UNAVAILABLE']);
+const lswObservationSectionKeySchema = z.enum([
+  'daily_weekly_standard_tasks',
+  'plant_specific_cause_rca_triggers',
+  'to_do_today_this_week',
+  'level_1_2_3_meeting_rails',
+  'improvement_projects_updates',
+  'follow_ups',
+  'scheduled_tasks_meetings',
+  'personal_objectives_goals'
+]);
 
 const scheduledTaskBodySchema = z.object({
   dueDate: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
@@ -156,6 +186,18 @@ const scheduledTaskBodySchema = z.object({
 
 const lswSettingsBodySchema = z.object({
   workDaysPerWeek: z.union([z.literal(5), z.literal(6), z.literal(7)])
+});
+
+const observationAvailabilityBodySchema = z.object({
+  availability: lswObservationAvailabilitySchema,
+  endDate: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  startDate: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  note: z.string().trim().max(240).optional()
+});
+
+const observationNoteBodySchema = z.object({
+  body: z.string().trim().min(1).max(800),
+  sectionKey: lswObservationSectionKeySchema
 });
 
 const taskIdParamSchema = z.string().trim().regex(/^[A-Za-z0-9_-]{8,128}$/);
@@ -178,6 +220,154 @@ lswRouter.get('/key-results', verifyAppCheck, async (req, res, next) => {
     const keyResults = await getCompanyKeyResultsForCurrentUser(decodedToken);
 
     res.json({ keyResults });
+  } catch (error) {
+    next(error);
+  }
+});
+
+lswRouter.get('/verification-summary', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const query = lswContextQuerySchema.parse(req.query);
+    const verificationSummary = await getLswWeeklyVerificationSummary(decodedToken, query);
+
+    res.json({ verificationSummary });
+  } catch (error) {
+    next(error);
+  }
+});
+
+lswRouter.get('/export', verifyAppCheck, async (req, res, next) => {
+  let decodedToken: Awaited<ReturnType<typeof getDecodedToken>> | null = null;
+
+  try {
+    decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const query = lswExportQuerySchema.parse(req.query);
+    const exportResult = await generateLswExcelExport(decodedToken, query);
+
+    await writeAuditEvent({
+      action: 'LSW_EXCEL_EXPORT',
+      metadata: {
+        departmentName: exportResult.metadata.departmentName,
+        fileName: exportResult.fileName,
+        isObservation: exportResult.metadata.isObservation,
+        ownerUid: exportResult.metadata.ownerUid,
+        week: exportResult.metadata.week,
+        year: exportResult.metadata.year
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: exportResult.metadata.tenantId,
+      uid: decodedToken.uid
+    }).catch((error) => {
+      console.warn('Unable to write LSW export audit event:', error);
+    });
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${exportResult.fileName}"`);
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    res.send(exportResult.buffer);
+  } catch (error) {
+    if (decodedToken) {
+      await writeAuditEvent({
+        action: 'LSW_EXCEL_EXPORT',
+        metadata: {
+          query: req.query
+        },
+        reason: error instanceof Error ? error.message : 'Unknown export failure',
+        req,
+        status: 'FAILED',
+        uid: decodedToken.uid
+      }).catch((auditError) => {
+        console.warn('Unable to write failed LSW export audit event:', auditError);
+      });
+    }
+
+    next(error);
+  }
+});
+
+lswRouter.get('/observation-candidates', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const candidates = await listLswObservationCandidates(decodedToken);
+
+    res.json({ candidates });
+  } catch (error) {
+    next(error);
+  }
+});
+
+lswRouter.get('/observation-status', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const query = lswContextQuerySchema.parse(req.query);
+    const status = await getLswObservationStatus(decodedToken, query);
+
+    res.json({ status });
+  } catch (error) {
+    next(error);
+  }
+});
+
+lswRouter.patch('/observation-availability', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const body = observationAvailabilityBodySchema.parse(req.body);
+    const status = await updateLswObservationAvailability(decodedToken, body);
+
+    res.json({ status });
+  } catch (error) {
+    next(error);
+  }
+});
+
+lswRouter.post('/observation-view', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const query = lswContextQuerySchema.parse(req.query);
+    const status = await recordLswObservationView(decodedToken, query);
+
+    res.status(201).json({ status });
+  } catch (error) {
+    next(error);
+  }
+});
+
+lswRouter.get('/observation-notes', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const query = lswContextQuerySchema.parse(req.query);
+    const notes = await listLswObservationNotes(decodedToken, query);
+
+    res.json({ notes });
+  } catch (error) {
+    next(error);
+  }
+});
+
+lswRouter.post('/observation-notes', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const query = lswContextQuerySchema.parse(req.query);
+    const body = observationNoteBodySchema.parse(req.body);
+    const note = await createLswObservationNote(decodedToken, { ...body, ...query });
+
+    res.status(201).json({ note });
+  } catch (error) {
+    next(error);
+  }
+});
+
+lswRouter.delete('/observation-notes/:noteId', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const query = lswContextQuerySchema.parse(req.query);
+    const noteId = taskIdParamSchema.parse(req.params.noteId);
+
+    await withdrawLswObservationNote(decodedToken, noteId, query);
+
+    res.status(204).end();
   } catch (error) {
     next(error);
   }
@@ -352,7 +542,8 @@ lswRouter.delete('/meeting-rails/:railId', verifyAppCheck, async (req, res, next
 lswRouter.get('/personal-goals', verifyAppCheck, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
-    const personalGoals = await listLswPersonalGoals(decodedToken);
+    const query = lswContextQuerySchema.parse(req.query);
+    const personalGoals = await listLswPersonalGoals(decodedToken, query);
 
     res.json({ personalGoals });
   } catch (error) {
@@ -401,7 +592,8 @@ lswRouter.delete('/personal-goals/:goalId', verifyAppCheck, async (req, res, nex
 lswRouter.get('/improvement-projects', verifyAppCheck, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
-    const improvementProjects = await listLswImprovementProjects(decodedToken);
+    const query = lswContextQuerySchema.parse(req.query);
+    const improvementProjects = await listLswImprovementProjects(decodedToken, query);
 
     res.json({ improvementProjects });
   } catch (error) {
@@ -450,7 +642,8 @@ lswRouter.delete('/improvement-projects/:projectId', verifyAppCheck, async (req,
 lswRouter.get('/scheduled-tasks', verifyAppCheck, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
-    const scheduledTasks = await listLswScheduledTasks(decodedToken);
+    const query = lswContextQuerySchema.parse(req.query);
+    const scheduledTasks = await listLswScheduledTasks(decodedToken, query);
 
     res.json({ scheduledTasks });
   } catch (error) {
@@ -499,7 +692,8 @@ lswRouter.delete('/scheduled-tasks/:taskId', verifyAppCheck, async (req, res, ne
 lswRouter.get('/follow-ups', verifyAppCheck, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
-    const followUps = await listLswFollowUps(decodedToken);
+    const query = lswContextQuerySchema.parse(req.query);
+    const followUps = await listLswFollowUps(decodedToken, query);
 
     res.json({ followUps });
   } catch (error) {
@@ -548,7 +742,8 @@ lswRouter.delete('/follow-ups/:followUpId', verifyAppCheck, async (req, res, nex
 lswRouter.get('/rca-triggers', verifyAppCheck, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
-    const rcaTriggers = await listLswRcaTriggers(decodedToken);
+    const query = lswContextQuerySchema.parse(req.query);
+    const rcaTriggers = await listLswRcaTriggers(decodedToken, query);
 
     res.json({ rcaTriggers });
   } catch (error) {

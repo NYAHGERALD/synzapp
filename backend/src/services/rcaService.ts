@@ -13,7 +13,7 @@ type FirestoreDateLike = FirebaseFirestore.Timestamp | { seconds?: number; toDat
 export type RcaIncidentStatus = 'OPEN' | 'INVESTIGATING' | 'CLOSED';
 export type RcaSessionStatus = 'ACTIVE' | 'FREEZE' | 'COMPLETED' | 'CLOSED';
 export type RcaMethodology = '5_WHYS' | 'ISHIKAWA' | 'FAULT_TREE';
-export type RcaNodeType = 'WHY' | 'ISHIKAWA_CATEGORY' | 'CAUSE' | 'SUB_CAUSE' | 'FAULT_GATE' | 'STICKY_NOTE';
+export type RcaNodeType = 'WHY' | 'ISHIKAWA_CATEGORY' | 'CAUSE' | 'SUB_CAUSE' | 'FAULT_GATE' | 'STICKY_NOTE' | 'COMMENT';
 export type RcaFiveWhysNodeRole =
   | 'INCIDENT'
   | 'INCIDENT_DETAILS'
@@ -37,6 +37,17 @@ export interface RcaRiskFactors {
   detection: number;
   occurrence: number;
   severity: number;
+}
+
+export interface RcaOccurrenceSuggestion {
+  confidence: 'LOW' | 'MEDIUM' | 'HIGH';
+  currentOccurrence: number;
+  evidence: string[];
+  recommendedOccurrence: number;
+  reason: string;
+  similarIncidentCount: number;
+  source: 'RCA_HISTORY';
+  windowDays: number;
 }
 
 export interface RcaUiCoordinates {
@@ -142,6 +153,7 @@ export interface RcaNode {
   isSuspectedCause: boolean;
   fiveWhysRole?: RcaFiveWhysNodeRole | null;
   label: string;
+  linkedNodeIds?: string[];
   lockedAtIso: string | null;
   lockedBy: string | null;
   nodeType: RcaNodeType;
@@ -211,6 +223,9 @@ export interface RcaIncidentInput {
 }
 
 export interface RcaIncidentUpdateInput {
+  assetId?: string;
+  riskFactors?: Partial<RcaRiskFactors>;
+  status?: RcaIncidentStatus;
   title?: string;
 }
 
@@ -230,6 +245,7 @@ export interface RcaNodeInput {
   isSuspectedCause?: boolean;
   fiveWhysRole?: RcaFiveWhysNodeRole | null;
   label?: string;
+  linkedNodeIds?: string[];
   lockForEditing?: boolean;
   nodeType?: RcaNodeType;
   parentNodeId?: string | null;
@@ -348,6 +364,7 @@ interface RcaNodeRecord {
   isRootCause?: boolean;
   isSuspectedCause?: boolean;
   label?: string;
+  linkedNodeIds?: string[];
   lockedAt?: FirestoreDateLike;
   lockedAtIso?: string | null;
   lockedBy?: string | null;
@@ -410,6 +427,47 @@ const RCA_SYSTEM_MANAGED_DETAIL_FIELD_KEYS: Partial<Record<RcaFiveWhysNodeRole, 
   INCIDENT: ['incidentId'],
   RISK_ASSESSMENT: ['riskAssessmentId']
 };
+const RCA_DEPRECATED_NODE_DETAIL_FIELD_KEYS: Partial<Record<RcaFiveWhysNodeRole, string[]>> = {
+  PROBLEM: [
+    'problemType',
+    'problemLocation',
+    'problemStartTime',
+    'problemDetectedBy',
+    'problemImpact',
+    'knownFacts',
+    'unknownInformation',
+    'problemStatus',
+    'incidentCategory',
+    'department',
+    'areaLocation',
+    'lineMachineProcess',
+    'shift',
+    'dateOfIncident',
+    'timeOfIncident',
+    'reportedBy',
+    'supervisorOnDuty',
+    'severityLevel',
+    'incidentDescription',
+    'immediateImpact',
+    'productAffected',
+    'productNameCode',
+    'lotNumber',
+    'quantityAffected',
+    'incidentStatus',
+    'whatHappened',
+    'whereDidItHappen',
+    'whenDidItHappen',
+    'whoWasInvolved',
+    'whoDiscoveredIt',
+    'wasAnyoneInjured',
+    'wasProductAffected',
+    'wasEquipmentAffected',
+    'wasProductionInterrupted',
+    'downtimeDuration',
+    'initialBusinessImpact',
+    'detailedDescription'
+  ]
+};
 
 export async function getRcaWorkspaceContext(decodedToken: DecodedIdToken): Promise<RcaWorkspaceContext> {
   const context = await getAuthorizedRcaContext(decodedToken);
@@ -469,6 +527,145 @@ export async function getRcaIncident(
   );
 
   return mapIncident(incidentRef.id, incidentRecord, context, ownerByUid);
+}
+
+export async function suggestRcaOccurrence(
+  decodedToken: DecodedIdToken,
+  incidentId: string
+): Promise<RcaOccurrenceSuggestion> {
+  const { context, incidentRecord, incidentRef } = await getAuthorizedIncident(decodedToken, incidentId);
+  const targetIncident = mapIncident(incidentRef.id, incidentRecord, context);
+  const now = new Date();
+  const windowDays = 365;
+  const targetAsset = normalizeComparableText(targetIncident.assetId);
+  const targetDepartmentId = targetIncident.departmentId || '';
+  const targetDepartmentName = normalizeComparableText(targetIncident.departmentName);
+  const targetTitleTokens = tokenizeComparableText(targetIncident.title);
+  const targetCreatedAt = targetIncident.createdAtIso ? new Date(targetIncident.createdAtIso) : now;
+  const incidentSnapshot = await context.organizationRef.collection(RCA_INCIDENTS_COLLECTION).get();
+  const similarIncidents: Array<{ incident: RcaIncident; reasons: string[]; score: number }> = [];
+
+  incidentSnapshot.docs.forEach((doc) => {
+    if (doc.id === incidentRef.id) {
+      return;
+    }
+
+    const record = doc.data() as RcaIncidentRecord;
+
+    if (record.status === 'DELETED') {
+      return;
+    }
+
+    const incident = mapIncident(doc.id, record, context);
+    const createdAt = incident.createdAtIso ? new Date(incident.createdAtIso) : null;
+    const daysAgo = createdAt && Number.isFinite(createdAt.getTime())
+      ? Math.abs(now.getTime() - createdAt.getTime()) / 86_400_000
+      : windowDays + 1;
+
+    if (daysAgo > windowDays) {
+      return;
+    }
+
+    const reasons: string[] = [];
+    let score = 0;
+    const asset = normalizeComparableText(incident.assetId);
+    const departmentName = normalizeComparableText(incident.departmentName);
+    const titleOverlap = countTokenOverlap(targetTitleTokens, tokenizeComparableText(incident.title));
+
+    if (targetAsset && asset && targetAsset === asset && !isUnassignedAssetText(asset)) {
+      score += 5;
+      reasons.push('same asset or asset area');
+    }
+
+    if (
+      targetDepartmentId &&
+      incident.departmentId &&
+      targetDepartmentId === incident.departmentId
+    ) {
+      score += 2;
+      reasons.push('same department');
+    } else if (targetDepartmentName && departmentName && targetDepartmentName === departmentName) {
+      score += 1;
+      reasons.push('same department name');
+    }
+
+    if (
+      targetIncident.sourceRailsItemId &&
+      incident.sourceRailsItemId &&
+      targetIncident.sourceRailsItemId === incident.sourceRailsItemId
+    ) {
+      score += 4;
+      reasons.push('same linked RAILS source');
+    }
+
+    if (titleOverlap >= 3) {
+      score += 3;
+      reasons.push('similar incident wording');
+    } else if (titleOverlap >= 2) {
+      score += 1;
+      reasons.push('related incident wording');
+    }
+
+    if (daysAgo <= 90) {
+      score += 2;
+      reasons.push('occurred in the last 90 days');
+    } else if (daysAgo <= 180) {
+      score += 1;
+      reasons.push('occurred in the last 180 days');
+    }
+
+    if (score >= 3) {
+      similarIncidents.push({ incident, reasons, score });
+    }
+  });
+
+  similarIncidents.sort((first, second) => second.score - first.score);
+
+  const strongestScore = similarIncidents[0]?.score || 0;
+  const similarIncidentCount = similarIncidents.length;
+  const recentRepeatCount = similarIncidents.filter(({ incident }) => {
+    const createdAt = incident.createdAtIso ? new Date(incident.createdAtIso) : null;
+    const daysAgo = createdAt && Number.isFinite(createdAt.getTime())
+      ? Math.abs(now.getTime() - createdAt.getTime()) / 86_400_000
+      : Number.POSITIVE_INFINITY;
+
+    return daysAgo <= 180;
+  }).length;
+  const recommendedOccurrence = clampRiskFactor(
+    similarIncidentCount >= 5 || strongestScore >= 11
+      ? 6
+      : similarIncidentCount >= 3 || strongestScore >= 8
+        ? 5
+        : recentRepeatCount >= 2 || strongestScore >= 6
+          ? 4
+          : similarIncidentCount >= 1
+            ? 3
+            : 2
+  );
+  const confidence: RcaOccurrenceSuggestion['confidence'] = strongestScore >= 10 || similarIncidentCount >= 5
+    ? 'HIGH'
+    : strongestScore >= 6 || similarIncidentCount >= 2
+      ? 'MEDIUM'
+      : 'LOW';
+  const evidence = similarIncidents.slice(0, 4).map(({ incident, reasons }) => {
+    const when = incident.createdAtIso ? formatRelativeIncidentAge(incident.createdAtIso, targetCreatedAt) : 'date unavailable';
+
+    return `${incident.displayId}: ${incident.title || 'Untitled incident'} (${when}; ${reasons.join(', ')})`;
+  });
+  const reason = similarIncidentCount
+    ? `The system found ${similarIncidentCount} related RCA incident${similarIncidentCount === 1 ? '' : 's'} in the last ${windowDays} days.`
+    : `No related RCA history was found in the last ${windowDays} days, so the system recommends a low occurrence value until additional recurrence evidence is available.`;
+
+  return {
+    confidence,
+    currentOccurrence: targetIncident.riskFactors.occurrence,
+    evidence,
+    recommendedOccurrence,
+    reason,
+    similarIncidentCount,
+    source: 'RCA_HISTORY',
+    windowDays
+  };
 }
 
 export async function createRcaIncident(
@@ -790,6 +987,11 @@ export async function updateRcaIncident(
   input: RcaIncidentUpdateInput
 ): Promise<RcaIncident> {
   const { context, incidentRecord, incidentRef } = await getAuthorizedIncident(decodedToken, incidentId);
+
+  if (incidentRecord.status === 'CLOSED') {
+    throw validationError('This RCA is closed and can only be opened through a governed reopen workflow.');
+  }
+
   const nowIso = new Date().toISOString();
   const update: Record<string, unknown> = {
     updatedAt: fieldValue.serverTimestamp(),
@@ -798,6 +1000,24 @@ export async function updateRcaIncident(
 
   if (input.title !== undefined) {
     update.title = normalizeText(input.title, 'Untitled RCA incident', 180);
+  }
+
+  if (input.assetId !== undefined) {
+    update.assetId = normalizeText(input.assetId, 'Unassigned asset', 120);
+  }
+
+  if (input.riskFactors !== undefined) {
+    const riskFactors = normalizeRiskFactors({
+      ...incidentRecord.riskFactors,
+      ...input.riskFactors
+    });
+
+    update.riskFactors = riskFactors;
+    update.rpnScore = calculateRpn(riskFactors);
+  }
+
+  if (input.status !== undefined) {
+    update.status = normalizeIncidentStatus(input.status);
   }
 
   await incidentRef.set(update, { merge: true });
@@ -1028,6 +1248,7 @@ export async function createRcaNode(
 ): Promise<RcaNode> {
   const { context, incidentRecord, incidentRef, sessionRef, sessionRecord } = await getAuthorizedSession(decodedToken, incidentId, sessionId);
 
+  assertIncidentIsEditable(incidentRecord);
   assertSessionIsEditable(sessionRecord);
 
   const nodeRef = sessionRef.collection(RCA_NODES_COLLECTION).doc();
@@ -1048,7 +1269,7 @@ export async function createRcaNode(
 
   await assertIncidentNodeCreateOrder(sessionRef, nodeType, fiveWhysRole);
 
-  const dimensions = nodeType === 'STICKY_NOTE'
+  const dimensions = isAnnotationNodeType(nodeType)
     ? normalizeNodeDimensions(input.dimensions)
     : undefined;
   const record: RcaNodeRecord = {
@@ -1067,6 +1288,7 @@ export async function createRcaNode(
       ? Boolean(input.isRootCause || whyChain.length)
       : Boolean(input.isSuspectedCause || input.isRootCause),
     label: normalizeText(input.label, '', 240),
+    linkedNodeIds: normalizeLinkedNodeIds(input.linkedNodeIds),
     lockedAtIso: null,
     lockedBy: null,
     nodeType,
@@ -1115,6 +1337,7 @@ export async function updateRcaNode(
 ): Promise<RcaNode> {
   const { context, incidentRecord, incidentRef, sessionRecord, sessionRef } = await getAuthorizedSession(decodedToken, incidentId, sessionId);
 
+  assertIncidentIsEditable(incidentRecord);
   assertSessionIsEditable(sessionRecord);
 
   const nodeRef = sessionRef.collection(RCA_NODES_COLLECTION).doc(nodeId);
@@ -1180,6 +1403,10 @@ export async function updateRcaNode(
     update.connectionHandles = normalizeNodeConnectionHandles(input.connectionHandles);
   }
 
+  if (input.linkedNodeIds !== undefined) {
+    update.linkedNodeIds = normalizeLinkedNodeIds(input.linkedNodeIds);
+  }
+
   if (input.detailFields !== undefined) {
     update.detailFields = normalizeSystemManagedNodeDetailFields(
       nextFiveWhysRole,
@@ -1190,8 +1417,8 @@ export async function updateRcaNode(
     );
   }
 
-  if (input.dimensions !== undefined || nextNodeType !== 'STICKY_NOTE') {
-    const dimensions = nextNodeType === 'STICKY_NOTE'
+  if (input.dimensions !== undefined || !isAnnotationNodeType(nextNodeType)) {
+    const dimensions = isAnnotationNodeType(nextNodeType)
       ? normalizeNodeDimensions(input.dimensions)
       : undefined;
 
@@ -1309,8 +1536,9 @@ export async function deleteRcaNode(
   sessionId: string,
   nodeId: string
 ): Promise<void> {
-  const { context, sessionRecord, sessionRef } = await getAuthorizedSession(decodedToken, incidentId, sessionId);
+  const { context, incidentRecord, sessionRecord, sessionRef } = await getAuthorizedSession(decodedToken, incidentId, sessionId);
 
+  assertIncidentIsEditable(incidentRecord);
   assertSessionIsEditable(sessionRecord);
 
   const nodeRef = sessionRef.collection(RCA_NODES_COLLECTION).doc(nodeId);
@@ -1716,6 +1944,7 @@ function mapSession(id: string, record: RcaSessionRecord): RcaSession {
 function mapNode(id: string, record: RcaNodeRecord): RcaNode {
   const methodology = normalizeMethodology(record.uiCoordinates?.layoutMethodology || 'ISHIKAWA');
   const nodeType = normalizeNodeType(record.nodeType || (methodology === '5_WHYS' ? 'WHY' : 'CAUSE'));
+  const fiveWhysRole = nodeType === 'WHY' ? normalizeFiveWhysRole(record.fiveWhysRole) : null;
 
   return {
     attachedEvidence: Array.isArray(record.attachedEvidence) ? record.attachedEvidence : [],
@@ -1729,14 +1958,15 @@ function mapNode(id: string, record: RcaNodeRecord): RcaNode {
       uid: record.createdByUid
     } : null,
     createdAtIso: toIso(record.createdAtIso || record.createdAt),
-    detailFields: normalizeNodeDetailFields(record.detailFields),
-    dimensions: nodeType === 'STICKY_NOTE' ? normalizeNodeDimensions(record.dimensions) : undefined,
+    detailFields: normalizeActiveNodeDetailFields(fiveWhysRole, record.detailFields),
+    dimensions: isAnnotationNodeType(nodeType) ? normalizeNodeDimensions(record.dimensions) : undefined,
     edgeStyle: normalizeEdgeStyle(record.edgeStyle),
-    fiveWhysRole: nodeType === 'WHY' ? normalizeFiveWhysRole(record.fiveWhysRole) : null,
+    fiveWhysRole,
     id,
     isRootCause: Boolean(record.isRootCause),
     isSuspectedCause: Boolean(record.isSuspectedCause || record.isRootCause),
     label: record.label || '',
+    linkedNodeIds: normalizeLinkedNodeIds(record.linkedNodeIds),
     lockedAtIso: toIso(record.lockedAtIso || record.lockedAt),
     lockedBy: record.lockedBy || null,
     nodeType,
@@ -1921,14 +2151,14 @@ function getActivityNodePrimaryText(node: RcaNode): string {
     return directLabel;
   }
 
-  const fields = node.detailFields || {};
   const role = node.nodeType === 'WHY' ? normalizeFiveWhysRole(node.fiveWhysRole) : null;
+  const fields = removeDeprecatedNodeDetailFields(role, node.detailFields || {});
   const preferredKeys = role === 'INCIDENT_DETAILS'
     ? ['whereDidItHappen', 'whenDidItHappen', 'whoWasInvolved', 'detailedDescription', 'whatHappened']
     : role === 'INCIDENT'
       ? ['incidentTitle', 'lineMachineProcess', 'areaLocation', 'dateOfIncident', 'incidentDescription']
       : role === 'PROBLEM'
-        ? ['problemStatement', 'problemLocation', 'knownFacts']
+        ? ['problemStatement', 'expectedStandard', 'actualCondition', 'measurableGap', 'analysisScope']
         : [];
   const preferredValues = preferredKeys
     .map((key) => normalizeText(fields[key], '', 80))
@@ -2051,7 +2281,7 @@ function formatNodeType(nodeType: RcaNodeType): string {
   }
 
   if (nodeType === 'WHY') {
-    return 'Why';
+    return 'RCA stage';
   }
 
   if (nodeType === 'SUB_CAUSE') {
@@ -2060,6 +2290,10 @@ function formatNodeType(nodeType: RcaNodeType): string {
 
   if (nodeType === 'STICKY_NOTE') {
     return 'Sticky note';
+  }
+
+  if (nodeType === 'COMMENT') {
+    return 'Comment';
   }
 
   return 'Cause';
@@ -2100,8 +2334,69 @@ function normalizeRiskFactor(value: unknown, fallback: number): number {
   return Math.min(10, Math.max(1, Math.round(numericValue)));
 }
 
+function clampRiskFactor(value: number): number {
+  return Math.min(10, Math.max(1, Math.round(value)));
+}
+
 function calculateRpn(riskFactors: RcaRiskFactors): number {
   return riskFactors.severity * riskFactors.occurrence * riskFactors.detection;
+}
+
+function normalizeComparableText(value: string | null | undefined): string {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isUnassignedAssetText(value: string): boolean {
+  return !value || value === 'unassigned asset' || value === 'asset not assigned';
+}
+
+function tokenizeComparableText(value: string | null | undefined): Set<string> {
+  const stopWords = new Set(['a', 'an', 'and', 'are', 'as', 'at', 'from', 'in', 'is', 'of', 'on', 'or', 'the', 'to', 'under', 'with']);
+
+  return new Set(
+    normalizeComparableText(value)
+      .split(' ')
+      .filter((token) => token.length >= 3 && !stopWords.has(token))
+  );
+}
+
+function countTokenOverlap(firstTokens: Set<string>, secondTokens: Set<string>): number {
+  let count = 0;
+
+  firstTokens.forEach((token) => {
+    if (secondTokens.has(token)) {
+      count += 1;
+    }
+  });
+
+  return count;
+}
+
+function formatRelativeIncidentAge(value: string, compareDate: Date): string {
+  const date = new Date(value);
+
+  if (!Number.isFinite(date.getTime())) {
+    return 'date unavailable';
+  }
+
+  const dayDelta = Math.round((compareDate.getTime() - date.getTime()) / 86_400_000);
+
+  if (dayDelta === 0) {
+    return 'same day';
+  }
+
+  if (dayDelta > 0) {
+    return `${dayDelta} day${dayDelta === 1 ? '' : 's'} before`;
+  }
+
+  const daysAfter = Math.abs(dayDelta);
+
+  return `${daysAfter} day${daysAfter === 1 ? '' : 's'} after`;
 }
 
 function normalizeCoordinates(
@@ -2295,7 +2590,7 @@ function hasCompletedFiveWhys(whyChain: string[]): boolean {
 
 function assertRootCauseReady(_attachedEvidence: RcaAttachedEvidence[], whyChain: string[]): void {
   if (!hasCompletedFiveWhys(whyChain)) {
-    throw validationError('Complete the 5 Whys before confirming a root cause.');
+    throw validationError('Complete the 5 Whys before confirming a cause.');
   }
 }
 
@@ -2334,12 +2629,17 @@ function normalizeNodeType(nodeType: unknown): RcaNodeType {
     nodeType === 'CAUSE' ||
     nodeType === 'SUB_CAUSE' ||
     nodeType === 'FAULT_GATE' ||
-    nodeType === 'STICKY_NOTE'
+    nodeType === 'STICKY_NOTE' ||
+    nodeType === 'COMMENT'
   ) {
     return nodeType;
   }
 
   return 'WHY';
+}
+
+function isAnnotationNodeType(nodeType: RcaNodeType): boolean {
+  return nodeType === 'STICKY_NOTE' || nodeType === 'COMMENT';
 }
 
 function normalizeFiveWhysRole(role: unknown): RcaFiveWhysNodeRole | null {
@@ -2429,9 +2729,39 @@ function normalizeSystemManagedNodeDetailFields(
   }
 
   return {
-    ...editableFields,
+    ...removeDeprecatedNodeDetailFields(role, editableFields),
     ...getSystemManagedNodeDetailFields(role, incidentId, incidentRecord, normalizeNodeDetailFields(existingFields))
   };
+}
+
+function normalizeActiveNodeDetailFields(
+  role: RcaFiveWhysNodeRole | null,
+  value: unknown
+): Record<string, string> {
+  return removeDeprecatedNodeDetailFields(role, normalizeNodeDetailFields(value));
+}
+
+function removeDeprecatedNodeDetailFields(
+  role: RcaFiveWhysNodeRole | null,
+  fields: Record<string, string>
+): Record<string, string> {
+  const deprecatedKeys = new Set(RCA_DEPRECATED_NODE_DETAIL_FIELD_KEYS[role || 'FIVE_WHYS'] || []);
+
+  if (!deprecatedKeys.size) {
+    return fields;
+  }
+
+  const nextFields: Record<string, string> = {};
+
+  for (const [key, value] of Object.entries(fields)) {
+    if (deprecatedKeys.has(key) || deprecatedKeys.has(key.replace(/OtherText$/, ''))) {
+      continue;
+    }
+
+    nextFields[key] = value;
+  }
+
+  return nextFields;
 }
 
 async function assertIncidentNodeCreateOrder(
@@ -2499,6 +2829,17 @@ function normalizeNodeConnectionHandles(value: unknown): RcaNodeConnectionHandle
   }
 
   return connectionHandles;
+}
+
+function normalizeLinkedNodeIds(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return [...new Set(value
+    .map((item) => normalizeText(item, '', 128))
+    .filter((item) => /^[A-Za-z0-9_-]{8,128}$/.test(item))
+  )].slice(0, 40);
 }
 
 function normalizeVisualStyle(style: unknown): RcaNodeVisualStyle {
@@ -2584,6 +2925,12 @@ function normalizeEdgeStyle(style: unknown): RcaNodeEdgeStyle {
 function assertSessionIsEditable(session: RcaSessionRecord): void {
   if (session.status === 'CLOSED' || session.status === 'COMPLETED') {
     throw validationError('This RCA session is closed and cannot be edited.');
+  }
+}
+
+function assertIncidentIsEditable(incident: RcaIncidentRecord): void {
+  if (incident.status === 'CLOSED') {
+    throw validationError('This Root Cause Analysis is closed and is available in view mode only.');
   }
 }
 

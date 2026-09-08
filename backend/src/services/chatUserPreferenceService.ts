@@ -22,6 +22,7 @@ export interface ChatUserPreference {
   isFavorite: boolean;
   isPinned: boolean;
   isSpam: boolean;
+  permanentlyDeletedAtMs: number | null;
   spammedAtMs: number | null;
   tenantId: string;
   trashSegments: ChatTrashSegment[];
@@ -47,6 +48,7 @@ interface ChatUserPreferenceRecord {
   isFavorite?: boolean;
   isPinned?: boolean;
   isSpam?: boolean;
+  permanentlyDeletedAtMs?: number | null;
   spammedAtMs?: number | null;
   tenantId?: string;
   trashSegments?: unknown;
@@ -75,6 +77,7 @@ export function getDefaultChatUserPreference(
     isFavorite: false,
     isPinned: false,
     isSpam: false,
+    permanentlyDeletedAtMs: null,
     spammedAtMs: null,
     tenantId,
     trashSegments: [],
@@ -291,6 +294,9 @@ function normalizeChatUserPreference(
   const spammedAtMs = Number.isFinite(record?.spammedAtMs)
     ? Math.max(Math.round(record?.spammedAtMs || 0), 0)
     : null;
+  const permanentlyDeletedAtMs = Number.isFinite(record?.permanentlyDeletedAtMs)
+    ? Math.max(Math.round(record?.permanentlyDeletedAtMs || 0), 0)
+    : null;
   const trashSegments = normalizeTrashSegments(record?.trashSegments);
   const isLegacyTrashActive = record?.isSpam === true &&
     (!spammedAtMs || spammedAtMs + TRASH_RETENTION_MS > Date.now());
@@ -304,6 +310,7 @@ function normalizeChatUserPreference(
     isFavorite: record?.isFavorite === true,
     isPinned: record?.isPinned === true,
     isSpam: isLegacyTrashActive,
+    permanentlyDeletedAtMs,
     spammedAtMs,
     tenantId,
     trashSegments,

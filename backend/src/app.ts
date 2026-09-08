@@ -3,6 +3,8 @@ import express, { ErrorRequestHandler } from 'express';
 import helmet from 'helmet';
 import { env } from './config/env.js';
 import { adminRouter } from './routes/adminRoutes.js';
+import { actionRouter } from './routes/actionRoutes.js';
+import { announcementRouter } from './routes/announcementRoutes.js';
 import { authRouter } from './routes/authRoutes.js';
 import { interpreterRouter } from './routes/interpreterRoutes.js';
 import { lswRouter } from './routes/lswRoutes.js';
@@ -10,6 +12,10 @@ import { profileRouter } from './routes/profileRoutes.js';
 import { railsRouter } from './routes/railsRoutes.js';
 import { rcaRouter } from './routes/rcaRoutes.js';
 import { getHealthStatus } from './services/monitoringService.js';
+import { contactRouter } from './routes/contactRoutes.js';
+import { schedulerRouter } from './routes/schedulerRoutes.js';
+import { staffRouter } from './routes/staffRoutes.js';
+import { complianceRouter } from './routes/complianceRoutes.js';
 
 export function createSynzappApp() {
   const app = express();
@@ -18,7 +24,10 @@ export function createSynzappApp() {
   app.use(helmet({
     crossOriginResourcePolicy: { policy: 'cross-origin' }
   }));
-  app.use(cors({ origin: env.corsOrigin === '*' ? true : env.corsOrigin }));
+  app.use(cors({
+    exposedHeaders: ['Content-Disposition'],
+    origin: env.corsOrigin === '*' ? true : env.corsOrigin
+  }));
   app.use(express.json({ limit: '5mb' }));
 
   app.get('/health', (_req, res) => {
@@ -41,6 +50,12 @@ export function createSynzappApp() {
   app.use('/api/lsw', lswRouter);
   app.use('/api/profile', profileRouter);
   app.use('/api/rails', railsRouter);
+  app.use('/api/announcements', announcementRouter);
+  app.use('/api/actions', actionRouter);
+  app.use('/api/compliance', complianceRouter);
+  app.use('/api/contact', contactRouter);
+  app.use('/api/scheduler', schedulerRouter);
+  app.use('/api/staff', staffRouter);
   app.use('/api/rca', rcaRouter);
   app.use(errorHandler);
 
@@ -74,12 +89,31 @@ export const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
   }
 
   if (error?.name === 'RateLimitError') {
+    const retryAfterSeconds = Number((error as Error & { retryAfterSeconds?: number }).retryAfterSeconds);
+
+    if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
+      res.setHeader('Retry-After', String(Math.ceil(retryAfterSeconds)));
+      res.status(429).json({
+        error: error.message,
+        retryAfterSeconds: Math.ceil(retryAfterSeconds)
+      });
+      return;
+    }
+
     res.status(429).json({ error: error.message });
     return;
   }
 
   if (error?.name === 'TranslationServiceError') {
-    res.status(503).json({ error: error.message });
+    const statusCode = Number((error as Error & { statusCode?: number }).statusCode);
+    res.status(Number.isInteger(statusCode) && statusCode >= 400 && statusCode < 600 ? statusCode : 503).json({
+      error: error.message
+    });
+    return;
+  }
+
+  if (error?.name === 'AiPolicyDeniedError') {
+    res.status(403).json({ error: error.message });
     return;
   }
 

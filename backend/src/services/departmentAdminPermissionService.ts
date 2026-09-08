@@ -261,6 +261,7 @@ function mapApprovedEmployee(
     departmentId: record.departmentId || '',
     departmentName: record.departmentName || 'Department',
     displayName: record.displayName || null,
+    employeeUid: record.employeeUid || record.claimedByUid || null,
     phoneLast4: record.phoneLast4 || '',
     phoneMasked: record.phoneMasked || '*****',
     profilePhotoCacheKey: record.profilePhotoStoragePath

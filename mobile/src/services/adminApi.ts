@@ -1,6 +1,10 @@
 import { getSynzappApiBaseUrl, normalizeSynzappApiUrl } from './apiConfig';
 import { getRegisteredDeviceHeaders } from './deviceIdentity';
 import type { ChatBackupPolicy } from './chatBackup';
+import {
+  normalizeChatOfflinePolicySettings,
+  type ChatOfflinePolicySettings
+} from './chatOfflineSettings';
 
 export interface TenantDepartment {
   departmentId: string;
@@ -47,6 +51,7 @@ export interface ApprovedEmployee {
   departmentId: string;
   departmentName: string;
   displayName: string | null;
+  employeeUid: string | null;
   phoneFormatted?: string | null;
   phoneLast4: string;
   phoneMasked: string;
@@ -150,6 +155,98 @@ export interface OrganizationDeletionResult {
   deleted: boolean;
   revokedUserCount: number;
   tenantId: string;
+}
+
+export type AiUsageFeatureId =
+  | 'chat_translation'
+  | 'interpreter_realtime'
+  | 'interpreter_segment_translation'
+  | 'interpreter_spoken_summary'
+  | 'interpreter_summary'
+  | 'interpreter_transcript_audio'
+  | 'interpreter_voice_preview'
+  | 'lsw_ai'
+  | 'rails_ai'
+  | 'rca_ai';
+
+export interface TenantAiFeatureCatalogItem {
+  featureId: AiUsageFeatureId;
+  label: string;
+}
+
+export interface TenantAiScopePolicy {
+  enabled: boolean;
+  hardLimitEnabled: boolean;
+  monthlyBudgetUsd: number | null;
+  updatedAtIso: string | null;
+  updatedByUid: string | null;
+}
+
+export interface TenantAiFeaturePolicy extends TenantAiScopePolicy {
+  featureId: AiUsageFeatureId;
+}
+
+export interface TenantAiPolicy {
+  companyAiEnabled: boolean;
+  createdAtIso: string;
+  departmentPolicies: Record<string, TenantAiScopePolicy>;
+  disabledReason: string | null;
+  employeePolicies: Record<string, TenantAiScopePolicy>;
+  featurePolicies: Record<string, TenantAiFeaturePolicy>;
+  hardLimitEnabled: boolean;
+  monthlyBudgetUsd: number | null;
+  softWarningPercent: number;
+  tenantId: string;
+  updatedAtIso: string;
+  updatedByUid: string | null;
+}
+
+export interface AiUsageBreakdownRow {
+  enabled?: boolean;
+  estimatedCostUsd: number;
+  id: string;
+  label: string;
+  requestCount: number;
+  status?: string;
+}
+
+export interface TenantAiUsageSummary {
+  budget: {
+    hardLimitEnabled: boolean;
+    monthlyBudgetUsd: number | null;
+    remainingBudgetUsd: number | null;
+    softWarningPercent: number;
+  };
+  generatedAudioSeconds: number;
+  period: {
+    endDate: string;
+    label: string;
+    month: string;
+    startDate: string;
+  };
+  status: 'ai_disabled' | 'approaching_budget' | 'budget_reached' | 'healthy';
+  totals: {
+    audioInputTokens: number;
+    audioOutputTokens: number;
+    estimatedCostUsd: number;
+    failedRequests: number;
+    inputTokens: number;
+    outputTokens: number;
+    requests: number;
+    successfulRequests: number;
+  };
+}
+
+export interface TenantAiUsageDashboard {
+  breakdowns: {
+    departments: AiUsageBreakdownRow[];
+    employees: AiUsageBreakdownRow[];
+    failures: AiUsageBreakdownRow[];
+    features: AiUsageBreakdownRow[];
+    meetings: AiUsageBreakdownRow[];
+  };
+  policy: TenantAiPolicy;
+  summary: TenantAiUsageSummary;
 }
 
 interface CreateTenantRecordInput {
@@ -472,6 +569,127 @@ export async function updateEmployeeDepartmentAdminPermissions(input: {
   return normalizeApprovedEmployee(body.employee);
 }
 
+/**
+ * What is waiting to be sent across the organization.
+ *
+ * Metadata only, by design of the endpoint behind it: who scheduled it, for
+ * whom, and when. **Never what it says.** An admin who can stop a message must
+ * not be able to read a colleague's unsent words, and the response this parses
+ * carries no ciphertext to make that possible even by accident.
+ */
+export interface ActionReminderPolicy {
+  escalateOverdueAfterHours: number | null;
+  firstReminderHour: number;
+  frequency: 'OFF' | 'ONCE' | 'TWICE';
+  secondReminderHour: number;
+  timeZone: string;
+  updatedAt: string | null;
+  updatedByUid: string | null;
+  workingHoursEndHour: number;
+  workingHoursStartHour: number;
+}
+
+export async function getActionReminderPolicy(idToken: string): Promise<ActionReminderPolicy> {
+  const response = await adminFetch('/api/admin/action-reminder-policy', idToken);
+  const body = await response.json() as { policy: ActionReminderPolicy };
+
+  return body.policy;
+}
+
+export async function updateActionReminderPolicy(input: {
+  idToken: string;
+  policy: Omit<ActionReminderPolicy, 'updatedAt' | 'updatedByUid'>;
+}): Promise<ActionReminderPolicy> {
+  const response = await adminFetch('/api/admin/action-reminder-policy', input.idToken, {
+    body: JSON.stringify(input.policy),
+    method: 'PATCH'
+  });
+  const body = await response.json() as { policy: ActionReminderPolicy };
+
+  return body.policy;
+}
+
+export async function listTenantScheduledMessages(idToken: string): Promise<TenantScheduledMessage[]> {
+  const response = await adminFetch('/api/admin/scheduled-messages', idToken);
+  const body = await response.json() as { scheduledMessages?: TenantScheduledMessage[] };
+
+  return body.scheduledMessages || [];
+}
+
+/**
+ * Stops somebody's message, with a reason they will be shown.
+ *
+ * The reason is not optional and is not paperwork: the person who wrote the
+ * message reads it. An administrator who has to explain themselves to the
+ * person affected acts differently from one who can act invisibly, and that
+ * difference is the safeguard on a power that would otherwise be silent.
+ */
+export async function cancelTenantScheduledMessage(input: {
+  idToken: string;
+  reason: string;
+  scheduledMessageId: string;
+}): Promise<void> {
+  await adminFetch(
+    `/api/admin/scheduled-messages/${encodeURIComponent(input.scheduledMessageId)}/cancel`,
+    input.idToken,
+    {
+      body: JSON.stringify({ reason: input.reason }),
+      method: 'POST'
+    }
+  );
+}
+
+export async function getScheduledMessagePolicy(idToken: string): Promise<ScheduledMessagePolicy> {
+  const response = await adminFetch('/api/admin/scheduled-message-policy', idToken);
+  const body = await response.json() as { policy: ScheduledMessagePolicy };
+
+  return body.policy;
+}
+
+export async function updateScheduledMessagePolicy(input: {
+  idToken: string;
+  policy: {
+    adminVisibilityEnabled: boolean;
+    enabled: boolean;
+    maxDaysAhead: number;
+    maxPendingPerUser: number;
+  };
+}): Promise<ScheduledMessagePolicy> {
+  const response = await adminFetch('/api/admin/scheduled-message-policy', input.idToken, {
+    body: JSON.stringify(input.policy),
+    method: 'PATCH'
+  });
+  const body = await response.json() as { policy: ScheduledMessagePolicy };
+
+  return body.policy;
+}
+
+/** Deliberately has no field that could carry the message itself. */
+export interface TenantScheduledMessage {
+  conversationId: string;
+  createdAt: string | null;
+  departmentId: string;
+  departmentName: string;
+  recipientName: string;
+  recipientUid: string;
+  releaseAt: string;
+  releaseAtMs: number;
+  scheduledMessageId: string;
+  senderName: string;
+  senderUid: string;
+  status: string;
+  timeZone: string;
+}
+
+export interface ScheduledMessagePolicy {
+  adminVisibilityEnabled: boolean;
+  enabled: boolean;
+  maxDaysAhead: number;
+  maxPendingPerUser: number;
+  updatedAt: string | null;
+  updatedByUid: string | null;
+}
+
 export async function listTenantDevices(idToken: string): Promise<TenantDevice[]> {
   const response = await adminFetch('/api/admin/devices', idToken);
   const body = await response.json() as { devices?: TenantDevice[] };
@@ -516,6 +734,170 @@ export async function updateTenantChatBackupPolicy(input: {
   return body.policy;
 }
 
+export async function getTenantChatOfflinePolicy(idToken: string): Promise<ChatOfflinePolicySettings> {
+  const response = await adminFetch('/api/admin/chat-offline-policy', idToken);
+  const body = await response.json() as { policy: ChatOfflinePolicySettings };
+
+  return normalizeChatOfflinePolicy(body.policy);
+}
+
+export async function updateTenantChatOfflinePolicy(input: {
+  cacheRetentionDays: number;
+  fullMediaCacheBudgetBytes: number;
+  idToken: string;
+  mediaLimitBytes: ChatOfflinePolicySettings['mediaLimitBytes'];
+  offlineMediaCacheAllowed: boolean;
+  purgeOnSignOut: boolean;
+  wifiOnlyMediaPrefetch: boolean;
+}): Promise<ChatOfflinePolicySettings> {
+  const response = await adminFetch('/api/admin/chat-offline-policy', input.idToken, {
+    body: JSON.stringify({
+      cacheRetentionDays: input.cacheRetentionDays,
+      fullMediaCacheBudgetBytes: input.fullMediaCacheBudgetBytes,
+      mediaLimitBytes: input.mediaLimitBytes,
+      offlineMediaCacheAllowed: input.offlineMediaCacheAllowed,
+      purgeOnSignOut: input.purgeOnSignOut,
+      wifiOnlyMediaPrefetch: input.wifiOnlyMediaPrefetch
+    }),
+    method: 'PATCH'
+  });
+  const body = await response.json() as { policy: ChatOfflinePolicySettings };
+
+  return normalizeChatOfflinePolicy(body.policy);
+}
+
+export async function getTenantAiUsageDashboard(idToken: string, month?: string): Promise<TenantAiUsageDashboard> {
+  const query = month ? `?month=${encodeURIComponent(month)}` : '';
+  const response = await adminFetch(`/api/admin/ai-usage/summary${query}`, idToken);
+  const body = await response.json() as { dashboard: TenantAiUsageDashboard };
+
+  return body.dashboard;
+}
+
+export async function getTenantAiPolicy(idToken: string): Promise<{
+  features: TenantAiFeatureCatalogItem[];
+  policy: TenantAiPolicy;
+}> {
+  const response = await adminFetch('/api/admin/ai-policy', idToken);
+  const body = await response.json() as {
+    features?: TenantAiFeatureCatalogItem[];
+    policy: TenantAiPolicy;
+  };
+
+  return {
+    features: body.features || [],
+    policy: body.policy
+  };
+}
+
+export async function updateTenantCompanyAiPolicy(input: {
+  enabled: boolean;
+  idToken: string;
+  reason?: string;
+}): Promise<TenantAiPolicy> {
+  const response = await adminFetch('/api/admin/ai-policy/company', input.idToken, {
+    body: JSON.stringify({
+      enabled: input.enabled,
+      reason: input.reason
+    }),
+    method: 'PATCH'
+  });
+  const body = await response.json() as { policy: TenantAiPolicy };
+
+  return body.policy;
+}
+
+export async function updateTenantAiBudgetPolicy(input: {
+  hardLimitEnabled: boolean;
+  idToken: string;
+  monthlyBudgetUsd: number | null;
+  softWarningPercent: number;
+}): Promise<TenantAiPolicy> {
+  const response = await adminFetch('/api/admin/ai-policy/budget', input.idToken, {
+    body: JSON.stringify({
+      hardLimitEnabled: input.hardLimitEnabled,
+      monthlyBudgetUsd: input.monthlyBudgetUsd,
+      softWarningPercent: input.softWarningPercent
+    }),
+    method: 'PATCH'
+  });
+  const body = await response.json() as { policy: TenantAiPolicy };
+
+  return body.policy;
+}
+
+export async function updateTenantAiFeaturePolicy(input: {
+  enabled: boolean;
+  featureId: AiUsageFeatureId;
+  hardLimitEnabled?: boolean;
+  idToken: string;
+  monthlyBudgetUsd?: number | null;
+}): Promise<TenantAiPolicy> {
+  const response = await adminFetch(
+    `/api/admin/ai-policy/features/${encodeURIComponent(input.featureId)}`,
+    input.idToken,
+    {
+      body: JSON.stringify({
+        enabled: input.enabled,
+        hardLimitEnabled: input.hardLimitEnabled,
+        monthlyBudgetUsd: input.monthlyBudgetUsd
+      }),
+      method: 'PATCH'
+    }
+  );
+  const body = await response.json() as { policy: TenantAiPolicy };
+
+  return body.policy;
+}
+
+export async function updateTenantAiDepartmentPolicy(input: {
+  departmentId: string;
+  enabled: boolean;
+  hardLimitEnabled?: boolean;
+  idToken: string;
+  monthlyBudgetUsd?: number | null;
+}): Promise<TenantAiPolicy> {
+  const response = await adminFetch(
+    `/api/admin/ai-policy/departments/${encodeURIComponent(input.departmentId)}`,
+    input.idToken,
+    {
+      body: JSON.stringify({
+        enabled: input.enabled,
+        hardLimitEnabled: input.hardLimitEnabled,
+        monthlyBudgetUsd: input.monthlyBudgetUsd
+      }),
+      method: 'PATCH'
+    }
+  );
+  const body = await response.json() as { policy: TenantAiPolicy };
+
+  return body.policy;
+}
+
+export async function updateTenantAiEmployeePolicy(input: {
+  employeeUid: string;
+  enabled: boolean;
+  hardLimitEnabled?: boolean;
+  idToken: string;
+  monthlyBudgetUsd?: number | null;
+}): Promise<TenantAiPolicy> {
+  const response = await adminFetch(
+    `/api/admin/ai-policy/employees/${encodeURIComponent(input.employeeUid)}`,
+    input.idToken,
+    {
+      body: JSON.stringify({
+        enabled: input.enabled,
+        hardLimitEnabled: input.hardLimitEnabled,
+        monthlyBudgetUsd: input.monthlyBudgetUsd
+      }),
+      method: 'PATCH'
+    }
+  );
+  const body = await response.json() as { policy: TenantAiPolicy };
+
+  return body.policy;
+}
+
 async function adminFetch(path: string, idToken: string, init: RequestInit = {}): Promise<Response> {
   const deviceHeaders = await getRegisteredDeviceHeaders(idToken);
   const response = await fetch(`${getSynzappApiBaseUrl()}${path}`, {
@@ -554,9 +936,23 @@ function normalizeApprovedEmployee(employee: ApprovedEmployee): ApprovedEmployee
   return {
     ...employee,
     departmentAdminPermissions: employee.departmentAdminPermissions || [],
+    employeeUid: employee.employeeUid || null,
     permissions: employee.permissions || [],
     profilePhotoUrl: normalizeSynzappApiUrl(employee.profilePhotoUrl)
   };
+}
+
+function normalizeChatOfflinePolicy(policy: ChatOfflinePolicySettings): ChatOfflinePolicySettings {
+  return normalizeChatOfflinePolicySettings({
+    cacheRetentionDays: policy.cacheRetentionDays,
+    fullMediaCacheBudgetBytes: policy.fullMediaCacheBudgetBytes,
+    mediaLimitBytes: policy.mediaLimitBytes,
+    offlineMediaCacheAllowed: policy.offlineMediaCacheAllowed,
+    purgeOnSignOut: policy.purgeOnSignOut,
+    updatedAt: policy.updatedAt || '',
+    version: 1,
+    wifiOnlyMediaPrefetch: policy.wifiOnlyMediaPrefetch
+  });
 }
 
 function normalizeCompanyProfile(profile: CompanyProfile): CompanyProfile {

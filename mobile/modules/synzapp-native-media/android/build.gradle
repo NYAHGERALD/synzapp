@@ -1,0 +1,16 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'com.synzapp.nativemedia'
+version = '0.1.0'
+
+android {
+  namespace "com.synzapp.nativemedia"
+
+  defaultConfig {
+    versionCode 1
+    versionName '0.1.0'
+  }
+}

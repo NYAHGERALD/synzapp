@@ -1,3 +1,23 @@
+/**
+ * SYNZAPP COLOUR RULE. Read this before changing any screen.
+ *
+ *   The entire background is `groupedBackground`. Headers, footers, page
+ *   bodies, empty space: all of it.
+ *
+ *   The ONLY things that are `groupedCard` are:
+ *     - cards with rounded corners
+ *     - the floating footer navigation bar
+ *
+ * Light: background #F2F2F6, cards #FFFFFF.
+ * Dark:  background #000000, cards #1C1C1E.
+ *
+ * A screen with a white page and a grey panel on it is the rule applied
+ * upside down, and has been shipped that way once already. If a surface is
+ * not a rounded card, it is not white.
+ *
+ * The rest of the layout rules live in SYNZAPP_APP_STYLE.md at the repo root.
+ */
+
 export type AppColorScheme = 'dark' | 'light';
 
 export interface AppColors {
@@ -15,8 +35,14 @@ export interface AppColors {
   divider: string;
   footer: string;
   footerActive: string;
+  /** The tinted ground a grouped card list sits on. */
+  groupedBackground: string;
+  /** A card on that ground. Must stay clearly lighter than it in both themes. */
+  groupedCard: string;
   input: string;
   ink: string;
+  /** Tinted text that acts as a button. The platform's own link blue. */
+  link: string;
   muted: string;
   mutedStrong: string;
   overlay: string;
@@ -26,6 +52,9 @@ export interface AppColors {
   red: string;
   redSoft: string;
   screen: string;
+  /** The hairline between rows in a card. Stronger than `divider`, which is
+      used for heavier borders elsewhere. */
+  separator: string;
   success: string;
   successSoft: string;
   surface: string;
@@ -47,8 +76,11 @@ export const lightColors: AppColors = {
   divider: '#E5E7EB',
   footer: '#FFFFFF',
   footerActive: '#EEF2FF',
+  groupedBackground: '#F2F2F6',
+  groupedCard: '#FFFFFF',
   input: '#FBFCFE',
   ink: '#111827',
+  link: '#0079FE',
   muted: '#5D6675',
   mutedStrong: '#334155',
   overlay: 'rgba(15, 23, 42, 0.24)',
@@ -58,6 +90,7 @@ export const lightColors: AppColors = {
   red: '#B91C1C',
   redSoft: '#FEE2E2',
   screen: '#FFFFFF',
+  separator: '#DCDCE0',
   success: '#047857',
   successSoft: '#DCFCE7',
   surface: '#F4F6F8',
@@ -78,9 +111,12 @@ export const darkColors: AppColors = {
   destructive: '#F87171',
   divider: '#242424',
   footer: '#080808',
+  groupedBackground: '#000000',
+  groupedCard: '#1C1C1E',
   footerActive: '#063B34',
   input: '#111111',
   ink: '#F8FAFC',
+  link: '#0A84FF',
   muted: '#A1A1AA',
   mutedStrong: '#D4D4D8',
   overlay: 'rgba(0, 0, 0, 0.62)',
@@ -90,6 +126,7 @@ export const darkColors: AppColors = {
   red: '#F87171',
   redSoft: '#2A0F0F',
   screen: '#000000',
+  separator: '#2C2C2E',
   success: '#22C55E',
   successSoft: '#052E1B',
   surface: '#0A0A0A',

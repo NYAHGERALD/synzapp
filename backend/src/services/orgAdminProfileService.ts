@@ -17,9 +17,20 @@ import {
   HUMAN_RESOURCES_DEPARTMENT_NAME
 } from './tenantDefaults.js';
 
+export interface CompanyAddressParts {
+  city?: string;
+  countryCode?: string;
+  line1?: string;
+  line2?: string;
+  postalCode?: string;
+  region?: string;
+}
+
 interface CreateOrgAdminProfileInput {
   companyName: string;
   companyAddress: string;
+  companyAddressParts?: CompanyAddressParts;
+  companyEmail?: string;
   adminFirstName: string;
   adminLastName: string;
   calendarYearStartDate: string;
@@ -105,6 +116,17 @@ export async function createOrgAdminProfile(
 
     transaction.set(organizationRef, {
       companyAddress: input.companyAddress.trim(),
+      companyAddressParts: input.companyAddressParts
+        ? {
+            city: (input.companyAddressParts.city || '').trim().slice(0, 120),
+            countryCode: (input.companyAddressParts.countryCode || '').trim().slice(0, 2),
+            line1: (input.companyAddressParts.line1 || '').trim().slice(0, 200),
+            line2: (input.companyAddressParts.line2 || '').trim().slice(0, 200),
+            postalCode: (input.companyAddressParts.postalCode || '').trim().slice(0, 20),
+            region: (input.companyAddressParts.region || '').trim().slice(0, 120)
+          }
+        : null,
+      companyEmail: (input.companyEmail || '').trim().slice(0, 320) || null,
       chatBackupPolicy: {
         adminApprovalRequired: true,
         encryptedBackupsEnabled: false,

@@ -11,7 +11,8 @@ import {
 import { writeAuditEvent } from '../services/auditService.js';
 import {
   getCurrentUserProfile,
-  getCurrentUserProfilePhoto
+  getCurrentUserProfilePhoto,
+  getTenantUserProfilePhoto
 } from '../services/userProfileService.js';
 import { maskPhoneNumber } from '../utils/phone.js';
 
@@ -167,7 +168,10 @@ authRouter.get('/web-profile/photo', verifyAppCheck, async (req, res, next) => {
     }
 
     const decodedToken = await verifyFirebaseSession(idToken);
-    const profilePhoto = await getCurrentUserProfilePhoto(decodedToken);
+    const requestedUid = typeof req.query.uid === 'string' ? req.query.uid.trim() : '';
+    const profilePhoto = requestedUid
+      ? await getTenantUserProfilePhoto(decodedToken, requestedUid)
+      : await getCurrentUserProfilePhoto(decodedToken);
     const etag = `"${profilePhoto.cacheKey}"`;
 
     res.setHeader('Cache-Control', 'no-store, private');

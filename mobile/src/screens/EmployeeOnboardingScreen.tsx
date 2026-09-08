@@ -393,8 +393,8 @@ function createStyles(colors: AppColors) {
     marginBottom: 18
   },
   splashLogo: {
-    height: 76,
-    width: 230
+    height: 58,
+    width: 178
   },
   header: {
     gap: 8

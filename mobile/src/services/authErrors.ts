@@ -1,8 +1,9 @@
-import { ACCESS_DENIED_MESSAGE } from './backendAuth';
+import { ACCESS_DENIED_MESSAGE, isAuthRateLimitError } from './backendAuth';
 
 interface FirebaseLikeError {
   code?: string;
   message?: string;
+  retryAfterSeconds?: number | null;
 }
 
 export function getUserAuthMessage(error: unknown, fallback = 'We could not complete sign-in. Please try again.'): string {
@@ -14,6 +15,11 @@ export function getUserAuthMessage(error: unknown, fallback = 'We could not comp
   const code = authError?.code || '';
   const message = authError?.message || '';
   const combined = `${code} ${message}`.toLowerCase();
+  const retryAfterSeconds = getRetryAfterSeconds(authError?.retryAfterSeconds);
+
+  if (isAuthRateLimitError(error)) {
+    return message || getPhoneSignInPausedMessage(retryAfterSeconds);
+  }
 
   if (/cancel/.test(combined)) {
     return 'Verification was cancelled.';
@@ -32,7 +38,7 @@ export function getUserAuthMessage(error: unknown, fallback = 'We could not comp
   }
 
   if (/too-many-requests|blocked all requests|unusual activity|rate|429/.test(combined)) {
-    return 'Too many attempts. Please wait before trying again.';
+    return getPhoneSignInPausedMessage(retryAfterSeconds);
   }
 
   if (/quota|billing|blaze|sms.*not.*available|sms.*not.*enabled/.test(combined)) {
@@ -68,4 +74,30 @@ export function getUserAuthMessage(error: unknown, fallback = 'We could not comp
   }
 
   return fallback;
+}
+
+function getRetryAfterSeconds(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+
+  return Math.ceil(value);
+}
+
+function getPhoneSignInPausedMessage(retryAfterSeconds: number | null): string {
+  if (!retryAfterSeconds) {
+    return 'Sorry, phone sign-in is temporarily paused after too many attempts. Please wait a few minutes and try again.';
+  }
+
+  return `Sorry, phone sign-in is temporarily paused after too many attempts. Please wait ${formatRetryAfter(retryAfterSeconds)} and try again.`;
+}
+
+function formatRetryAfter(retryAfterSeconds: number): string {
+  if (retryAfterSeconds < 60) {
+    return `${retryAfterSeconds} ${retryAfterSeconds === 1 ? 'second' : 'seconds'}`;
+  }
+
+  const minutes = Math.ceil(retryAfterSeconds / 60);
+
+  return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`;
 }

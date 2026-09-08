@@ -11,7 +11,8 @@ import {
   getDirectChatRealtimeContext,
   listCurrentUserChatContacts,
   mapDirectChatMessageReactions,
-  markDirectChatRead
+  markDirectChatRead,
+  shouldIncludeDirectChatContactInChatList
 } from './userProfileService.js';
 import { verifyActiveRegisteredDevice } from './deviceIdentityService.js';
 import {
@@ -133,7 +134,7 @@ class ChatRealtimeConnection {
       return;
     }
 
-    if (!this.decodedToken) {
+    if (!this.decodedToken || !this.deviceId) {
       this.sendError('Realtime session is not authenticated.');
       return;
     }
@@ -199,7 +200,7 @@ class ChatRealtimeConnection {
   }
 
   private async subscribeContactSummaries(): Promise<void> {
-    if (!this.decodedToken || !this.tenantId) {
+    if (!this.decodedToken || !this.tenantId || !this.deviceId) {
       return;
     }
 
@@ -207,8 +208,8 @@ class ChatRealtimeConnection {
 
     try {
       const [contacts, groupContacts] = await Promise.all([
-        listCurrentUserChatContacts(this.decodedToken),
-        listCurrentUserGroupChatContacts(this.decodedToken)
+        listCurrentUserChatContacts(this.decodedToken, { includeDirectoryContacts: true }),
+        listCurrentUserGroupChatContacts(this.decodedToken, this.deviceId)
       ]);
 
       this.visibleContactIds = new Set([
@@ -317,6 +318,10 @@ class ChatRealtimeConnection {
         this.deviceId
       );
       const contact = await getDirectChatContact(this.decodedToken, contactId, directChat);
+      if (!shouldIncludeDirectChatContactInChatList(contact)) {
+        return;
+      }
+
       this.sendJson({
         contact,
         envelopes,
@@ -346,7 +351,7 @@ class ChatRealtimeConnection {
           markAsDelivered: true,
           markAsRead: false
         }),
-        getGroupChatContact(this.decodedToken, groupId),
+        getGroupChatContact(this.decodedToken, groupId, this.deviceId),
         getGroupChatMessageReactions(this.decodedToken, groupId)
       ]);
 
@@ -402,11 +407,12 @@ class ChatRealtimeConnection {
   }
 
   private async subscribeGroupConversation(groupId: string): Promise<void> {
-    if (!this.decodedToken) {
+    if (!this.decodedToken || !this.deviceId) {
       this.sendError('Realtime session is not authenticated.');
       return;
     }
 
+    const activeDeviceId = this.deviceId;
     const isSessionActive = await this.ensureRealtimeSessionStillActive();
 
     if (!isSessionActive) {
@@ -414,7 +420,7 @@ class ChatRealtimeConnection {
     }
 
     const context = await getGroupChatRealtimeContext(this.decodedToken, groupId);
-    const conversationContact = await getGroupChatContact(this.decodedToken, context.groupId);
+    const conversationContact = await getGroupChatContact(this.decodedToken, context.groupId, activeDeviceId);
 
     this.conversationUnsubscribe = context.chatRef
       .collection('encryptedEnvelopes')
@@ -485,7 +491,7 @@ class ChatRealtimeConnection {
       this.deviceId
     );
     const [refreshedContact, messageReactions] = await Promise.all([
-      getGroupChatContact(this.decodedToken, groupId)
+      getGroupChatContact(this.decodedToken, groupId, this.deviceId)
         .catch(() => contact),
       getGroupChatMessageReactions(this.decodedToken, groupId)
     ]);

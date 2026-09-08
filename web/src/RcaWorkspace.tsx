@@ -35,6 +35,18 @@ import * as Popover from '@radix-ui/react-popover';
 import { DayPicker } from 'react-day-picker';
 import { HexColorPicker } from 'react-colorful';
 import 'react-day-picker/style.css';
+import EmojiPicker, { EmojiStyle, Theme, type EmojiClickData } from 'emoji-picker-react';
+import {
+  ArrowsInSimple,
+  ArrowsOutSimple,
+  CaretDown as PhCaretDown,
+  CaretLeft,
+  CaretRight,
+  Cursor,
+  HandPalm,
+  MonitorPlay,
+  X as PhX
+} from '@phosphor-icons/react';
 import {
   AlignHorizontalSpaceBetween,
   ArrowLeft,
@@ -52,15 +64,18 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  CircleHelp,
   ClipboardList,
   ClipboardCopy,
   ClipboardPaste,
   Clock3,
+  Crosshair,
   Download,
   Eye,
   FileDown,
   FilePlus2,
   FileSpreadsheet,
+  FileStack,
   FileText,
   FileLock2,
   Flame,
@@ -74,6 +89,7 @@ import {
   Lock,
   Magnet,
   Maximize2,
+  MessageSquareText,
   Minimize2,
   Moon,
   MousePointer2,
@@ -96,6 +112,7 @@ import {
   ExternalLink,
   Settings2,
   ShieldCheck,
+  SmilePlus,
   Sparkles,
   StickyNote,
   SlidersHorizontal,
@@ -122,6 +139,7 @@ import {
   deleteRcaIncident,
   deleteRcaNode as deleteRcaNodeHttp,
   downloadRcaEvidenceBlob,
+  getRcaOccurrenceSuggestion,
   getRcaAuthenticatedObjectUrl,
   inviteRcaCollaborators,
   listRcaActivityLogs,
@@ -146,6 +164,7 @@ import {
   type RcaNodeInput,
   type RcaNodeVisualStyle,
   type RcaNodeType,
+  type RcaOccurrenceSuggestion,
   type RcaSession,
   type RcaSplineArrowHead,
   type RcaSplineLineType,
@@ -154,6 +173,8 @@ import {
   type RcaWorkspaceResponse
 } from './rcaApi';
 import { useAppLoading } from './appLoading';
+import { EvidenceLibraryWindow } from './EvidenceLibraryWindow';
+import { downloadRailsEvidenceBlob, type RailsEvidence } from './railsApi';
 import {
   decodeRcaRealtimeUpdate,
   rcaRealtimeClient,
@@ -168,12 +189,56 @@ interface RcaNodeCardData extends Record<string, unknown> {
   isReferenceProject?: boolean;
   isRealtimeReady: boolean;
   methodology: RcaMethodology;
+  missingDataBadges: RcaMissingDataBadge[];
   node: RcaNode;
   nodes: RcaNode[];
+  onOpenHint?: (nodeId: string, event: React.MouseEvent<HTMLElement>) => void;
+  onOpenReactionPalette?: (anchor: RcaNodeReactionPaletteAnchor) => void;
   onInspect: (nodeId: string) => void;
   onLabelCommit: (nodeId: string, label: string) => Promise<RcaNode>;
+  onOpenEvidenceLibrary?: (nodeId: string) => void;
+  onOpenEvidencePhotoViewer?: (nodeId: string, evidenceKey: string) => void;
   selected: boolean;
   sessionId: string | null;
+}
+
+interface RcaNodeHintAnchor {
+  nodeId: string;
+  x: number;
+  y: number;
+}
+
+interface RcaNodeGuideContent {
+  acceptsFrom: string[];
+  connectsTo: string[];
+  description: string;
+  guidance: string;
+  title: string;
+}
+
+interface RcaNodeReactionPaletteAnchor {
+  avoidRect?: {
+    bottom: number;
+    left: number;
+    right: number;
+    top: number;
+  };
+  nodeId: string;
+  x: number;
+  y: number;
+}
+
+interface RcaNodeReactionUser {
+  displayName: string;
+  reactedAtIso: string;
+  uid: string;
+}
+
+interface RcaNodeReactionSummary {
+  count: number;
+  emoji: string;
+  latestAtIso: string;
+  users: RcaNodeReactionUser[];
 }
 
 interface RcaFishboneSpineData extends Record<string, unknown> {
@@ -181,22 +246,122 @@ interface RcaFishboneSpineData extends Record<string, unknown> {
   selected: boolean;
 }
 
+type RcaGuidedPathPriority = 'critical' | 'important' | 'next' | 'complete';
+type RcaGuidedPathRecommendation = {
+  actionLabel: string;
+  description: string;
+  id: string;
+  nodeIds: string[];
+  priority: RcaGuidedPathPriority;
+  title: string;
+};
+type RcaGuidedRequiredField = {
+  key: string;
+  label: string;
+  validValues?: string[];
+};
+type RcaNodeReadinessGap = {
+  missingLabels: string[];
+  node: RcaNode;
+};
+type RcaMissingDataBadgeTone = 'critical' | 'important' | 'ready' | 'waiting';
+type RcaMissingDataBadge = {
+  label: string;
+  title: string;
+  tone: RcaMissingDataBadgeTone;
+};
+type RcaQualityScoreLevel = 'ready' | 'strong' | 'developing' | 'at-risk';
+type RcaQualityScoreComponent = {
+  completedChecks: number;
+  description: string;
+  id: string;
+  score: number;
+  title: string;
+  totalChecks: number;
+  weight: number;
+};
+type RcaQualityScoreGap = {
+  description: string;
+  id: string;
+  nodeIds: string[];
+  title: string;
+};
+type RcaSelectedNodeQualityGap = {
+  explanation: string;
+  label: string;
+};
+type RcaSelectedNodeQualitySummary = {
+  gaps: RcaSelectedNodeQualityGap[];
+  isComplete: boolean;
+  nodeId: string;
+  nodeLabel: string;
+  score: number;
+};
+type RcaQualityScoreSummary = {
+  components: RcaQualityScoreComponent[];
+  confidenceLabel: string;
+  explanation: string;
+  gaps: RcaQualityScoreGap[];
+  level: RcaQualityScoreLevel;
+  score: number;
+  selectedNodeQuality: RcaSelectedNodeQualitySummary | null;
+};
+type RcaGuidedPathSummary = {
+  completedCount: number;
+  qualityScore: RcaQualityScoreSummary;
+  recommendations: RcaGuidedPathRecommendation[];
+  readinessScore: number;
+  totalCount: number;
+};
+type RcaConnectionCreateRecommendation = {
+  actionType?: 'CREATE_NODE' | 'CREATE_FISHBONE' | 'CREATE_FIVE_WHYS_ANALYSIS' | 'CREATE_STANDALONE_FIVE_WHYS_CLOSURE';
+  direction: 'new-to-selected' | 'selected-to-new';
+  description?: string;
+  disabledReason?: string;
+  fiveWhysRole?: RcaFiveWhysNodeRole;
+  id: string;
+  nodeType: RcaNodeType;
+  title: string;
+  typeLabel: string;
+};
+type RcaConnectionRecommendationSummary = {
+  addActions: RcaConnectionCreateRecommendation[];
+  selectedGuide: RcaNodeGuideContent | null;
+};
+
 type RcaFlowNode = FlowNode<RcaNodeCardData | RcaFishboneSpineData>;
 type RcaCanvasInteractionMode = 'select' | 'pan';
 type RcaCanvasTheme = 'dark' | 'light' | 'gray';
 type RcaCanvasSubmenuPlacement = 'left' | 'right';
-type RcaNodeContextMenuKind = 'category' | 'cause' | 'sticky';
+type RcaNodeContextMenuKind = 'category' | 'cause' | 'faultGate' | 'sticky' | 'comment';
 type RcaWorkspaceView = 'dashboard' | 'canvas';
 type RcaCanvasConnectionChange = {
   childNodeId: string;
   connectionHandles?: RcaNode['connectionHandles'];
+  linkedNodeId?: string;
   nodeType: RcaNodeType;
   parentNodeId: string | null;
+  sourceNodeId?: string;
+};
+type RcaCanvasLayoutPatchValue = {
+  connectionHandles?: RcaNode['connectionHandles'];
+  linkedNodeIds?: RcaNode['linkedNodeIds'];
+  parentNodeId?: RcaNode['parentNodeId'];
+  uiCoordinates: RcaNode['uiCoordinates'];
+};
+type RcaMainIntakeChainPatchValue = {
+  connectionHandles?: RcaNode['connectionHandles'];
+  linkedNodeIds?: RcaNode['linkedNodeIds'];
+  parentNodeId?: RcaNode['parentNodeId'];
 };
 type RcaCanvasDestructiveActionKind = 'CLEAR_CANVAS' | 'DELETE_SELECTION' | 'DELETE_NODE';
 type RcaCanvasDestructiveAction = {
   kind: RcaCanvasDestructiveActionKind;
   nodeId?: string;
+};
+type RcaMissingFishboneBranchOption = {
+  disabled: boolean;
+  label: string;
 };
 type RcaResolvedSplineStyle = {
   arrowHead: RcaSplineArrowHead;
@@ -245,7 +410,7 @@ type RcaInspectorDraft = {
 };
 
 interface RcaSplineEdgeData extends Record<string, unknown> {
-  kind?: 'category-spine' | 'sticky-annotation';
+  kind?: 'capa-convergence' | 'category-spine' | 'comment-annotation' | 'sticky-annotation';
   ownerNodeId?: string;
   sourceAnchor?: { x: number; y: number };
   splineStyle?: RcaResolvedSplineStyle;
@@ -270,6 +435,29 @@ interface RcaCanvasContextMenuState {
   targetNodeId?: string;
   x: number;
   y: number;
+}
+
+interface RcaZoomRegionState {
+  currentClientX: number;
+  currentClientY: number;
+  startClientX: number;
+  startClientY: number;
+}
+
+interface RcaPresentationStep {
+  id: string;
+  nodeIds: string[];
+  subtitle: string;
+  title: string;
+}
+
+interface RcaBranchWalkthroughStep {
+  categoryNodeId: string;
+  id: string;
+  nodeCount: number;
+  nodeIds: string[];
+  subtitle: string;
+  title: string;
 }
 
 interface RcaNodeStyleEditorState {
@@ -299,13 +487,22 @@ const RCA_CANVAS_GRID_DEFAULT_SIZE = 18;
 const RCA_CANVAS_GRID_MIN_SIZE = 10;
 const RCA_CANVAS_GRID_MAX_SIZE = 34;
 const RCA_CANVAS_GRID_STEP = 2;
-const RCA_CANVAS_COORDINATE_LIMIT = 20000;
+const RCA_CANVAS_MIN_ZOOM = 0.06;
+const RCA_CANVAS_FIT_MAX_ZOOM = 0.78;
+const RCA_CANVAS_MANUAL_MAX_ZOOM = 1.35;
+const RCA_CANVAS_COORDINATE_LIMIT = 80000;
 const RCA_CANVAS_COORDINATE_EXTENT: [[number, number], [number, number]] = [
   [-RCA_CANVAS_COORDINATE_LIMIT, -RCA_CANVAS_COORDINATE_LIMIT],
   [RCA_CANVAS_COORDINATE_LIMIT, RCA_CANVAS_COORDINATE_LIMIT]
 ];
 const RCA_TOAST_MIN_VISIBLE_MS = 4000;
 const RCA_CANVAS_HISTORY_LIMIT = 50;
+const RCA_NODE_HINT_AUTO_OPEN_STORAGE_KEY = 'synzapp.rca.nodeHint.autoOpen';
+const RCA_AUTO_FOCUS_SELECTION_STORAGE_KEY = 'synzapp.rca.autoFocusSelection';
+const RCA_NODE_REACTIONS_DETAIL_FIELD_KEY = '__synzappNodeReactions';
+const RCA_NODE_REACTION_LONG_PRESS_MS = 520;
+const RCA_NODE_REACTION_DRAG_CANCEL_PX = 10;
+const RCA_NODE_REACTION_QUICK_EMOJIS = ['👍', '✅', '👏', '💡', '👀', '⚠️', '❓', '❤️'];
 const RCA_ALIGNMENT_THRESHOLD = 12;
 const RCA_INCIDENT_TITLE_MAX_LENGTH = 180;
 const RCA_KNOWLEDGE_PANEL_DEFAULT_WIDTH = 430;
@@ -324,6 +521,16 @@ const RCA_DEFAULT_SPLINE_STYLE: RcaResolvedSplineStyle = {
   lineType: 'CONTINUOUS',
   weight: 2.4
 };
+const RCA_DEFAULT_SPLINE_COLOR_BY_NODE_TYPE: Record<RcaNodeType, string> = {
+  CAUSE: '#0284c7',
+  COMMENT: '#0ea5e9',
+  FAULT_GATE: '#2563eb',
+  ISHIKAWA_CATEGORY: '#2563eb',
+  STICKY_NOTE: '#f59e0b',
+  SUB_CAUSE: '#0891b2',
+  WHY: '#7c3aed'
+};
+const RCA_DEFAULT_EVIDENCE_SPLINE_COLOR = '#16a34a';
 const RCA_SPLINE_ARROW_MARKER_SIZE = 14;
 const RCA_SPLINE_ARROW_BASE_X = 4;
 const RCA_SPLINE_ARROW_TIP_X = 12;
@@ -368,24 +575,44 @@ const RCA_STICKY_NOTE_MAX_HEIGHT = 520;
 const RCA_CAUSE_NODE_HEIGHT = 132;
 const RCA_CATEGORY_NODE_HEIGHT = 76;
 const RCA_FAULT_GATE_NODE_HEIGHT = 112;
-const RCA_CAUSE_VERTICAL_GAP = 24;
-const RCA_CAUSE_TALL_VERTICAL_GAP = 28;
-const RCA_CAUSE_EXTRA_TALL_VERTICAL_GAP = 32;
+const RCA_CAUSE_VERTICAL_GAP = 42;
+const RCA_CAUSE_TALL_VERTICAL_GAP = 54;
+const RCA_CAUSE_EXTRA_TALL_VERTICAL_GAP = 68;
 const RCA_CAUSE_LABEL_CHARS_PER_LINE = 34;
 const RCA_CAUSE_DETAIL_CHARS_PER_LINE = 42;
 const RCA_FAULT_GATE_LABEL_CHARS_PER_LINE = 34;
-const RCA_CATEGORY_HORIZONTAL_GAP = 144;
-const RCA_BRANCH_CATEGORY_GAP = 52;
-const RCA_CAUSE_CATEGORY_HORIZONTAL_GAP = 96;
-const RCA_SUBCAUSE_HORIZONTAL_GAP = 88;
+const RCA_BRANCH_HORIZONTAL_GAP = 220;
+const RCA_BRANCH_CATEGORY_GAP = 58;
+const RCA_CAUSE_CATEGORY_HORIZONTAL_GAP = 116;
+const RCA_SUBCAUSE_HORIZONTAL_GAP = 116;
 const RCA_FAULT_GATE_HORIZONTAL_GAP = 220;
+const RCA_FAULT_GATE_APPROVAL_HORIZONTAL_GAP = 180;
 const RCA_FISHBONE_FIRST_COLUMN_X = 650;
 const RCA_FISHBONE_TOP_CATEGORY_Y = 585;
 const RCA_FISHBONE_BOTTOM_CATEGORY_Y = 805;
-const RCA_FISHBONE_COLUMN_STEP = 470;
+const RCA_FISHBONE_COLUMN_STEP = 540;
+const RCA_MAIN_INTAKE_CHAIN_CENTER_X = 520;
+const RCA_MAIN_INTAKE_CHAIN_START_Y = 130;
+const RCA_MAIN_INTAKE_CHAIN_VERTICAL_GAP = 72;
+const RCA_MAIN_INTAKE_CHAIN_FISHBONE_VERTICAL_GAP = 24;
+const RCA_MAIN_INTAKE_TO_FAULT_GATE_GAP = 72;
+const RCA_CONNECTED_SATELLITE_HORIZONTAL_GAP = 92;
+const RCA_CONNECTED_SATELLITE_VERTICAL_GAP = 44;
+const RCA_BRANCH_SATELLITE_RESERVE_GAP = 24;
+const RCA_CAPA_WORKFLOW_COLUMN_GAP = 140;
+const RCA_CAPA_WORKFLOW_VERTICAL_GAP = 54;
+const RCA_CAPA_SUPPORT_COLUMN_GAP = RCA_CONNECTED_SATELLITE_HORIZONTAL_GAP;
+const RCA_ROOT_CAUSE_WORKFLOW_BLOCK_GAP = 132;
+const RCA_LAYOUT_ORPHAN_COLUMN_START_X = 80;
+const RCA_LAYOUT_ORPHAN_COLUMN_START_Y = 1040;
+const RCA_LAYOUT_NODE_COLLISION_HORIZONTAL_GAP = 72;
+const RCA_LAYOUT_NODE_COLLISION_VERTICAL_GAP = 42;
+const RCA_LAYOUT_NODE_COLLISION_MAX_PASSES = 80;
+const RCA_LAYOUT_SPINE_LANE_GAP = 46;
 const RCA_NODE_FONT_SIZE_OPTIONS = [10, 11, 12, 13, 14, 15, 16, 18] as const;
 const RCA_NODE_FONT_SIZE_MIN = RCA_NODE_FONT_SIZE_OPTIONS[0];
 const RCA_NODE_FONT_SIZE_MAX = RCA_NODE_FONT_SIZE_OPTIONS[RCA_NODE_FONT_SIZE_OPTIONS.length - 1];
+const RCA_RISK_FACTOR_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const;
 const RCA_DEFAULT_NODE_FONT_FAMILY = 'Inter';
 const RCA_FIVE_WHY_LEADING_CONNECTIVE_PATTERNS = [
   /^(?:because of|because|since|as a result of|as|so that|so|therefore|thus|hence|then|and|but|however|although|though|while|whereas|also|additionally|moreover|furthermore|consequently|accordingly|instead)\b[\s,;:.-]*/i,
@@ -436,6 +663,16 @@ const RCA_DEFAULT_STICKY_NOTE_VISUAL_STYLE: RcaResolvedNodeVisualStyle = {
   isUnderline: false,
   textColor: '#713f12'
 };
+const RCA_DEFAULT_COMMENT_VISUAL_STYLE: RcaResolvedNodeVisualStyle = {
+  backgroundColor: '#e0f2fe',
+  borderColor: '#38bdf8',
+  fontFamily: RCA_DEFAULT_NODE_FONT_FAMILY,
+  fontSize: 13,
+  isBold: false,
+  isItalic: false,
+  isUnderline: false,
+  textColor: '#0f172a'
+};
 
 const RCA_FISHBONE_CATEGORY_LAYOUTS: Array<{
   id: string;
@@ -465,7 +702,8 @@ const RCA_DEFAULT_FISHBONE_CATEGORIES = [
 const RCA_FIVE_WHYS_SCAFFOLD_LAYOUT: Array<{ x: number; y: number }> = [
   { x: 120, y: 120 },
   { x: 520, y: 120 },
-  { x: 920, y: 120 }
+  { x: 920, y: 120 },
+  { x: 1320, y: 120 }
 ];
 
 const RCA_FIVE_WHYS_SCAFFOLD: Array<{
@@ -496,6 +734,16 @@ const RCA_FIVE_WHYS_SCAFFOLD: Array<{
   },
   {
     label: '',
+    role: 'ROOT_CAUSE',
+    visualStyle: {
+      backgroundColor: '#fff7ed',
+      borderColor: '#f97316',
+      fontSize: 14,
+      textColor: '#7c2d12'
+    }
+  },
+  {
+    label: '',
     role: 'CAPA',
     visualStyle: {
       backgroundColor: '#ecfdf5',
@@ -506,6 +754,21 @@ const RCA_FIVE_WHYS_SCAFFOLD: Array<{
     }
   }
 ];
+
+const RCA_FIVE_WHYS_CHAIN_TOP_GAP = 152;
+const RCA_FIVE_WHYS_CHAIN_EDGE_STYLE: RcaNodeEdgeStyle = {
+  arrowHead: 'CLOSED_FILLED',
+  color: '#0284c7',
+  lineType: 'CONTINUOUS',
+  weight: 2
+};
+const RCA_CAPA_STAGE_WORKFLOW_ROLES = [
+  'CORRECTIVE_ACTION',
+  'PREVENTIVE_ACTION',
+  'RISK_ASSESSMENT',
+  'EFFECTIVENESS',
+  'LESSONS_LEARNED'
+] as const satisfies readonly RcaFiveWhysNodeRole[];
 
 const methodologyOptions: Array<{
   icon: typeof ListChecks;
@@ -574,12 +837,13 @@ const RCA_CANVAS_THEME_STYLES: Record<RcaCanvasTheme, {
 };
 
 const nodeTypeOptions: Array<{ label: string; value: RcaNodeType }> = [
-  { label: 'Why', value: 'WHY' },
+  { label: 'RCA Stage', value: 'WHY' },
   { label: 'Fishbone Category', value: 'ISHIKAWA_CATEGORY' },
   { label: 'Cause', value: 'CAUSE' },
   { label: 'Sub Cause', value: 'SUB_CAUSE' },
   { label: 'Fault Gate', value: 'FAULT_GATE' },
-  { label: 'Sticky Note', value: 'STICKY_NOTE' }
+  { label: 'Sticky Note', value: 'STICKY_NOTE' },
+  { label: 'Comment', value: 'COMMENT' }
 ];
 
 const RCA_FIVE_WHYS_NODE_ROLE_OPTIONS: Array<{ label: string; value: RcaFiveWhysNodeRole }> = [
@@ -587,9 +851,9 @@ const RCA_FIVE_WHYS_NODE_ROLE_OPTIONS: Array<{ label: string; value: RcaFiveWhys
   { label: 'Incident Details', value: 'INCIDENT_DETAILS' },
   { label: 'Containment', value: 'CONTAINMENT' },
   { label: 'Evidence', value: 'EVIDENCE' },
-  { label: 'Problem', value: 'PROBLEM' },
-  { label: 'Why', value: 'FIVE_WHYS' },
-  { label: 'Answer', value: 'ANSWER' },
+  { label: 'Problem Statement', value: 'PROBLEM' },
+  { label: '5 Whys', value: 'FIVE_WHYS' },
+  { label: 'Answer (legacy)', value: 'ANSWER' },
   { label: 'Root Cause', value: 'ROOT_CAUSE' },
   { label: 'CAPA', value: 'CAPA' },
   { label: 'Corrective Action', value: 'CORRECTIVE_ACTION' },
@@ -599,6 +863,14 @@ const RCA_FIVE_WHYS_NODE_ROLE_OPTIONS: Array<{ label: string; value: RcaFiveWhys
   { label: 'Lessons Learned', value: 'LESSONS_LEARNED' },
   { label: 'Approval & Closure', value: 'APPROVAL_CLOSURE' }
 ];
+
+function getSelectableRcaFiveWhysNodeRoleOptions(
+  currentRole?: RcaFiveWhysNodeRole
+): Array<{ label: string; value: RcaFiveWhysNodeRole }> {
+  return RCA_FIVE_WHYS_NODE_ROLE_OPTIONS.filter((option) => (
+    option.value !== 'ANSWER' || currentRole === 'ANSWER'
+  ));
+}
 
 const RCA_FISHBONE_CATEGORY_LABELS = [
   'People',
@@ -614,9 +886,8 @@ const RCA_ADD_NODE_ROLE_OPTIONS: Array<{ icon: LucideIcon; label: string; value:
   { icon: ClipboardList, label: 'Incident Details', value: 'INCIDENT_DETAILS' },
   { icon: ShieldCheck, label: 'Containment', value: 'CONTAINMENT' },
   { icon: FileLock2, label: 'Evidence', value: 'EVIDENCE' },
-  { icon: AlertTriangle, label: 'Problem', value: 'PROBLEM' },
-  { icon: ListChecks, label: 'Why', value: 'FIVE_WHYS' },
-  { icon: ClipboardCopy, label: 'Answer', value: 'ANSWER' },
+  { icon: AlertTriangle, label: 'Problem Statement', value: 'PROBLEM' },
+  { icon: ListChecks, label: '5 Whys', value: 'FIVE_WHYS' },
   { icon: Gauge, label: 'Root Cause', value: 'ROOT_CAUSE' },
   { icon: PackageCheck, label: 'CAPA', value: 'CAPA' }
 ];
@@ -630,6 +901,20 @@ const RCA_CAPA_NODE_ROLE_OPTIONS: Array<{ icon: LucideIcon; label: string; value
   { icon: CheckCircle2, label: 'Approval & Closure', value: 'APPROVAL_CLOSURE' }
 ];
 
+const RCA_ROLES_REQUIRING_CONTAINMENT_OR_PROBLEM = new Set<RcaFiveWhysNodeRole>([
+  'EVIDENCE',
+  'FIVE_WHYS',
+  'ANSWER',
+  'ROOT_CAUSE',
+  'CAPA',
+  'CORRECTIVE_ACTION',
+  'PREVENTIVE_ACTION',
+  'RISK_ASSESSMENT',
+  'EFFECTIVENESS',
+  'LESSONS_LEARNED',
+  'APPROVAL_CLOSURE'
+]);
+
 type RcaNodeDetailFieldType = 'date' | 'datetime-local' | 'number' | 'select' | 'text' | 'textarea' | 'time' | 'url';
 type RcaNodeDetailFieldDefinition = {
   key: string;
@@ -638,6 +923,23 @@ type RcaNodeDetailFieldDefinition = {
   readOnly?: boolean;
   type: RcaNodeDetailFieldType;
 };
+
+const RCA_FIVE_WHYS_CAUSE_DISPOSITION_OPTIONS = [
+  'Needs More Evidence',
+  'Ruled In - Direct Cause',
+  'Ruled In - Contributing Cause',
+  'Ruled Out',
+  'No Direct Impact'
+] as const;
+
+const RCA_FIVE_WHYS_PREVENTION_OPTIONS = ['Yes', 'Partially', 'No', 'Unknown'] as const;
+
+const RCA_FIVE_WHYS_STEP_VERIFICATION_OPTIONS = [
+  'Unverified',
+  'Evidence linked',
+  'Verified',
+  'Disproven'
+] as const;
 
 const RCA_NODE_DETAIL_SCHEMA: Partial<Record<RcaFiveWhysNodeRole, RcaNodeDetailFieldDefinition[]>> = {
   INCIDENT: [
@@ -712,20 +1014,19 @@ const RCA_NODE_DETAIL_SCHEMA: Partial<Record<RcaFiveWhysNodeRole, RcaNodeDetailF
   ],
   PROBLEM: [
     { key: 'problemStatement', label: 'Problem Statement', type: 'textarea' },
-    { key: 'problemType', label: 'Problem Type', type: 'select', options: ['Safety', 'Food Safety', 'Quality', 'Equipment', 'Process', 'Warehouse', 'Environmental', 'Other'] },
-    { key: 'problemLocation', label: 'Problem Location', type: 'text' },
-    { key: 'problemStartTime', label: 'Problem Start Time', type: 'datetime-local' },
-    { key: 'problemDetectedBy', label: 'Problem Detected By', type: 'text' },
-    { key: 'problemImpact', label: 'Problem Impact', type: 'textarea' },
-    { key: 'knownFacts', label: 'Known Facts', type: 'textarea' },
-    { key: 'unknownInformation', label: 'Unknown Information', type: 'textarea' },
-    { key: 'problemStatus', label: 'Problem Status', type: 'select', options: ['Open', 'Under Investigation', 'Linked to Cause', 'Resolved', 'Eliminated'] }
+    { key: 'expectedStandard', label: 'Expected Standard', type: 'textarea' },
+    { key: 'actualCondition', label: 'Actual Condition', type: 'textarea' },
+    { key: 'measurableGap', label: 'Measurable Gap', type: 'textarea' },
+    { key: 'analysisScope', label: 'RCA Analysis Scope', type: 'textarea' },
+    { key: 'outOfScope', label: 'Out of Scope', type: 'textarea' }
   ],
   FIVE_WHYS: [
-    { key: 'selectedCause', label: 'Selected Cause', type: 'text' },
-    { key: 'whyIsThisCauseLikely', label: 'Why Is This Cause Likely?', type: 'textarea' },
+    { key: 'selectedCause', label: 'Cause Being Tested', type: 'textarea' },
+    { key: 'whyIsThisCauseLikely', label: 'Why Is This Cause Worth Testing?', type: 'textarea' },
     { key: 'priorityLevel', label: 'Priority Level', type: 'select', options: ['Low', 'Medium', 'High', 'Critical'] },
-    { key: 'reasonForDecision', label: 'Reason for Decision', type: 'textarea' }
+    { key: 'investigationOwner', label: 'Investigation Owner', type: 'text' },
+    { key: 'decisionOwner', label: 'Decision Owner', type: 'text' },
+    { key: 'analysisStatus', label: '5 Whys Status', type: 'select', options: ['Draft', 'In Progress', 'Ready for Decision', 'Decision Applied'] }
   ],
   ANSWER: [
     { key: 'answerStatement', label: 'Answer Statement', type: 'textarea' },
@@ -737,8 +1038,9 @@ const RCA_NODE_DETAIL_SCHEMA: Partial<Record<RcaFiveWhysNodeRole, RcaNodeDetailF
   ],
   ROOT_CAUSE: [
     { key: 'rootCauseStatement', label: 'Root Cause Statement', type: 'textarea' },
-    { key: 'rootCauseType', label: 'Root Cause Type', type: 'select', options: [...RCA_FISHBONE_CATEGORY_LABELS] },
-    { key: 'rootCauseDescription', label: 'Root Cause Description', type: 'textarea' },
+    { key: 'causeClassification', label: 'Cause Classification', type: 'select', options: ['Root Cause', 'Contributing Cause', 'Needs More Evidence', 'Ruled Out'] },
+    { key: 'rootCauseType', label: 'Cause Type', type: 'select', options: [...RCA_FISHBONE_CATEGORY_LABELS] },
+    { key: 'rootCauseDescription', label: 'Cause Description', type: 'textarea' },
     { key: 'wouldFixingPreventRecurrence', label: 'Would Fixing This Prevent Recurrence?', type: 'select', options: ['Yes', 'No', 'Partially', 'Unknown'] },
     { key: 'isSystemFailure', label: 'Is This a System Failure?', type: 'select', options: ['Yes', 'No', 'Partially'] },
     { key: 'isBlamingIndividual', label: 'Is This Blaming an Individual?', type: 'select', options: ['Yes', 'No'] },
@@ -827,17 +1129,224 @@ const RCA_NODE_DETAIL_SCHEMA: Partial<Record<RcaFiveWhysNodeRole, RcaNodeDetailF
   ],
   APPROVAL_CLOSURE: [
     { key: 'closureReviewId', label: 'Closure Review ID', readOnly: true, type: 'text' },
-    { key: 'investigationSummary', label: 'Investigation Summary', type: 'textarea' },
-    { key: 'finalCapaSummary', label: 'Final CAPA Summary', type: 'textarea' },
+    { key: 'caseClosureScope', label: 'Closure Scope', type: 'select', options: ['Entire RCA Case', 'Case With Open Follow-Up', 'Escalated For Management Review', 'Rejected - More Investigation Required'] },
+    { key: 'closureReadiness', label: 'Closure Readiness', type: 'select', options: ['Not Ready', 'Ready for Review', 'Approved to Close', 'Rejected', 'Reopened'] },
+    { key: 'investigationSummary', label: 'Final Investigation Summary', type: 'textarea' },
+    { key: 'rootCauseVerificationStatus', label: 'Root Cause Verification Status', type: 'select', options: ['All Verified', 'Some Pending', 'Rejected', 'Not Applicable'] },
+    { key: 'capaWorkflowStatus', label: 'CAPA Workflow Status', type: 'select', options: ['All CAPA Work Complete', 'CAPA In Progress', 'CAPA Overdue', 'CAPA Not Required', 'Escalated'] },
+    { key: 'correctiveActionsComplete', label: 'Corrective Actions Complete?', type: 'select', options: ['Yes', 'No', 'Not Applicable'] },
+    { key: 'preventiveActionsComplete', label: 'Preventive Actions Complete?', type: 'select', options: ['Yes', 'No', 'Not Applicable'] },
+    { key: 'riskAssessmentComplete', label: 'Risk Assessment Complete?', type: 'select', options: ['Yes', 'No', 'Not Applicable'] },
+    { key: 'effectivenessVerified', label: 'Effectiveness Verified?', type: 'select', options: ['Yes', 'No', 'Not Applicable'] },
+    { key: 'lessonsLearnedCompleted', label: 'Lessons Learned Completed?', type: 'select', options: ['Yes', 'No', 'Not Applicable'] },
+    { key: 'evidenceReviewStatus', label: 'Evidence Review Status', type: 'select', options: ['Complete', 'Missing Evidence', 'Needs QA Review', 'Not Applicable'] },
+    { key: 'residualRiskDecision', label: 'Residual Risk Decision', type: 'select', options: ['Accepted', 'Accepted With Controls', 'Not Accepted', 'Management Approval Required'] },
     { key: 'finalRiskLevel', label: 'Final Risk Level', type: 'select', options: ['Low', 'Medium', 'High', 'Critical'] },
-    { key: 'effectivenessVerified', label: 'Effectiveness Verified?', type: 'select', options: ['Yes', 'No'] },
-    { key: 'allActionsCompleted', label: 'All Actions Completed?', type: 'select', options: ['Yes', 'No'] },
-    { key: 'allEvidenceAttached', label: 'All Evidence Attached?', type: 'select', options: ['Yes', 'No'] },
-    { key: 'lessonsLearnedCompleted', label: 'Lessons Learned Completed?', type: 'select', options: ['Yes', 'No'] },
-    { key: 'closureRecommendation', label: 'Closure Recommendation', type: 'select', options: ['Close', 'Keep Open', 'Reopen Investigation'] },
+    { key: 'regulatoryOrCustomerNotification', label: 'Regulatory / Customer Notification', type: 'select', options: ['Not Required', 'Required and Completed', 'Required and Pending', 'Unknown'] },
+    { key: 'closureConditions', label: 'Closure Conditions / Open Follow-Ups', type: 'textarea' },
+    { key: 'reopenTrigger', label: 'Reopen Trigger', type: 'textarea' },
+    { key: 'closureRecommendation', label: 'Closure Recommendation', type: 'select', options: ['Close RCA', 'Keep Open', 'Close With Follow-Up', 'Reopen Investigation', 'Escalate'] },
     { key: 'finalApprover', label: 'Final Approver', type: 'text' },
+    { key: 'approverRole', label: 'Approver Role', type: 'select', options: ['RCA Owner', 'Department Manager', 'Quality Manager', 'Safety Manager', 'Plant Manager', 'Executive Sponsor', 'Other'] },
     { key: 'closureDate', label: 'Closure Date', type: 'date' },
     { key: 'closureComments', label: 'Closure Comments', type: 'textarea' }
+  ]
+};
+
+const RCA_APPROVAL_CLOSURE_REQUIRED_FIELDS: Array<{ key: string; label: string; validValues?: string[] }> = [
+  { key: 'caseClosureScope', label: 'closure scope', validValues: ['Entire RCA Case', 'Case With Open Follow-Up'] },
+  { key: 'closureReadiness', label: 'closure readiness', validValues: ['Approved to Close'] },
+  { key: 'investigationSummary', label: 'final investigation summary' },
+  { key: 'rootCauseVerificationStatus', label: 'root cause verification status', validValues: ['All Verified', 'Not Applicable'] },
+  { key: 'capaWorkflowStatus', label: 'CAPA workflow status', validValues: ['All CAPA Work Complete', 'CAPA Not Required'] },
+  { key: 'correctiveActionsComplete', label: 'corrective action completion', validValues: ['Yes', 'Not Applicable'] },
+  { key: 'preventiveActionsComplete', label: 'preventive action completion', validValues: ['Yes', 'Not Applicable'] },
+  { key: 'riskAssessmentComplete', label: 'risk assessment completion', validValues: ['Yes', 'Not Applicable'] },
+  { key: 'effectivenessVerified', label: 'effectiveness verification', validValues: ['Yes', 'Not Applicable'] },
+  { key: 'lessonsLearnedCompleted', label: 'lessons learned completion', validValues: ['Yes', 'Not Applicable'] },
+  { key: 'evidenceReviewStatus', label: 'evidence review status', validValues: ['Complete', 'Not Applicable'] },
+  { key: 'residualRiskDecision', label: 'residual risk decision', validValues: ['Accepted', 'Accepted With Controls'] },
+  { key: 'finalRiskLevel', label: 'final risk level' },
+  { key: 'regulatoryOrCustomerNotification', label: 'regulatory or customer notification status', validValues: ['Not Required', 'Required and Completed'] },
+  { key: 'reopenTrigger', label: 'reopen trigger' },
+  { key: 'closureRecommendation', label: 'closure recommendation', validValues: ['Close RCA', 'Close With Follow-Up'] },
+  { key: 'finalApprover', label: 'final approver' },
+  { key: 'approverRole', label: 'approver role' },
+  { key: 'closureDate', label: 'closure date' },
+  { key: 'closureComments', label: 'closure comments' }
+];
+
+const RCA_GUIDED_REQUIRED_FIELDS_BY_ROLE: Partial<Record<RcaFiveWhysNodeRole, RcaGuidedRequiredField[]>> = {
+  INCIDENT: [
+    { key: 'incidentTitle', label: 'incident title' },
+    { key: 'incidentCategory', label: 'incident category' },
+    { key: 'department', label: 'department' },
+    { key: 'areaLocation', label: 'area or location' },
+    { key: 'lineMachineProcess', label: 'line, machine, or process' },
+    { key: 'dateOfIncident', label: 'date of incident' },
+    { key: 'reportedBy', label: 'reported by' },
+    { key: 'severityLevel', label: 'severity level' },
+    { key: 'incidentDescription', label: 'incident description' },
+    { key: 'incidentStatus', label: 'incident status', validValues: ['Open', 'Containment', 'Investigation', 'RCA Review', 'CAPA Open', 'Verification', 'Pending Approval', 'Closed', 'Reopened'] }
+  ],
+  INCIDENT_DETAILS: [
+    { key: 'whatHappened', label: 'what happened' },
+    { key: 'whereDidItHappen', label: 'where it happened' },
+    { key: 'whenDidItHappen', label: 'when it happened' },
+    { key: 'whoDiscoveredIt', label: 'who discovered it' },
+    { key: 'initialBusinessImpact', label: 'initial business impact' },
+    { key: 'detailedDescription', label: 'detailed description' }
+  ],
+  CONTAINMENT: [
+    { key: 'containmentTitle', label: 'containment title' },
+    { key: 'issueStillActive', label: 'issue active status' },
+    { key: 'containmentType', label: 'containment type' },
+    { key: 'temporaryFixApplied', label: 'temporary fix status' },
+    { key: 'containmentOwner', label: 'containment owner' },
+    { key: 'containmentStatus', label: 'containment status', validValues: ['Completed', 'Escalated'] }
+  ],
+  PROBLEM: [
+    { key: 'problemStatement', label: 'problem statement' },
+    { key: 'expectedStandard', label: 'expected standard' },
+    { key: 'actualCondition', label: 'actual condition' },
+    { key: 'measurableGap', label: 'measurable gap' },
+    { key: 'analysisScope', label: 'RCA analysis scope' }
+  ],
+  EVIDENCE: [
+    { key: 'evidenceTitle', label: 'evidence title' },
+    { key: 'evidenceType', label: 'evidence type' },
+    { key: 'evidenceDescription', label: 'evidence description' },
+    { key: 'collectedBy', label: 'collected by' },
+    { key: 'sourceOfEvidence', label: 'source of evidence' },
+    { key: 'evidenceVerified', label: 'evidence verification', validValues: ['Yes'] },
+    { key: 'evidenceRelevance', label: 'evidence relevance', validValues: ['Supports Cause', 'Disproves Cause'] }
+  ],
+  FIVE_WHYS: [
+    { key: 'selectedCause', label: 'cause being tested' },
+    { key: 'whyIsThisCauseLikely', label: 'why the cause is worth testing' },
+    { key: 'investigationOwner', label: 'investigation owner' },
+    { key: 'decisionOwner', label: 'decision owner' },
+    { key: 'analysisStatus', label: '5 Whys decision status', validValues: ['Decision Applied'] },
+    { key: 'answerStatement', label: 'final finding' },
+    { key: 'reasonForDecision', label: 'reason for decision' },
+    { key: 'evidenceStrength', label: 'evidence strength', validValues: ['Medium', 'Strong'] },
+    { key: 'isAnswerVerified', label: 'finding verified', validValues: ['Yes'] },
+    { key: 'causeDisposition', label: 'cause disposition', validValues: ['Ruled In - Direct Cause', 'Ruled In - Contributing Cause', 'Ruled Out', 'No Direct Impact'] }
+  ],
+  ROOT_CAUSE: [
+    { key: 'rootCauseStatement', label: 'root cause statement' },
+    { key: 'causeClassification', label: 'cause classification', validValues: ['Root Cause', 'Contributing Cause'] },
+    { key: 'rootCauseType', label: 'cause type' },
+    { key: 'rootCauseDescription', label: 'cause description' },
+    { key: 'wouldFixingPreventRecurrence', label: 'recurrence prevention decision', validValues: ['Yes', 'Partially'] },
+    { key: 'isSystemFailure', label: 'system failure decision' },
+    { key: 'otherCausesRuledOut', label: 'other causes ruled out', validValues: ['Yes'] },
+    { key: 'validationStatus', label: 'validation status', validValues: ['Approved'] },
+    { key: 'validatedBy', label: 'validated by' },
+    { key: 'validationDate', label: 'validation date' },
+    { key: 'validationComments', label: 'validation comments' }
+  ],
+  CAPA: [
+    { key: 'capaSummary', label: 'CAPA summary' },
+    { key: 'capaOwner', label: 'CAPA owner' },
+    { key: 'capaStatus', label: 'CAPA status', validValues: ['In Progress', 'Pending Verification', 'Completed', 'Closed'] },
+    { key: 'capaDueDate', label: 'CAPA due date' },
+    { key: 'capaPriority', label: 'CAPA priority' }
+  ],
+  CORRECTIVE_ACTION: [
+    { key: 'correctiveActionTitle', label: 'corrective action title' },
+    { key: 'actionDescription', label: 'action description' },
+    { key: 'actionOwner', label: 'action owner' },
+    { key: 'departmentResponsible', label: 'responsible department' },
+    { key: 'priority', label: 'priority' },
+    { key: 'dueDate', label: 'due date' },
+    { key: 'actionStatus', label: 'action status', validValues: ['Completed'] },
+    { key: 'completionDate', label: 'completion date' },
+    { key: 'completionNotes', label: 'completion notes' }
+  ],
+  PREVENTIVE_ACTION: [
+    { key: 'preventiveActionTitle', label: 'preventive action title' },
+    { key: 'preventiveActionScope', label: 'preventive action scope' },
+    { key: 'actionDescription', label: 'action description' },
+    { key: 'actionOwner', label: 'action owner' },
+    { key: 'departmentResponsible', label: 'responsible department' },
+    { key: 'priority', label: 'priority' },
+    { key: 'dueDate', label: 'due date' },
+    { key: 'trainingRequired', label: 'training required decision' },
+    { key: 'sopUpdateRequired', label: 'SOP update decision' },
+    { key: 'actionStatus', label: 'action status', validValues: ['Completed'] }
+  ],
+  RISK_ASSESSMENT: [
+    { key: 'assessmentType', label: 'assessment type' },
+    { key: 'severityScore', label: 'severity score' },
+    { key: 'occurrenceScore', label: 'occurrence score' },
+    { key: 'detectionScore', label: 'detection score' },
+    { key: 'riskJustification', label: 'risk justification' },
+    { key: 'residualRiskAcceptable', label: 'residual risk decision', validValues: ['Yes', 'Requires Management Approval'] },
+    { key: 'riskApprovedBy', label: 'risk approved by' },
+    { key: 'riskApprovalComments', label: 'risk approval comments' }
+  ],
+  EFFECTIVENESS: [
+    { key: 'verificationMethod', label: 'verification method' },
+    { key: 'verificationOwner', label: 'verification owner' },
+    { key: 'verificationDueDate', label: 'verification due date' },
+    { key: 'successCriteria', label: 'success criteria' },
+    { key: 'verificationResult', label: 'verification result', validValues: ['Pass'] },
+    { key: 'verificationNotes', label: 'verification notes' },
+    { key: 'reopenRcaIfFailed', label: 'reopen decision if failed' }
+  ],
+  LESSONS_LEARNED: [
+    { key: 'lessonLearnedSummary', label: 'lesson learned summary' },
+    { key: 'whatWentWrong', label: 'what went wrong' },
+    { key: 'whatShouldChange', label: 'what should change' },
+    { key: 'canHappenElsewhere', label: 'can happen elsewhere decision' },
+    { key: 'sopUpdateNeeded', label: 'SOP update needed decision' },
+    { key: 'trainingUpdateNeeded', label: 'training update needed decision' },
+    { key: 'lessonOwner', label: 'lesson owner' },
+    { key: 'lessonApprovalStatus', label: 'lesson approval status', validValues: ['Approved'] }
+  ],
+  APPROVAL_CLOSURE: RCA_APPROVAL_CLOSURE_REQUIRED_FIELDS
+};
+
+const RCA_DEPRECATED_NODE_DETAIL_FIELD_KEYS: Partial<Record<RcaFiveWhysNodeRole, string[]>> = {
+  PROBLEM: [
+    'problemType',
+    'problemLocation',
+    'problemStartTime',
+    'problemDetectedBy',
+    'problemImpact',
+    'knownFacts',
+    'unknownInformation',
+    'problemStatus',
+    'incidentCategory',
+    'department',
+    'areaLocation',
+    'lineMachineProcess',
+    'shift',
+    'dateOfIncident',
+    'timeOfIncident',
+    'reportedBy',
+    'supervisorOnDuty',
+    'severityLevel',
+    'incidentDescription',
+    'immediateImpact',
+    'productAffected',
+    'productNameCode',
+    'lotNumber',
+    'quantityAffected',
+    'incidentStatus',
+    'whatHappened',
+    'whereDidItHappen',
+    'whenDidItHappen',
+    'whoWasInvolved',
+    'whoDiscoveredIt',
+    'wasAnyoneInjured',
+    'wasProductAffected',
+    'wasEquipmentAffected',
+    'wasProductionInterrupted',
+    'downtimeDuration',
+    'initialBusinessImpact',
+    'detailedDescription'
   ]
 };
 
@@ -849,7 +1358,6 @@ const RCA_NODE_PRIMARY_LABEL_FIELD_KEYS: Partial<Record<RcaFiveWhysNodeRole, str
   CORRECTIVE_ACTION: 'correctiveActionTitle',
   EFFECTIVENESS: 'successCriteria',
   EVIDENCE: 'evidenceTitle',
-  FIVE_WHYS: 'selectedCause',
   INCIDENT: 'incidentTitle',
   INCIDENT_DETAILS: 'whatHappened',
   LESSONS_LEARNED: 'lessonLearnedSummary',
@@ -858,59 +1366,6 @@ const RCA_NODE_PRIMARY_LABEL_FIELD_KEYS: Partial<Record<RcaFiveWhysNodeRole, str
   RISK_ASSESSMENT: 'riskJustification',
   ROOT_CAUSE: 'rootCauseStatement'
 };
-
-const RCA_EVIDENCE_FILE_ACCEPT = [
-  'image/*',
-  'image/heic',
-  'image/heif',
-  'video/*',
-  'audio/*',
-  'application/pdf',
-  'application/msword',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'application/vnd.ms-excel',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  'application/vnd.ms-powerpoint',
-  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  'text/*',
-  '.3gp',
-  '.aac',
-  '.apng',
-  '.avif',
-  '.csv',
-  '.doc',
-  '.docx',
-  '.gif',
-  '.heic',
-  '.heif',
-  '.jpeg',
-  '.jpg',
-  '.json',
-  '.log',
-  '.m4a',
-  '.mov',
-  '.mp3',
-  '.mp4',
-  '.odp',
-  '.ods',
-  '.odt',
-  '.pdf',
-  '.png',
-  '.ppt',
-  '.pptx',
-  '.rtf',
-  '.svg',
-  '.tif',
-  '.tiff',
-  '.txt',
-  '.wav',
-  '.webm',
-  '.webp',
-  '.xls',
-  '.xlsx',
-  '.xml',
-  '.zip'
-].join(',');
 
 function getRcaPrimaryLabelFieldKey(role: RcaFiveWhysNodeRole | null | undefined): string | null {
   return role ? RCA_NODE_PRIMARY_LABEL_FIELD_KEYS[role] || null : null;
@@ -1149,7 +1604,7 @@ const REFERENCE_RCA_PROJECT: ReferenceRcaProject = {
         }
       ],
       owner: 'Maintenance Manager',
-      verification: 'Confirmed root cause. Seal gap created direct path for flour dust to collect against hot underside surfaces.',
+      verification: 'Confirmed verified cause. Seal gap created direct path for flour dust to collect against hot underside surfaces.',
       whyChain: [
         'Why was there fire under the oven? Flour dust accumulated near a hot underside surface.',
         'Why did flour dust reach the underside? A lower return-panel seal gap created an open path.',
@@ -1203,7 +1658,7 @@ const REFERENCE_RCA_PROJECT: ReferenceRcaProject = {
         'Why was the hidden area excluded? The LSW checklist was copied from a similar line without lower oven geometry.',
         'Why was the checklist not challenged? Prior near-miss reports were not linked to the standard work owner.',
         'Why was that acceptable? The review cadence focused on completion rate, not hazard coverage.',
-        'Why is this a root cause? The missing control allowed the hazard to build undetected across shifts.'
+        'Why is this a verified cause? The missing control allowed the hazard to build undetected across shifts.'
       ]
     },
     'material-flour-escape': {
@@ -1245,7 +1700,7 @@ const REFERENCE_RCA_PROJECT: ReferenceRcaProject = {
         }
       ],
       owner: 'Process Engineer',
-      verification: 'Contributing root cause. Flour applicator escape created the combustible fuel source that migrated to the oven underside.',
+      verification: 'Contributing verified cause. Flour applicator escape created the combustible fuel source that migrated to the oven underside.',
       whyChain: [
         'Why was combustible fuel present? Flour escaped from the applicator during Die Cut production.',
         'Why did it escape? The containment skirt did not seal after changeover.',
@@ -1316,10 +1771,10 @@ const REFERENCE_RCA_PROJECT: ReferenceRcaProject = {
       status: 'complete'
     },
     {
-      description: 'Three verified root causes were marked and tied to 5 Whys logic.',
+      description: 'Three verified causes were marked and tied to 5 Whys logic.',
       focusNodeId: 'method-pm-under-oven-missing',
       id: 'rootcause',
-      label: 'Root causes verified',
+      label: 'Causes verified',
       status: 'complete'
     },
     {
@@ -1650,7 +2105,7 @@ function arrangeFiveWhysCanvasNodes(nodes: RcaNode[]): RcaNode[] {
 }
 
 function getFiveWhysArrangedPosition(node: RcaNode, nodes: RcaNode[], index: number): { x: number; y: number } {
-  if (node.nodeType === 'STICKY_NOTE') {
+  if (isFreeformRcaAnnotationNode(node)) {
     return getStickyNoteRearrangedPosition(node, nodes, '5_WHYS');
   }
 
@@ -1711,8 +2166,12 @@ function getFiveWhysLayoutIndex(node: RcaNode, nodes: RcaNode[], fallbackIndex: 
     return 1;
   }
 
-  if (role === 'CAPA') {
+  if (role === 'ROOT_CAUSE') {
     return 2;
+  }
+
+  if (role === 'CAPA') {
+    return 3;
   }
 
   return RCA_FIVE_WHYS_SCAFFOLD_LAYOUT.length + Math.max(0, fallbackIndex);
@@ -1752,17 +2211,39 @@ function arrangeFishboneCanvasNodes(
   nodes: RcaNode[],
   nodeDetails: Record<string, ReferenceRcaNodeDetail> = {}
 ): RcaNode[] {
+  const activeNodes = nodes.filter((node) => node.status !== 'DELETED');
   const childrenByParent = new Map<string, RcaNode[]>();
+  const allChildrenByParent = new Map<string, RcaNode[]>();
+  const sortByCurrentCanvasPosition = (leftNode: RcaNode, rightNode: RcaNode) => {
+    const leftX = sanitizeRcaCanvasCoordinate(leftNode.uiCoordinates?.x) ?? 0;
+    const rightX = sanitizeRcaCanvasCoordinate(rightNode.uiCoordinates?.x) ?? 0;
+    const leftY = sanitizeRcaCanvasCoordinate(leftNode.uiCoordinates?.y) ?? 0;
+    const rightY = sanitizeRcaCanvasCoordinate(rightNode.uiCoordinates?.y) ?? 0;
 
-  nodes.forEach((node) => {
-    if (!node.parentNodeId || node.nodeType === 'STICKY_NOTE') {
+    return leftY - rightY || leftX - rightX || leftNode.id.localeCompare(rightNode.id);
+  };
+
+  activeNodes.forEach((node) => {
+    if (!node.parentNodeId) {
       return;
     }
 
-    const siblings = childrenByParent.get(node.parentNodeId) || [];
-    siblings.push(node);
-    childrenByParent.set(node.parentNodeId, siblings);
+    const allSiblings = allChildrenByParent.get(node.parentNodeId) || [];
+
+    allSiblings.push(node);
+    allChildrenByParent.set(node.parentNodeId, allSiblings);
+
+    if (!shouldArrangeNodeInsideFishboneCauseTree(node)) {
+      return;
+    }
+
+    const treeSiblings = childrenByParent.get(node.parentNodeId) || [];
+    treeSiblings.push(node);
+    childrenByParent.set(node.parentNodeId, treeSiblings);
   });
+
+  allChildrenByParent.forEach((siblings) => siblings.sort(sortByCurrentCanvasPosition));
+  childrenByParent.forEach((siblings) => siblings.sort(sortByCurrentCanvasPosition));
 
   const coordinatesById = new Map<string, { x: number; y: number }>();
   const faultGate = getFishboneFaultGateNode(nodes);
@@ -1778,8 +2259,10 @@ function arrangeFishboneCanvasNodes(
     const branchExtents = getFishboneBranchHorizontalExtents(
       categoryNode,
       childrenByParent,
+      allChildrenByParent,
       causeOffsetX,
       subCauseOffsetX,
+      nodes,
       nodeDetails
     );
 
@@ -1798,6 +2281,27 @@ function arrangeFishboneCanvasNodes(
   const columnIndexes = [...new Set(categoryAssignments.map((assignment) => assignment.columnIndex))]
     .sort((leftIndex, rightIndex) => leftIndex - rightIndex);
   let previousColumnRight = 0;
+  const laneByNodeId = new Map<string, 'top' | 'bottom'>();
+  const branchGridRowNodeIdsByNodeId = new Map<string, string[]>();
+  const branchGridSectionKeyByNodeId = new Map<string, string>();
+  const branchGridSectionNodeIdsByNodeId = new Map<string, string[]>();
+
+  function assignBranchLane(node: RcaNode, lane: 'top' | 'bottom', visitedNodeIds = new Set<string>()) {
+    if (visitedNodeIds.has(node.id)) {
+      return;
+    }
+
+    visitedNodeIds.add(node.id);
+    laneByNodeId.set(node.id, lane);
+
+    (allChildrenByParent.get(node.id) || []).forEach((childNode) => {
+      assignBranchLane(childNode, lane, visitedNodeIds);
+    });
+  }
+
+  categoryAssignments.forEach((assignment) => {
+    assignBranchLane(assignment.categoryNode, assignment.categoryLayout.lane);
+  });
 
   columnIndexes.forEach((columnIndex, index) => {
     const assignments = categoryAssignments.filter((assignment) => assignment.columnIndex === columnIndex);
@@ -1806,7 +2310,7 @@ function arrangeFishboneCanvasNodes(
     const defaultX = RCA_FISHBONE_FIRST_COLUMN_X + index * RCA_FISHBONE_COLUMN_STEP;
     const minimumX = index === 0
       ? minimumSubCauseX - branchMinOffset
-      : previousColumnRight + RCA_CATEGORY_HORIZONTAL_GAP - branchMinOffset;
+      : previousColumnRight + RCA_BRANCH_HORIZONTAL_GAP - branchMinOffset;
     const x = Math.max(defaultX, minimumX);
 
     columnLayouts.set(columnIndex, {
@@ -1826,7 +2330,19 @@ function arrangeFishboneCanvasNodes(
 
     const childNodes = childrenByParent.get(node.id) || [];
     const childStackHeight = getStackHeight(childNodes.map(getSubtreeHeight));
-    const subtreeHeight = Math.max(getRcaNodeSize(node, nodeDetails[node.id]).height, childStackHeight);
+    const treeChildIds = new Set(childNodes.map((childNode) => childNode.id));
+    const satelliteNodes = (allChildrenByParent.get(node.id) || []).filter((childNode) => (
+      childNode.status !== 'DELETED' &&
+      !treeChildIds.has(childNode.id)
+    ));
+    const satelliteStackHeight = getStackHeight(satelliteNodes.map((childNode) => (
+      getRcaNodeSize(childNode, nodeDetails[childNode.id]).height
+    )));
+    const subtreeHeight = Math.max(
+      getRcaNodeSize(node, nodeDetails[node.id]).height,
+      childStackHeight,
+      satelliteStackHeight
+    );
 
     subtreeHeightByNodeId.set(node.id, subtreeHeight);
     return subtreeHeight;
@@ -1853,15 +2369,519 @@ function arrangeFishboneCanvasNodes(
     });
   }
 
+  function normalizeFishboneBranchColumnGrid(
+    branchCoordinatesById: Map<string, { x: number; y: number }>,
+    assignments: typeof categoryAssignments,
+    childrenByNodeId: Map<string, RcaNode[]>,
+    detailsByNodeId: Record<string, ReferenceRcaNodeDetail>
+  ) {
+    const activeNodeById: Map<string, RcaNode> = new Map(activeNodes.map((node) => [node.id, node]));
+    const collectBranchDescendants = (branchNode: RcaNode): RcaNode[] => {
+      const descendants: RcaNode[] = [];
+      const visitedNodeIds = new Set<string>();
+
+      function walk(parentNode: RcaNode) {
+        (childrenByNodeId.get(parentNode.id) || []).forEach((childNode) => {
+          if (visitedNodeIds.has(childNode.id) || childNode.status === 'DELETED') {
+            return;
+          }
+
+          visitedNodeIds.add(childNode.id);
+          descendants.push(childNode);
+          walk(childNode);
+        });
+      }
+
+      walk(branchNode);
+      return descendants;
+    };
+
+    const belongsToRootCauseWorkflow = (node: RcaNode): boolean => {
+      let parentNodeId = node.parentNodeId;
+      const visitedNodeIds = new Set<string>();
+
+      while (parentNodeId) {
+        if (visitedNodeIds.has(parentNodeId)) {
+          return false;
+        }
+
+        visitedNodeIds.add(parentNodeId);
+        const parentNode = activeNodeById.get(parentNodeId);
+
+        if (!parentNode) {
+          return false;
+        }
+
+        const parentRole = parentNode.nodeType === 'WHY' ? getFiveWhysNodeRole(parentNode) : null;
+
+        if (
+          parentRole === 'ROOT_CAUSE' ||
+          parentRole === 'CAPA' ||
+          parentRole === 'CORRECTIVE_ACTION' ||
+          parentRole === 'PREVENTIVE_ACTION' ||
+          parentRole === 'RISK_ASSESSMENT' ||
+          parentRole === 'EFFECTIVENESS' ||
+          parentRole === 'LESSONS_LEARNED' ||
+          parentRole === 'APPROVAL_CLOSURE'
+        ) {
+          return true;
+        }
+
+        parentNodeId = parentNode.parentNodeId || null;
+      }
+
+      return false;
+    };
+
+    const getGridColumn = (node: RcaNode): 'sticky' | 'comment' | 'evidence' | 'cause' | 'analysis' | null => {
+      if (belongsToRootCauseWorkflow(node)) {
+        return null;
+      }
+
+      if (isFreeformRcaAnnotationNode(node)) {
+        return null;
+      }
+
+      if (isEvidenceRoleNode(node)) {
+        return 'evidence';
+      }
+
+      if (isFiveWhysInvestigationRoleNode(node) || getFiveWhysNodeRole(node) === 'ANSWER') {
+        return 'analysis';
+      }
+
+      if (isFishboneCauseNode(node)) {
+        return 'cause';
+      }
+
+      return null;
+    };
+
+    const sortByCurrentY = (leftNode: RcaNode, rightNode: RcaNode) => {
+      const leftPosition = branchCoordinatesById.get(leftNode.id) || leftNode.uiCoordinates;
+      const rightPosition = branchCoordinatesById.get(rightNode.id) || rightNode.uiCoordinates;
+
+      return leftPosition.y - rightPosition.y ||
+        leftPosition.x - rightPosition.x ||
+        leftNode.id.localeCompare(rightNode.id);
+    };
+
+    assignments.forEach((assignment) => {
+      const branchPosition = branchCoordinatesById.get(assignment.categoryNode.id);
+      const activeNodeIndexById = new Map(activeNodes.map((node, index) => [node.id, index]));
+      const getBranchRowCreationOrder = (node: RcaNode): number => (
+        getRcaFlowNodeLayerTime(node, activeNodeIndexById.get(node.id) ?? 0)
+      );
+
+      if (!branchPosition) {
+        return;
+      }
+
+      const branchSize = getRcaNodeSize(assignment.categoryNode, detailsByNodeId[assignment.categoryNode.id]);
+      const columns: Record<'sticky' | 'comment' | 'evidence' | 'cause' | 'analysis', RcaNode[]> = {
+        analysis: [],
+        comment: [],
+        cause: [],
+        evidence: [],
+        sticky: []
+      };
+
+      const branchCandidateNodeById = new Map<string, RcaNode>();
+      const isConnectedToBranchCandidate = (node: RcaNode): boolean => (
+        Boolean(node.parentNodeId && branchCandidateNodeById.has(node.parentNodeId)) ||
+        normalizeRcaLinkedNodeIds(node.linkedNodeIds).some((linkedNodeId) => branchCandidateNodeById.has(linkedNodeId)) ||
+        [...branchCandidateNodeById.values()].some((candidateNode) => (
+          candidateNode.parentNodeId === node.id ||
+          normalizeRcaLinkedNodeIds(candidateNode.linkedNodeIds).includes(node.id)
+        ))
+      );
+
+      collectBranchDescendants(assignment.categoryNode).forEach((node) => {
+        branchCandidateNodeById.set(node.id, node);
+      });
+
+      let addedConnectedCandidate = true;
+
+      while (addedConnectedCandidate) {
+        addedConnectedCandidate = false;
+
+        activeNodes.forEach((node) => {
+          if (branchCandidateNodeById.has(node.id) || !getGridColumn(node)) {
+            return;
+          }
+
+          if (!isConnectedToBranchCandidate(node)) {
+            return;
+          }
+
+          branchCandidateNodeById.set(node.id, node);
+          addedConnectedCandidate = true;
+        });
+      }
+
+      branchCandidateNodeById.forEach((node) => {
+        const column = getGridColumn(node);
+
+        if (!column || !branchCoordinatesById.has(node.id)) {
+          return;
+        }
+
+        columns[column].push(node);
+      });
+
+      (Object.keys(columns) as Array<keyof typeof columns>).forEach((column) => {
+        columns[column].sort(sortByCurrentY);
+      });
+
+      type BranchGridRow = Partial<Record<keyof typeof columns, RcaNode>>;
+      const gridNodeById = new Map<string, RcaNode>();
+      const gridColumnByNodeId = new Map<string, keyof typeof columns>();
+      const rows: BranchGridRow[] = [];
+
+      (Object.keys(columns) as Array<keyof typeof columns>).forEach((column) => {
+        columns[column].forEach((node) => {
+          gridNodeById.set(node.id, node);
+          gridColumnByNodeId.set(node.id, column);
+        });
+      });
+
+      const connectedGridNodeIdsByNodeId = new Map<string, Set<string>>();
+      const connectGridNodes = (firstNodeId: string | null | undefined, secondNodeId: string | null | undefined) => {
+        if (!firstNodeId || !secondNodeId || firstNodeId === secondNodeId) {
+          return;
+        }
+
+        if (!gridNodeById.has(firstNodeId) || !gridNodeById.has(secondNodeId)) {
+          return;
+        }
+
+        const firstConnections = connectedGridNodeIdsByNodeId.get(firstNodeId) || new Set<string>();
+        const secondConnections = connectedGridNodeIdsByNodeId.get(secondNodeId) || new Set<string>();
+
+        firstConnections.add(secondNodeId);
+        secondConnections.add(firstNodeId);
+        connectedGridNodeIdsByNodeId.set(firstNodeId, firstConnections);
+        connectedGridNodeIdsByNodeId.set(secondNodeId, secondConnections);
+      };
+
+      gridNodeById.forEach((node) => {
+        connectGridNodes(node.id, node.parentNodeId);
+        normalizeRcaLinkedNodeIds(node.linkedNodeIds).forEach((linkedNodeId) => {
+          connectGridNodes(node.id, linkedNodeId);
+        });
+      });
+
+      const visitedGridNodeIds = new Set<string>();
+      const gridComponents: RcaNode[][] = [];
+
+      gridNodeById.forEach((node) => {
+        if (visitedGridNodeIds.has(node.id)) {
+          return;
+        }
+
+        const component: RcaNode[] = [];
+        const pendingNodeIds = [node.id];
+        visitedGridNodeIds.add(node.id);
+
+        while (pendingNodeIds.length) {
+          const currentNodeId = pendingNodeIds.shift() as string;
+          const currentNode = gridNodeById.get(currentNodeId);
+
+          if (!currentNode) {
+            return;
+          }
+
+          component.push(currentNode);
+          (connectedGridNodeIdsByNodeId.get(currentNodeId) || new Set<string>()).forEach((connectedNodeId) => {
+            if (visitedGridNodeIds.has(connectedNodeId)) {
+              return;
+            }
+
+            visitedGridNodeIds.add(connectedNodeId);
+            pendingNodeIds.push(connectedNodeId);
+          });
+        }
+
+        gridComponents.push(component);
+      });
+
+      gridComponents.forEach((component) => {
+        const rowByDuplicateIndex: BranchGridRow[] = [];
+
+        component
+          .sort(sortByCurrentY)
+          .forEach((node) => {
+            const column = gridColumnByNodeId.get(node.id);
+
+            if (!column) {
+              return;
+            }
+
+            let duplicateIndex = 0;
+
+            while (rowByDuplicateIndex[duplicateIndex]?.[column]) {
+              duplicateIndex += 1;
+            }
+
+            rowByDuplicateIndex[duplicateIndex] = {
+              ...(rowByDuplicateIndex[duplicateIndex] || {}),
+              [column]: node
+            };
+          });
+
+        rows.push(...rowByDuplicateIndex.filter((row) => Object.keys(row).length > 0));
+      });
+
+      columns.cause.forEach((causeNode) => {
+        const row = rows.find((candidateRow) => candidateRow.cause?.id === causeNode.id);
+
+        if (!row) {
+          return;
+        }
+
+        (['evidence', 'sticky', 'comment', 'analysis'] as const).forEach((column) => {
+          if (row[column]) {
+            return;
+          }
+
+          const connectedNode = columns[column].find((candidateNode) => (
+            !rows.some((candidateRow) => candidateRow[column]?.id === candidateNode.id) &&
+            (
+              candidateNode.parentNodeId === causeNode.id ||
+              causeNode.parentNodeId === candidateNode.id ||
+              normalizeRcaLinkedNodeIds(candidateNode.linkedNodeIds).includes(causeNode.id) ||
+              normalizeRcaLinkedNodeIds(causeNode.linkedNodeIds).includes(candidateNode.id)
+            )
+          ));
+
+          if (connectedNode) {
+            row[column] = connectedNode;
+          }
+        });
+      });
+
+      if (columns.cause.length) {
+        const causeAnchoredRows: BranchGridRow[] = [];
+        const usedNodeIds = new Set<string>();
+        const areDirectlyConnected = (firstNode: RcaNode, secondNode: RcaNode): boolean => (
+          firstNode.parentNodeId === secondNode.id ||
+          secondNode.parentNodeId === firstNode.id ||
+          normalizeRcaLinkedNodeIds(firstNode.linkedNodeIds).includes(secondNode.id) ||
+          normalizeRcaLinkedNodeIds(secondNode.linkedNodeIds).includes(firstNode.id)
+        );
+        const takeCauseSupportNode = (causeNode: RcaNode, column: 'sticky' | 'comment' | 'evidence' | 'analysis'): RcaNode | undefined => {
+          const connectedNode = columns[column].find((candidateNode) => (
+            !usedNodeIds.has(candidateNode.id) &&
+            areDirectlyConnected(candidateNode, causeNode)
+          ));
+
+          if (!connectedNode) {
+            return undefined;
+          }
+
+          usedNodeIds.add(connectedNode.id);
+          return connectedNode;
+        };
+
+        columns.cause.forEach((causeNode) => {
+          const row: BranchGridRow = { cause: causeNode };
+
+          usedNodeIds.add(causeNode.id);
+          row.evidence = takeCauseSupportNode(causeNode, 'evidence');
+          row.analysis = takeCauseSupportNode(causeNode, 'analysis');
+          row.sticky = takeCauseSupportNode(causeNode, 'sticky');
+          row.comment = takeCauseSupportNode(causeNode, 'comment');
+          causeAnchoredRows.push(row);
+        });
+
+        (['evidence', 'analysis', 'sticky', 'comment'] as const).forEach((column) => {
+          columns[column].forEach((node) => {
+            if (usedNodeIds.has(node.id)) {
+              return;
+            }
+
+            usedNodeIds.add(node.id);
+            causeAnchoredRows.push({ [column]: node });
+          });
+        });
+
+        rows.splice(0, rows.length, ...causeAnchoredRows);
+      }
+
+      rows.sort((leftRow, rightRow) => {
+        if (leftRow.cause && rightRow.cause) {
+          const leftCreatedOrder = getBranchRowCreationOrder(leftRow.cause);
+          const rightCreatedOrder = getBranchRowCreationOrder(rightRow.cause);
+
+          return rightCreatedOrder - leftCreatedOrder ||
+            sortByCurrentY(leftRow.cause, rightRow.cause);
+        }
+
+        const getRowPosition = (row: BranchGridRow) => {
+          const rowNodes = [
+            row.sticky,
+            row.comment,
+            row.evidence,
+            row.cause,
+            row.analysis
+          ].filter((node): node is RcaNode => Boolean(node));
+          const rowPositions = rowNodes.map((node) => branchCoordinatesById.get(node.id) || node.uiCoordinates);
+
+          return {
+            x: Math.min(...rowPositions.map((position) => position.x)),
+            y: Math.min(...rowPositions.map((position) => position.y))
+          };
+        };
+        const leftPosition = getRowPosition(leftRow);
+        const rightPosition = getRowPosition(rightRow);
+
+        return leftPosition.y - rightPosition.y || leftPosition.x - rightPosition.x;
+      });
+
+      const rowCount = rows.length;
+
+      if (!rowCount) {
+        return;
+      }
+
+      const sectionNodeIds = rows.flatMap((row) => [
+        row.sticky,
+        row.comment,
+        row.evidence,
+        row.cause,
+        row.analysis
+      ]
+        .filter((node): node is RcaNode => Boolean(node))
+        .map((node) => node.id));
+      const sectionKey = assignment.categoryNode.id;
+
+      sectionNodeIds.forEach((nodeId) => {
+        branchGridSectionKeyByNodeId.set(nodeId, sectionKey);
+        branchGridSectionNodeIdsByNodeId.set(nodeId, sectionNodeIds);
+      });
+
+      const rowHeights = Array.from({ length: rowCount }, (_, rowIndex) => {
+        const row = rows[rowIndex];
+        const rowNodes = [
+          row.sticky,
+          row.comment,
+          row.evidence,
+          row.cause,
+          row.analysis
+        ].filter((node): node is RcaNode => Boolean(node));
+
+        return Math.max(...rowNodes.map((node) => getRcaNodeSize(node, detailsByNodeId[node.id]).height));
+      });
+      const totalRowsHeight = rowHeights.reduce((height, rowHeight, rowIndex) => (
+        height + rowHeight + (rowIndex === 0 ? 0 : RCA_CONNECTED_SATELLITE_VERTICAL_GAP)
+      ), 0);
+      const topY = assignment.categoryLayout.lane === 'top'
+        ? branchPosition.y - RCA_BRANCH_CATEGORY_GAP - totalRowsHeight
+        : branchPosition.y + branchSize.height + RCA_BRANCH_CATEGORY_GAP;
+      const rowYValues: number[] = [];
+      let nextRowY = topY;
+
+      rowHeights.forEach((rowHeight, rowIndex) => {
+        rowYValues[rowIndex] = nextRowY;
+        nextRowY += rowHeight + RCA_CONNECTED_SATELLITE_VERTICAL_GAP;
+      });
+
+      const columnOrderFromBranch: Array<keyof typeof columns> = ['cause', 'evidence', 'sticky', 'comment'];
+      const columnWidthByColumn = new Map<keyof typeof columns, number>();
+      const columnXByColumn = new Map<keyof typeof columns, number>();
+
+      (Object.keys(columns) as Array<keyof typeof columns>).forEach((column) => {
+        const columnWidth = Math.max(
+          0,
+          ...columns[column].map((node) => getRcaNodeSize(node, detailsByNodeId[node.id]).width)
+        );
+
+        if (columnWidth > 0) {
+          columnWidthByColumn.set(column, columnWidth);
+        }
+      });
+
+      if (columnWidthByColumn.has('analysis')) {
+        columnXByColumn.set('analysis', branchPosition.x);
+      }
+
+      let nextRightX = branchPosition.x;
+
+      columnOrderFromBranch.forEach((column) => {
+        const columnWidth = columnWidthByColumn.get(column);
+
+        if (!columnWidth) {
+          return;
+        }
+
+        const columnX = Math.max(
+          -RCA_CANVAS_COORDINATE_LIMIT,
+          nextRightX - RCA_CONNECTED_SATELLITE_HORIZONTAL_GAP - columnWidth
+        );
+
+        columnXByColumn.set(column, columnX);
+        nextRightX = columnX;
+      });
+
+      const getColumnX = (column: keyof typeof columns, node: RcaNode) => {
+        const nodeSize = getRcaNodeSize(node, detailsByNodeId[node.id]);
+        const columnX = columnXByColumn.get(column);
+        const columnWidth = columnWidthByColumn.get(column) || nodeSize.width;
+
+        if (column === 'analysis') {
+          return branchPosition.x;
+        }
+
+        return Math.max(
+          -RCA_CANVAS_COORDINATE_LIMIT,
+          (columnX ?? branchPosition.x) + columnWidth - nodeSize.width
+        );
+      };
+
+      rows.forEach((row, rowIndex) => {
+        (Object.keys(columns) as Array<keyof typeof columns>).forEach((column) => {
+          const node = row[column];
+
+          if (!node) {
+            return;
+          }
+
+          branchCoordinatesById.set(node.id, {
+            x: Math.round(getColumnX(column, node)),
+            y: Math.round(rowYValues[rowIndex])
+          });
+        });
+      });
+
+      for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+        const row = rows[rowIndex];
+        const rowNodeIds = [
+          row.sticky,
+          row.comment,
+          row.evidence,
+          row.cause,
+          row.analysis
+        ]
+          .filter((node): node is RcaNode => Boolean(node))
+          .map((node) => node.id);
+
+        rowNodeIds.forEach((nodeId) => {
+          branchGridRowNodeIdsByNodeId.set(nodeId, rowNodeIds);
+        });
+      }
+    });
+  }
+
   if (faultGate) {
     const faultGateSize = getRcaNodeSize(faultGate, nodeDetails[faultGate.id]);
     const lastColumnRight = Math.max(
       0,
       ...[...columnLayouts.values()].map((columnLayout) => columnLayout.x + columnLayout.branchMaxOffset)
     );
+    const minimumFaultGateX = RCA_FISHBONE_FIRST_COLUMN_X + RCA_FISHBONE_COLUMN_STEP;
 
     coordinatesById.set(faultGate.id, {
-      x: Math.max(2050, lastColumnRight + RCA_FAULT_GATE_HORIZONTAL_GAP),
+      x: Math.max(minimumFaultGateX, lastColumnRight + RCA_FAULT_GATE_HORIZONTAL_GAP),
       y: RCA_FISHBONE_SPINE_Y - faultGateSize.height / 2
     });
   }
@@ -1892,22 +2912,2443 @@ function arrangeFishboneCanvasNodes(
     });
   });
 
+  const mainIntakeChainPatchByNodeId = placeMainIntakeChainNodes(
+    coordinatesById,
+    nodes,
+    nodeDetails
+  );
+  const layoutPatchByNodeId = new Map<string, RcaMainIntakeChainPatchValue>(mainIntakeChainPatchByNodeId);
+
+  placeUnarrangedConnectedRcaNodes(
+    coordinatesById,
+    layoutPatchByNodeId,
+    nodes,
+    allChildrenByParent,
+    laneByNodeId,
+    nodeDetails
+  );
+  placeUnarrangedOrphanRcaNodes(coordinatesById, nodes, nodeDetails);
+  placeUnarrangedConnectedRcaNodes(
+    coordinatesById,
+    layoutPatchByNodeId,
+    nodes,
+    allChildrenByParent,
+    laneByNodeId,
+    nodeDetails
+  );
+  normalizeCapaWorkflowLayout(coordinatesById, nodes, allChildrenByParent, nodeDetails);
+  normalizeFishboneBranchColumnGrid(
+    coordinatesById,
+    categoryAssignments,
+    allChildrenByParent,
+    nodeDetails
+  );
+  normalizeRootCauseCapaWorkflowLayout(
+    coordinatesById,
+    layoutPatchByNodeId,
+    nodes,
+    allChildrenByParent,
+    categoryAssignments.map((assignment) => ({
+      categoryNode: assignment.categoryNode,
+      lane: assignment.categoryLayout.lane
+    })),
+    laneByNodeId,
+    nodeDetails
+  );
+  normalizeStandaloneFiveWhysAnalysisLayout(
+    coordinatesById,
+    layoutPatchByNodeId,
+    nodes,
+    allChildrenByParent,
+    nodeDetails
+  );
+  placeCaseApprovalClosureNode(
+    coordinatesById,
+    layoutPatchByNodeId,
+    nodes,
+    nodeDetails
+  );
+  resolveRcaCanvasLayoutCollisions(
+    coordinatesById,
+    nodes,
+    nodeDetails,
+    laneByNodeId,
+    branchGridRowNodeIdsByNodeId,
+    branchGridSectionKeyByNodeId,
+    branchGridSectionNodeIdsByNodeId
+  );
+  enforceFishboneBranchClearance(
+    coordinatesById,
+    nodes,
+    nodeDetails,
+    laneByNodeId,
+    branchGridSectionNodeIdsByNodeId
+  );
+  enforceCapaStageStackClearance(
+    coordinatesById,
+    layoutPatchByNodeId,
+    nodes,
+    allChildrenByParent,
+    laneByNodeId,
+    nodeDetails
+  );
+  enforceMainIntakeFaultGateGap(coordinatesById, nodes, nodeDetails);
+  finalizeFishboneBranchSupportRows(coordinatesById, nodes, nodeDetails, laneByNodeId);
+  normalizeRootCauseCapaWorkflowLayout(
+    coordinatesById,
+    layoutPatchByNodeId,
+    nodes,
+    allChildrenByParent,
+    categoryAssignments.map((assignment) => ({
+      categoryNode: assignment.categoryNode,
+      lane: assignment.categoryLayout.lane
+    })),
+    laneByNodeId,
+    nodeDetails
+  );
+  normalizeStandaloneFiveWhysAnalysisLayout(
+    coordinatesById,
+    layoutPatchByNodeId,
+    nodes,
+    allChildrenByParent,
+    nodeDetails
+  );
+  restoreFreeformAnnotationCoordinates(coordinatesById, nodes);
+  syncArrangedRcaConnectionHandles(coordinatesById, layoutPatchByNodeId, nodes, nodeDetails);
+
   return nodes.map((node) => {
     const coordinates = coordinatesById.get(node.id);
+    const layoutPatch = layoutPatchByNodeId.get(node.id);
 
-    if (!coordinates) {
+    if (!coordinates && !layoutPatch) {
       return node;
     }
 
     return {
       ...node,
-      uiCoordinates: {
-        layoutMethodology: 'ISHIKAWA',
-        x: coordinates.x,
-        y: coordinates.y
-      }
+      ...(layoutPatch?.connectionHandles ? { connectionHandles: layoutPatch.connectionHandles } : {}),
+      ...(layoutPatch?.linkedNodeIds ? { linkedNodeIds: layoutPatch.linkedNodeIds } : {}),
+      ...(layoutPatch && Object.prototype.hasOwnProperty.call(layoutPatch, 'parentNodeId')
+        ? { parentNodeId: layoutPatch.parentNodeId ?? null }
+        : {}),
+      ...(coordinates
+        ? {
+            uiCoordinates: {
+              layoutMethodology: 'ISHIKAWA',
+              x: coordinates.x,
+              y: coordinates.y
+            }
+          }
+        : {})
     };
   });
+}
+
+function shouldArrangeNodeInsideFishboneCauseTree(node: RcaNode): boolean {
+  if (isFreeformRcaAnnotationNode(node) || node.nodeType === 'FAULT_GATE') {
+    return false;
+  }
+
+  if (
+    isIncidentRoleNode(node) ||
+    isIncidentDetailsRoleNode(node) ||
+    isContainmentRoleNode(node) ||
+    isProblemRoleNode(node) ||
+    isEvidenceRoleNode(node) ||
+    isFiveWhysInvestigationRoleNode(node) ||
+    isRootCauseRoleNode(node) ||
+    isCapaRoleNode(node) ||
+    isCapaDownstreamRoleNode(node)
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function placeUnarrangedConnectedRcaNodes(
+  coordinatesById: Map<string, { x: number; y: number }>,
+  patchByNodeId: Map<string, RcaMainIntakeChainPatchValue>,
+  nodes: RcaNode[],
+  childrenByParent: Map<string, RcaNode[]>,
+  laneByNodeId: Map<string, 'top' | 'bottom'> = new Map(),
+  nodeDetails: Record<string, ReferenceRcaNodeDetail> = {}
+) {
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const processedParentNodeIds = new Set<string>();
+  const sortedParents = nodes
+    .filter((node) => node.status !== 'DELETED' && coordinatesById.has(node.id))
+    .sort((leftNode, rightNode) => {
+      const leftPosition = coordinatesById.get(leftNode.id) || { x: 0, y: 0 };
+      const rightPosition = coordinatesById.get(rightNode.id) || { x: 0, y: 0 };
+
+      return leftPosition.x - rightPosition.x || leftPosition.y - rightPosition.y || leftNode.id.localeCompare(rightNode.id);
+    });
+
+  function placeChildren(parentNode: RcaNode) {
+    if (processedParentNodeIds.has(parentNode.id) || !coordinatesById.has(parentNode.id)) {
+      return;
+    }
+
+    processedParentNodeIds.add(parentNode.id);
+
+    const childNodes = (childrenByParent.get(parentNode.id) || [])
+      .filter((childNode) => (
+        childNode.status !== 'DELETED' &&
+        !coordinatesById.has(childNode.id) &&
+        nodeById.has(childNode.id)
+      ));
+
+    if (!childNodes.length) {
+      return;
+    }
+
+    const childGroups = new Map<'left' | 'right' | 'below', RcaNode[]>();
+
+    childNodes.forEach((childNode) => {
+      const side = getConnectedRcaNodeLayoutSide(childNode, parentNode, nodes);
+      const siblings = childGroups.get(side) || [];
+
+      siblings.push(childNode);
+      childGroups.set(side, siblings);
+    });
+
+    (['left', 'right', 'below'] as const).forEach((side) => {
+      const children = childGroups.get(side) || [];
+
+      placeConnectedRcaNodeStack(
+        coordinatesById,
+        patchByNodeId,
+        parentNode,
+        children,
+        side,
+        nodes,
+        laneByNodeId,
+        nodeDetails
+      );
+    });
+
+    childNodes.forEach(placeChildren);
+  }
+
+  sortedParents.forEach(placeChildren);
+}
+
+function getConnectedRcaNodeLayoutSide(
+  childNode: RcaNode,
+  parentNode: RcaNode,
+  nodes: RcaNode[]
+): 'left' | 'right' | 'below' {
+  if (childNode.nodeType === 'STICKY_NOTE' || isEvidenceRoleNode(childNode)) {
+    return 'left';
+  }
+
+  if (childNode.nodeType === 'COMMENT') {
+    return 'left';
+  }
+
+  if (isFiveWhysInvestigationRoleNode(childNode) || getFiveWhysNodeRole(childNode) === 'ANSWER') {
+    return 'right';
+  }
+
+  if (isCapaDownstreamRoleNode(childNode)) {
+    return 'right';
+  }
+
+  if (isRootCauseRoleNode(parentNode) && isFiveWhysInvestigationRoleNode(childNode)) {
+    return 'right';
+  }
+
+  if (isRcaForwardFlowEdge(childNode, parentNode)) {
+    return 'below';
+  }
+
+  if (childNode.nodeType === 'FAULT_GATE' || isCapaDestinationNode(childNode)) {
+    return 'right';
+  }
+
+  if (isFishboneCauseNode(childNode)) {
+    return 'left';
+  }
+
+  return nodes.findIndex((node) => node.id === childNode.id) % 2 === 0 ? 'right' : 'left';
+}
+
+function placeConnectedRcaNodeStack(
+  coordinatesById: Map<string, { x: number; y: number }>,
+  patchByNodeId: Map<string, RcaMainIntakeChainPatchValue>,
+  parentNode: RcaNode,
+  childNodes: RcaNode[],
+  preferredSide: 'left' | 'right' | 'below',
+  nodes: RcaNode[],
+  laneByNodeId: Map<string, 'top' | 'bottom'> = new Map(),
+  nodeDetails: Record<string, ReferenceRcaNodeDetail> = {}
+) {
+  if (!childNodes.length) {
+    return;
+  }
+
+  const parentCoordinates = coordinatesById.get(parentNode.id);
+
+  if (!parentCoordinates) {
+    return;
+  }
+
+  const parentSize = getRcaNodeSize(parentNode, nodeDetails[parentNode.id]);
+  const childSizes = childNodes.map((childNode) => getRcaNodeSize(childNode, nodeDetails[childNode.id]));
+  const stackHeight = childSizes.reduce((totalHeight, size, index) => (
+    totalHeight + size.height + (index === 0 ? 0 : RCA_CONNECTED_SATELLITE_VERTICAL_GAP)
+  ), 0);
+  const widestChild = Math.max(...childSizes.map((size) => size.width));
+  const canUseLeftSide = parentCoordinates.x - widestChild - RCA_CONNECTED_SATELLITE_HORIZONTAL_GAP >= 40;
+  const side = preferredSide === 'left' && !canUseLeftSide ? 'right' : preferredSide;
+  const lane = laneByNodeId.get(parentNode.id) || laneByNodeId.get(childNodes[0]?.id || '') || null;
+  const unclampedStackStartY = side === 'below'
+    ? lane === 'top'
+      ? parentCoordinates.y - RCA_CONNECTED_SATELLITE_VERTICAL_GAP - stackHeight
+      : parentCoordinates.y + parentSize.height + RCA_CONNECTED_SATELLITE_VERTICAL_GAP
+    : parentCoordinates.y + parentSize.height / 2 - stackHeight / 2;
+  const laneClampedStackStartY = lane === 'top'
+    ? Math.min(
+        Math.max(40, unclampedStackStartY),
+        RCA_FISHBONE_SPINE_Y - RCA_LAYOUT_SPINE_LANE_GAP - stackHeight
+      )
+    : lane === 'bottom'
+      ? Math.max(RCA_FISHBONE_SPINE_Y + RCA_LAYOUT_SPINE_LANE_GAP, unclampedStackStartY)
+      : Math.max(40, unclampedStackStartY);
+  let nextY = laneClampedStackStartY;
+
+  childNodes.forEach((childNode, childIndex) => {
+    const childSize = childSizes[childIndex];
+    const x = getConnectedRcaNodeColumnX(
+      parentNode,
+      childNode,
+      childSize,
+      parentCoordinates,
+      parentSize,
+      side,
+      nodes,
+      coordinatesById
+    );
+
+    coordinatesById.set(childNode.id, {
+      x: Math.round(x),
+      y: Math.round(nextY)
+    });
+    patchByNodeId.set(childNode.id, {
+      ...(patchByNodeId.get(childNode.id) || {}),
+      connectionHandles: getPreferredRcaLayoutConnectionHandles(parentNode, childNode, coordinatesById, nodes, nodeDetails)
+    });
+    nextY += childSize.height + RCA_CONNECTED_SATELLITE_VERTICAL_GAP;
+  });
+}
+
+function getConnectedRcaNodeColumnX(
+  parentNode: RcaNode,
+  childNode: RcaNode,
+  childSize: { height: number; width: number },
+  parentCoordinates: { x: number; y: number },
+  parentSize: { height: number; width: number },
+  side: 'left' | 'right' | 'below',
+  nodes: RcaNode[],
+  coordinatesById: Map<string, { x: number; y: number }>
+): number {
+  if (isFiveWhysInvestigationRoleNode(childNode) || getFiveWhysNodeRole(childNode) === 'ANSWER' || isCapaDownstreamRoleNode(childNode)) {
+    const branchColumnX = getOwningFishboneBranchColumnX(parentNode, nodes, coordinatesById);
+
+    return branchColumnX ?? parentCoordinates.x + parentSize.width + RCA_CAUSE_CATEGORY_HORIZONTAL_GAP;
+  }
+
+  if (side === 'right' || childNode.nodeType === 'FAULT_GATE' || isCapaDestinationNode(childNode)) {
+    return parentCoordinates.x + parentSize.width + RCA_CONNECTED_SATELLITE_HORIZONTAL_GAP;
+  }
+
+  if (isEvidenceRoleNode(childNode)) {
+    return Math.max(
+      -RCA_CANVAS_COORDINATE_LIMIT,
+      parentCoordinates.x - childSize.width - RCA_CONNECTED_SATELLITE_HORIZONTAL_GAP * 2 - RCA_CAUSE_NODE_WIDTH
+    );
+  }
+
+  if (childNode.nodeType === 'STICKY_NOTE' || childNode.nodeType === 'COMMENT') {
+    const outerColumnOffset = childNode.nodeType === 'COMMENT'
+      ? RCA_CONNECTED_SATELLITE_HORIZONTAL_GAP * 4 + RCA_CAUSE_NODE_WIDTH + RCA_STICKY_NOTE_MAX_WIDTH * 2
+      : RCA_CONNECTED_SATELLITE_HORIZONTAL_GAP * 3 + RCA_CAUSE_NODE_WIDTH + RCA_STICKY_NOTE_MAX_WIDTH;
+
+    return Math.max(-RCA_CANVAS_COORDINATE_LIMIT, parentCoordinates.x - childSize.width - outerColumnOffset);
+  }
+
+  if (isFishboneCauseNode(childNode)) {
+    return Math.max(
+      -RCA_CANVAS_COORDINATE_LIMIT,
+      parentCoordinates.x - childSize.width - RCA_CONNECTED_SATELLITE_HORIZONTAL_GAP
+    );
+  }
+
+  if (side === 'below') {
+    return Math.max(40, parentCoordinates.x + parentSize.width / 2 - childSize.width / 2);
+  }
+
+  return Math.max(
+    -RCA_CANVAS_COORDINATE_LIMIT,
+    parentCoordinates.x - childSize.width - RCA_CONNECTED_SATELLITE_HORIZONTAL_GAP
+  );
+}
+
+function normalizeCapaWorkflowLayout(
+  coordinatesById: Map<string, { x: number; y: number }>,
+  nodes: RcaNode[],
+  childrenByParent: Map<string, RcaNode[]>,
+  nodeDetails: Record<string, ReferenceRcaNodeDetail> = {}
+) {
+  const activeNodes = nodes.filter((node) => node.status !== 'DELETED');
+  const capaNodes = activeNodes.filter(isCapaRoleNode);
+
+  capaNodes.forEach((capaNode) => {
+    const linkedFaultGateNode = activeNodes.find((node) => (
+      node.nodeType === 'FAULT_GATE' &&
+      node.parentNodeId === capaNode.id &&
+      coordinatesById.has(node.id)
+    ));
+
+    if (!linkedFaultGateNode) {
+      return;
+    }
+
+    const faultGateCoordinates = coordinatesById.get(linkedFaultGateNode.id);
+
+    if (!faultGateCoordinates) {
+      return;
+    }
+
+    const faultGateSize = getRcaNodeSize(linkedFaultGateNode, nodeDetails[linkedFaultGateNode.id]);
+    const capaSize = getRcaNodeSize(capaNode, nodeDetails[capaNode.id]);
+    const capaCoordinates = {
+      x: Math.round(faultGateCoordinates.x + faultGateSize.width + RCA_CAPA_WORKFLOW_COLUMN_GAP),
+      y: Math.round(faultGateCoordinates.y + faultGateSize.height / 2 - capaSize.height / 2)
+    };
+
+    coordinatesById.set(capaNode.id, capaCoordinates);
+
+    const downstreamNodes = (childrenByParent.get(capaNode.id) || [])
+      .filter(isCapaDownstreamRoleNode)
+      .sort((leftNode, rightNode) => getCapaWorkflowRoleRank(leftNode) - getCapaWorkflowRoleRank(rightNode));
+    const stageNodes = downstreamNodes.filter((node) => !isApprovalClosureRoleNode(node));
+
+    if (!stageNodes.length) {
+      return;
+    }
+
+    const stageSizes = stageNodes.map((node) => getRcaNodeSize(node, nodeDetails[node.id]));
+    const workflowEvidenceNodes = getCapaWorkflowEvidenceNodes(stageNodes, undefined, childrenByParent);
+    const widestCapaColumnWidth = Math.max(
+      capaSize.width,
+      ...workflowEvidenceNodes.map((node) => getRcaNodeSize(node, nodeDetails[node.id]).width)
+    );
+    const stageColumnX = Math.round(capaCoordinates.x + widestCapaColumnWidth + RCA_CAPA_WORKFLOW_COLUMN_GAP);
+    let nextStageY = Math.round(Math.max(40, capaCoordinates.y + capaSize.height + RCA_CAPA_WORKFLOW_VERTICAL_GAP));
+
+    stageNodes.forEach((stageNode, index) => {
+      const stageSize = stageSizes[index];
+      const stageCoordinates = {
+        x: stageColumnX,
+        y: nextStageY
+      };
+
+      coordinatesById.set(stageNode.id, stageCoordinates);
+      nextStageY += stageSize.height + RCA_CAPA_WORKFLOW_VERTICAL_GAP;
+    });
+
+    placeCapaWorkflowSupportColumns(
+      coordinatesById,
+      capaNode,
+      linkedFaultGateNode,
+      stageNodes,
+      undefined,
+      capaCoordinates,
+      faultGateCoordinates,
+      childrenByParent,
+      nodeDetails
+    );
+  });
+}
+
+function normalizeRootCauseCapaWorkflowLayout(
+  coordinatesById: Map<string, { x: number; y: number }>,
+  patchByNodeId: Map<string, RcaMainIntakeChainPatchValue>,
+  nodes: RcaNode[],
+  childrenByParent: Map<string, RcaNode[]>,
+  categoryLayouts: Array<{ categoryNode: RcaNode; lane: 'top' | 'bottom' }>,
+  laneByNodeId: Map<string, 'top' | 'bottom'> = new Map(),
+  nodeDetails: Record<string, ReferenceRcaNodeDetail> = {}
+) {
+  const nodeById = new Map(nodes
+    .filter((node) => node.status !== 'DELETED')
+    .map((node) => [node.id, node]));
+  const categoryLayoutById = new Map(categoryLayouts.map((layout) => [layout.categoryNode.id, layout]));
+  const rootCausesByCategoryId = new Map<string, RcaNode[]>();
+  const rootCauseNodes = nodes
+    .filter((node) => (
+      node.status !== 'DELETED' &&
+      isRootCauseRoleNode(node) &&
+      !isMisclassifiedFishboneCauseNode(node, nodes)
+    ));
+
+  rootCauseNodes.forEach((rootCauseNode) => {
+    const categoryNode = getOwningFishboneCategoryNode(rootCauseNode, nodeById);
+
+    if (!categoryNode || !categoryLayoutById.has(categoryNode.id)) {
+      return;
+    }
+
+    const siblings = rootCausesByCategoryId.get(categoryNode.id) || [];
+    siblings.push(rootCauseNode);
+    rootCausesByCategoryId.set(categoryNode.id, siblings);
+  });
+
+  rootCausesByCategoryId.forEach((rootCauseGroup, categoryId) => {
+    const categoryLayout = categoryLayoutById.get(categoryId);
+    const categoryCoordinates = categoryLayout ? coordinatesById.get(categoryLayout.categoryNode.id) : undefined;
+
+    if (!categoryLayout || !categoryCoordinates) {
+      return;
+    }
+
+    const categorySize = getRcaNodeSize(categoryLayout.categoryNode, nodeDetails[categoryLayout.categoryNode.id]);
+    const nodeIndexById = new Map(nodes.map((node, index) => [node.id, index]));
+    const sortedRootCauseGroup = rootCauseGroup
+      .sort((leftNode, rightNode) => (
+        getRcaFlowNodeLayerTime(rightNode, nodeIndexById.get(rightNode.id) ?? 0) -
+          getRcaFlowNodeLayerTime(leftNode, nodeIndexById.get(leftNode.id) ?? 0) ||
+        sortRcaNodesByCurrentCanvasPosition(leftNode, rightNode)
+      ));
+    const workflowBlocks = sortedRootCauseGroup.map((rootCauseNode) => (
+      getRootCauseWorkflowBlockLayout(rootCauseNode, nodes, childrenByParent, nodeDetails)
+    ));
+    const totalWorkflowHeight = workflowBlocks.reduce((height, workflowBlock, index) => (
+      height + workflowBlock.height + (index === 0 ? 0 : RCA_ROOT_CAUSE_WORKFLOW_BLOCK_GAP)
+    ), 0);
+    let nextBlockY = categoryLayout.lane === 'top'
+      ? categoryCoordinates.y - RCA_BRANCH_CATEGORY_GAP - totalWorkflowHeight
+      : categoryCoordinates.y + categorySize.height + RCA_BRANCH_CATEGORY_GAP;
+
+    workflowBlocks.forEach((workflowBlock) => {
+      placeRootCauseWorkflowBlock(
+        coordinatesById,
+        patchByNodeId,
+        workflowBlock,
+        {
+          x: Math.round(categoryCoordinates.x + categorySize.width + RCA_CAPA_WORKFLOW_COLUMN_GAP),
+          y: Math.round(nextBlockY)
+        },
+        categoryLayout.lane,
+        childrenByParent,
+        nodeDetails
+      );
+      nextBlockY += workflowBlock.height + RCA_ROOT_CAUSE_WORKFLOW_BLOCK_GAP;
+    });
+  });
+}
+
+function normalizeStandaloneFiveWhysAnalysisLayout(
+  coordinatesById: Map<string, { x: number; y: number }>,
+  patchByNodeId: Map<string, RcaMainIntakeChainPatchValue>,
+  nodes: RcaNode[],
+  childrenByParent: Map<string, RcaNode[]>,
+  nodeDetails: Record<string, ReferenceRcaNodeDetail> = {}
+) {
+  const activeNodes = nodes.filter((node) => node.status !== 'DELETED');
+  const activeNodeById = new Map(activeNodes.map((node) => [node.id, node]));
+  const fiveWhysNodes = activeNodes
+    .filter((node) => {
+      const parentNode = node.parentNodeId ? activeNodeById.get(node.parentNodeId) : undefined;
+
+      return Boolean(
+        isFiveWhysInvestigationRoleNode(node) &&
+        parentNode &&
+        isProblemRoleNode(parentNode) &&
+        coordinatesById.has(parentNode.id)
+      );
+    })
+    .sort(sortRcaNodesByCurrentCanvasPosition);
+
+  fiveWhysNodes.forEach((fiveWhysNode, fiveWhysIndex) => {
+    const problemNode = fiveWhysNode.parentNodeId ? activeNodeById.get(fiveWhysNode.parentNodeId) : undefined;
+    const problemCoordinates = problemNode ? coordinatesById.get(problemNode.id) : undefined;
+
+    if (!problemNode || !problemCoordinates) {
+      return;
+    }
+
+    const problemSize = getRcaNodeSize(problemNode, nodeDetails[problemNode.id]);
+    const fiveWhysSize = getRcaNodeSize(fiveWhysNode, nodeDetails[fiveWhysNode.id]);
+    const fiveWhysCoordinates = {
+      x: Math.round(problemCoordinates.x),
+      y: Math.round(
+        problemCoordinates.y +
+        problemSize.height +
+        RCA_FIVE_WHYS_CHAIN_TOP_GAP +
+        fiveWhysIndex * (fiveWhysSize.height + RCA_ROOT_CAUSE_WORKFLOW_BLOCK_GAP)
+      )
+    };
+
+    coordinatesById.set(fiveWhysNode.id, fiveWhysCoordinates);
+    patchByNodeId.set(fiveWhysNode.id, {
+      ...(patchByNodeId.get(fiveWhysNode.id) || {}),
+      connectionHandles: getVerticalRcaFlowConnectionHandles(),
+      parentNodeId: problemNode.id
+    });
+
+    const rootCauseNodes = (childrenByParent.get(fiveWhysNode.id) || [])
+      .filter(isRootCauseRoleNode)
+      .sort(sortRcaNodesByCurrentCanvasPosition);
+    let nextRootCauseY = Math.round(fiveWhysCoordinates.y + fiveWhysSize.height + RCA_CONNECTED_SATELLITE_VERTICAL_GAP);
+
+    rootCauseNodes.forEach((rootCauseNode) => {
+      const workflowBlock = getRootCauseWorkflowBlockLayout(rootCauseNode, nodes, childrenByParent, nodeDetails);
+      const evidenceStackHeight = getFixedGapStackHeight(
+        workflowBlock.evidenceSizes.map((size) => size.height),
+        RCA_CONNECTED_SATELLITE_VERTICAL_GAP
+      );
+      const rootCausePrefixHeight = workflowBlock.evidenceNodes.length
+        ? evidenceStackHeight + RCA_CONNECTED_SATELLITE_VERTICAL_GAP
+        : 0;
+      const blockOrigin = {
+        x: Math.round(fiveWhysCoordinates.x),
+        y: Math.round(nextRootCauseY - rootCausePrefixHeight)
+      };
+
+      placeRootCauseWorkflowBlock(
+        coordinatesById,
+        patchByNodeId,
+        workflowBlock,
+        blockOrigin,
+        'bottom',
+        childrenByParent,
+        nodeDetails
+      );
+      const rootCauseCoordinates = coordinatesById.get(rootCauseNode.id);
+
+      if (rootCauseCoordinates && workflowBlock.evidenceNodes.length) {
+        workflowBlock.evidenceNodes.forEach((evidenceNode, evidenceIndex) => {
+          const evidenceSize = workflowBlock.evidenceSizes[evidenceIndex] ||
+            getRcaNodeSize(evidenceNode, nodeDetails[evidenceNode.id]);
+
+          coordinatesById.set(evidenceNode.id, {
+            x: Math.round(rootCauseCoordinates.x - evidenceSize.width - RCA_CONNECTED_SATELLITE_HORIZONTAL_GAP),
+            y: Math.round(rootCauseCoordinates.y + Math.max(0, (workflowBlock.rootCauseSize.height - evidenceSize.height) / 2))
+          });
+          patchByNodeId.set(evidenceNode.id, {
+            ...(patchByNodeId.get(evidenceNode.id) || {}),
+            connectionHandles: {
+              sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+              targetHandle: RCA_TARGET_LEFT_HANDLE
+            },
+            parentNodeId: rootCauseNode.id
+          });
+        });
+      }
+
+      if (workflowBlock.capaNode && workflowBlock.stageNodes.length) {
+        const approvalNode = workflowBlock.approvalNode || activeNodes
+          .filter(isApprovalClosureRoleNode)
+          .filter((candidateNode) => !candidateNode.parentNodeId || candidateNode.parentNodeId === workflowBlock.capaNode?.id)
+          .sort(sortRcaNodesByCurrentCanvasPosition)[0];
+        const correctiveStageNode = workflowBlock.stageNodes.find((stageNode) => getFiveWhysNodeRole(stageNode) === 'CORRECTIVE_ACTION') ||
+          workflowBlock.stageNodes[0];
+        const correctiveCoordinates = coordinatesById.get(correctiveStageNode.id);
+
+        if (approvalNode && correctiveCoordinates) {
+          const correctiveSize = getRcaNodeSize(correctiveStageNode, nodeDetails[correctiveStageNode.id]);
+          const approvalSize = getRcaNodeSize(approvalNode, nodeDetails[approvalNode.id]);
+
+          coordinatesById.set(approvalNode.id, {
+            x: Math.round(correctiveCoordinates.x + correctiveSize.width + RCA_CAPA_WORKFLOW_COLUMN_GAP),
+            y: Math.round(correctiveCoordinates.y + correctiveSize.height / 2 - approvalSize.height / 2)
+          });
+          patchByNodeId.set(approvalNode.id, {
+            ...(patchByNodeId.get(approvalNode.id) || {}),
+            connectionHandles: {
+              sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+              targetHandle: RCA_TARGET_LEFT_HANDLE
+            },
+            parentNodeId: workflowBlock.capaNode.id
+          });
+          workflowBlock.stageNodes.forEach((stageNode) => {
+            patchByNodeId.set(stageNode.id, {
+              ...(patchByNodeId.get(stageNode.id) || {}),
+              linkedNodeIds: [...new Set([...normalizeRcaLinkedNodeIds(stageNode.linkedNodeIds), approvalNode.id])]
+            });
+          });
+        }
+      }
+      patchByNodeId.set(rootCauseNode.id, {
+        ...(patchByNodeId.get(rootCauseNode.id) || {}),
+        connectionHandles: getVerticalRcaFlowConnectionHandles(),
+        parentNodeId: fiveWhysNode.id
+      });
+      nextRootCauseY = Math.max(
+        nextRootCauseY + workflowBlock.height + RCA_ROOT_CAUSE_WORKFLOW_BLOCK_GAP,
+        blockOrigin.y + workflowBlock.height + RCA_ROOT_CAUSE_WORKFLOW_BLOCK_GAP
+      );
+    });
+  });
+}
+
+function placeCaseApprovalClosureNode(
+  coordinatesById: Map<string, { x: number; y: number }>,
+  patchByNodeId: Map<string, RcaMainIntakeChainPatchValue>,
+  nodes: RcaNode[],
+  nodeDetails: Record<string, ReferenceRcaNodeDetail> = {}
+) {
+  const faultGateNode = nodes.find((node) => node.status !== 'DELETED' && node.nodeType === 'FAULT_GATE');
+  const approvalNode = nodes
+    .filter(isApprovalClosureRoleNode)
+    .sort(sortRcaNodesByCurrentCanvasPosition)[0];
+
+  if (!faultGateNode || !approvalNode) {
+    return;
+  }
+
+  const faultGateCoordinates = coordinatesById.get(faultGateNode.id);
+
+  if (!faultGateCoordinates) {
+    return;
+  }
+
+  const faultGateSize = getRcaNodeSize(faultGateNode, nodeDetails[faultGateNode.id]);
+  const approvalSize = getRcaNodeSize(approvalNode, nodeDetails[approvalNode.id]);
+  const approvalCoordinates = {
+    x: Math.round(faultGateCoordinates.x + faultGateSize.width + RCA_FAULT_GATE_APPROVAL_HORIZONTAL_GAP),
+    y: Math.round(faultGateCoordinates.y + faultGateSize.height / 2 - approvalSize.height / 2)
+  };
+
+  coordinatesById.set(approvalNode.id, approvalCoordinates);
+  patchByNodeId.set(approvalNode.id, {
+    ...(patchByNodeId.get(approvalNode.id) || {}),
+    connectionHandles: {
+      sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+      targetHandle: RCA_TARGET_LEFT_HANDLE
+    },
+    parentNodeId: faultGateNode.id
+  });
+}
+
+type RcaRootCauseWorkflowBlockLayout = {
+  approvalNode?: RcaNode;
+  approvalSize?: { height: number; width: number };
+  capaNode?: RcaNode;
+  capaSize?: { height: number; width: number };
+  capaDirectEvidenceNodes: RcaNode[];
+  capaDirectEvidenceSizes: Array<{ height: number; width: number }>;
+  capaStageEvidenceNodes: RcaNode[];
+  capaStageEvidenceSizes: Array<{ height: number; width: number }>;
+  evidenceNodes: RcaNode[];
+  evidenceSizes: Array<{ height: number; width: number }>;
+  height: number;
+  rootCauseNode: RcaNode;
+  rootCauseSize: { height: number; width: number };
+  stageNodes: RcaNode[];
+  stageSizes: Array<{ height: number; width: number }>;
+};
+
+function getRootCauseWorkflowBlockLayout(
+  rootCauseNode: RcaNode,
+  nodes: RcaNode[],
+  childrenByParent: Map<string, RcaNode[]>,
+  nodeDetails: Record<string, ReferenceRcaNodeDetail>
+): RcaRootCauseWorkflowBlockLayout {
+  void nodes;
+  const rootCauseSize = getRcaNodeSize(rootCauseNode, nodeDetails[rootCauseNode.id]);
+  const evidenceNodes = (childrenByParent.get(rootCauseNode.id) || [])
+    .filter(isEvidenceRoleNode)
+    .sort(sortRcaNodesByCurrentCanvasPosition);
+  const evidenceSizes = evidenceNodes.map((node) => getRcaNodeSize(node, nodeDetails[node.id]));
+  const capaNode = (childrenByParent.get(rootCauseNode.id) || [])
+    .filter(isCapaRoleNode)
+    .sort(sortRcaNodesByCurrentCanvasPosition)[0];
+  const capaSize = capaNode ? getRcaNodeSize(capaNode, nodeDetails[capaNode.id]) : undefined;
+  const downstreamNodes = capaNode
+    ? (childrenByParent.get(capaNode.id) || []).filter(isCapaDownstreamRoleNode)
+    : [];
+  const approvalNode = downstreamNodes
+    .filter(isApprovalClosureRoleNode)
+    .sort(sortRcaNodesByCurrentCanvasPosition)[0];
+  const approvalSize = approvalNode ? getRcaNodeSize(approvalNode, nodeDetails[approvalNode.id]) : undefined;
+  const stageNodes = downstreamNodes
+    .filter((node) => !isApprovalClosureRoleNode(node))
+    .sort((leftNode, rightNode) => getCapaWorkflowRoleRank(leftNode) - getCapaWorkflowRoleRank(rightNode) || leftNode.id.localeCompare(rightNode.id));
+  const stageSizes = stageNodes.map((node) => getRcaNodeSize(node, nodeDetails[node.id]));
+  const capaStageEvidenceNodes = getCapaWorkflowEvidenceNodes(stageNodes, undefined, childrenByParent);
+  const capaStageEvidenceSizes = capaStageEvidenceNodes.map((node) => getRcaNodeSize(node, nodeDetails[node.id]));
+  const capaDirectEvidenceNodes = capaNode
+    ? (childrenByParent.get(capaNode.id) || []).filter(isEvidenceRoleNode).sort(sortRcaNodesByCurrentCanvasPosition)
+    : [];
+  const capaDirectEvidenceSizes = capaDirectEvidenceNodes.map((node) => getRcaNodeSize(node, nodeDetails[node.id]));
+  const evidenceStackHeight = getFixedGapStackHeight(
+    evidenceSizes.map((size) => size.height),
+    RCA_CONNECTED_SATELLITE_VERTICAL_GAP
+  );
+  const rootColumnHeight = evidenceNodes.length
+    ? evidenceStackHeight + RCA_CONNECTED_SATELLITE_VERTICAL_GAP + rootCauseSize.height
+    : rootCauseSize.height;
+  const stageRowHeights = stageNodes.map((stageNode, index) => {
+    const stageEvidenceSizes = (childrenByParent.get(stageNode.id) || [])
+      .filter(isEvidenceRoleNode)
+      .sort(sortRcaNodesByCurrentCanvasPosition)
+      .map((node) => getRcaNodeSize(node, nodeDetails[node.id]));
+    const stageEvidenceStackHeight = getFixedGapStackHeight(
+      stageEvidenceSizes.map((size) => size.height),
+      RCA_CONNECTED_SATELLITE_VERTICAL_GAP
+    );
+
+    return Math.max(stageSizes[index]?.height ?? 0, stageEvidenceStackHeight);
+  });
+  const stageStackHeight = getFixedGapStackHeight(
+    stageRowHeights.length ? stageRowHeights : stageSizes.map((size) => size.height),
+    RCA_CAPA_WORKFLOW_VERTICAL_GAP
+  );
+  const capaDirectEvidenceStackHeight = getFixedGapStackHeight(
+    capaDirectEvidenceSizes.map((size) => size.height),
+    RCA_CONNECTED_SATELLITE_VERTICAL_GAP
+  );
+  const capaColumnSupportHeight = stageStackHeight +
+    (stageStackHeight && capaDirectEvidenceStackHeight ? RCA_CAPA_WORKFLOW_VERTICAL_GAP : 0) +
+    capaDirectEvidenceStackHeight;
+  const hasCapaEvidenceColumn = Boolean(capaStageEvidenceNodes.length || capaDirectEvidenceNodes.length);
+  const capaColumnHeight = hasCapaEvidenceColumn && capaSize
+    ? capaColumnSupportHeight + RCA_CAPA_WORKFLOW_VERTICAL_GAP + capaSize.height
+    : capaSize?.height ?? 0;
+
+  return {
+    approvalNode,
+    approvalSize,
+    capaDirectEvidenceNodes,
+    capaDirectEvidenceSizes,
+    capaNode,
+    capaSize,
+    capaStageEvidenceNodes,
+    capaStageEvidenceSizes,
+    evidenceNodes,
+    evidenceSizes,
+    height: Math.max(rootColumnHeight, capaColumnHeight, stageStackHeight),
+    rootCauseNode,
+    rootCauseSize,
+    stageNodes,
+    stageSizes
+  };
+}
+
+function placeRootCauseWorkflowBlock(
+  coordinatesById: Map<string, { x: number; y: number }>,
+  patchByNodeId: Map<string, RcaMainIntakeChainPatchValue>,
+  workflowBlock: RcaRootCauseWorkflowBlockLayout,
+  blockOrigin: { x: number; y: number },
+  lane: 'top' | 'bottom',
+  childrenByParent: Map<string, RcaNode[]>,
+  nodeDetails: Record<string, ReferenceRcaNodeDetail>
+) {
+  const rootColumnHeight = workflowBlock.evidenceNodes.length
+    ? getFixedGapStackHeight(
+        workflowBlock.evidenceSizes.map((size) => size.height),
+        RCA_CONNECTED_SATELLITE_VERTICAL_GAP
+      ) +
+      RCA_CONNECTED_SATELLITE_VERTICAL_GAP +
+      workflowBlock.rootCauseSize.height
+    : workflowBlock.rootCauseSize.height;
+  let nextY = lane === 'top'
+    ? blockOrigin.y + workflowBlock.height - rootColumnHeight
+    : blockOrigin.y;
+
+  workflowBlock.evidenceNodes.forEach((evidenceNode, index) => {
+    const evidenceSize = workflowBlock.evidenceSizes[index];
+
+    coordinatesById.set(evidenceNode.id, {
+      x: blockOrigin.x,
+      y: Math.round(nextY)
+    });
+    patchByNodeId.set(evidenceNode.id, {
+      ...(patchByNodeId.get(evidenceNode.id) || {}),
+      connectionHandles: getVerticalRcaFlowConnectionHandles()
+    });
+    nextY += evidenceSize.height + RCA_CONNECTED_SATELLITE_VERTICAL_GAP;
+  });
+
+  const rootCauseCoordinates = {
+    x: blockOrigin.x,
+    y: Math.round(nextY)
+  };
+
+  coordinatesById.set(workflowBlock.rootCauseNode.id, rootCauseCoordinates);
+  if (workflowBlock.evidenceNodes.some((evidenceNode) => workflowBlock.rootCauseNode.parentNodeId === evidenceNode.id)) {
+    patchByNodeId.set(workflowBlock.rootCauseNode.id, {
+      ...(patchByNodeId.get(workflowBlock.rootCauseNode.id) || {}),
+      connectionHandles: getVerticalRcaFlowConnectionHandles()
+    });
+  }
+
+  if (!workflowBlock.capaNode || !workflowBlock.capaSize) {
+    return;
+  }
+
+  const capaColumnX = Math.round(blockOrigin.x + workflowBlock.rootCauseSize.width + RCA_CAPA_WORKFLOW_COLUMN_GAP);
+  let capaStageStackStartY: number | undefined;
+  let capaY = Math.round(rootCauseCoordinates.y + workflowBlock.rootCauseSize.height / 2 - workflowBlock.capaSize.height / 2);
+
+  if (workflowBlock.capaStageEvidenceNodes.length || workflowBlock.capaDirectEvidenceNodes.length) {
+    const evidenceNodeIds = new Set(workflowBlock.capaStageEvidenceNodes.map((node) => node.id));
+    const evidenceSizeById = new Map(workflowBlock.capaStageEvidenceNodes.map((node, index) => [
+      node.id,
+      workflowBlock.capaStageEvidenceSizes[index]
+    ]));
+    const directEvidenceSizeById = new Map(workflowBlock.capaDirectEvidenceNodes.map((node, index) => [
+      node.id,
+      workflowBlock.capaDirectEvidenceSizes[index]
+    ]));
+    const stageNodesInVisualOrder = lane === 'top'
+      ? [...workflowBlock.stageNodes].reverse()
+      : workflowBlock.stageNodes;
+    const stageSizeById = new Map(workflowBlock.stageNodes.map((node, index) => [
+      node.id,
+      workflowBlock.stageSizes[index]
+    ]));
+    const stageColumnX = Math.round(
+      capaColumnX +
+      Math.max(
+        workflowBlock.capaSize.width,
+        ...workflowBlock.capaStageEvidenceSizes.map((size) => size.width),
+        ...workflowBlock.capaDirectEvidenceSizes.map((size) => size.width)
+      ) +
+      RCA_CAPA_WORKFLOW_COLUMN_GAP
+    );
+    let nextRowY = blockOrigin.y;
+
+    stageNodesInVisualOrder.forEach((stageNode) => {
+      const stageSize = stageSizeById.get(stageNode.id) || getRcaNodeSize(stageNode, nodeDetails[stageNode.id]);
+      const stageEvidenceNodes = (childrenByParent.get(stageNode.id) || [])
+        .filter((childNode) => evidenceNodeIds.has(childNode.id))
+        .sort(sortRcaNodesByCurrentCanvasPosition);
+      const stageEvidenceStackHeight = getFixedGapStackHeight(stageEvidenceNodes.map((evidenceNode) => (
+        evidenceSizeById.get(evidenceNode.id) || getRcaNodeSize(evidenceNode, nodeDetails[evidenceNode.id])
+      ).height), RCA_CONNECTED_SATELLITE_VERTICAL_GAP);
+      const rowHeight = Math.max(stageSize.height, stageEvidenceStackHeight);
+      const stageY = Math.round(nextRowY + Math.max(0, (rowHeight - stageSize.height) / 2));
+      let nextEvidenceY = nextRowY;
+
+      stageEvidenceNodes.forEach((evidenceNode) => {
+        const evidenceSize = evidenceSizeById.get(evidenceNode.id) || getRcaNodeSize(evidenceNode, nodeDetails[evidenceNode.id]);
+
+        coordinatesById.set(evidenceNode.id, {
+          x: capaColumnX,
+          y: Math.round(nextEvidenceY)
+        });
+        patchByNodeId.set(evidenceNode.id, {
+          ...(patchByNodeId.get(evidenceNode.id) || {}),
+          connectionHandles: {
+            sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+            targetHandle: RCA_TARGET_LEFT_HANDLE
+          }
+        });
+        nextEvidenceY += evidenceSize.height + RCA_CONNECTED_SATELLITE_VERTICAL_GAP;
+      });
+
+      coordinatesById.set(stageNode.id, {
+        x: stageColumnX,
+        y: stageY
+      });
+      patchByNodeId.set(stageNode.id, {
+        ...(patchByNodeId.get(stageNode.id) || {}),
+        connectionHandles: {
+          sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+          targetHandle: RCA_TARGET_LEFT_HANDLE
+        }
+      });
+      nextRowY += rowHeight + RCA_CAPA_WORKFLOW_VERTICAL_GAP;
+    });
+
+    workflowBlock.capaDirectEvidenceNodes.forEach((evidenceNode) => {
+      const evidenceSize = directEvidenceSizeById.get(evidenceNode.id) || getRcaNodeSize(evidenceNode, nodeDetails[evidenceNode.id]);
+
+      coordinatesById.set(evidenceNode.id, {
+        x: capaColumnX,
+        y: Math.round(nextRowY)
+      });
+      patchByNodeId.set(evidenceNode.id, {
+        ...(patchByNodeId.get(evidenceNode.id) || {}),
+        connectionHandles: {
+          sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+          targetHandle: RCA_TARGET_LEFT_HANDLE
+        }
+      });
+      nextRowY += evidenceSize.height + RCA_CONNECTED_SATELLITE_VERTICAL_GAP;
+    });
+
+    capaStageStackStartY = undefined;
+    capaY = Math.round(nextRowY);
+  }
+
+  const capaCoordinates = {
+    x: capaColumnX,
+    y: capaY
+  };
+
+  coordinatesById.set(workflowBlock.capaNode.id, capaCoordinates);
+  patchByNodeId.set(workflowBlock.capaNode.id, {
+    ...(patchByNodeId.get(workflowBlock.capaNode.id) || {}),
+    connectionHandles: {
+      sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+      targetHandle: RCA_TARGET_LEFT_HANDLE
+    }
+  });
+  if (!workflowBlock.capaStageEvidenceNodes.length && !workflowBlock.capaDirectEvidenceNodes.length) {
+    placeRootCauseCapaStages(
+      coordinatesById,
+      patchByNodeId,
+      workflowBlock.capaNode,
+      capaCoordinates,
+      lane,
+      childrenByParent,
+      nodeDetails,
+      capaStageStackStartY
+    );
+  }
+
+  if (workflowBlock.approvalNode && workflowBlock.approvalSize) {
+    const anchorStageNode = workflowBlock.stageNodes.find((stageNode) => getFiveWhysNodeRole(stageNode) === 'CORRECTIVE_ACTION') ||
+      workflowBlock.stageNodes[0] ||
+      workflowBlock.capaNode;
+    const anchorCoordinates = coordinatesById.get(anchorStageNode.id);
+    const anchorSize = getRcaNodeSize(anchorStageNode, nodeDetails[anchorStageNode.id]);
+
+    if (anchorCoordinates) {
+      coordinatesById.set(workflowBlock.approvalNode.id, {
+        x: Math.round(anchorCoordinates.x + anchorSize.width + RCA_CAPA_WORKFLOW_COLUMN_GAP),
+        y: Math.round(anchorCoordinates.y + anchorSize.height / 2 - workflowBlock.approvalSize.height / 2)
+      });
+      patchByNodeId.set(workflowBlock.approvalNode.id, {
+        ...(patchByNodeId.get(workflowBlock.approvalNode.id) || {}),
+        connectionHandles: {
+          sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+          targetHandle: RCA_TARGET_LEFT_HANDLE
+        }
+      });
+    }
+  }
+}
+
+function sortRcaNodesByCurrentCanvasPosition(leftNode: RcaNode, rightNode: RcaNode): number {
+  const leftX = sanitizeRcaCanvasCoordinate(leftNode.uiCoordinates?.x) ?? 0;
+  const rightX = sanitizeRcaCanvasCoordinate(rightNode.uiCoordinates?.x) ?? 0;
+  const leftY = sanitizeRcaCanvasCoordinate(leftNode.uiCoordinates?.y) ?? 0;
+  const rightY = sanitizeRcaCanvasCoordinate(rightNode.uiCoordinates?.y) ?? 0;
+
+  return leftY - rightY || leftX - rightX || leftNode.id.localeCompare(rightNode.id);
+}
+
+function getOwningFishboneCategoryNode(
+  node: RcaNode,
+  nodeById: Map<string, RcaNode>
+): RcaNode | null {
+  let currentNode: RcaNode | undefined = node;
+  const visitedNodeIds = new Set<string>();
+
+  while (currentNode && !visitedNodeIds.has(currentNode.id)) {
+    visitedNodeIds.add(currentNode.id);
+
+    if (currentNode.nodeType === 'ISHIKAWA_CATEGORY') {
+      return currentNode;
+    }
+
+    currentNode = currentNode.parentNodeId ? nodeById.get(currentNode.parentNodeId) : undefined;
+  }
+
+  return null;
+}
+
+function placeRootCauseCapaStages(
+  coordinatesById: Map<string, { x: number; y: number }>,
+  patchByNodeId: Map<string, RcaMainIntakeChainPatchValue>,
+  capaNode: RcaNode,
+  capaCoordinates: { x: number; y: number },
+  lane: 'top' | 'bottom',
+  childrenByParent: Map<string, RcaNode[]>,
+  nodeDetails: Record<string, ReferenceRcaNodeDetail>,
+  stackStartY?: number
+) {
+  const capaSize = getRcaNodeSize(capaNode, nodeDetails[capaNode.id]);
+  const downstreamNodes = (childrenByParent.get(capaNode.id) || [])
+    .filter(isCapaDownstreamRoleNode);
+  const stageNodes = downstreamNodes
+    .filter((node) => !isApprovalClosureRoleNode(node))
+    .sort((leftNode, rightNode) => {
+      const rankDelta = getCapaWorkflowRoleRank(leftNode) - getCapaWorkflowRoleRank(rightNode);
+
+      return lane === 'top'
+        ? -rankDelta || leftNode.id.localeCompare(rightNode.id)
+        : rankDelta || leftNode.id.localeCompare(rightNode.id);
+    });
+
+  if (!stageNodes.length) {
+    return;
+  }
+
+  const stageSizes = stageNodes.map((node) => getRcaNodeSize(node, nodeDetails[node.id]));
+  const stageColumnX = Math.round(capaCoordinates.x + capaSize.width + RCA_CAPA_WORKFLOW_COLUMN_GAP);
+
+  if (stageNodes.length) {
+    if (lane === 'top') {
+      const bottomStageIndex = stageNodes.length - 1;
+      const bottomStageSize = stageSizes[bottomStageIndex];
+      let nextY = stackStartY !== undefined
+        ? stackStartY + getStackHeight(stageSizes.map((size) => size.height)) - bottomStageSize.height
+        : capaCoordinates.y + capaSize.height / 2 - bottomStageSize.height / 2;
+      let previousPlacedStageHeight = 0;
+
+      for (let index = bottomStageIndex; index >= 0; index -= 1) {
+        const stageNode = stageNodes[index];
+        const stageSize = stageSizes[index];
+
+        if (index !== bottomStageIndex) {
+          nextY -= previousPlacedStageHeight + RCA_CAPA_WORKFLOW_VERTICAL_GAP;
+        }
+
+        const coordinates = {
+          x: stageColumnX,
+          y: Math.round(nextY)
+        };
+
+        coordinatesById.set(stageNode.id, coordinates);
+        patchByNodeId.set(stageNode.id, {
+          ...(patchByNodeId.get(stageNode.id) || {}),
+          connectionHandles: {
+            sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+            targetHandle: RCA_TARGET_LEFT_HANDLE
+          }
+        });
+        previousPlacedStageHeight = stageSize.height;
+      }
+    } else {
+      let nextY = stackStartY !== undefined
+        ? stackStartY
+        : capaCoordinates.y + capaSize.height / 2 - stageSizes[0].height / 2;
+
+      stageNodes.forEach((stageNode, index) => {
+        const stageSize = stageSizes[index];
+        const coordinates = {
+          x: stageColumnX,
+          y: Math.round(nextY)
+        };
+
+        coordinatesById.set(stageNode.id, coordinates);
+        patchByNodeId.set(stageNode.id, {
+          ...(patchByNodeId.get(stageNode.id) || {}),
+          connectionHandles: {
+            sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+            targetHandle: RCA_TARGET_LEFT_HANDLE
+          }
+        });
+        nextY += stageSize.height + RCA_CAPA_WORKFLOW_VERTICAL_GAP;
+      });
+    }
+  }
+}
+
+function enforceCapaStageStackClearance(
+  coordinatesById: Map<string, { x: number; y: number }>,
+  patchByNodeId: Map<string, RcaMainIntakeChainPatchValue>,
+  nodes: RcaNode[],
+  childrenByParent: Map<string, RcaNode[]>,
+  laneByNodeId: Map<string, 'top' | 'bottom'> = new Map(),
+  nodeDetails: Record<string, ReferenceRcaNodeDetail> = {}
+) {
+  nodes
+    .filter(isCapaRoleNode)
+    .forEach((capaNode) => {
+      const stageNodes = (childrenByParent.get(capaNode.id) || [])
+        .filter(isCapaDownstreamStageRoleNode);
+
+      const hasManagedCapaWorkflowEvidence = getCapaWorkflowEvidenceNodes(stageNodes, undefined, childrenByParent).length ||
+        (childrenByParent.get(capaNode.id) || []).some(isEvidenceRoleNode);
+
+      if (hasManagedCapaWorkflowEvidence) {
+        return;
+      }
+
+      if (stageNodes.length < 2) {
+        return;
+      }
+
+      const lane = laneByNodeId.get(capaNode.id) ||
+        stageNodes.map((stageNode) => laneByNodeId.get(stageNode.id)).find(Boolean) ||
+        'bottom';
+      const sortedStageNodes = [...stageNodes].sort((leftNode, rightNode) => {
+        const rankDelta = getCapaWorkflowRoleRank(leftNode) - getCapaWorkflowRoleRank(rightNode);
+
+        return lane === 'top'
+          ? -rankDelta || leftNode.id.localeCompare(rightNode.id)
+          : rankDelta || leftNode.id.localeCompare(rightNode.id);
+      });
+      const firstStageCoordinates = coordinatesById.get(sortedStageNodes[0].id);
+
+      if (!firstStageCoordinates) {
+        return;
+      }
+
+      let nextY = firstStageCoordinates.y;
+
+      sortedStageNodes.forEach((stageNode, index) => {
+        const stageSize = getRcaNodeSize(stageNode, nodeDetails[stageNode.id]);
+        const currentCoordinates = coordinatesById.get(stageNode.id) || firstStageCoordinates;
+        const nextCoordinates = {
+          x: currentCoordinates.x,
+          y: Math.round(nextY)
+        };
+
+        coordinatesById.set(stageNode.id, nextCoordinates);
+        patchByNodeId.set(stageNode.id, {
+          ...(patchByNodeId.get(stageNode.id) || {}),
+          connectionHandles: {
+            sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+            targetHandle: RCA_TARGET_LEFT_HANDLE
+          }
+        });
+
+        if (index < sortedStageNodes.length - 1) {
+          nextY += stageSize.height + RCA_CAPA_WORKFLOW_VERTICAL_GAP;
+        }
+      });
+    });
+}
+
+function placeCapaWorkflowSupportColumns(
+  coordinatesById: Map<string, { x: number; y: number }>,
+  capaNode: RcaNode,
+  faultGateNode: RcaNode,
+  stageNodes: RcaNode[],
+  approvalNode: RcaNode | undefined,
+  capaCoordinates: { x: number; y: number },
+  faultGateCoordinates: { x: number; y: number },
+  childrenByParent: Map<string, RcaNode[]>,
+  nodeDetails: Record<string, ReferenceRcaNodeDetail> = {}
+) {
+  type CapaSupportColumn = 'evidence' | 'comment' | 'sticky';
+  type CapaSupportEntry = {
+    anchorY: number;
+    column: CapaSupportColumn;
+    node: RcaNode;
+  };
+  const workflowParents = [
+    faultGateNode,
+    capaNode,
+    ...stageNodes,
+    ...(approvalNode ? [approvalNode] : [])
+  ].filter((node) => coordinatesById.has(node.id));
+
+  if (!workflowParents.length) {
+    return;
+  }
+
+  const supportColumns: Record<CapaSupportColumn, CapaSupportEntry[]> = {
+    comment: [],
+    evidence: [],
+    sticky: []
+  };
+  const seenSupportNodeIds = new Set<string>();
+
+  function addSupportNode(node: RcaNode, column: CapaSupportColumn, anchorY: number) {
+    if (seenSupportNodeIds.has(node.id)) {
+      return;
+    }
+
+    seenSupportNodeIds.add(node.id);
+    supportColumns[column].push({ anchorY, column, node });
+  }
+
+  function collectAnnotationDescendants(parentNode: RcaNode, anchorY: number) {
+    (childrenByParent.get(parentNode.id) || []).forEach((childNode) => {
+      if (childNode.status === 'DELETED') {
+        return;
+      }
+
+      if (childNode.nodeType === 'COMMENT') {
+        addSupportNode(childNode, 'comment', anchorY);
+        collectAnnotationDescendants(childNode, anchorY);
+      }
+
+      if (childNode.nodeType === 'STICKY_NOTE') {
+        addSupportNode(childNode, 'sticky', anchorY);
+        collectAnnotationDescendants(childNode, anchorY);
+      }
+    });
+  }
+
+  workflowParents.forEach((parentNode) => {
+    const parentCoordinates = coordinatesById.get(parentNode.id);
+
+    if (!parentCoordinates) {
+      return;
+    }
+
+    const parentSize = getRcaNodeSize(parentNode, nodeDetails[parentNode.id]);
+    const parentAnchorY = parentNode.id === capaNode.id || parentNode.id === faultGateNode.id
+      ? capaCoordinates.y + parentSize.height + RCA_CAPA_WORKFLOW_VERTICAL_GAP
+      : parentCoordinates.y + parentSize.height / 2;
+
+    (childrenByParent.get(parentNode.id) || []).forEach((childNode) => {
+      if (childNode.status === 'DELETED') {
+        return;
+      }
+
+      if (isEvidenceRoleNode(childNode)) {
+        addSupportNode(childNode, 'evidence', parentAnchorY);
+        collectAnnotationDescendants(childNode, parentAnchorY);
+      }
+
+      if (childNode.nodeType === 'COMMENT') {
+        addSupportNode(childNode, 'comment', parentAnchorY);
+        collectAnnotationDescendants(childNode, parentAnchorY);
+      }
+
+      if (childNode.nodeType === 'STICKY_NOTE') {
+        addSupportNode(childNode, 'sticky', parentAnchorY);
+        collectAnnotationDescendants(childNode, parentAnchorY);
+      }
+    });
+  });
+
+  if (!seenSupportNodeIds.size) {
+    return;
+  }
+
+  (Object.keys(supportColumns) as CapaSupportColumn[]).forEach((column) => {
+    supportColumns[column].sort((leftEntry, rightEntry) => (
+      leftEntry.anchorY - rightEntry.anchorY ||
+      leftEntry.node.id.localeCompare(rightEntry.node.id)
+    ));
+  });
+
+  const capaColumnX = capaCoordinates.x;
+  const columnOrderFromStage: CapaSupportColumn[] = ['evidence', 'comment', 'sticky'];
+  const columnXByColumn = new Map<CapaSupportColumn, number>();
+  let nextColumnRightX = capaColumnX;
+
+  columnOrderFromStage.forEach((column) => {
+    const columnWidth = Math.max(
+      0,
+      ...supportColumns[column].map((entry) => getRcaNodeSize(entry.node, nodeDetails[entry.node.id]).width)
+    );
+
+    if (!columnWidth) {
+      return;
+    }
+
+    const columnX = column === 'evidence'
+      ? Math.round(capaColumnX)
+      : Math.round(nextColumnRightX - RCA_CAPA_SUPPORT_COLUMN_GAP - columnWidth);
+
+    columnXByColumn.set(column, columnX);
+    nextColumnRightX = column === 'evidence' ? capaColumnX : columnX;
+  });
+
+  columnOrderFromStage.forEach((column) => {
+    const columnX = columnXByColumn.get(column);
+
+    if (columnX === undefined) {
+      return;
+    }
+
+    let previousBottomY = -Number.POSITIVE_INFINITY;
+
+    supportColumns[column].forEach((entry) => {
+      const node = entry.node;
+      const nodeSize = getRcaNodeSize(node, nodeDetails[node.id]);
+      const preferredY = entry.anchorY - nodeSize.height / 2;
+      const y = Math.max(preferredY, previousBottomY + RCA_CONNECTED_SATELLITE_VERTICAL_GAP);
+
+      coordinatesById.set(node.id, {
+        x: Math.round(columnX),
+        y: Math.round(y)
+      });
+      previousBottomY = y + nodeSize.height;
+    });
+  });
+}
+
+function getCapaWorkflowEvidenceNodes(
+  stageNodes: RcaNode[],
+  approvalNode: RcaNode | undefined,
+  childrenByParent: Map<string, RcaNode[]>
+): RcaNode[] {
+  const evidenceNodes: RcaNode[] = [];
+  const seenEvidenceNodeIds = new Set<string>();
+  const workflowParents = [
+    ...stageNodes,
+    ...(approvalNode ? [approvalNode] : [])
+  ];
+
+  workflowParents.forEach((parentNode) => {
+    (childrenByParent.get(parentNode.id) || []).forEach((childNode) => {
+      if (
+        childNode.status === 'DELETED' ||
+        !isEvidenceRoleNode(childNode) ||
+        seenEvidenceNodeIds.has(childNode.id)
+      ) {
+        return;
+      }
+
+      seenEvidenceNodeIds.add(childNode.id);
+      evidenceNodes.push(childNode);
+    });
+  });
+
+  return evidenceNodes;
+}
+
+function getCapaWorkflowRoleRank(node: RcaNode): number {
+  const role = getFiveWhysNodeRole(node);
+
+  if (role === 'CORRECTIVE_ACTION') return 1;
+  if (role === 'PREVENTIVE_ACTION') return 2;
+  if (role === 'RISK_ASSESSMENT') return 3;
+  if (role === 'EFFECTIVENESS') return 4;
+  if (role === 'LESSONS_LEARNED') return 5;
+  if (role === 'APPROVAL_CLOSURE') return 6;
+
+  return 99;
+}
+
+function getOwningFishboneBranchColumnX(
+  startNode: RcaNode,
+  nodes: RcaNode[],
+  coordinatesById: Map<string, { x: number; y: number }>
+): number | null {
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  let currentNode: RcaNode | undefined = startNode;
+  const visitedNodeIds = new Set<string>();
+
+  while (currentNode && !visitedNodeIds.has(currentNode.id)) {
+    visitedNodeIds.add(currentNode.id);
+
+    if (currentNode.nodeType === 'ISHIKAWA_CATEGORY') {
+      return coordinatesById.get(currentNode.id)?.x ?? null;
+    }
+
+    currentNode = currentNode.parentNodeId ? nodeById.get(currentNode.parentNodeId) : undefined;
+  }
+
+  return null;
+}
+
+function placeUnarrangedOrphanRcaNodes(
+  coordinatesById: Map<string, { x: number; y: number }>,
+  nodes: RcaNode[],
+  nodeDetails: Record<string, ReferenceRcaNodeDetail> = {}
+) {
+  const connectedNodeIds = getConnectedRcaNodeIds(nodes);
+  const unarrangedNodes = nodes
+    .filter((node) => (
+      node.status !== 'DELETED' &&
+      !coordinatesById.has(node.id) &&
+      connectedNodeIds.has(node.id)
+    ))
+    .sort((leftNode, rightNode) => {
+      const leftX = sanitizeRcaCanvasCoordinate(leftNode.uiCoordinates?.x) ?? 0;
+      const rightX = sanitizeRcaCanvasCoordinate(rightNode.uiCoordinates?.x) ?? 0;
+      const leftY = sanitizeRcaCanvasCoordinate(leftNode.uiCoordinates?.y) ?? 0;
+      const rightY = sanitizeRcaCanvasCoordinate(rightNode.uiCoordinates?.y) ?? 0;
+
+      return leftY - rightY || leftX - rightX || leftNode.id.localeCompare(rightNode.id);
+    });
+  let nextX = RCA_LAYOUT_ORPHAN_COLUMN_START_X;
+  let nextY = RCA_LAYOUT_ORPHAN_COLUMN_START_Y;
+  let rowHeight = 0;
+
+  unarrangedNodes.forEach((node) => {
+    const nodeSize = getRcaNodeSize(node, nodeDetails[node.id]);
+
+    if (nextX > RCA_LAYOUT_ORPHAN_COLUMN_START_X && nextX + nodeSize.width > 2100) {
+      nextX = RCA_LAYOUT_ORPHAN_COLUMN_START_X;
+      nextY += rowHeight + RCA_CONNECTED_SATELLITE_VERTICAL_GAP;
+      rowHeight = 0;
+    }
+
+    coordinatesById.set(node.id, {
+      x: Math.round(nextX),
+      y: Math.round(nextY)
+    });
+    nextX += nodeSize.width + RCA_CONNECTED_SATELLITE_HORIZONTAL_GAP;
+    rowHeight = Math.max(rowHeight, nodeSize.height);
+  });
+}
+
+function getConnectedRcaNodeIds(nodes: RcaNode[]): Set<string> {
+  const activeNodeIds = new Set(nodes
+    .filter((node) => node.status !== 'DELETED')
+    .map((node) => node.id));
+  const connectedNodeIds = new Set<string>();
+
+  nodes.forEach((node) => {
+    if (node.status === 'DELETED' || !node.parentNodeId || !activeNodeIds.has(node.parentNodeId)) {
+      return;
+    }
+
+    connectedNodeIds.add(node.id);
+    connectedNodeIds.add(node.parentNodeId);
+  });
+
+  return connectedNodeIds;
+}
+
+function resolveRcaCanvasLayoutCollisions(
+  coordinatesById: Map<string, { x: number; y: number }>,
+  nodes: RcaNode[],
+  nodeDetails: Record<string, ReferenceRcaNodeDetail> = {},
+  laneByNodeId: Map<string, 'top' | 'bottom'> = new Map(),
+  branchGridRowNodeIdsByNodeId: Map<string, string[]> = new Map(),
+  branchGridSectionKeyByNodeId: Map<string, string> = new Map(),
+  branchGridSectionNodeIdsByNodeId: Map<string, string[]> = new Map()
+) {
+  type PlacedLayoutEntry = {
+    bottom: number;
+    height: number;
+    left: number;
+    node: RcaNode;
+    right: number;
+    top: number;
+    width: number;
+  };
+
+  const activeNodeById = new Map(nodes
+    .filter((node) => node.status !== 'DELETED')
+    .map((node) => [node.id, node]));
+  const childrenByParent = new Map<string, RcaNode[]>();
+
+  activeNodeById.forEach((node) => {
+    if (!node.parentNodeId || !activeNodeById.has(node.parentNodeId)) {
+      return;
+    }
+
+    const siblings = childrenByParent.get(node.parentNodeId) || [];
+    siblings.push(node);
+    childrenByParent.set(node.parentNodeId, siblings);
+  });
+
+  const getPlacedEntries = (): PlacedLayoutEntry[] => nodes
+    .filter((node) => node.status !== 'DELETED' && coordinatesById.has(node.id))
+    .map((node) => {
+      const coordinates = coordinatesById.get(node.id) || { x: 0, y: 0 };
+      const size = getRcaNodeSize(node, nodeDetails[node.id]);
+
+      return {
+        bottom: coordinates.y + size.height,
+        height: size.height,
+        left: coordinates.x,
+        node,
+        right: coordinates.x + size.width,
+        top: coordinates.y,
+        width: size.width,
+      };
+    })
+    .sort((leftEntry, rightEntry) => (
+      leftEntry.top - rightEntry.top ||
+      leftEntry.left - rightEntry.left ||
+      leftEntry.node.id.localeCompare(rightEntry.node.id)
+    ));
+
+  const getHorizontalSeparationDelta = (anchorEntry: PlacedLayoutEntry, movingEntry: PlacedLayoutEntry): number => {
+    const shouldMoveRight = movingEntry.left >= anchorEntry.left;
+    const nextLeft = shouldMoveRight
+      ? anchorEntry.right + RCA_LAYOUT_NODE_COLLISION_HORIZONTAL_GAP
+      : anchorEntry.left - RCA_LAYOUT_NODE_COLLISION_HORIZONTAL_GAP - movingEntry.width;
+
+    return nextLeft - movingEntry.left;
+  };
+
+  const getVerticalSeparationDelta = (anchorEntry: PlacedLayoutEntry, movingEntry: PlacedLayoutEntry): number => {
+    const shouldMoveDown = movingEntry.top >= anchorEntry.top;
+    const nextTop = shouldMoveDown
+      ? anchorEntry.bottom + RCA_LAYOUT_NODE_COLLISION_VERTICAL_GAP
+      : anchorEntry.top - RCA_LAYOUT_NODE_COLLISION_VERTICAL_GAP - movingEntry.height;
+
+    return nextTop - movingEntry.top;
+  };
+
+  const getOverlap = (leftEntry: PlacedLayoutEntry, rightEntry: PlacedLayoutEntry) => {
+    const horizontalOverlap = Math.min(leftEntry.right, rightEntry.right) -
+      Math.max(leftEntry.left, rightEntry.left) +
+      RCA_LAYOUT_NODE_COLLISION_HORIZONTAL_GAP;
+    const verticalOverlap = Math.min(leftEntry.bottom, rightEntry.bottom) -
+      Math.max(leftEntry.top, rightEntry.top) +
+      RCA_LAYOUT_NODE_COLLISION_VERTICAL_GAP;
+
+    if (horizontalOverlap <= 0 || verticalOverlap <= 0) {
+      return null;
+    }
+
+    return { horizontalOverlap, verticalOverlap };
+  };
+
+  const getLayoutPriority = (entry: PlacedLayoutEntry): number => {
+    if (entry.node.nodeType === 'FAULT_GATE') {
+      return 0;
+    }
+
+    if (entry.node.nodeType === 'ISHIKAWA_CATEGORY') {
+      return 1;
+    }
+
+    if (isProblemRoleNode(entry.node) || isIncidentRoleNode(entry.node)) {
+      return 2;
+    }
+
+    if (branchGridRowNodeIdsByNodeId.has(entry.node.id)) {
+      return 2.5;
+    }
+
+    if (isFishboneCauseNode(entry.node) || isRootCauseRoleNode(entry.node)) {
+      return 3;
+    }
+
+    return 4;
+  };
+
+  const getMovableEntryPair = (firstEntry: PlacedLayoutEntry, secondEntry: PlacedLayoutEntry) => {
+    const firstPriority = getLayoutPriority(firstEntry);
+    const secondPriority = getLayoutPriority(secondEntry);
+
+    if (firstPriority !== secondPriority) {
+      return firstPriority < secondPriority
+        ? { anchorEntry: firstEntry, movingEntry: secondEntry }
+        : { anchorEntry: secondEntry, movingEntry: firstEntry };
+    }
+
+    const firstHasChildren = Boolean(childrenByParent.get(firstEntry.node.id)?.length);
+    const secondHasChildren = Boolean(childrenByParent.get(secondEntry.node.id)?.length);
+
+    if (firstHasChildren !== secondHasChildren) {
+      return firstHasChildren
+        ? { anchorEntry: firstEntry, movingEntry: secondEntry }
+        : { anchorEntry: secondEntry, movingEntry: firstEntry };
+    }
+
+    return firstEntry.top <= secondEntry.top
+      ? { anchorEntry: firstEntry, movingEntry: secondEntry }
+      : { anchorEntry: secondEntry, movingEntry: firstEntry };
+  };
+
+  const shouldResolveHorizontally = (
+    anchorEntry: PlacedLayoutEntry,
+    movingEntry: PlacedLayoutEntry,
+    overlap: { horizontalOverlap: number; verticalOverlap: number }
+  ): boolean => {
+    if (laneByNodeId.has(anchorEntry.node.id) || laneByNodeId.has(movingEntry.node.id)) {
+      return false;
+    }
+
+    const centerDeltaX = Math.abs((anchorEntry.left + anchorEntry.width / 2) - (movingEntry.left + movingEntry.width / 2));
+    const centerDeltaY = Math.abs((anchorEntry.top + anchorEntry.height / 2) - (movingEntry.top + movingEntry.height / 2));
+    const isMostlySideBySide = centerDeltaX > Math.min(anchorEntry.width, movingEntry.width) * 0.35;
+
+    return isMostlySideBySide && overlap.horizontalOverlap <= overlap.verticalOverlap + centerDeltaY * 0.25;
+  };
+
+  const belongToSameBranchGridSection = (firstNodeId: string, secondNodeId: string): boolean => {
+    const firstSectionKey = branchGridSectionKeyByNodeId.get(firstNodeId);
+
+    return Boolean(firstSectionKey && firstSectionKey === branchGridSectionKeyByNodeId.get(secondNodeId));
+  };
+
+  const shiftNodeAndDescendants = (
+    nodeId: string,
+    delta: { x: number; y: number },
+    visitedNodeIds = new Set<string>(),
+    expandBranchGridRow = true
+  ) => {
+    const sectionNodeIds = branchGridSectionNodeIdsByNodeId.get(nodeId);
+
+    if (expandBranchGridRow && sectionNodeIds?.length) {
+      sectionNodeIds.forEach((sectionNodeId) => {
+        shiftNodeAndDescendants(sectionNodeId, delta, visitedNodeIds, false);
+      });
+      return;
+    }
+
+    const rowNodeIds = branchGridRowNodeIdsByNodeId.get(nodeId);
+
+    if (expandBranchGridRow && rowNodeIds?.length) {
+      rowNodeIds.forEach((rowNodeId) => {
+        shiftNodeAndDescendants(rowNodeId, delta, visitedNodeIds, false);
+      });
+      return;
+    }
+
+    if (visitedNodeIds.has(nodeId)) {
+      return;
+    }
+
+    visitedNodeIds.add(nodeId);
+
+    const coordinates = coordinatesById.get(nodeId);
+
+    if (coordinates) {
+      const movingNode = activeNodeById.get(nodeId);
+      const movingSize = movingNode ? getRcaNodeSize(movingNode, nodeDetails[movingNode.id]) : { height: 0, width: 0 };
+      const lane = laneByNodeId.get(nodeId);
+      const nextY = lane === 'top'
+        ? Math.min(
+            RCA_FISHBONE_SPINE_Y - RCA_LAYOUT_SPINE_LANE_GAP - movingSize.height,
+            coordinates.y + delta.y
+          )
+        : lane === 'bottom'
+          ? Math.max(RCA_FISHBONE_SPINE_Y + RCA_LAYOUT_SPINE_LANE_GAP, coordinates.y + delta.y)
+          : coordinates.y + delta.y;
+
+      coordinatesById.set(nodeId, {
+        x: Math.round(Math.max(lane ? -RCA_CANVAS_COORDINATE_LIMIT : 40, coordinates.x + delta.x)),
+        y: Math.round(lane === 'top' ? Math.max(-RCA_CANVAS_COORDINATE_LIMIT, nextY) : Math.max(40, nextY))
+      });
+    }
+
+    (childrenByParent.get(nodeId) || []).forEach((childNode) => {
+      shiftNodeAndDescendants(childNode.id, delta, visitedNodeIds, true);
+    });
+  };
+
+  for (let passIndex = 0; passIndex < RCA_LAYOUT_NODE_COLLISION_MAX_PASSES; passIndex += 1) {
+    const placedEntries = getPlacedEntries();
+    let shiftedNode = false;
+
+    for (let leftIndex = 0; leftIndex < placedEntries.length; leftIndex += 1) {
+      const firstEntry = placedEntries[leftIndex];
+
+      for (let rightIndex = leftIndex + 1; rightIndex < placedEntries.length; rightIndex += 1) {
+        const secondEntry = placedEntries[rightIndex];
+        const overlap = getOverlap(firstEntry, secondEntry);
+
+        if (!overlap || belongToSameBranchGridSection(firstEntry.node.id, secondEntry.node.id)) {
+          continue;
+        }
+
+        const { anchorEntry, movingEntry } = getMovableEntryPair(firstEntry, secondEntry);
+        const horizontalDelta = getHorizontalSeparationDelta(anchorEntry, movingEntry);
+        const verticalDelta = getVerticalSeparationDelta(anchorEntry, movingEntry);
+        const delta = shouldResolveHorizontally(anchorEntry, movingEntry, overlap)
+          ? { x: horizontalDelta, y: 0 }
+          : { x: 0, y: verticalDelta };
+
+        if (Math.abs(delta.x) < 1 && Math.abs(delta.y) < 1) {
+          continue;
+        }
+
+        shiftNodeAndDescendants(movingEntry.node.id, delta);
+        shiftedNode = true;
+        break;
+      }
+
+      if (shiftedNode) {
+        break;
+      }
+    }
+
+    if (!shiftedNode) {
+      break;
+    }
+  }
+
+  for (let passIndex = 0; passIndex < RCA_LAYOUT_NODE_COLLISION_MAX_PASSES; passIndex += 1) {
+    const placedEntries = getPlacedEntries();
+    let shiftedNode = false;
+
+    for (let leftIndex = 0; leftIndex < placedEntries.length; leftIndex += 1) {
+      const firstEntry = placedEntries[leftIndex];
+
+      for (let rightIndex = leftIndex + 1; rightIndex < placedEntries.length; rightIndex += 1) {
+        const secondEntry = placedEntries[rightIndex];
+        const overlap = getOverlap(firstEntry, secondEntry);
+
+        if (!overlap || belongToSameBranchGridSection(firstEntry.node.id, secondEntry.node.id)) {
+          continue;
+        }
+
+        const upperEntry = firstEntry.top <= secondEntry.top ? firstEntry : secondEntry;
+        const lowerEntry = upperEntry === firstEntry ? secondEntry : firstEntry;
+        const nextTop = upperEntry.bottom + RCA_LAYOUT_NODE_COLLISION_VERTICAL_GAP;
+        const lowerLane = laneByNodeId.get(lowerEntry.node.id);
+        const lowerMaxTop = lowerLane === 'top'
+          ? RCA_FISHBONE_SPINE_Y - RCA_LAYOUT_SPINE_LANE_GAP - lowerEntry.height
+          : Number.POSITIVE_INFINITY;
+        const canMoveLowerDown = nextTop <= lowerMaxTop;
+        const deltaY = canMoveLowerDown
+          ? nextTop - lowerEntry.top
+          : upperEntry.top - (lowerEntry.top - RCA_LAYOUT_NODE_COLLISION_VERTICAL_GAP - upperEntry.height);
+
+        if (deltaY <= 0) {
+          continue;
+        }
+
+        shiftNodeAndDescendants(
+          canMoveLowerDown ? lowerEntry.node.id : upperEntry.node.id,
+          { x: 0, y: canMoveLowerDown ? deltaY : -deltaY }
+        );
+        shiftedNode = true;
+        break;
+      }
+
+      if (shiftedNode) {
+        break;
+      }
+    }
+
+    if (!shiftedNode) {
+      break;
+    }
+  }
+}
+
+function syncArrangedRcaConnectionHandles(
+  coordinatesById: Map<string, { x: number; y: number }>,
+  patchByNodeId: Map<string, RcaMainIntakeChainPatchValue>,
+  nodes: RcaNode[],
+  nodeDetails: Record<string, ReferenceRcaNodeDetail> = {}
+) {
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+
+  nodes.forEach((node) => {
+    if (!node.parentNodeId || node.status === 'DELETED') {
+      return;
+    }
+
+    const parentNode = nodeById.get(node.parentNodeId);
+
+    if (!parentNode || !coordinatesById.has(node.id) || !coordinatesById.has(parentNode.id)) {
+      return;
+    }
+
+    patchByNodeId.set(node.id, {
+      ...(patchByNodeId.get(node.id) || {}),
+      connectionHandles: getPreferredRcaLayoutConnectionHandles(parentNode, node, coordinatesById, nodes, nodeDetails)
+    });
+  });
+}
+
+function getPreferredRcaLayoutConnectionHandles(
+  parentNode: RcaNode,
+  childNode: RcaNode,
+  coordinatesById: Map<string, { x: number; y: number }>,
+  nodes: RcaNode[],
+  nodeDetails: Record<string, ReferenceRcaNodeDetail> = {}
+): NonNullable<RcaNode['connectionHandles']> {
+  if (isFiveWhysInvestigationToRootCauseFlowEdge(childNode, parentNode)) {
+    if (isStandaloneFiveWhysInvestigationToRootCauseFlowEdge(childNode, parentNode, nodes)) {
+      return getVerticalRcaFlowConnectionHandles();
+    }
+
+    return {
+      sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+      targetHandle: RCA_TARGET_LEFT_HANDLE
+    };
+  }
+
+  if (isRootCauseEvidenceSupportFlowEdge(childNode, parentNode)) {
+    if (isStandaloneFiveWhysRootCauseEvidenceSupportFlowEdge(childNode, parentNode, nodes)) {
+      return {
+        sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+        targetHandle: RCA_TARGET_LEFT_HANDLE
+      };
+    }
+
+    return getVerticalRcaFlowConnectionHandles();
+  }
+
+  const parentCoordinates = coordinatesById.get(parentNode.id);
+  const childCoordinates = coordinatesById.get(childNode.id);
+
+  if (!parentCoordinates || !childCoordinates) {
+    return {
+      sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+      targetHandle: RCA_TARGET_LEFT_HANDLE
+    };
+  }
+
+  const parentSize = getRcaNodeSize(parentNode, nodeDetails[parentNode.id]);
+  const childSize = getRcaNodeSize(childNode, nodeDetails[childNode.id]);
+  const parentCenterX = parentCoordinates.x + parentSize.width / 2;
+  const parentCenterY = parentCoordinates.y + parentSize.height / 2;
+  const childCenterX = childCoordinates.x + childSize.width / 2;
+  const childCenterY = childCoordinates.y + childSize.height / 2;
+  const isVerticallyStacked = childCenterY > parentCenterY &&
+    Math.abs(childCenterX - parentCenterX) < Math.max(parentSize.width, childSize.width) * 0.7;
+  const shouldUseVerticalHandles = isRcaForwardFlowEdge(childNode, parentNode) &&
+    isVerticallyStacked;
+
+  if (shouldUseVerticalHandles) {
+    return getVerticalRcaFlowConnectionHandles();
+  }
+
+  return {
+    sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+    targetHandle: RCA_TARGET_LEFT_HANDLE
+  };
+}
+
+function enforceMainIntakeFaultGateGap(
+  coordinatesById: Map<string, { x: number; y: number }>,
+  nodes: RcaNode[],
+  nodeDetails: Record<string, ReferenceRcaNodeDetail> = {}
+) {
+  const incidentNode = getPreferredRcaRoleNode(nodes, 'INCIDENT');
+  const incidentDetailsNode = getPreferredRcaRoleNode(nodes, 'INCIDENT_DETAILS', incidentNode?.id);
+  const containmentNode = getPreferredRcaRoleNode(nodes, 'CONTAINMENT', incidentDetailsNode?.id);
+  const problemParentNode = containmentNode || incidentDetailsNode;
+  const problemNode = getPreferredRcaRoleNode(nodes, 'PROBLEM', problemParentNode?.id);
+  const faultGateNode = problemNode
+    ? nodes.find((node) => node.status !== 'DELETED' && node.nodeType === 'FAULT_GATE')
+    : undefined;
+  const intakeChainNodes = [incidentNode, incidentDetailsNode, containmentNode, problemNode].filter((node): node is RcaNode => Boolean(node));
+
+  if (!problemNode || !faultGateNode) {
+    return;
+  }
+
+  const problemCoordinates = coordinatesById.get(problemNode.id);
+  const faultGateCoordinates = coordinatesById.get(faultGateNode.id);
+
+  if (!problemCoordinates || !faultGateCoordinates) {
+    return;
+  }
+
+  const problemSize = getRcaNodeSize(problemNode, nodeDetails[problemNode.id]);
+  const currentGap = faultGateCoordinates.y - (problemCoordinates.y + problemSize.height);
+
+  if (currentGap >= RCA_MAIN_INTAKE_TO_FAULT_GATE_GAP) {
+    return;
+  }
+
+  const shiftY = RCA_MAIN_INTAKE_TO_FAULT_GATE_GAP - currentGap;
+
+  intakeChainNodes.forEach((node) => {
+    const coordinates = coordinatesById.get(node.id);
+
+    if (!coordinates) {
+      return;
+    }
+
+    coordinatesById.set(node.id, {
+      x: coordinates.x,
+      y: Math.round(Math.max(-RCA_CANVAS_COORDINATE_LIMIT, coordinates.y - shiftY))
+    });
+  });
+}
+
+function enforceFishboneBranchClearance(
+  coordinatesById: Map<string, { x: number; y: number }>,
+  nodes: RcaNode[],
+  nodeDetails: Record<string, ReferenceRcaNodeDetail> = {},
+  laneByNodeId: Map<string, 'top' | 'bottom'> = new Map(),
+  branchGridSectionNodeIdsByNodeId: Map<string, string[]> = new Map()
+) {
+  const activeNodes = nodes.filter((node) => node.status !== 'DELETED');
+  const activeNodeById = new Map(activeNodes.map((node) => [node.id, node]));
+  const childrenByParent = new Map<string, RcaNode[]>();
+
+  activeNodes.forEach((node) => {
+    if (!node.parentNodeId || !activeNodeById.has(node.parentNodeId)) {
+      return;
+    }
+
+    const siblings = childrenByParent.get(node.parentNodeId) || [];
+    siblings.push(node);
+    childrenByParent.set(node.parentNodeId, siblings);
+  });
+
+  const collectDescendants = (branchNode: RcaNode): RcaNode[] => {
+    const descendants: RcaNode[] = [];
+    const visitedNodeIds = new Set<string>();
+
+    function walk(parentNode: RcaNode) {
+      (childrenByParent.get(parentNode.id) || []).forEach((childNode) => {
+        if (visitedNodeIds.has(childNode.id) || childNode.status === 'DELETED') {
+          return;
+        }
+
+        visitedNodeIds.add(childNode.id);
+        descendants.push(childNode);
+        walk(childNode);
+      });
+    }
+
+    walk(branchNode);
+    return descendants;
+  };
+
+  const shiftNodeAndDescendants = (
+    nodeId: string,
+    deltaY: number,
+    visitedNodeIds = new Set<string>(),
+    expandBranchGridSection = true
+  ) => {
+    const sectionNodeIds = branchGridSectionNodeIdsByNodeId.get(nodeId);
+
+    if (expandBranchGridSection && sectionNodeIds?.length) {
+      sectionNodeIds.forEach((sectionNodeId) => {
+        shiftNodeAndDescendants(sectionNodeId, deltaY, visitedNodeIds, false);
+      });
+      return;
+    }
+
+    if (visitedNodeIds.has(nodeId)) {
+      return;
+    }
+
+    visitedNodeIds.add(nodeId);
+
+    const coordinates = coordinatesById.get(nodeId);
+
+    if (coordinates) {
+      coordinatesById.set(nodeId, {
+        x: coordinates.x,
+        y: Math.round(Math.max(-RCA_CANVAS_COORDINATE_LIMIT, coordinates.y + deltaY))
+      });
+    }
+
+    (childrenByParent.get(nodeId) || []).forEach((childNode) => {
+      shiftNodeAndDescendants(childNode.id, deltaY, visitedNodeIds, true);
+    });
+  };
+
+  activeNodes
+    .filter((node) => node.nodeType === 'ISHIKAWA_CATEGORY' && coordinatesById.has(node.id))
+    .forEach((branchNode) => {
+      const branchCoordinates = coordinatesById.get(branchNode.id);
+
+      if (!branchCoordinates) {
+        return;
+      }
+
+      const branchSize = getRcaNodeSize(branchNode, nodeDetails[branchNode.id]);
+      const branchTop = branchCoordinates.y;
+      const branchBottom = branchCoordinates.y + branchSize.height;
+      const lane = laneByNodeId.get(branchNode.id);
+      const descendants = collectDescendants(branchNode)
+        .filter((node) => coordinatesById.has(node.id) && node.nodeType !== 'ISHIKAWA_CATEGORY');
+
+      if (!descendants.length) {
+        return;
+      }
+
+      if (lane === 'top') {
+        const lowestDescendant = descendants
+          .map((node) => {
+            const coordinates = coordinatesById.get(node.id) || { x: 0, y: 0 };
+            const size = getRcaNodeSize(node, nodeDetails[node.id]);
+
+            return { bottom: coordinates.y + size.height, node };
+          })
+          .sort((leftEntry, rightEntry) => rightEntry.bottom - leftEntry.bottom)[0];
+        const currentGap = branchTop - lowestDescendant.bottom;
+
+        if (currentGap >= RCA_BRANCH_CATEGORY_GAP) {
+          return;
+        }
+
+        const shiftY = currentGap - RCA_BRANCH_CATEGORY_GAP;
+        descendants
+          .filter((node) => !isDescendantOfAnyNodeInSet(node, descendants, activeNodeById))
+          .forEach((node) => shiftNodeAndDescendants(node.id, shiftY));
+        return;
+      }
+
+      if (lane === 'bottom') {
+        const highestDescendant = descendants
+          .map((node) => {
+            const coordinates = coordinatesById.get(node.id) || { x: 0, y: 0 };
+
+            return { node, top: coordinates.y };
+          })
+          .sort((leftEntry, rightEntry) => leftEntry.top - rightEntry.top)[0];
+        const currentGap = highestDescendant.top - branchBottom;
+
+        if (currentGap >= RCA_BRANCH_CATEGORY_GAP) {
+          return;
+        }
+
+        const shiftY = RCA_BRANCH_CATEGORY_GAP - currentGap;
+        descendants
+          .filter((node) => !isDescendantOfAnyNodeInSet(node, descendants, activeNodeById))
+          .forEach((node) => shiftNodeAndDescendants(node.id, shiftY));
+      }
+    });
+}
+
+function finalizeFishboneBranchSupportRows(
+  coordinatesById: Map<string, { x: number; y: number }>,
+  nodes: RcaNode[],
+  nodeDetails: Record<string, ReferenceRcaNodeDetail> = {},
+  laneByNodeId: Map<string, 'top' | 'bottom'> = new Map()
+) {
+  type SupportColumn = 'sticky' | 'comment' | 'evidence' | 'cause' | 'analysis';
+  type SupportRow = {
+    analysis?: RcaNode;
+    cause: RcaNode;
+    comment?: RcaNode;
+    evidence?: RcaNode;
+    sticky?: RcaNode;
+  };
+
+  const activeNodes = nodes.filter((node) => node.status !== 'DELETED');
+  const activeNodeById = new Map(activeNodes.map((node) => [node.id, node]));
+  const childrenByParent = new Map<string, RcaNode[]>();
+
+  activeNodes.forEach((node) => {
+    if (!node.parentNodeId || !activeNodeById.has(node.parentNodeId)) {
+      return;
+    }
+
+    const siblings = childrenByParent.get(node.parentNodeId) || [];
+    siblings.push(node);
+    childrenByParent.set(node.parentNodeId, siblings);
+  });
+
+  const areDirectlyConnected = (firstNode: RcaNode, secondNode: RcaNode): boolean => (
+    firstNode.parentNodeId === secondNode.id ||
+    secondNode.parentNodeId === firstNode.id ||
+    normalizeRcaLinkedNodeIds(firstNode.linkedNodeIds).includes(secondNode.id) ||
+    normalizeRcaLinkedNodeIds(secondNode.linkedNodeIds).includes(firstNode.id)
+  );
+
+  const collectBranchDescendants = (branchNode: RcaNode): RcaNode[] => {
+    const descendants: RcaNode[] = [];
+    const visitedNodeIds = new Set<string>();
+
+    function walk(parentNode: RcaNode) {
+      (childrenByParent.get(parentNode.id) || []).forEach((childNode) => {
+        if (visitedNodeIds.has(childNode.id) || childNode.status === 'DELETED') {
+          return;
+        }
+
+        visitedNodeIds.add(childNode.id);
+        descendants.push(childNode);
+        walk(childNode);
+      });
+    }
+
+    walk(branchNode);
+    return descendants;
+  };
+
+  const sortByCurrentPosition = (leftNode: RcaNode, rightNode: RcaNode) => {
+    const leftPosition = coordinatesById.get(leftNode.id) || leftNode.uiCoordinates;
+    const rightPosition = coordinatesById.get(rightNode.id) || rightNode.uiCoordinates;
+
+    return leftPosition.y - rightPosition.y ||
+      leftPosition.x - rightPosition.x ||
+      leftNode.id.localeCompare(rightNode.id);
+  };
+
+  getOrderedFishboneCategoryNodes(activeNodes).forEach((branchNode) => {
+    const branchCoordinates = coordinatesById.get(branchNode.id);
+
+    if (!branchCoordinates) {
+      return;
+    }
+
+    const branchDescendants = collectBranchDescendants(branchNode);
+    const branchDescendantIds = new Set(branchDescendants.map((node) => node.id));
+    const causeNodes = branchDescendants
+      .filter((node) => (
+        isFishboneCauseNode(node) &&
+        !isRootCauseRoleNode(node) &&
+        !isMisclassifiedFishboneCauseNode(node, activeNodes)
+      ))
+      .sort(sortByCurrentPosition);
+
+    if (!causeNodes.length) {
+      return;
+    }
+
+    const usedSupportNodeIds = new Set<string>();
+    const findSupportNode = (causeNode: RcaNode, predicate: (node: RcaNode) => boolean): RcaNode | undefined => {
+      const connectedSupportNodes = activeNodes
+        .filter((node) => (
+          !usedSupportNodeIds.has(node.id) &&
+          coordinatesById.has(node.id) &&
+          predicate(node) &&
+          (
+            branchDescendantIds.has(node.id) ||
+            areDirectlyConnected(node, causeNode)
+          ) &&
+          areDirectlyConnected(node, causeNode)
+        ))
+        .sort(sortByCurrentPosition);
+      const supportNode = connectedSupportNodes[0];
+
+      if (supportNode) {
+        usedSupportNodeIds.add(supportNode.id);
+      }
+
+      return supportNode;
+    };
+    const rows: SupportRow[] = causeNodes.map((causeNode) => ({
+      analysis: findSupportNode(causeNode, (node) => isFiveWhysInvestigationRoleNode(node) || getFiveWhysNodeRole(node) === 'ANSWER'),
+      cause: causeNode,
+      evidence: findSupportNode(causeNode, isEvidenceRoleNode)
+    }));
+
+    const rowHeights = rows.map((row) => Math.max(
+      getRcaNodeSize(row.cause, nodeDetails[row.cause.id]).height,
+      row.evidence ? getRcaNodeSize(row.evidence, nodeDetails[row.evidence.id]).height : 0,
+      row.analysis ? getRcaNodeSize(row.analysis, nodeDetails[row.analysis.id]).height : 0,
+      row.sticky ? getRcaNodeSize(row.sticky, nodeDetails[row.sticky.id]).height : 0,
+      row.comment ? getRcaNodeSize(row.comment, nodeDetails[row.comment.id]).height : 0
+    ));
+    const branchSize = getRcaNodeSize(branchNode, nodeDetails[branchNode.id]);
+    const totalRowsHeight = rowHeights.reduce((totalHeight, rowHeight, rowIndex) => (
+      totalHeight + rowHeight + (rowIndex === 0 ? 0 : RCA_CONNECTED_SATELLITE_VERTICAL_GAP)
+    ), 0);
+    const lane = laneByNodeId.get(branchNode.id) || 'top';
+    const firstRowY = lane === 'bottom'
+      ? branchCoordinates.y + branchSize.height + RCA_BRANCH_CATEGORY_GAP
+      : branchCoordinates.y - RCA_BRANCH_CATEGORY_GAP - totalRowsHeight;
+    const columnWidths = new Map<SupportColumn, number>();
+    const setColumnWidth = (column: SupportColumn, rowNode: RcaNode | undefined) => {
+      if (!rowNode) {
+        return;
+      }
+
+      columnWidths.set(
+        column,
+        Math.max(columnWidths.get(column) || 0, getRcaNodeSize(rowNode, nodeDetails[rowNode.id]).width)
+      );
+    };
+
+    rows.forEach((row) => {
+      setColumnWidth('analysis', row.analysis);
+      setColumnWidth('cause', row.cause);
+      setColumnWidth('comment', row.comment);
+      setColumnWidth('evidence', row.evidence);
+      setColumnWidth('sticky', row.sticky);
+    });
+
+    const columnXByColumn = new Map<SupportColumn, number>();
+    const causeWidth = columnWidths.get('cause') || RCA_CAUSE_NODE_WIDTH;
+    let nextRightX = branchCoordinates.x - RCA_CONNECTED_SATELLITE_HORIZONTAL_GAP;
+
+    columnXByColumn.set('cause', Math.round(nextRightX - causeWidth));
+    nextRightX = columnXByColumn.get('cause') || nextRightX;
+
+    (['evidence', 'sticky', 'comment'] as SupportColumn[]).forEach((column) => {
+      const columnWidth = columnWidths.get(column);
+
+      if (!columnWidth) {
+        return;
+      }
+
+      columnXByColumn.set(column, Math.round(nextRightX - RCA_CONNECTED_SATELLITE_HORIZONTAL_GAP - columnWidth));
+      nextRightX = columnXByColumn.get(column) || nextRightX;
+    });
+
+    if (columnWidths.has('analysis')) {
+      columnXByColumn.set('analysis', Math.round(branchCoordinates.x));
+    }
+
+    let nextRowY = firstRowY;
+
+    rows.forEach((row, rowIndex) => {
+      const rowY = Math.round(nextRowY);
+      const setRowNodePosition = (column: SupportColumn, rowNode: RcaNode | undefined) => {
+        const columnX = columnXByColumn.get(column);
+
+        if (!rowNode || columnX === undefined) {
+          return;
+        }
+
+        coordinatesById.set(rowNode.id, {
+          x: columnX,
+          y: rowY
+        });
+      };
+
+      setRowNodePosition('comment', row.comment);
+      setRowNodePosition('sticky', row.sticky);
+      setRowNodePosition('evidence', row.evidence);
+      setRowNodePosition('cause', row.cause);
+      setRowNodePosition('analysis', row.analysis);
+      nextRowY += rowHeights[rowIndex] + RCA_CONNECTED_SATELLITE_VERTICAL_GAP;
+    });
+  });
+}
+
+function restoreFreeformAnnotationCoordinates(
+  coordinatesById: Map<string, { x: number; y: number }>,
+  nodes: RcaNode[]
+) {
+  nodes.forEach((node) => {
+    if (node.status === 'DELETED' || !isFreeformRcaAnnotationNode(node)) {
+      return;
+    }
+
+    const x = sanitizeRcaCanvasCoordinate(node.uiCoordinates?.x);
+    const y = sanitizeRcaCanvasCoordinate(node.uiCoordinates?.y);
+
+    if (x === null || y === null) {
+      return;
+    }
+
+    coordinatesById.set(node.id, { x, y });
+  });
+}
+
+function isDescendantOfAnyNodeInSet(
+  node: RcaNode,
+  candidateAncestors: RcaNode[],
+  nodeById: Map<string, RcaNode>
+): boolean {
+  const candidateAncestorIds = new Set(candidateAncestors.map((candidateNode) => candidateNode.id));
+  let parentNodeId = node.parentNodeId;
+  const visitedNodeIds = new Set<string>();
+
+  while (parentNodeId) {
+    if (visitedNodeIds.has(parentNodeId)) {
+      return false;
+    }
+
+    visitedNodeIds.add(parentNodeId);
+
+    if (candidateAncestorIds.has(parentNodeId)) {
+      return true;
+    }
+
+    parentNodeId = nodeById.get(parentNodeId)?.parentNodeId || null;
+  }
+
+  return false;
+}
+
+function placeMainIntakeChainNodes(
+  coordinatesById: Map<string, { x: number; y: number }>,
+  nodes: RcaNode[],
+  nodeDetails: Record<string, ReferenceRcaNodeDetail> = {}
+): Map<string, RcaMainIntakeChainPatchValue> {
+  const incidentNode = getPreferredRcaRoleNode(nodes, 'INCIDENT');
+  const incidentDetailsNode = getPreferredRcaRoleNode(nodes, 'INCIDENT_DETAILS', incidentNode?.id);
+  const containmentNode = getPreferredRcaRoleNode(nodes, 'CONTAINMENT', incidentDetailsNode?.id);
+  const problemParentNode = containmentNode || incidentDetailsNode;
+  const problemNode = getPreferredRcaRoleNode(nodes, 'PROBLEM', problemParentNode?.id);
+  const faultGateNode = problemNode
+    ? nodes.find((node) => node.status !== 'DELETED' && node.nodeType === 'FAULT_GATE')
+    : undefined;
+  const intakeChainNodes = [incidentNode, incidentDetailsNode, containmentNode, problemNode].filter((node): node is RcaNode => Boolean(node));
+  const patchByNodeId = new Map<string, RcaMainIntakeChainPatchValue>();
+  const faultGateCoordinates = faultGateNode ? coordinatesById.get(faultGateNode.id) : undefined;
+  const faultGateSize = faultGateNode ? getRcaNodeSize(faultGateNode, nodeDetails[faultGateNode.id]) : undefined;
+  const shouldAnchorChainToFaultGate = Boolean(faultGateCoordinates && faultGateSize && intakeChainNodes.length);
+  const chainGap = shouldAnchorChainToFaultGate
+    ? RCA_MAIN_INTAKE_CHAIN_FISHBONE_VERTICAL_GAP
+    : RCA_MAIN_INTAKE_CHAIN_VERTICAL_GAP;
+  const chainCenterX = shouldAnchorChainToFaultGate && faultGateCoordinates && faultGateSize
+    ? faultGateCoordinates.x + faultGateSize.width / 2
+    : RCA_MAIN_INTAKE_CHAIN_CENTER_X;
+  const intakeNodeSizes = intakeChainNodes.map((node) => getRcaNodeSize(node, nodeDetails[node.id]));
+  const totalChainHeight = intakeNodeSizes.reduce((totalHeight, size, index) => (
+    totalHeight + size.height + (index === 0 ? 0 : chainGap)
+  ), 0);
+  let nextY = shouldAnchorChainToFaultGate && faultGateCoordinates
+    ? Math.max(40, faultGateCoordinates.y - RCA_MAIN_INTAKE_TO_FAULT_GATE_GAP - totalChainHeight)
+    : RCA_MAIN_INTAKE_CHAIN_START_Y;
+
+  intakeChainNodes.forEach((node, nodeIndex) => {
+    const nodeSize = intakeNodeSizes[nodeIndex];
+
+    coordinatesById.set(node.id, {
+      x: Math.round(chainCenterX - nodeSize.width / 2),
+      y: Math.round(nextY)
+    });
+    nextY += nodeSize.height + chainGap;
+  });
+
+  const setChainPatch = (childNode: RcaNode | undefined, parentNode: RcaNode | undefined, handles: RcaNode['connectionHandles']) => {
+    if (!childNode || !parentNode) {
+      return;
+    }
+
+    patchByNodeId.set(childNode.id, {
+      ...(patchByNodeId.get(childNode.id) || {}),
+      connectionHandles: handles,
+      parentNodeId: parentNode.id
+    });
+  };
+
+  setChainPatch(incidentDetailsNode, incidentNode, getVerticalRcaFlowConnectionHandles());
+  setChainPatch(containmentNode, incidentDetailsNode, getVerticalRcaFlowConnectionHandles());
+  setChainPatch(problemNode, problemParentNode, getVerticalRcaFlowConnectionHandles());
+  if (faultGateNode && !isFaultGateCapaSplineOwner(faultGateNode, nodes)) {
+    setChainPatch(
+      faultGateNode,
+      problemNode,
+      shouldAnchorChainToFaultGate
+        ? getVerticalRcaFlowConnectionHandles()
+        : {
+            sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+            targetHandle: RCA_TARGET_LEFT_HANDLE
+          }
+    );
+  }
+
+  return patchByNodeId;
+}
+
+function getPreferredRcaRoleNode(
+  nodes: RcaNode[],
+  role: RcaFiveWhysNodeRole,
+  preferredParentNodeId?: string
+): RcaNode | undefined {
+  const candidates = nodes
+    .map((node, index) => ({ index, node }))
+    .filter((entry) => (
+      entry.node.status !== 'DELETED' &&
+      entry.node.nodeType === 'WHY' &&
+      getFiveWhysNodeRole(entry.node) === role
+    ));
+
+  if (!candidates.length) {
+    return undefined;
+  }
+
+  if (preferredParentNodeId) {
+    const connectedCandidate = candidates.find((entry) => entry.node.parentNodeId === preferredParentNodeId);
+
+    if (connectedCandidate) {
+      return connectedCandidate.node;
+    }
+  }
+
+  return candidates
+    .sort((leftEntry, rightEntry) => {
+      const leftX = sanitizeRcaCanvasCoordinate(leftEntry.node.uiCoordinates?.x) ?? 0;
+      const rightX = sanitizeRcaCanvasCoordinate(rightEntry.node.uiCoordinates?.x) ?? 0;
+      const leftY = sanitizeRcaCanvasCoordinate(leftEntry.node.uiCoordinates?.y) ?? 0;
+      const rightY = sanitizeRcaCanvasCoordinate(rightEntry.node.uiCoordinates?.y) ?? 0;
+
+      return leftY - rightY || leftX - rightX || leftEntry.index - rightEntry.index;
+    })[0]?.node;
+}
+
+function getVerticalRcaFlowConnectionHandles(): NonNullable<RcaNode['connectionHandles']> {
+  return {
+    sourceHandle: RCA_SOURCE_BOTTOM_HANDLE,
+    targetHandle: RCA_TARGET_TOP_HANDLE
+  };
+}
+
+function getRcaFiveWhysChainAnchor(problemNode: RcaNode, nodes: RcaNode[]): { x: number; y: number } {
+  const problemIndex = Math.max(0, nodes.findIndex((candidateNode) => candidateNode.id === problemNode.id));
+  const problemPosition = getNodePosition(problemNode, nodes, problemIndex, 'ISHIKAWA');
+  const problemSize = getRcaNodeSize(problemNode);
+
+  return {
+    x: Math.round(problemPosition.x),
+    y: Math.round(problemPosition.y + problemSize.height + RCA_FIVE_WHYS_CHAIN_TOP_GAP)
+  };
 }
 
 function withNodeCoordinates(
@@ -1981,8 +5422,8 @@ function getFishboneCategoryLayout(
 
   return {
     lane,
-    x: 650 + fallbackColumn * 470,
-    y: lane === 'top' ? 585 : 805
+    x: RCA_FISHBONE_FIRST_COLUMN_X + fallbackColumn * RCA_FISHBONE_COLUMN_STEP,
+    y: lane === 'top' ? RCA_FISHBONE_TOP_CATEGORY_Y : RCA_FISHBONE_BOTTOM_CATEGORY_Y
   };
 }
 
@@ -1997,6 +5438,16 @@ function getStackHeight(heights: number[]): number {
 
     return totalHeight + gapBefore + height;
   }, 0);
+}
+
+function getFixedGapStackHeight(heights: number[], gap: number): number {
+  if (!heights.length) {
+    return 0;
+  }
+
+  return heights.reduce((totalHeight, height, index) => (
+    totalHeight + height + (index === 0 ? 0 : gap)
+  ), 0);
 }
 
 function getCauseStackGap(previousHeight: number, nextHeight: number): number {
@@ -2015,36 +5466,177 @@ function getCauseStackGap(previousHeight: number, nextHeight: number): number {
 
 function getFishboneBranchHorizontalExtents(
   categoryNode: RcaNode,
-  childrenByParent: Map<string, RcaNode[]>,
+  treeChildrenByParent: Map<string, RcaNode[]>,
+  allChildrenByParent: Map<string, RcaNode[]>,
   causeOffsetX: number,
   subCauseOffsetX: number,
+  nodes: RcaNode[],
   nodeDetails: Record<string, ReferenceRcaNodeDetail> = {}
 ): { max: number; min: number } {
-  const visitedNodeIds = new Set<string>();
+  const visitedTreeNodeIds = new Set<string>();
+  const visitedSatelliteNodeIds = new Set<string>();
+  const categoryWidth = getRcaNodeSize(categoryNode, nodeDetails[categoryNode.id]).width;
   const extents = {
-    max: RCA_CATEGORY_NODE_WIDTH,
+    max: categoryWidth,
     min: 0
   };
 
-  function walk(parentNodeId: string, childXOffset: number) {
-    const childNodes = childrenByParent.get(parentNodeId) || [];
+  function includeNode(leftOffset: number, width: number) {
+    extents.min = Math.min(extents.min, leftOffset);
+    extents.max = Math.max(extents.max, leftOffset + width);
+  }
 
-    childNodes.forEach((childNode) => {
-      if (visitedNodeIds.has(childNode.id)) {
+  function collectAllDescendants(parentNode: RcaNode, visitedNodeIds = new Set<string>()): RcaNode[] {
+    const descendants: RcaNode[] = [];
+
+    (allChildrenByParent.get(parentNode.id) || []).forEach((childNode) => {
+      if (childNode.status === 'DELETED' || visitedNodeIds.has(childNode.id)) {
         return;
       }
 
       visitedNodeIds.add(childNode.id);
+      descendants.push(childNode);
+      descendants.push(...collectAllDescendants(childNode, visitedNodeIds));
+    });
 
-      const childWidth = getRcaNodeSize(childNode, nodeDetails[childNode.id]).width;
+    return descendants;
+  }
 
-      extents.min = Math.min(extents.min, childXOffset);
-      extents.max = Math.max(extents.max, childXOffset + childWidth);
-      walk(childNode.id, childXOffset - subCauseOffsetX);
+  function reserveRootCauseWorkflowLanes() {
+    const descendants = collectAllDescendants(categoryNode);
+    const rootCauseNodes = descendants.filter((node) => (
+      isRootCauseRoleNode(node) &&
+      !isMisclassifiedFishboneCauseNode(node, nodes)
+    ));
+
+    rootCauseNodes.forEach((rootCauseNode) => {
+      const workflowBlock = getRootCauseWorkflowBlockLayout(
+        rootCauseNode,
+        nodes,
+        allChildrenByParent,
+        nodeDetails
+      );
+      const stageWidth = Math.max(
+        0,
+        ...workflowBlock.stageNodes.map((stageNode) => getRcaNodeSize(stageNode, nodeDetails[stageNode.id]).width)
+      );
+      const rightWorkflowWidth =
+        workflowBlock.rootCauseSize.width +
+        (workflowBlock.capaSize ? RCA_CAPA_WORKFLOW_COLUMN_GAP + workflowBlock.capaSize.width : 0) +
+        (stageWidth ? RCA_CAPA_WORKFLOW_COLUMN_GAP + stageWidth : 0);
+      const workflowLeftOffset = categoryWidth + RCA_CAPA_WORKFLOW_COLUMN_GAP;
+      const workflowRightReserve = workflowLeftOffset + rightWorkflowWidth + RCA_BRANCH_HORIZONTAL_GAP;
+
+      includeNode(workflowLeftOffset, workflowRightReserve - workflowLeftOffset);
+
+      descendants
+        .filter((node) => node.parentNodeId === rootCauseNode.id && isEvidenceRoleNode(node))
+        .forEach((evidenceNode) => {
+          const evidenceWidth = getRcaNodeSize(evidenceNode, nodeDetails[evidenceNode.id]).width;
+          includeNode(workflowLeftOffset, Math.max(evidenceWidth, workflowBlock.rootCauseSize.width));
+        });
+
     });
   }
 
-  walk(categoryNode.id, -causeOffsetX);
+  function reserveSatelliteLane(parentNode: RcaNode, parentOffsetX: number) {
+    const parentSize = getRcaNodeSize(parentNode, nodeDetails[parentNode.id]);
+    const treeChildIds = new Set((treeChildrenByParent.get(parentNode.id) || []).map((childNode) => childNode.id));
+    const satelliteNodes = (allChildrenByParent.get(parentNode.id) || []).filter((childNode) => (
+      childNode.status !== 'DELETED' &&
+      !treeChildIds.has(childNode.id) &&
+      !visitedSatelliteNodeIds.has(childNode.id)
+    ));
+    const activeLeftColumnWidths = new Map<'sticky' | 'comment' | 'evidence', number>();
+    const satelliteWidthsBySide = new Map<'left' | 'right' | 'below', number>();
+
+    satelliteNodes.forEach((childNode) => {
+      visitedSatelliteNodeIds.add(childNode.id);
+      const side = getConnectedRcaNodeLayoutSide(childNode, parentNode, nodes);
+      const childWidth = getRcaNodeSize(childNode, nodeDetails[childNode.id]).width;
+
+      if (isFiveWhysInvestigationRoleNode(childNode) || getFiveWhysNodeRole(childNode) === 'ANSWER') {
+        includeNode(0, childWidth);
+        return;
+      }
+
+      if (childNode.nodeType === 'STICKY_NOTE') {
+        activeLeftColumnWidths.set('sticky', Math.max(activeLeftColumnWidths.get('sticky') || 0, childWidth));
+        return;
+      }
+
+      if (childNode.nodeType === 'COMMENT') {
+        activeLeftColumnWidths.set('comment', Math.max(activeLeftColumnWidths.get('comment') || 0, childWidth));
+        return;
+      }
+
+      if (isEvidenceRoleNode(childNode)) {
+        activeLeftColumnWidths.set('evidence', Math.max(activeLeftColumnWidths.get('evidence') || 0, childWidth));
+        return;
+      }
+
+      satelliteWidthsBySide.set(side, Math.max(satelliteWidthsBySide.get(side) || 0, childWidth));
+    });
+
+    let nextLeftColumnRightOffset = parentOffsetX;
+
+    (['evidence', 'sticky', 'comment'] as const).forEach((column) => {
+      const columnWidth = activeLeftColumnWidths.get(column);
+
+      if (!columnWidth) {
+        return;
+      }
+
+      const columnLeftOffset = nextLeftColumnRightOffset - RCA_CONNECTED_SATELLITE_HORIZONTAL_GAP - columnWidth;
+
+      includeNode(columnLeftOffset - RCA_BRANCH_SATELLITE_RESERVE_GAP, columnWidth);
+      nextLeftColumnRightOffset = columnLeftOffset;
+    });
+
+    satelliteWidthsBySide.forEach((widestChild, side) => {
+      if (!Number.isFinite(widestChild) || widestChild <= 0) {
+        return;
+      }
+
+      if (side === 'left') {
+        const childLeftOffset = nextLeftColumnRightOffset - RCA_CONNECTED_SATELLITE_HORIZONTAL_GAP - widestChild;
+
+        includeNode(childLeftOffset - RCA_BRANCH_SATELLITE_RESERVE_GAP, widestChild);
+        nextLeftColumnRightOffset = childLeftOffset;
+        return;
+      }
+
+      if (side === 'right') {
+        includeNode(parentOffsetX + parentSize.width + RCA_CONNECTED_SATELLITE_HORIZONTAL_GAP + RCA_BRANCH_SATELLITE_RESERVE_GAP, widestChild);
+        return;
+      }
+
+      includeNode(parentOffsetX + (parentSize.width - widestChild) / 2, widestChild);
+    });
+  }
+
+  function walk(parentNode: RcaNode, parentOffsetX: number) {
+    const parentWidth = getRcaNodeSize(parentNode, nodeDetails[parentNode.id]).width;
+    const childNodes = treeChildrenByParent.get(parentNode.id) || [];
+
+    includeNode(parentOffsetX, parentWidth);
+    reserveSatelliteLane(parentNode, parentOffsetX);
+
+    childNodes.forEach((childNode) => {
+      if (visitedTreeNodeIds.has(childNode.id)) {
+        return;
+      }
+
+      visitedTreeNodeIds.add(childNode.id);
+      walk(
+        childNode,
+        parentOffsetX - (parentNode.id === categoryNode.id ? causeOffsetX : subCauseOffsetX)
+      );
+    });
+  }
+
+  walk(categoryNode, 0);
+  reserveRootCauseWorkflowLanes();
 
   return extents;
 }
@@ -2129,9 +5721,11 @@ function RcaWorkspaceInner() {
   const reactFlow = useReactFlow();
   const { zoom: canvasZoom } = useViewport();
   const workspaceRootRef = React.useRef<HTMLElement | null>(null);
+  const canvasSurfaceRef = React.useRef<HTMLDivElement | null>(null);
+  const zoomRegionGestureRef = React.useRef<RcaZoomRegionState | null>(null);
   const [workspaceView, setWorkspaceView] = React.useState<RcaWorkspaceView>('dashboard');
   const [workspace, setWorkspace] = React.useState<RcaWorkspaceResponse | null>(null);
-  const [isReferenceProjectActive, setIsReferenceProjectActive] = React.useState(true);
+  const [isReferenceProjectActive, setIsReferenceProjectActive] = React.useState(false);
   const [referenceMethodology, setReferenceMethodology] = React.useState<RcaMethodology>('ISHIKAWA');
   const [referenceNodesByMethodology, setReferenceNodesByMethodology] = React.useState<Record<RcaMethodology, RcaNode[]>>(() => ({
     '5_WHYS': [],
@@ -2146,19 +5740,44 @@ function RcaWorkspaceInner() {
   const [nodes, setNodes] = React.useState<RcaNode[]>([]);
   const [selectedNodeId, setSelectedNodeId] = React.useState<string | null>(null);
   const [inspectedNodeId, setInspectedNodeId] = React.useState<string | null>(null);
+  const [nodeHintAnchor, setNodeHintAnchor] = React.useState<RcaNodeHintAnchor | null>(null);
+  const [reactionPaletteAnchor, setReactionPaletteAnchor] = React.useState<RcaNodeReactionPaletteAnchor | null>(null);
   const [selectedFlowNodeIds, setSelectedFlowNodeIds] = React.useState<Set<string>>(() => new Set());
   const [selectedFlowEdgeIds, setSelectedFlowEdgeIds] = React.useState<Set<string>>(() => new Set());
   const [pendingCanvasDestructiveAction, setPendingCanvasDestructiveAction] = React.useState<RcaCanvasDestructiveAction | null>(null);
   const [canvasInteractionMode, setCanvasInteractionMode] = React.useState<RcaCanvasInteractionMode>('select');
   const [canvasTheme, setCanvasTheme] = React.useState<RcaCanvasTheme>('light');
   const [canvasContextMenu, setCanvasContextMenu] = React.useState<RcaCanvasContextMenuState | null>(null);
+  const [zoomRegion, setZoomRegion] = React.useState<RcaZoomRegionState | null>(null);
   const [isKnowledgeBaseOpen, setIsKnowledgeBaseOpen] = React.useState(false);
+  const [isEvidenceLibraryOpen, setIsEvidenceLibraryOpen] = React.useState(false);
+  const [evidenceLibraryTargetNodeId, setEvidenceLibraryTargetNodeId] = React.useState<string | null>(null);
+  const [isGuidedPathOpen, setIsGuidedPathOpen] = React.useState(false);
+  const [isConnectionRecommendationsOpen, setIsConnectionRecommendationsOpen] = React.useState(false);
+  const [isBranchWalkthroughOpen, setIsBranchWalkthroughOpen] = React.useState(false);
+  const [branchWalkthroughIndex, setBranchWalkthroughIndex] = React.useState(0);
   const [isCanvasShortcutListOpen, setIsCanvasShortcutListOpen] = React.useState(false);
   const [nodeStyleEditor, setNodeStyleEditor] = React.useState<RcaNodeStyleEditorState | null>(null);
   const [splineStyleEditor, setSplineStyleEditor] = React.useState<RcaSplineStyleEditorState | null>(null);
   const [isCanvasGridVisible, setIsCanvasGridVisible] = React.useState(true);
   const [canvasGridSize, setCanvasGridSize] = React.useState(RCA_CANVAS_GRID_MAX_SIZE);
   const [isCanvasSnapEnabled, setIsCanvasSnapEnabled] = React.useState(true);
+  const [isPresentationMode, setIsPresentationMode] = React.useState(false);
+  const [presentationStepIndex, setPresentationStepIndex] = React.useState(0);
+  const [isAutoFocusSelectionEnabled, setIsAutoFocusSelectionEnabled] = React.useState(() => {
+    if (typeof window === 'undefined') {
+      return false;
+    }
+
+    return window.localStorage.getItem(RCA_AUTO_FOCUS_SELECTION_STORAGE_KEY) === 'true';
+  });
+  const [isNodeHintAutoOpenEnabled, setIsNodeHintAutoOpenEnabled] = React.useState(() => {
+    if (typeof window === 'undefined') {
+      return true;
+    }
+
+    return window.localStorage.getItem(RCA_NODE_HINT_AUTO_OPEN_STORAGE_KEY) !== 'false';
+  });
   const [alignmentGuides, setAlignmentGuides] = React.useState<RcaAlignmentGuide[]>([]);
   const [canvasUndoStack, setCanvasUndoStack] = React.useState<RcaCanvasHistorySnapshot[]>([]);
   const [canvasRedoStack, setCanvasRedoStack] = React.useState<RcaCanvasHistorySnapshot[]>([]);
@@ -2195,13 +5814,18 @@ function RcaWorkspaceInner() {
   const [incidentDraft, setIncidentDraft] = React.useState({
     title: ''
   });
+  const [canvasEvidencePhotoViewer, setCanvasEvidencePhotoViewer] = React.useState<{
+    evidenceKey: string;
+    nodeId: string;
+  } | null>(null);
+  const [canvasEvidencePreviewUrls, setCanvasEvidencePreviewUrls] = React.useState<Map<string, string>>(() => new Map());
   const nodesRef = React.useRef<RcaNode[]>([]);
   const nodesCanvasKeyRef = React.useRef<string | null>(null);
   const openedCanvasFitViewKeyRef = React.useRef<string | null>(null);
   const fiveWhysScaffoldSessionRef = React.useRef<Set<string>>(new Set());
   const pendingNodePositionUpdatesRef = React.useRef<Map<string, { x: number; y: number }>>(new Map());
   const canvasSaveRequestRef = React.useRef(0);
-  const canvasFitViewTimeoutRef = React.useRef<number | null>(null);
+  const canvasFitViewTimeoutRef = React.useRef<number[]>([]);
   const dragStartNodesRef = React.useRef<RcaNode[] | null>(null);
   const activeDragNodeIdsRef = React.useRef<Set<string>>(new Set());
   const nodeEditHistorySnapshotRef = React.useRef<Map<string, RcaNode[]>>(new Map());
@@ -2217,6 +5841,22 @@ function RcaWorkspaceInner() {
   const contextRef = React.useRef<RcaWorkspaceContext | null>(null);
   const lastNonEmptyNodesByCanvasRef = React.useRef<Map<string, RcaNode[]>>(new Map());
   const liveLabelDocsRef = React.useRef<Map<string, Y.Doc>>(new Map());
+  const canvasEvidenceObjectUrlsRef = React.useRef<Set<string>>(new Set());
+
+  React.useEffect(() => {
+    window.localStorage.setItem(RCA_NODE_HINT_AUTO_OPEN_STORAGE_KEY, isNodeHintAutoOpenEnabled ? 'true' : 'false');
+  }, [isNodeHintAutoOpenEnabled]);
+  React.useEffect(() => {
+    window.localStorage.setItem(RCA_AUTO_FOCUS_SELECTION_STORAGE_KEY, isAutoFocusSelectionEnabled ? 'true' : 'false');
+  }, [isAutoFocusSelectionEnabled]);
+  React.useEffect(() => () => {
+    canvasEvidenceObjectUrlsRef.current.forEach((objectUrl) => {
+      if (objectUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    });
+    canvasEvidenceObjectUrlsRef.current.clear();
+  }, []);
 
   const referenceSession = React.useMemo<RcaSession>(() => ({
     ...REFERENCE_RCA_PROJECT.session,
@@ -2253,6 +5893,7 @@ function RcaWorkspaceInner() {
         session.id === selectedSessionId &&
         session.incidentId === selectedIncidentId
       )) || null;
+  const isSelectedRcaCaseClosed = Boolean(!isReferenceProjectActive && selectedIncident?.status === 'CLOSED');
   const persistedVisibleNodes = isReferenceProjectActive ? referenceNodes : nodes;
   React.useEffect(() => {
     nodesRef.current = nodes;
@@ -2288,7 +5929,68 @@ function RcaWorkspaceInner() {
     ));
   }, [isReferenceProjectActive, liveNodeLabels, persistedVisibleNodes]);
   const selectedNode = visibleNodes.find((node) => node.id === selectedNodeId) || null;
+  const selectedNodeTypeLabel = selectedNode
+    ? selectedNode.nodeType === 'ISHIKAWA_CATEGORY'
+      ? selectedNode.label?.trim() || 'Branch'
+      : selectedNode.nodeType === 'WHY'
+      ? getFiveWhysRoleLabel(getFiveWhysNodeRole(selectedNode))
+      : formatNodeType(selectedNode.nodeType)
+    : '';
+  const guidedPathSummary = React.useMemo(() => (
+    buildRcaGuidedPathSummary(
+      visibleNodes,
+      selectedIncident,
+      selectedSession?.methodology || 'ISHIKAWA',
+      selectedNodeId
+    )
+  ), [selectedIncident, selectedNodeId, selectedSession?.methodology, visibleNodes]);
+  const connectionRecommendationSummary = React.useMemo(() => (
+    buildRcaConnectionRecommendationSummary(
+      selectedNode,
+      visibleNodes,
+      selectedSession?.methodology || 'ISHIKAWA'
+    )
+  ), [selectedNode, selectedSession?.methodology, visibleNodes]);
+  const presentationSteps = React.useMemo(() => (
+    buildRcaPresentationSteps(visibleNodes, selectedSession?.methodology || 'ISHIKAWA')
+  ), [selectedSession?.methodology, visibleNodes]);
+  const branchWalkthroughSteps = React.useMemo(() => (
+    buildRcaBranchWalkthroughSteps(visibleNodes, selectedSession?.methodology || 'ISHIKAWA')
+  ), [selectedSession?.methodology, visibleNodes]);
+  const activeBranchWalkthroughStep = isBranchWalkthroughOpen && branchWalkthroughSteps.length
+    ? branchWalkthroughSteps[Math.min(branchWalkthroughIndex, branchWalkthroughSteps.length - 1)]
+    : null;
+  const activePresentationStep = isPresentationMode && presentationSteps.length
+    ? presentationSteps[Math.min(presentationStepIndex, presentationSteps.length - 1)]
+    : null;
   const inspectedNode = visibleNodes.find((node) => node.id === inspectedNodeId) || null;
+  const evidenceLibraryTargetNode = evidenceLibraryTargetNodeId
+    ? visibleNodes.find((node) => node.id === evidenceLibraryTargetNodeId) || null
+    : null;
+  const canvasEvidencePhotoNode = canvasEvidencePhotoViewer
+    ? visibleNodes.find((node) => node.id === canvasEvidencePhotoViewer.nodeId && isEvidenceRoleNode(node)) || null
+    : null;
+  const canvasEvidencePhotoItems = React.useMemo(() => (
+    canvasEvidencePhotoNode
+      ? canvasEvidencePhotoNode.attachedEvidence
+          .filter(isImageEvidence)
+          .map((item) => ({
+            item,
+            previewUrl: getEvidencePreviewUrl(item, canvasEvidencePreviewUrls)
+          }))
+      : []
+  ), [canvasEvidencePhotoNode, canvasEvidencePreviewUrls]);
+  const selectedCanvasEvidencePhotoIndex = canvasEvidencePhotoViewer
+    ? canvasEvidencePhotoItems.findIndex((entry) => getEvidenceKey(entry.item) === canvasEvidencePhotoViewer.evidenceKey)
+    : -1;
+  const selectedCanvasEvidencePhoto = selectedCanvasEvidencePhotoIndex >= 0
+    ? canvasEvidencePhotoItems[selectedCanvasEvidencePhotoIndex]
+    : null;
+  React.useEffect(() => {
+    if (canvasEvidencePhotoViewer && !selectedCanvasEvidencePhoto) {
+      setCanvasEvidencePhotoViewer(null);
+    }
+  }, [canvasEvidencePhotoViewer, selectedCanvasEvidencePhoto]);
   const selectedReportIncidentNode = React.useMemo(() => {
     if (isRcaIncidentReportNode(selectedNode, visibleNodes)) {
       return selectedNode;
@@ -2311,10 +6013,248 @@ function RcaWorkspaceInner() {
   const reportIncidentNode = reportIncidentNodeId
     ? visibleNodes.find((node) => node.id === reportIncidentNodeId && isRcaIncidentReportNode(node, visibleNodes)) || null
     : null;
+  const hintedNode = nodeHintAnchor
+    ? visibleNodes.find((node) => node.id === nodeHintAnchor.nodeId) || null
+    : null;
+  const reactionPaletteNode = reactionPaletteAnchor
+    ? visibleNodes.find((node) => node.id === reactionPaletteAnchor.nodeId) || null
+    : null;
+  const selectedHintNodeId = React.useMemo(() => {
+    const realSelectedNodeIds = [...selectedFlowNodeIds].filter((nodeId) => (
+      !isFishboneSpineFlowNodeId(nodeId) &&
+      visibleNodes.some((node) => node.id === nodeId)
+    ));
+
+    if (realSelectedNodeIds.length === 1) {
+      return realSelectedNodeIds[0];
+    }
+
+    return selectedNodeId && visibleNodes.some((node) => node.id === selectedNodeId)
+      ? selectedNodeId
+      : null;
+  }, [selectedFlowNodeIds, selectedNodeId, visibleNodes]);
+  const canOpenSelectedNodeHint = Boolean(
+    selectedHintNodeId &&
+    selectedFlowNodeIds.size <= 1
+  );
   const activeNodeDetails = React.useMemo(
     () => (isReferenceProjectActive ? REFERENCE_RCA_PROJECT.nodeDetails : {}),
     [isReferenceProjectActive]
   );
+  const getNodeReactionAvoidRect = React.useCallback((node: RcaNode | null): RcaNodeReactionPaletteAnchor['avoidRect'] => {
+    if (!node) {
+      return undefined;
+    }
+
+    const nodeSize = getRcaNodeSize(node, activeNodeDetails[node.id]);
+    const viewport = reactFlow.getViewport();
+    const left = node.uiCoordinates.x * viewport.zoom + viewport.x;
+    const top = node.uiCoordinates.y * viewport.zoom + viewport.y;
+
+    return {
+      bottom: top + nodeSize.height * viewport.zoom,
+      left,
+      right: left + nodeSize.width * viewport.zoom,
+      top
+    };
+  }, [activeNodeDetails, reactFlow]);
+  const openNodeHintFromCanvasControl = React.useCallback((nodeId: string) => {
+    const rootBounds = workspaceRootRef.current?.getBoundingClientRect();
+
+    setNodeHintAnchor({
+      nodeId,
+      x: (rootBounds?.left || 0) + 190,
+      y: (rootBounds?.top || 0) + 42
+    });
+  }, []);
+  const handleOpenNodeHint = React.useCallback((nodeId: string, event: React.MouseEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setNodeHintAnchor((currentAnchor) => (
+      currentAnchor?.nodeId === nodeId
+        ? null
+        : {
+            nodeId,
+            x: event.clientX,
+            y: event.clientY
+          }
+    ));
+  }, []);
+  const handleOpenReactionPalette = React.useCallback((anchor: RcaNodeReactionPaletteAnchor) => {
+    const targetNode = visibleNodes.find((node) => node.id === anchor.nodeId) || null;
+
+    setNodeHintAnchor(null);
+    setReactionPaletteAnchor({
+      ...anchor,
+      avoidRect: anchor.avoidRect || getNodeReactionAvoidRect(targetNode)
+    });
+    setSelectedNodeId(anchor.nodeId);
+    setSelectedFlowNodeIds(new Set([anchor.nodeId]));
+  }, [getNodeReactionAvoidRect, visibleNodes]);
+  const handleOpenEvidenceLibraryForNode = React.useCallback((nodeId: string) => {
+    if (isReferenceProjectActive || isSelectedRcaCaseClosed) {
+      return;
+    }
+
+    const targetNode = visibleNodes.find((node) => node.id === nodeId);
+
+    if (!targetNode || !isEvidenceRoleNode(targetNode)) {
+      return;
+    }
+
+    setEvidenceLibraryTargetNodeId(nodeId);
+    setIsEvidenceLibraryOpen(true);
+    setSelectedNodeId(nodeId);
+    setSelectedFlowNodeIds(new Set([nodeId]));
+  }, [isReferenceProjectActive, isSelectedRcaCaseClosed, visibleNodes]);
+  const handleOpenCanvasEvidencePhotoViewer = React.useCallback((nodeId: string, evidenceKey: string) => {
+    const targetNode = visibleNodes.find((node) => node.id === nodeId);
+
+    if (!targetNode || !isEvidenceRoleNode(targetNode)) {
+      return;
+    }
+
+    const targetPhoto = targetNode.attachedEvidence.find((item) => (
+      getEvidenceKey(item) === evidenceKey && isImageEvidence(item)
+    ));
+
+    if (!targetPhoto) {
+      return;
+    }
+
+    setNodeHintAnchor(null);
+    setReactionPaletteAnchor(null);
+    setCanvasContextMenu(null);
+    setSelectedNodeId(nodeId);
+    setSelectedFlowNodeIds(new Set([nodeId]));
+    setCanvasEvidencePhotoViewer({ evidenceKey, nodeId });
+  }, [visibleNodes]);
+  React.useEffect(() => {
+    if (!canvasEvidencePhotoItems.length) {
+      return undefined;
+    }
+
+    const missingPhotos = canvasEvidencePhotoItems
+      .map((entry) => entry.item)
+      .filter((item) => (
+        !canvasEvidencePreviewUrls.has(getEvidenceKey(item)) &&
+        (!isBrowserDisplayableImageUrl(item.fileUrl) || isRcaLibraryAttachedEvidence(item))
+      ));
+
+    if (!missingPhotos.length) {
+      return undefined;
+    }
+
+    let isCurrent = true;
+
+    async function hydrateCanvasEvidencePhotos() {
+      const entries = await Promise.all(missingPhotos.map(async (item) => {
+        try {
+          const evidenceKey = getEvidenceKey(item);
+          let blob = await getStoredEvidencePreviewBlob(evidenceKey);
+
+          if (!blob && selectedIncident && selectedSession && isRcaStoredEvidenceUrl(item.fileUrl)) {
+            blob = await downloadRcaEvidenceBlob(selectedIncident.id, selectedSession.id, item.fileUrl);
+          }
+
+          if (!blob && isRcaLibraryAttachedEvidence(item) && !item.fileUrl.startsWith('rails-evidence://')) {
+            blob = await downloadRailsEvidenceBlob(item.fileUrl);
+          }
+
+          if (!blob || !blob.type.startsWith('image/')) {
+            return null;
+          }
+
+          await storeEvidencePreviewBlob(evidenceKey, blob);
+          const objectUrl = URL.createObjectURL(blob);
+
+          return { evidenceKey, objectUrl };
+        } catch {
+          return null;
+        }
+      }));
+
+      if (!isCurrent) {
+        entries.forEach((entry) => {
+          if (entry?.objectUrl) {
+            URL.revokeObjectURL(entry.objectUrl);
+          }
+        });
+        return;
+      }
+
+      setCanvasEvidencePreviewUrls((currentUrls) => {
+        const nextUrls = new Map(currentUrls);
+        let didAddUrl = false;
+
+        entries.forEach((entry) => {
+          if (!entry || nextUrls.has(entry.evidenceKey)) {
+            return;
+          }
+
+          canvasEvidenceObjectUrlsRef.current.add(entry.objectUrl);
+          nextUrls.set(entry.evidenceKey, entry.objectUrl);
+          didAddUrl = true;
+        });
+
+        return didAddUrl ? nextUrls : currentUrls;
+      });
+    }
+
+    void hydrateCanvasEvidencePhotos();
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [canvasEvidencePhotoItems, canvasEvidencePreviewUrls, selectedIncident, selectedSession]);
+  const handleOpenCanvasEvidenceOriginal = React.useCallback(async (item: RcaAttachedEvidence) => {
+    if (isRcaLibraryAttachedEvidence(item) && item.fileUrl && !item.fileUrl.startsWith('rails-evidence://')) {
+      const previewWindow = window.open('', '_blank');
+
+      try {
+        const blob = await downloadRailsEvidenceBlob(item.fileUrl);
+        const objectUrl = URL.createObjectURL(blob);
+
+        if (previewWindow) {
+          previewWindow.location.href = objectUrl;
+        } else {
+          window.open(objectUrl, '_blank', 'noopener,noreferrer');
+        }
+
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 120000);
+      } catch {
+        previewWindow?.close();
+      }
+
+      return;
+    }
+
+    if (isLikelyUrl(item.fileUrl)) {
+      window.open(item.fileUrl, '_blank', 'noopener,noreferrer');
+      return;
+    }
+
+    if (!selectedIncident || !selectedSession || !isRcaStoredEvidenceUrl(item.fileUrl)) {
+      return;
+    }
+
+    const previewWindow = window.open('', '_blank');
+
+    try {
+      const blob = await downloadRcaEvidenceBlob(selectedIncident.id, selectedSession.id, item.fileUrl);
+      const objectUrl = URL.createObjectURL(blob);
+
+      if (previewWindow) {
+        previewWindow.location.href = objectUrl;
+      } else {
+        window.open(objectUrl, '_blank', 'noopener,noreferrer');
+      }
+
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 120000);
+    } catch {
+      previewWindow?.close();
+    }
+  }, [selectedIncident, selectedSession]);
   const flowNodes = React.useMemo(
     () => buildFlowNodes(
       visibleNodes,
@@ -2329,9 +6269,13 @@ function RcaWorkspaceInner() {
       realtimeStatus === 'subscribed',
       nodeActivities,
       measuredFlowNodeSizes,
-      handleInlineNodeCommit
+      handleInlineNodeCommit,
+      handleOpenNodeHint,
+      handleOpenEvidenceLibraryForNode,
+      handleOpenReactionPalette,
+      handleOpenCanvasEvidencePhotoViewer
     ),
-    [activeNodeDetails, isReferenceProjectActive, measuredFlowNodeSizes, nodeActivities, realtimeStatus, selectedFlowNodeIds, selectedIncident?.id, selectedNodeId, selectedSession?.id, selectedSession?.methodology, visibleNodes]
+    [activeNodeDetails, handleOpenCanvasEvidencePhotoViewer, handleOpenEvidenceLibraryForNode, handleOpenNodeHint, handleOpenReactionPalette, isReferenceProjectActive, measuredFlowNodeSizes, nodeActivities, realtimeStatus, selectedFlowNodeIds, selectedIncident?.id, selectedNodeId, selectedSession?.id, selectedSession?.methodology, visibleNodes]
   );
   const flowEdges = React.useMemo(
     () => buildFlowEdges(visibleNodes, selectedSession?.methodology || 'ISHIKAWA', selectedFlowEdgeIds),
@@ -2339,6 +6283,7 @@ function RcaWorkspaceInner() {
   );
   const canEditCanvasConnections = Boolean(
     selectedIncident &&
+    !isSelectedRcaCaseClosed &&
     (selectedSession?.methodology === 'ISHIKAWA' || selectedSession?.methodology === '5_WHYS') &&
     !isReferenceProjectActive &&
     !isWorking &&
@@ -2346,6 +6291,7 @@ function RcaWorkspaceInner() {
   );
   const canRearrangeCanvas = Boolean(
     selectedSession &&
+    !isSelectedRcaCaseClosed &&
     (selectedSession.methodology === 'ISHIKAWA' || selectedSession.methodology === '5_WHYS') &&
     visibleNodes.length
   );
@@ -2362,12 +6308,17 @@ function RcaWorkspaceInner() {
     Math.max(1.7, Math.min(5.6, 1.9 / Math.max(canvasZoom, 0.28)))
   ), [canvasZoom]);
   const canFitVisibleProject = workspaceView === 'canvas' && Boolean(selectedSession) && visibleNodes.length > 0;
-  const fitVisibleProjectIntoView = React.useCallback((options: {
-    delay?: number;
-    force?: boolean;
-    padding?: number;
-  } = {}) => {
-    if (!visibleNodes.length) {
+  const fitRcaNodeSnapshotIntoView = React.useCallback((
+    targetNodes: RcaNode[],
+    methodology: RcaMethodology,
+    options: {
+      delay?: number;
+      force?: boolean;
+      padding?: number;
+      repeatDelays?: number[];
+    } = {}
+  ) => {
+    if (!targetNodes.length) {
       return;
     }
 
@@ -2375,22 +6326,122 @@ function RcaWorkspaceInner() {
       return;
     }
 
-    if (canvasFitViewTimeoutRef.current !== null) {
-      window.clearTimeout(canvasFitViewTimeoutRef.current);
+    canvasFitViewTimeoutRef.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
+    canvasFitViewTimeoutRef.current = [];
+
+    const runFit = () => {
+      window.requestAnimationFrame(() => {
+        const canvasBounds = workspaceRootRef.current?.getBoundingClientRect();
+
+        if (!canvasBounds?.width || !canvasBounds.height) {
+          void reactFlow.fitView({
+            duration: 560,
+            maxZoom: RCA_CANVAS_FIT_MAX_ZOOM,
+            minZoom: RCA_CANVAS_MIN_ZOOM,
+            padding: options.padding ?? 0.14
+          });
+          return;
+        }
+
+        let nodeBounds = targetNodes.reduce<{
+          bottom: number;
+          left: number;
+          right: number;
+          top: number;
+        } | null>((bounds, node, index) => {
+          const position = getNodePosition(node, targetNodes, index, methodology);
+          const size = getRcaNodeSize(node);
+          const left = position.x;
+          const top = position.y;
+          const right = position.x + size.width;
+          const bottom = position.y + size.height;
+
+          if (!bounds) {
+            return { bottom, left, right, top };
+          }
+
+          return {
+            bottom: Math.max(bounds.bottom, bottom),
+            left: Math.min(bounds.left, left),
+            right: Math.max(bounds.right, right),
+            top: Math.min(bounds.top, top)
+          };
+        }, null);
+
+        const spineLayout = getFishboneSpineNodeLayout(targetNodes, methodology);
+
+        if (spineLayout) {
+          const spineBounds = {
+            bottom: spineLayout.position.y + RCA_FISHBONE_SPINE_CONTROL_HEIGHT,
+            left: spineLayout.position.x,
+            right: spineLayout.position.x + spineLayout.width,
+            top: spineLayout.position.y
+          };
+
+          nodeBounds = nodeBounds
+            ? {
+                bottom: Math.max(nodeBounds.bottom, spineBounds.bottom),
+                left: Math.min(nodeBounds.left, spineBounds.left),
+                right: Math.max(nodeBounds.right, spineBounds.right),
+                top: Math.min(nodeBounds.top, spineBounds.top)
+              }
+            : spineBounds;
+        }
+
+        if (!nodeBounds) {
+          return;
+        }
+
+        const padding = options.padding ?? 0.14;
+        const contentWidth = Math.max(1, nodeBounds.right - nodeBounds.left);
+        const contentHeight = Math.max(1, nodeBounds.bottom - nodeBounds.top);
+        const paddedWidth = contentWidth * (1 + padding * 2);
+        const paddedHeight = contentHeight * (1 + padding * 2);
+        const targetZoom = Math.max(RCA_CANVAS_MIN_ZOOM, Math.min(RCA_CANVAS_FIT_MAX_ZOOM, Math.min(
+          canvasBounds.width / paddedWidth,
+          canvasBounds.height / paddedHeight
+        )));
+
+        void reactFlow.setCenter(
+          nodeBounds.left + contentWidth / 2,
+          nodeBounds.top + contentHeight / 2,
+          {
+            duration: 560,
+            zoom: targetZoom
+          }
+        );
+      });
+    };
+    const delays = options.repeatDelays?.length
+      ? options.repeatDelays
+      : [options.delay ?? 120];
+
+    canvasFitViewTimeoutRef.current = delays.map((delay) => {
+      const timeoutId = window.setTimeout(() => {
+        canvasFitViewTimeoutRef.current = canvasFitViewTimeoutRef.current.filter((currentTimeoutId) => (
+          currentTimeoutId !== timeoutId
+        ));
+      runFit();
+      }, delay);
+
+      return timeoutId;
+    });
+  }, [canFitVisibleProject, reactFlow]);
+  const fitVisibleProjectIntoView = React.useCallback((options: {
+    delay?: number;
+    force?: boolean;
+    padding?: number;
+  } = {}) => {
+    const methodology = isReferenceProjectActive
+      ? referenceMethodology
+      : selectedSession?.methodology;
+
+    if (!methodology) {
+      return;
     }
 
-    canvasFitViewTimeoutRef.current = window.setTimeout(() => {
-      canvasFitViewTimeoutRef.current = null;
-      window.requestAnimationFrame(() => {
-        void reactFlow.fitView({
-          duration: 560,
-          maxZoom: 0.78,
-          minZoom: 0.25,
-          padding: options.padding ?? 0.14
-        });
-      });
-    }, options.delay ?? 120);
-  }, [canFitVisibleProject, reactFlow, visibleNodes.length]);
+    fitRcaNodeSnapshotIntoView(visibleNodes, methodology, options);
+  }, [fitRcaNodeSnapshotIntoView, isReferenceProjectActive, referenceMethodology, selectedSession?.methodology, visibleNodes]);
   const closeCanvasContextMenu = React.useCallback(() => {
     setCanvasContextMenu(null);
   }, []);
@@ -2400,6 +6451,141 @@ function RcaWorkspaceInner() {
   const closeSplineStyleEditor = React.useCallback(() => {
     setSplineStyleEditor(null);
   }, []);
+  const finishZoomRegionGesture = React.useCallback((region: RcaZoomRegionState | null) => {
+    zoomRegionGestureRef.current = null;
+    setZoomRegion(null);
+
+    if (!region) {
+      return;
+    }
+
+    const width = Math.abs(region.currentClientX - region.startClientX);
+    const height = Math.abs(region.currentClientY - region.startClientY);
+
+    if (width < 24 || height < 24) {
+      return;
+    }
+
+    const startPosition = reactFlow.screenToFlowPosition({
+      x: region.startClientX,
+      y: region.startClientY
+    });
+    const endPosition = reactFlow.screenToFlowPosition({
+      x: region.currentClientX,
+      y: region.currentClientY
+    });
+    const x = Math.min(startPosition.x, endPosition.x);
+    const y = Math.min(startPosition.y, endPosition.y);
+    const boundsWidth = Math.max(1, Math.abs(endPosition.x - startPosition.x));
+    const boundsHeight = Math.max(1, Math.abs(endPosition.y - startPosition.y));
+
+    void reactFlow.fitBounds(
+      { height: boundsHeight, width: boundsWidth, x, y },
+      {
+        duration: 420,
+        padding: 0.08
+      }
+    );
+  }, [reactFlow]);
+  const handleZoomRegionPointerDownCapture = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const isModifierZoomGesture = event.metaKey || event.ctrlKey;
+
+    if (
+      !isModifierZoomGesture ||
+      event.button !== 0 ||
+      workspaceView !== 'canvas' ||
+      event.pointerType === 'touch'
+    ) {
+      return;
+    }
+
+    const target = event.target as HTMLElement | null;
+    const isOpenPane = Boolean(target?.closest('.react-flow__pane')) && !target?.closest(
+      '.react-flow__node, .react-flow__edge, .react-flow__handle, .react-flow__controls, .react-flow__minimap, button, input, select, textarea, [role="button"], [data-radix-popper-content-wrapper]'
+    );
+
+    if (!isOpenPane) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    setNodeHintAnchor(null);
+    closeCanvasContextMenu();
+    closeNodeStyleEditor();
+    closeSplineStyleEditor();
+    setSelectedNodeId(null);
+    setSelectedFlowNodeIds(new Set());
+    setSelectedFlowEdgeIds(new Set());
+
+    const nextRegion: RcaZoomRegionState = {
+      currentClientX: event.clientX,
+      currentClientY: event.clientY,
+      startClientX: event.clientX,
+      startClientY: event.clientY
+    };
+
+    zoomRegionGestureRef.current = nextRegion;
+    setZoomRegion(nextRegion);
+  }, [closeCanvasContextMenu, closeNodeStyleEditor, closeSplineStyleEditor, workspaceView]);
+  React.useEffect(() => {
+    if (!zoomRegion) {
+      return;
+    }
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const currentRegion = zoomRegionGestureRef.current;
+
+      if (!currentRegion) {
+        return;
+      }
+
+      event.preventDefault();
+      const nextRegion: RcaZoomRegionState = {
+        ...currentRegion,
+        currentClientX: event.clientX,
+        currentClientY: event.clientY
+      };
+
+      zoomRegionGestureRef.current = nextRegion;
+      setZoomRegion(nextRegion);
+    };
+    const handlePointerUp = (event: PointerEvent) => {
+      event.preventDefault();
+      const currentRegion = zoomRegionGestureRef.current;
+      const nextRegion = currentRegion
+        ? {
+          ...currentRegion,
+          currentClientX: event.clientX,
+          currentClientY: event.clientY
+        }
+        : null;
+
+      finishZoomRegionGesture(nextRegion);
+    };
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.key === 'Meta' || event.key === 'Control') {
+        finishZoomRegionGesture(zoomRegionGestureRef.current);
+      }
+    };
+
+    window.addEventListener('pointermove', handlePointerMove, { passive: false });
+    window.addEventListener('pointerup', handlePointerUp, { passive: false });
+    window.addEventListener('pointercancel', handlePointerUp, { passive: false });
+    window.addEventListener('keyup', handleKeyUp);
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerUp);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [finishZoomRegionGesture, zoomRegion]);
+  React.useEffect(() => {
+    if (workspaceView !== 'canvas' && zoomRegionGestureRef.current) {
+      finishZoomRegionGesture(null);
+    }
+  }, [finishZoomRegionGesture, workspaceView]);
   const clearPendingNodeStyleSaves = React.useCallback(() => {
     nodeStyleSaveTimeoutsRef.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
     nodeStyleSaveTimeoutsRef.current.clear();
@@ -2441,6 +6627,216 @@ function RcaWorkspaceInner() {
     closeNodeStyleEditor();
     closeSplineStyleEditor();
   }, [closeNodeStyleEditor, closeSplineStyleEditor, resetCanvasHistory]);
+  const focusRcaPresentationStep = React.useCallback((step: RcaPresentationStep | null) => {
+    if (!step || !visibleNodes.length) {
+      return;
+    }
+
+    const stepNodeIdSet = new Set(step.nodeIds);
+    const stepNodes = visibleNodes.filter((node) => stepNodeIdSet.has(node.id));
+    const focusNodes = stepNodes.length ? stepNodes : visibleNodes;
+    const bounds = getRcaNodeBoundsForViewport(focusNodes, activeNodeDetails);
+
+    if (!bounds) {
+      return;
+    }
+
+    void reactFlow.fitBounds(bounds, {
+      duration: 520,
+      padding: 0.18
+    });
+  }, [activeNodeDetails, reactFlow, visibleNodes]);
+  const focusBranchWalkthroughStep = React.useCallback((step: RcaBranchWalkthroughStep | null) => {
+    if (!step || !visibleNodes.length) {
+      return;
+    }
+
+    const stepNodeIds = new Set(step.nodeIds);
+    const targetNodes = visibleNodes.filter((node) => stepNodeIds.has(node.id));
+    const bounds = getRcaNodeBoundsForViewport(targetNodes, activeNodeDetails);
+
+    if (!bounds) {
+      return;
+    }
+
+    void reactFlow.fitBounds(bounds, {
+      duration: 460,
+      padding: targetNodes.length > 1 ? 0.24 : 0.38
+    });
+  }, [activeNodeDetails, reactFlow, visibleNodes]);
+  const openBranchWalkthrough = React.useCallback(() => {
+    if (!branchWalkthroughSteps.length) {
+      return;
+    }
+
+    const currentSelectedCategoryIndex = selectedNodeId
+      ? branchWalkthroughSteps.findIndex((step) => step.categoryNodeId === selectedNodeId || step.nodeIds.includes(selectedNodeId))
+      : -1;
+    const nextIndex = currentSelectedCategoryIndex >= 0
+      ? currentSelectedCategoryIndex
+      : Math.min(branchWalkthroughIndex, branchWalkthroughSteps.length - 1);
+
+    setIsBranchWalkthroughOpen(true);
+    setBranchWalkthroughIndex(nextIndex);
+    focusBranchWalkthroughStep(branchWalkthroughSteps[nextIndex]);
+  }, [branchWalkthroughIndex, branchWalkthroughSteps, focusBranchWalkthroughStep, selectedNodeId]);
+  const goToBranchWalkthroughStep = React.useCallback((nextIndex: number) => {
+    if (!branchWalkthroughSteps.length) {
+      return;
+    }
+
+    const boundedIndex = Math.max(0, Math.min(branchWalkthroughSteps.length - 1, nextIndex));
+
+    setBranchWalkthroughIndex(boundedIndex);
+    focusBranchWalkthroughStep(branchWalkthroughSteps[boundedIndex]);
+  }, [branchWalkthroughSteps, focusBranchWalkthroughStep]);
+  React.useEffect(() => {
+    if (!isBranchWalkthroughOpen) {
+      return;
+    }
+
+    if (!branchWalkthroughSteps.length) {
+      setIsBranchWalkthroughOpen(false);
+      setBranchWalkthroughIndex(0);
+      return;
+    }
+
+    setBranchWalkthroughIndex((currentIndex) => Math.min(currentIndex, branchWalkthroughSteps.length - 1));
+  }, [branchWalkthroughSteps.length, isBranchWalkthroughOpen]);
+  const autoFocusSelectionSignature = React.useMemo(() => (
+    [...selectedFlowNodeIds].sort().join('|')
+  ), [selectedFlowNodeIds]);
+  React.useEffect(() => {
+    if (
+      !isAutoFocusSelectionEnabled ||
+      workspaceView !== 'canvas' ||
+      isPresentationMode ||
+      canvasInteractionMode === 'pan' ||
+      zoomRegion ||
+      !autoFocusSelectionSignature
+    ) {
+      return undefined;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      if (
+        dragStartNodesRef.current ||
+        activeDragNodeIdsRef.current.size ||
+        zoomRegionGestureRef.current
+      ) {
+        return;
+      }
+
+      const focusNodes = getRcaAutoFocusSelectionNodes(visibleNodes, selectedFlowNodeIds);
+      const bounds = getRcaNodeBoundsForViewport(focusNodes, activeNodeDetails);
+
+      if (!bounds) {
+        return;
+      }
+
+      void reactFlow.fitBounds(bounds, {
+        duration: 420,
+        padding: focusNodes.length > 1 ? 0.26 : 0.34
+      });
+    }, 180);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [
+    activeNodeDetails,
+    autoFocusSelectionSignature,
+    canvasInteractionMode,
+    isAutoFocusSelectionEnabled,
+    isPresentationMode,
+    reactFlow,
+    selectedFlowNodeIds,
+    visibleNodes,
+    workspaceView,
+    zoomRegion
+  ]);
+  const enterPresentationMode = React.useCallback(() => {
+    if (workspaceView !== 'canvas' || !selectedSession || !visibleNodes.length) {
+      return;
+    }
+
+    setIsPresentationMode(true);
+    setPresentationStepIndex((currentIndex) => Math.min(currentIndex, Math.max(0, presentationSteps.length - 1)));
+    setNodeHintAnchor(null);
+    closeCanvasContextMenu();
+    closeNodeStyleEditor();
+    closeSplineStyleEditor();
+    setIsCanvasShortcutListOpen(false);
+    setIsKnowledgeBaseOpen(false);
+    setIsGuidedPathOpen(false);
+    setIsEvidenceLibraryOpen(false);
+    setIsActivityLogOpen(false);
+    setIsCollaboratorInviteOpen(false);
+    setIsIncidentShelfOpen(false);
+    setInspectedNodeId(null);
+    setSelectedNodeId(null);
+    setSelectedFlowNodeIds(new Set());
+    setSelectedFlowEdgeIds(new Set());
+  }, [closeCanvasContextMenu, closeNodeStyleEditor, closeSplineStyleEditor, presentationSteps.length, selectedSession, visibleNodes.length, workspaceView]);
+  const exitPresentationMode = React.useCallback(() => {
+    setIsPresentationMode(false);
+  }, []);
+  const goToPresentationStep = React.useCallback((nextIndex: number) => {
+    if (!presentationSteps.length) {
+      return;
+    }
+
+    setPresentationStepIndex(Math.max(0, Math.min(presentationSteps.length - 1, nextIndex)));
+  }, [presentationSteps.length]);
+  React.useEffect(() => {
+    if (workspaceView !== 'canvas' && isPresentationMode) {
+      setIsPresentationMode(false);
+    }
+  }, [isPresentationMode, workspaceView]);
+  React.useEffect(() => {
+    if (!isPresentationMode) {
+      return;
+    }
+
+    setPresentationStepIndex((currentIndex) => Math.min(currentIndex, Math.max(0, presentationSteps.length - 1)));
+  }, [isPresentationMode, presentationSteps.length]);
+  React.useEffect(() => {
+    if (!isPresentationMode || !activePresentationStep) {
+      return;
+    }
+
+    focusRcaPresentationStep(activePresentationStep);
+  }, [activePresentationStep, focusRcaPresentationStep, isPresentationMode]);
+  React.useEffect(() => {
+    if (!isPresentationMode) {
+      return undefined;
+    }
+
+    function handlePresentationKeyDown(event: KeyboardEvent) {
+      if (isEditableShortcutEvent(event)) {
+        return;
+      }
+
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        exitPresentationMode();
+        return;
+      }
+
+      if (event.key === 'ArrowRight' || event.key === 'PageDown') {
+        event.preventDefault();
+        goToPresentationStep(presentationStepIndex + 1);
+        return;
+      }
+
+      if (event.key === 'ArrowLeft' || event.key === 'PageUp') {
+        event.preventDefault();
+        goToPresentationStep(presentationStepIndex - 1);
+      }
+    }
+
+    window.addEventListener('keydown', handlePresentationKeyDown);
+
+    return () => window.removeEventListener('keydown', handlePresentationKeyDown);
+  }, [exitPresentationMode, goToPresentationStep, isPresentationMode, presentationStepIndex]);
   const recordCanvasHistory = React.useCallback((snapshot: RcaNode[]) => {
     if (isReferenceProjectActive || !selectedIncidentId || !selectedSessionId) {
       return;
@@ -2593,9 +6989,8 @@ function RcaWorkspaceInner() {
   }, []);
 
   React.useEffect(() => () => {
-    if (canvasFitViewTimeoutRef.current !== null) {
-      window.clearTimeout(canvasFitViewTimeoutRef.current);
-    }
+    canvasFitViewTimeoutRef.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
+    canvasFitViewTimeoutRef.current = [];
 
     clearPendingNodeStyleSaves();
     clearPendingSplineStyleSaves();
@@ -2681,7 +7076,8 @@ function RcaWorkspaceInner() {
       workspaceView !== 'canvas' ||
       isReferenceProjectActive ||
       !selectedIncidentId ||
-      !selectedSessionId
+      !selectedSessionId ||
+      !selectedSession
     ) {
       if (!isReferenceProjectActive) {
         resetActiveCanvasState(null);
@@ -2692,7 +7088,7 @@ function RcaWorkspaceInner() {
 
     void loadNodes(selectedIncidentId, selectedSessionId);
     void loadActivityLogs(selectedIncidentId, selectedSessionId);
-  }, [isReferenceProjectActive, selectedIncidentId, selectedSessionId, workspaceView]);
+  }, [isReferenceProjectActive, selectedIncidentId, selectedSession, selectedSessionId, workspaceView]);
 
   React.useEffect(() => {
     if (
@@ -3081,6 +7477,10 @@ function RcaWorkspaceInner() {
     sessionId: string,
     input: RcaNodeInput = {}
   ): Promise<RcaNode> {
+    if (isSelectedRcaCaseClosed) {
+      throw new Error('This Root Cause Analysis is closed and is available in view mode only.');
+    }
+
     if (rcaRealtimeClient.isReadyForCanvas(incidentId, sessionId)) {
       return rcaRealtimeClient.createNode(incidentId, sessionId, input);
     }
@@ -3094,6 +7494,10 @@ function RcaWorkspaceInner() {
     nodeId: string,
     input: RcaNodeInput
   ): Promise<RcaNode> {
+    if (isSelectedRcaCaseClosed) {
+      throw new Error('This Root Cause Analysis is closed and is available in view mode only.');
+    }
+
     if (rcaRealtimeClient.isReadyForCanvas(incidentId, sessionId)) {
       return rcaRealtimeClient.updateNode(incidentId, sessionId, nodeId, input);
     }
@@ -3102,6 +7506,10 @@ function RcaWorkspaceInner() {
   }
 
   async function handleInlineNodeCommit(nodeId: string, input: RcaNodeInput): Promise<RcaNode> {
+    if (isSelectedRcaCaseClosed) {
+      throw new Error('This Root Cause Analysis is closed and is available in view mode only.');
+    }
+
     if (!selectedIncident || !selectedSession) {
       throw new Error('Select an RCA project before editing a node.');
     }
@@ -3121,11 +7529,70 @@ function RcaWorkspaceInner() {
     return updatedNode;
   }
 
+  async function handleToggleNodeReaction(nodeId: string, emoji: string) {
+    if (isSelectedRcaCaseClosed) {
+      setReactionPaletteAnchor(null);
+      setErrorMessage('This Root Cause Analysis is closed and is available in view mode only.');
+      return;
+    }
+
+    if (!selectedIncident || !selectedSession || isReferenceProjectActive) {
+      return;
+    }
+
+    const targetNode = nodes.find((node) => node.id === nodeId);
+    const currentContext = contextRef.current;
+
+    if (!targetNode || !currentContext?.user.uid) {
+      return;
+    }
+
+    const currentUser: RcaNodeReactionUser = {
+      displayName: currentContext.user.displayName || 'User',
+      reactedAtIso: new Date().toISOString(),
+      uid: currentContext.user.uid
+    };
+    const nextDetailFields = buildRcaNodeReactionDetailFields(targetNode, emoji, currentUser);
+    const optimisticNode = {
+      ...targetNode,
+      detailFields: nextDetailFields,
+      updatedAtIso: new Date().toISOString()
+    };
+
+    setNodes((currentNodes) => currentNodes.map((node) => (
+      node.id === nodeId ? optimisticNode : node
+    )));
+
+    try {
+      const updatedNode = await updateCollaborativeRcaNode(selectedIncident.id, selectedSession.id, nodeId, {
+        detailFields: nextDetailFields
+      });
+
+      setNodes((currentNodes) => currentNodes.map((node) => (
+        node.id === updatedNode.id
+          ? {
+              ...updatedNode,
+              uiCoordinates: node.uiCoordinates
+            }
+          : node
+      )));
+    } catch (error) {
+      setNodes((currentNodes) => currentNodes.map((node) => (
+        node.id === targetNode.id ? targetNode : node
+      )));
+      setErrorMessage(error instanceof Error ? error.message : 'The node reaction could not be saved.');
+    }
+  }
+
   async function deleteCollaborativeRcaNode(
     incidentId: string,
     sessionId: string,
     nodeId: string
   ): Promise<void> {
+    if (isSelectedRcaCaseClosed) {
+      throw new Error('This Root Cause Analysis is closed and is available in view mode only.');
+    }
+
     if (rcaRealtimeClient.isReadyForCanvas(incidentId, sessionId)) {
       await rcaRealtimeClient.deleteNode(incidentId, sessionId, nodeId);
       return;
@@ -3527,6 +7994,60 @@ function RcaWorkspaceInner() {
     }
   }
 
+  async function handleIncidentRiskFactorsChange(riskFactors: Partial<RcaIncident['riskFactors']>) {
+    if (!selectedIncident || isReferenceProjectActive) {
+      return;
+    }
+
+    setErrorMessage('');
+
+    try {
+      const updatedIncident = await updateRcaIncident(selectedIncident.id, { riskFactors });
+
+      setWorkspace((currentWorkspace) => currentWorkspace
+        ? {
+            ...currentWorkspace,
+            incidents: currentWorkspace.incidents.map((incident) => (
+              incident.id === updatedIncident.id ? updatedIncident : incident
+            ))
+          }
+        : currentWorkspace);
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error));
+      throw error;
+    }
+  }
+
+  async function handleIncidentAssetChange(assetId: string) {
+    const nextAssetId = assetId.trim();
+
+    if (!selectedIncident || isReferenceProjectActive) {
+      return;
+    }
+
+    if (nextAssetId === selectedIncident.assetId.trim()) {
+      return;
+    }
+
+    setErrorMessage('');
+
+    try {
+      const updatedIncident = await updateRcaIncident(selectedIncident.id, { assetId: nextAssetId });
+
+      setWorkspace((currentWorkspace) => currentWorkspace
+        ? {
+            ...currentWorkspace,
+            incidents: currentWorkspace.incidents.map((incident) => (
+              incident.id === updatedIncident.id ? updatedIncident : incident
+            ))
+          }
+        : currentWorkspace);
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error));
+      throw error;
+    }
+  }
+
   async function ensureDefaultFishboneScaffold(
     currentNodes: RcaNode[],
     preferredFaultGate?: RcaNode
@@ -3611,7 +8132,7 @@ function RcaWorkspaceInner() {
         return {
           ...node,
           nodeType: 'FAULT_GATE',
-          parentNodeId: null
+          parentNodeId: node.parentNodeId
         };
       }
 
@@ -3631,17 +8152,21 @@ function RcaWorkspaceInner() {
     const arrangedNodes = arrangeRcaCanvasNodes(workingNodes, 'ISHIKAWA');
     const persistedNodes = await Promise.all(arrangedNodes.map((node) => {
       const nodeBeforeNormalization = nodeBeforeScaffoldNormalizationById.get(node.id);
+      const arrangedConnectionHandles = normalizeRcaNodeConnectionHandles(node.connectionHandles);
       const needsParentUpdate = nodeBeforeNormalization?.parentNodeId !== node.parentNodeId;
       const needsCoordinateUpdate = !nodeBeforeNormalization ||
         nodeBeforeNormalization.uiCoordinates.layoutMethodology !== node.uiCoordinates.layoutMethodology ||
         nodeBeforeNormalization.uiCoordinates.x !== node.uiCoordinates.x ||
         nodeBeforeNormalization.uiCoordinates.y !== node.uiCoordinates.y;
+      const needsConnectionHandleUpdate = getRcaConnectionHandleSignature(nodeBeforeNormalization?.connectionHandles) !==
+        getRcaConnectionHandleSignature(arrangedConnectionHandles);
 
-      if (!needsParentUpdate && !needsCoordinateUpdate) {
+      if (!needsParentUpdate && !needsCoordinateUpdate && !needsConnectionHandleUpdate) {
         return Promise.resolve(node);
       }
 
       return updateCollaborativeRcaNode(selectedIncident.id, selectedSession.id, node.id, {
+        ...(needsConnectionHandleUpdate ? { connectionHandles: arrangedConnectionHandles } : {}),
         parentNodeId: node.parentNodeId,
         uiCoordinates: node.uiCoordinates
       });
@@ -3661,7 +8186,7 @@ function RcaWorkspaceInner() {
     parentNodeId,
     skipAutoArrange = false
   }: RcaAddNodeRequest = {}) {
-    if (!selectedIncident || !selectedSession || isReferenceProjectActive || isWorking) {
+    if (!selectedIncident || !selectedSession || isReferenceProjectActive || isWorking || isSelectedRcaCaseClosed) {
       return;
     }
 
@@ -3675,6 +8200,14 @@ function RcaWorkspaceInner() {
 
     if (isIncidentNodeRequest && hasIncidentNode) {
       setErrorMessage('This RCA canvas already has an Incident node.');
+      return;
+    }
+
+    if (
+      fiveWhysNodeRole === 'APPROVAL_CLOSURE' &&
+      nodes.some((node) => isApprovalClosureRoleNode(node))
+    ) {
+      setErrorMessage('This RCA canvas already has a case-level Approval & Closure node.');
       return;
     }
 
@@ -3692,15 +8225,24 @@ function RcaWorkspaceInner() {
         : null;
       const placementCoordinates = coordinates || visibleCanvasCenter;
       const isStickyNoteRequest = nodeType === 'STICKY_NOTE';
-      const persistedNodeType = isStickyNoteRequest
-        ? 'STICKY_NOTE'
+      const isCommentNodeRequest = nodeType === 'COMMENT';
+      const persistedNodeType = isStickyNoteRequest || isCommentNodeRequest
+        ? nodeType
         : fiveWhysNodeRole
           ? 'WHY'
           : nodeType || getDefaultNodeType(selectedSession.methodology);
       const resolvedParentNodeId = parentNodeId !== undefined
         ? parentNodeId
         : null;
-      const shouldPreserveManualPlacement = isStickyNoteRequest || skipAutoArrange || Boolean(fiveWhysNodeRole);
+      const shouldAutoArrangeMainIntakeRole = selectedSession.methodology === 'ISHIKAWA' && (
+        fiveWhysNodeRole === 'INCIDENT_DETAILS' ||
+        fiveWhysNodeRole === 'CONTAINMENT' ||
+        fiveWhysNodeRole === 'PROBLEM'
+      );
+      const shouldPreserveManualPlacement = isStickyNoteRequest ||
+        isCommentNodeRequest ||
+        (skipAutoArrange && !shouldAutoArrangeMainIntakeRole) ||
+        (Boolean(fiveWhysNodeRole) && !shouldAutoArrangeMainIntakeRole);
 
       if (
         selectedSession.methodology === '5_WHYS' &&
@@ -3749,27 +8291,27 @@ function RcaWorkspaceInner() {
       const createdNode = await createCollaborativeRcaNode(selectedIncident.id, selectedSession.id, {
         detailFields: fiveWhysNodeRole ? buildDefaultRcaNodeDetailFields(fiveWhysNodeRole, selectedIncident) : {},
         fiveWhysRole: fiveWhysNodeRole || null,
-        label: fiveWhysNodeRole ? getDefaultRcaNodeRoleLabel(fiveWhysNodeRole, selectedIncident) : '',
+        label: isCommentNodeRequest
+          ? 'Write a comment...'
+          : fiveWhysNodeRole
+            ? getDefaultRcaNodeRoleLabel(fiveWhysNodeRole, selectedIncident)
+            : '',
         nodeType: persistedNodeType,
-        parentNodeId: isStickyNoteRequest || fiveWhysNodeRole ? null : resolvedParentNodeId,
+        parentNodeId: isStickyNoteRequest || isCommentNodeRequest || fiveWhysNodeRole ? null : resolvedParentNodeId,
         dimensions: isStickyNoteRequest ? {
           height: RCA_STICKY_NOTE_MIN_HEIGHT,
           width: 248
+        } : isCommentNodeRequest ? {
+          height: RCA_STICKY_NOTE_MIN_HEIGHT,
+          width: 260
         } : undefined,
         uiCoordinates: {
           layoutMethodology: selectedSession.methodology,
           x: placementCoordinates?.x ?? 180 + (nodes.length % 4) * 320,
           y: placementCoordinates?.y ?? 120 + Math.floor(nodes.length / 4) * 180
         },
-        visualStyle: isStickyNoteRequest ? {
-          backgroundColor: RCA_DEFAULT_STICKY_NOTE_VISUAL_STYLE.backgroundColor,
-          borderColor: RCA_DEFAULT_STICKY_NOTE_VISUAL_STYLE.borderColor,
-          fontFamily: RCA_DEFAULT_STICKY_NOTE_VISUAL_STYLE.fontFamily,
-          fontSize: RCA_DEFAULT_STICKY_NOTE_VISUAL_STYLE.fontSize,
-          isBold: RCA_DEFAULT_STICKY_NOTE_VISUAL_STYLE.isBold,
-          isItalic: RCA_DEFAULT_STICKY_NOTE_VISUAL_STYLE.isItalic,
-          isUnderline: RCA_DEFAULT_STICKY_NOTE_VISUAL_STYLE.isUnderline,
-          textColor: RCA_DEFAULT_STICKY_NOTE_VISUAL_STYLE.textColor
+        visualStyle: isStickyNoteRequest || isCommentNodeRequest ? {
+          ...(isCommentNodeRequest ? RCA_DEFAULT_COMMENT_VISUAL_STYLE : RCA_DEFAULT_STICKY_NOTE_VISUAL_STYLE)
         } : fiveWhysNodeRole ? RCA_FIVE_WHYS_ROLE_VISUAL_STYLE[fiveWhysNodeRole] : undefined
       });
 
@@ -3784,7 +8326,8 @@ function RcaWorkspaceInner() {
         setNodes((currentNodes) => mergeRcaCanvasNodes(currentNodes, [node]));
       } else if (selectedSession.methodology === 'ISHIKAWA') {
         const nodesWithNewCause = [...nodes, node];
-        const arrangedNodes = arrangeRcaCanvasNodes(nodesWithNewCause, 'ISHIKAWA');
+        const measuredNodesWithNewCause = withMeasuredRcaNodeDimensions(nodesWithNewCause, measuredFlowNodeSizes);
+        const arrangedNodes = arrangeRcaCanvasNodes(measuredNodesWithNewCause, 'ISHIKAWA');
         const nodeBeforeLayoutById = new Map(nodesWithNewCause.map((currentNode) => [currentNode.id, currentNode]));
 
         recordCanvasHistory(historySnapshot);
@@ -3792,18 +8335,21 @@ function RcaWorkspaceInner() {
 
         const persistedNodes = await Promise.all(arrangedNodes.map((arrangedNode) => {
           const previousNode = nodeBeforeLayoutById.get(arrangedNode.id);
+          const arrangedConnectionHandles = normalizeRcaNodeConnectionHandles(arrangedNode.connectionHandles);
           const shouldPersist =
             !previousNode ||
             previousNode.parentNodeId !== arrangedNode.parentNodeId ||
             previousNode.uiCoordinates.layoutMethodology !== arrangedNode.uiCoordinates.layoutMethodology ||
             previousNode.uiCoordinates.x !== arrangedNode.uiCoordinates.x ||
-            previousNode.uiCoordinates.y !== arrangedNode.uiCoordinates.y;
+            previousNode.uiCoordinates.y !== arrangedNode.uiCoordinates.y ||
+            getRcaConnectionHandleSignature(previousNode.connectionHandles) !== getRcaConnectionHandleSignature(arrangedConnectionHandles);
 
           if (!shouldPersist) {
             return Promise.resolve(arrangedNode);
           }
 
           return updateCollaborativeRcaNode(selectedIncident.id, selectedSession.id, arrangedNode.id, {
+            connectionHandles: arrangedConnectionHandles,
             parentNodeId: arrangedNode.parentNodeId,
             uiCoordinates: arrangedNode.uiCoordinates
           });
@@ -3816,12 +8362,11 @@ function RcaWorkspaceInner() {
         setNodes((currentNodes) => mergeRcaCanvasNodes(currentNodes, [node]));
       }
 
-      if (isStickyNoteRequest) {
-        setSelectedNodeId(null);
-        setSelectedFlowNodeIds(new Set());
-      } else {
-        setSelectedNodeId(node.id);
-        setSelectedFlowNodeIds(new Set([node.id]));
+      setSelectedNodeId(node.id);
+      setSelectedFlowNodeIds(new Set([node.id]));
+
+      if (isNodeHintAutoOpenEnabled) {
+        window.setTimeout(() => openNodeHintFromCanvasControl(node.id), 80);
       }
     } catch (error) {
       setErrorMessage(getErrorMessage(error));
@@ -3835,8 +8380,8 @@ function RcaWorkspaceInner() {
       return;
     }
 
-    if (!nodes.some((node) => getFiveWhysNodeRole(node) === 'INCIDENT')) {
-      setErrorMessage('Create the Incident node before adding the Fishbone structure.');
+    if (!nodes.some((node) => node.status !== 'DELETED' && getFiveWhysNodeRole(node) === 'PROBLEM')) {
+      setErrorMessage('Create the Problem Statement node before adding the Fishbone structure.');
       return;
     }
 
@@ -3861,6 +8406,622 @@ function RcaWorkspaceInner() {
       fitVisibleProjectIntoView({ delay: 140, force: true, padding: 0.16 });
     } catch (error) {
       setErrorMessage(getErrorMessage(error));
+    } finally {
+      setIsWorking(false);
+    }
+  }
+
+  async function handleAddMissingFishboneBranch(branchLabel: string) {
+    if (!selectedIncident || !selectedSession || selectedSession.methodology !== 'ISHIKAWA' || isReferenceProjectActive || isWorking || isSelectedRcaCaseClosed) {
+      return;
+    }
+
+    const faultGate = nodes.find((node) => node.status !== 'DELETED' && node.nodeType === 'FAULT_GATE');
+    const normalizedBranchLabel = normalizeFishboneCategoryName(branchLabel);
+    const categoryIndex = RCA_DEFAULT_FISHBONE_CATEGORIES.findIndex((category) => (
+      normalizeFishboneCategoryName(category.label) === normalizedBranchLabel
+    ));
+    const branchAlreadyExists = nodes.some((node) => (
+      node.status !== 'DELETED' &&
+      node.nodeType === 'ISHIKAWA_CATEGORY' &&
+      normalizeFishboneCategoryName(node.label) === normalizedBranchLabel
+    ));
+
+    if (!faultGate || categoryIndex < 0 || branchAlreadyExists) {
+      return;
+    }
+
+    setIsWorking(true);
+    setErrorMessage('');
+    const historySnapshot = cloneRcaNodes(nodes);
+
+    try {
+      const slot = RCA_FISHBONE_CATEGORY_LAYOUTS[categoryIndex] || {
+        x: RCA_FISHBONE_FIRST_COLUMN_X + RCA_FISHBONE_COLUMN_STEP * categoryIndex,
+        y: categoryIndex % 2 === 0 ? RCA_FISHBONE_TOP_CATEGORY_Y : RCA_FISHBONE_BOTTOM_CATEGORY_Y
+      };
+      const createdBranch = await createCollaborativeRcaNode(selectedIncident.id, selectedSession.id, {
+        label: branchLabel,
+        nodeType: 'ISHIKAWA_CATEGORY',
+        parentNodeId: faultGate.id,
+        uiCoordinates: {
+          layoutMethodology: 'ISHIKAWA',
+          x: slot.x,
+          y: slot.y
+        }
+      });
+      const nodesWithBranch = [...nodes, createdBranch];
+      const arrangedNodes = arrangeRcaCanvasNodes(
+        withMeasuredRcaNodeDimensions(nodesWithBranch, measuredFlowNodeSizes),
+        'ISHIKAWA'
+      );
+      const nodeBeforeLayoutById = new Map(nodesWithBranch.map((node) => [node.id, node]));
+
+      recordCanvasHistory(historySnapshot);
+      setNodes(arrangedNodes);
+      setSelectedNodeId(createdBranch.id);
+      setSelectedFlowNodeIds(new Set([createdBranch.id]));
+      setSelectedFlowEdgeIds(new Set());
+      closeCanvasContextMenu();
+
+      const persistedNodes = await Promise.all(arrangedNodes.map((arrangedNode) => {
+        const previousNode = nodeBeforeLayoutById.get(arrangedNode.id);
+        const arrangedConnectionHandles = normalizeRcaNodeConnectionHandles(arrangedNode.connectionHandles);
+        const shouldPersist =
+          !previousNode ||
+          previousNode.parentNodeId !== arrangedNode.parentNodeId ||
+          previousNode.uiCoordinates.layoutMethodology !== arrangedNode.uiCoordinates.layoutMethodology ||
+          previousNode.uiCoordinates.x !== arrangedNode.uiCoordinates.x ||
+          previousNode.uiCoordinates.y !== arrangedNode.uiCoordinates.y ||
+          getRcaConnectionHandleSignature(previousNode.connectionHandles) !== getRcaConnectionHandleSignature(arrangedConnectionHandles);
+
+        if (!shouldPersist) {
+          return Promise.resolve(arrangedNode);
+        }
+
+        return updateCollaborativeRcaNode(selectedIncident.id, selectedSession.id, arrangedNode.id, {
+          connectionHandles: arrangedConnectionHandles,
+          parentNodeId: arrangedNode.parentNodeId,
+          uiCoordinates: arrangedNode.uiCoordinates
+        });
+      }));
+      const persistedNodeById = new Map(persistedNodes.map((persistedNode) => [persistedNode.id, persistedNode]));
+
+      setNodes((currentNodes) => currentNodes.map((currentNode) => persistedNodeById.get(currentNode.id) || currentNode));
+      fitVisibleProjectIntoView({ delay: 140, force: true, padding: 0.16 });
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error));
+      setNodes(historySnapshot);
+    } finally {
+      setIsWorking(false);
+    }
+  }
+
+  async function handleAddFiveWhysStructure() {
+    if (!selectedIncident || !selectedSession || selectedSession.methodology !== 'ISHIKAWA' || isReferenceProjectActive || isWorking) {
+      return;
+    }
+
+    const problemNode = nodes.find((node) => (
+      node.status !== 'DELETED' &&
+      node.nodeType === 'WHY' &&
+      getFiveWhysNodeRole(node) === 'PROBLEM'
+    ));
+
+    if (!problemNode) {
+      setErrorMessage('Create the Problem Statement node before adding the 5 Whys structure.');
+      return;
+    }
+
+    const hasExistingFiveWhysNode = nodes.some((node) => {
+      const role = getFiveWhysNodeRole(node);
+
+      return node.status !== 'DELETED' && node.nodeType === 'WHY' && (role === 'FIVE_WHYS' || role === 'ANSWER');
+    });
+
+    if (hasExistingFiveWhysNode) {
+      setErrorMessage('This RCA canvas already has a 5 Whys investigation node. Open it to continue the investigation, or add a manual exception only if the RCA owner approves it.');
+      return;
+    }
+
+    setIsWorking(true);
+    setErrorMessage('');
+    const historySnapshot = cloneRcaNodes(nodes);
+
+    try {
+      const anchor = getRcaFiveWhysChainAnchor(problemNode, nodes);
+      const fiveWhysInput: RcaNodeInput = {
+        detailFields: {
+          ...buildDefaultRcaNodeDetailFields('FIVE_WHYS', selectedIncident),
+          reasonForDecision: 'Structured 5 Whys investigation'
+        },
+        edgeStyle: RCA_FIVE_WHYS_CHAIN_EDGE_STYLE,
+        fiveWhysRole: 'FIVE_WHYS',
+        isSuspectedCause: false,
+        label: '5 Whys',
+        nodeType: 'WHY',
+        parentNodeId: null,
+        uiCoordinates: {
+          layoutMethodology: 'ISHIKAWA',
+          x: anchor.x,
+          y: anchor.y
+        },
+        visualStyle: {
+          ...RCA_FIVE_WHYS_ROLE_VISUAL_STYLE.FIVE_WHYS,
+          isBold: false
+        },
+        whyChain: ['', '', '', '', '']
+      };
+      const fiveWhysNode = sanitizeRcaCanvasNode(await createCollaborativeRcaNode(selectedIncident.id, selectedSession.id, fiveWhysInput));
+
+      if (!fiveWhysNode) {
+        throw new Error('The 5 Whys investigation node could not be created.');
+      }
+
+      const nextNodes = mergeRcaCanvasNodes(nodes, [fiveWhysNode]);
+      const canvasKey = getRcaCanvasStateKey(selectedIncident.id, selectedSession.id);
+
+      recordCanvasHistory(historySnapshot);
+      nodesCanvasKeyRef.current = canvasKey;
+      lastNonEmptyNodesByCanvasRef.current.set(canvasKey, cloneRcaNodes(nextNodes));
+      setNodes(nextNodes);
+      setSelectedNodeId(fiveWhysNode.id);
+      setSelectedFlowNodeIds(new Set([fiveWhysNode.id]));
+
+      fitVisibleProjectIntoView({ delay: 160, force: true, padding: 0.18 });
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error));
+    } finally {
+      setIsWorking(false);
+    }
+  }
+
+  async function handleCreateFiveWhysAnalysisStructure(problemNode: RcaNode) {
+    if (
+      !selectedIncident ||
+      !selectedSession ||
+      !isProblemRoleNode(problemNode) ||
+      !canEditCanvasConnections ||
+      isReferenceProjectActive ||
+      isWorking
+    ) {
+      return;
+    }
+
+    const existingFiveWhysForProblem = nodes.some((node) => (
+      node.status !== 'DELETED' &&
+      isFiveWhysInvestigationRoleNode(node) &&
+      node.parentNodeId === problemNode.id
+    ));
+
+    if (existingFiveWhysForProblem) {
+      setErrorMessage('This Problem Statement already has a 5 Why Analysis path. Select the existing 5 Whys node to continue the analysis or add supporting evidence.');
+      return;
+    }
+
+    const historySnapshot = cloneRcaNodes(nodes);
+    const problemPosition = getNodePosition(
+      problemNode,
+      nodes,
+      Math.max(0, nodes.findIndex((node) => node.id === problemNode.id)),
+      selectedSession.methodology
+    );
+    const problemSize = getRcaNodeSize(problemNode, activeNodeDetails[problemNode.id]);
+    const fiveWhysPosition = {
+      x: Math.round(problemPosition.x),
+      y: Math.round(problemPosition.y + problemSize.height + RCA_FIVE_WHYS_CHAIN_TOP_GAP)
+    };
+
+    setIsWorking(true);
+    setErrorMessage('');
+
+    try {
+      const fiveWhysNode = sanitizeRcaCanvasNode(await createCollaborativeRcaNode(selectedIncident.id, selectedSession.id, {
+        connectionHandles: getVerticalRcaFlowConnectionHandles(),
+        detailFields: {
+          ...buildDefaultRcaNodeDetailFields('FIVE_WHYS', selectedIncident),
+          reasonForDecision: 'Standalone 5 Why Analysis from the Problem Statement'
+        },
+        edgeStyle: RCA_FIVE_WHYS_CHAIN_EDGE_STYLE,
+        fiveWhysRole: 'FIVE_WHYS',
+        isSuspectedCause: false,
+        label: '5 Whys',
+        nodeType: 'WHY',
+        parentNodeId: problemNode.id,
+        uiCoordinates: {
+          layoutMethodology: selectedSession.methodology,
+          x: fiveWhysPosition.x,
+          y: fiveWhysPosition.y
+        },
+        visualStyle: {
+          ...RCA_FIVE_WHYS_ROLE_VISUAL_STYLE.FIVE_WHYS,
+          isBold: false
+        },
+        whyChain: ['', '', '', '', '']
+      }));
+
+      if (!fiveWhysNode) {
+        throw new Error('The 5 Why Analysis node could not be created.');
+      }
+
+      const rootCauseNode = sanitizeRcaCanvasNode(await createCollaborativeRcaNode(selectedIncident.id, selectedSession.id, {
+        connectionHandles: getVerticalRcaFlowConnectionHandles(),
+        detailFields: {
+          ...buildDefaultRcaNodeDetailFields('ROOT_CAUSE', selectedIncident),
+          fiveWhysDecisionSourceNodeId: fiveWhysNode.id
+        },
+        edgeStyle: RCA_FIVE_WHYS_CHAIN_EDGE_STYLE,
+        fiveWhysRole: 'ROOT_CAUSE',
+        isRootCause: false,
+        isSuspectedCause: true,
+        label: 'Root cause',
+        nodeType: 'WHY',
+        parentNodeId: fiveWhysNode.id,
+        uiCoordinates: {
+          layoutMethodology: selectedSession.methodology,
+          x: fiveWhysPosition.x,
+          y: fiveWhysPosition.y + RCA_CAUSE_NODE_HEIGHT + RCA_CONNECTED_SATELLITE_VERTICAL_GAP
+        },
+        visualStyle: RCA_FIVE_WHYS_ROLE_VISUAL_STYLE.ROOT_CAUSE
+      }));
+
+      if (!rootCauseNode) {
+        throw new Error('The Root Cause node could not be created.');
+      }
+
+      const rootCauseEvidenceNode = sanitizeRcaCanvasNode(await createCollaborativeRcaNode(selectedIncident.id, selectedSession.id, {
+        connectionHandles: {
+          sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+          targetHandle: RCA_TARGET_LEFT_HANDLE
+        },
+        detailFields: buildDefaultRcaNodeDetailFields('EVIDENCE', selectedIncident),
+        edgeStyle: {
+          ...RCA_FIVE_WHYS_CHAIN_EDGE_STYLE,
+          color: RCA_DEFAULT_EVIDENCE_SPLINE_COLOR
+        },
+        fiveWhysRole: 'EVIDENCE',
+        isSuspectedCause: false,
+        label: 'Evidence',
+        nodeType: 'WHY',
+        parentNodeId: rootCauseNode.id,
+        uiCoordinates: {
+          layoutMethodology: selectedSession.methodology,
+          x: fiveWhysPosition.x - RCA_CAUSE_NODE_WIDTH - RCA_CONNECTED_SATELLITE_HORIZONTAL_GAP,
+          y: fiveWhysPosition.y + RCA_CAUSE_NODE_HEIGHT + RCA_CONNECTED_SATELLITE_VERTICAL_GAP
+        },
+        visualStyle: RCA_FIVE_WHYS_ROLE_VISUAL_STYLE.EVIDENCE
+      }));
+
+      if (!rootCauseEvidenceNode) {
+        throw new Error('The Root Cause evidence node could not be created.');
+      }
+
+      const capaNode = sanitizeRcaCanvasNode(await createCollaborativeRcaNode(selectedIncident.id, selectedSession.id, {
+        connectionHandles: {
+          sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+          targetHandle: RCA_TARGET_LEFT_HANDLE
+        },
+        detailFields: buildDefaultRcaNodeDetailFields('CAPA', selectedIncident),
+        edgeStyle: {
+          ...RCA_FIVE_WHYS_CHAIN_EDGE_STYLE,
+          color: RCA_FIVE_WHYS_ROLE_VISUAL_STYLE.CAPA.borderColor || '#10b981',
+          weight: 2.6
+        },
+        fiveWhysRole: 'CAPA',
+        isSuspectedCause: false,
+        label: 'CAPA',
+        nodeType: 'WHY',
+        parentNodeId: rootCauseNode.id,
+        uiCoordinates: {
+          layoutMethodology: selectedSession.methodology,
+          x: fiveWhysPosition.x + RCA_CAUSE_NODE_WIDTH + RCA_CAPA_WORKFLOW_COLUMN_GAP,
+          y: fiveWhysPosition.y + RCA_CAUSE_NODE_HEIGHT + RCA_CONNECTED_SATELLITE_VERTICAL_GAP
+        },
+        visualStyle: RCA_FIVE_WHYS_ROLE_VISUAL_STYLE.CAPA
+      }));
+
+      if (!capaNode) {
+        throw new Error('The CAPA node could not be created.');
+      }
+
+      const capaStageNodes: RcaNode[] = [];
+
+      for (const role of RCA_CAPA_STAGE_WORKFLOW_ROLES) {
+        const stageNode = sanitizeRcaCanvasNode(await createCollaborativeRcaNode(selectedIncident.id, selectedSession.id, {
+          connectionHandles: {
+            sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+            targetHandle: RCA_TARGET_LEFT_HANDLE
+          },
+          detailFields: buildDefaultRcaNodeDetailFields(role, selectedIncident),
+          edgeStyle: {
+            ...RCA_FIVE_WHYS_CHAIN_EDGE_STYLE,
+            color: RCA_FIVE_WHYS_ROLE_VISUAL_STYLE[role].borderColor || '#7c3aed'
+          },
+          fiveWhysRole: role,
+          isSuspectedCause: false,
+          label: getDefaultRcaNodeRoleLabel(role, selectedIncident),
+          nodeType: 'WHY',
+          parentNodeId: capaNode.id,
+          uiCoordinates: {
+            layoutMethodology: selectedSession.methodology,
+            x: fiveWhysPosition.x + RCA_CAUSE_NODE_WIDTH * 2 + RCA_CAPA_WORKFLOW_COLUMN_GAP * 2,
+            y: fiveWhysPosition.y
+          },
+          visualStyle: RCA_FIVE_WHYS_ROLE_VISUAL_STYLE[role]
+        }));
+
+        if (!stageNode) {
+          throw new Error(`${getFiveWhysRoleLabel(role)} could not be created.`);
+        }
+
+        capaStageNodes.push(stageNode);
+      }
+
+      const capaStageEvidenceNodes: RcaNode[] = [];
+
+      for (const stageNode of capaStageNodes) {
+        const evidenceNode = sanitizeRcaCanvasNode(await createCollaborativeRcaNode(selectedIncident.id, selectedSession.id, {
+          connectionHandles: {
+            sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+            targetHandle: RCA_TARGET_LEFT_HANDLE
+          },
+          detailFields: buildDefaultRcaNodeDetailFields('EVIDENCE', selectedIncident),
+          edgeStyle: {
+            ...RCA_FIVE_WHYS_CHAIN_EDGE_STYLE,
+            color: RCA_DEFAULT_EVIDENCE_SPLINE_COLOR
+          },
+          fiveWhysRole: 'EVIDENCE',
+          isSuspectedCause: false,
+          label: 'Evidence',
+          nodeType: 'WHY',
+          parentNodeId: stageNode.id,
+          uiCoordinates: {
+            layoutMethodology: selectedSession.methodology,
+            x: fiveWhysPosition.x + RCA_CAUSE_NODE_WIDTH + RCA_CAPA_WORKFLOW_COLUMN_GAP,
+            y: fiveWhysPosition.y
+          },
+          visualStyle: RCA_FIVE_WHYS_ROLE_VISUAL_STYLE.EVIDENCE
+        }));
+
+        if (!evidenceNode) {
+          throw new Error(`Evidence for ${getFiveWhysRoleLabel(getFiveWhysNodeRole(stageNode))} could not be created.`);
+        }
+
+        capaStageEvidenceNodes.push(evidenceNode);
+      }
+
+      const approvalClosureNode = sanitizeRcaCanvasNode(await createCollaborativeRcaNode(selectedIncident.id, selectedSession.id, {
+        connectionHandles: {
+          sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+          targetHandle: RCA_TARGET_LEFT_HANDLE
+        },
+        detailFields: buildDefaultRcaNodeDetailFields('APPROVAL_CLOSURE', selectedIncident),
+        edgeStyle: {
+          ...RCA_FIVE_WHYS_CHAIN_EDGE_STYLE,
+          color: RCA_FIVE_WHYS_ROLE_VISUAL_STYLE.APPROVAL_CLOSURE.borderColor || '#22c55e'
+        },
+        fiveWhysRole: 'APPROVAL_CLOSURE',
+        isSuspectedCause: false,
+        label: getDefaultRcaNodeRoleLabel('APPROVAL_CLOSURE', selectedIncident),
+        nodeType: 'WHY',
+        parentNodeId: capaNode.id,
+        uiCoordinates: {
+          layoutMethodology: selectedSession.methodology,
+          x: fiveWhysPosition.x + RCA_CAUSE_NODE_WIDTH * 3 + RCA_CAPA_WORKFLOW_COLUMN_GAP * 3,
+          y: fiveWhysPosition.y
+        },
+        visualStyle: RCA_FIVE_WHYS_ROLE_VISUAL_STYLE.APPROVAL_CLOSURE
+      }));
+
+      if (!approvalClosureNode) {
+        throw new Error('The Approval & Closure node could not be created.');
+      }
+
+      const linkedCapaStageNodes = capaStageNodes.map((stageNode) => ({
+        ...stageNode,
+        linkedNodeIds: [...new Set([...normalizeRcaLinkedNodeIds(stageNode.linkedNodeIds), approvalClosureNode.id])]
+      }));
+
+      const createdNodes = [
+        fiveWhysNode,
+        rootCauseNode,
+        rootCauseEvidenceNode,
+        capaNode,
+        ...linkedCapaStageNodes,
+        ...capaStageEvidenceNodes,
+        approvalClosureNode
+      ];
+      const workingNodes = mergeRcaCanvasNodes(nodes, createdNodes);
+      const layoutNodes = sanitizeRcaCanvasNodes(arrangeRcaCanvasNodes(
+        withMeasuredRcaNodeDimensions(workingNodes, measuredFlowNodeSizes),
+        selectedSession.methodology,
+        activeNodeDetails
+      ));
+      const layoutPatch = buildRcaCanvasLayoutPatch(workingNodes, new Map(layoutNodes.map((node) => [node.id, node])), selectedSession.methodology);
+      const nodesToPersist = new Set<string>([
+        ...createdNodes.map((node) => node.id),
+        ...layoutPatch.keys()
+      ]);
+
+      recordCanvasHistory(historySnapshot);
+      setNodes(layoutNodes);
+      setSelectedNodeId(fiveWhysNode.id);
+      setSelectedFlowNodeIds(new Set([fiveWhysNode.id]));
+      setSelectedFlowEdgeIds(new Set());
+
+      const updatedNodes = await Promise.all([...nodesToPersist].map((nodeId) => {
+        const layoutValue = layoutPatch.get(nodeId);
+        const createdNode = createdNodes.find((node) => node.id === nodeId);
+
+        return updateCollaborativeRcaNode(selectedIncident.id, selectedSession.id, nodeId, {
+          ...(createdNode ? {
+            connectionHandles: normalizeRcaNodeConnectionHandles(createdNode.connectionHandles),
+            detailFields: createdNode.detailFields,
+            edgeStyle: createdNode.edgeStyle,
+            fiveWhysRole: createdNode.fiveWhysRole,
+            isRootCause: createdNode.isRootCause,
+            isSuspectedCause: createdNode.isSuspectedCause,
+            linkedNodeIds: normalizeRcaLinkedNodeIds(createdNode.linkedNodeIds),
+            nodeType: createdNode.nodeType,
+            parentNodeId: createdNode.parentNodeId,
+            visualStyle: createdNode.visualStyle,
+            whyChain: createdNode.whyChain
+          } : {}),
+          ...(layoutValue?.connectionHandles ? { connectionHandles: normalizeRcaNodeConnectionHandles(layoutValue.connectionHandles) } : {}),
+          ...(layoutValue?.linkedNodeIds ? { linkedNodeIds: normalizeRcaLinkedNodeIds(layoutValue.linkedNodeIds) } : {}),
+          ...(Object.prototype.hasOwnProperty.call(layoutValue || {}, 'parentNodeId') ? { parentNodeId: layoutValue?.parentNodeId ?? null } : {}),
+          ...(layoutValue ? { uiCoordinates: layoutValue.uiCoordinates } : {})
+        });
+      }));
+      const updatedNodeById = new Map(updatedNodes.map((node) => [node.id, node]));
+
+      setNodes((currentNodes) => currentNodes.map((node) => updatedNodeById.get(node.id) || node));
+      fitRcaNodeSnapshotIntoView(layoutNodes, selectedSession.methodology, {
+        force: true,
+        padding: 0.18,
+        repeatDelays: [120, 320]
+      });
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error));
+      setNodes(historySnapshot);
+    } finally {
+      setIsWorking(false);
+    }
+  }
+
+  async function handleEnsureStandaloneFiveWhysApprovalClosure(stageNode: RcaNode) {
+    if (
+      !selectedIncident ||
+      !selectedSession ||
+      !canEditCanvasConnections ||
+      isReferenceProjectActive ||
+      isWorking
+    ) {
+      return;
+    }
+
+    const standaloneBlock = getStandaloneFiveWhysCapaStageBlock(stageNode, nodes);
+
+    if (!standaloneBlock || !standaloneBlock.stageNodes.length) {
+      setErrorMessage('Approval & Closure can only be added from a standalone 5 Why CAPA stage path.');
+      return;
+    }
+
+    const historySnapshot = cloneRcaNodes(nodes);
+    const correctiveStageNode = standaloneBlock.stageNodes.find((candidateNode) => getFiveWhysNodeRole(candidateNode) === 'CORRECTIVE_ACTION') ||
+      standaloneBlock.stageNodes[0];
+    const correctivePosition = getNodePosition(
+      correctiveStageNode,
+      nodes,
+      Math.max(0, nodes.findIndex((candidateNode) => candidateNode.id === correctiveStageNode.id)),
+      selectedSession.methodology
+    );
+    const correctiveSize = getRcaNodeSize(correctiveStageNode, activeNodeDetails[correctiveStageNode.id]);
+    const approvalSize = getRcaNodeSize({
+      ...stageNode,
+      fiveWhysRole: 'APPROVAL_CLOSURE',
+      label: getDefaultRcaNodeRoleLabel('APPROVAL_CLOSURE', selectedIncident),
+      visualStyle: RCA_FIVE_WHYS_ROLE_VISUAL_STYLE.APPROVAL_CLOSURE
+    }, activeNodeDetails[stageNode.id]);
+    const approvalPosition = {
+      x: Math.round(correctivePosition.x + correctiveSize.width + RCA_CAPA_WORKFLOW_COLUMN_GAP),
+      y: Math.round(correctivePosition.y + correctiveSize.height / 2 - approvalSize.height / 2)
+    };
+
+    setIsWorking(true);
+    setErrorMessage('');
+
+    try {
+      const approvalNode = standaloneBlock.approvalNode || sanitizeRcaCanvasNode(await createCollaborativeRcaNode(selectedIncident.id, selectedSession.id, {
+        connectionHandles: {
+          sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+          targetHandle: RCA_TARGET_LEFT_HANDLE
+        },
+        detailFields: buildDefaultRcaNodeDetailFields('APPROVAL_CLOSURE', selectedIncident),
+        edgeStyle: {
+          ...RCA_FIVE_WHYS_CHAIN_EDGE_STYLE,
+          color: RCA_FIVE_WHYS_ROLE_VISUAL_STYLE.APPROVAL_CLOSURE.borderColor || '#22c55e'
+        },
+        fiveWhysRole: 'APPROVAL_CLOSURE',
+        isSuspectedCause: false,
+        label: getDefaultRcaNodeRoleLabel('APPROVAL_CLOSURE', selectedIncident),
+        nodeType: 'WHY',
+        parentNodeId: standaloneBlock.capaNode.id,
+        uiCoordinates: {
+          layoutMethodology: selectedSession.methodology,
+          x: approvalPosition.x,
+          y: approvalPosition.y
+        },
+        visualStyle: RCA_FIVE_WHYS_ROLE_VISUAL_STYLE.APPROVAL_CLOSURE
+      }));
+
+      if (!approvalNode) {
+        throw new Error('The Approval & Closure node could not be created.');
+      }
+
+      const linkedStageNodes = standaloneBlock.stageNodes.map((candidateStageNode) => ({
+        ...candidateStageNode,
+        linkedNodeIds: [...new Set([...normalizeRcaLinkedNodeIds(candidateStageNode.linkedNodeIds), approvalNode.id])]
+      }));
+      const linkedStageNodeById = new Map(linkedStageNodes.map((candidateStageNode) => [candidateStageNode.id, candidateStageNode]));
+      const workingNodes = mergeRcaCanvasNodes(
+        nodes.map((candidateNode) => linkedStageNodeById.get(candidateNode.id) || candidateNode),
+        [approvalNode]
+      );
+      const layoutNodes = sanitizeRcaCanvasNodes(arrangeRcaCanvasNodes(
+        withMeasuredRcaNodeDimensions(workingNodes, measuredFlowNodeSizes),
+        selectedSession.methodology,
+        activeNodeDetails
+      ));
+      const layoutPatch = buildRcaCanvasLayoutPatch(workingNodes, new Map(layoutNodes.map((candidateNode) => [candidateNode.id, candidateNode])), selectedSession.methodology);
+      const nodesToPersist = new Set<string>([
+        approvalNode.id,
+        ...linkedStageNodes.map((candidateStageNode) => candidateStageNode.id),
+        ...layoutPatch.keys()
+      ]);
+
+      recordCanvasHistory(historySnapshot);
+      setNodes(layoutNodes);
+      setSelectedNodeId(approvalNode.id);
+      setSelectedFlowNodeIds(new Set([approvalNode.id]));
+      setSelectedFlowEdgeIds(new Set());
+
+      const workingNodeById = new Map(workingNodes.map((candidateNode) => [candidateNode.id, candidateNode]));
+      const updatedNodes = await Promise.all([...nodesToPersist].map((nodeId) => {
+        const layoutValue = layoutPatch.get(nodeId);
+        const workingNode = workingNodeById.get(nodeId);
+
+        return updateCollaborativeRcaNode(selectedIncident.id, selectedSession.id, nodeId, {
+          ...(workingNode ? {
+            connectionHandles: normalizeRcaNodeConnectionHandles(workingNode.connectionHandles),
+            detailFields: workingNode.detailFields,
+            edgeStyle: workingNode.edgeStyle,
+            fiveWhysRole: workingNode.fiveWhysRole,
+            isRootCause: workingNode.isRootCause,
+            isSuspectedCause: workingNode.isSuspectedCause,
+            linkedNodeIds: normalizeRcaLinkedNodeIds(workingNode.linkedNodeIds),
+            nodeType: workingNode.nodeType,
+            parentNodeId: workingNode.parentNodeId,
+            visualStyle: workingNode.visualStyle,
+            whyChain: workingNode.whyChain
+          } : {}),
+          ...(layoutValue?.connectionHandles ? { connectionHandles: normalizeRcaNodeConnectionHandles(layoutValue.connectionHandles) } : {}),
+          ...(layoutValue?.linkedNodeIds ? { linkedNodeIds: normalizeRcaLinkedNodeIds(layoutValue.linkedNodeIds) } : {}),
+          ...(Object.prototype.hasOwnProperty.call(layoutValue || {}, 'parentNodeId') ? { parentNodeId: layoutValue?.parentNodeId ?? null } : {}),
+          ...(layoutValue ? { uiCoordinates: layoutValue.uiCoordinates } : {})
+        });
+      }));
+      const updatedNodeById = new Map(updatedNodes.map((candidateNode) => [candidateNode.id, candidateNode]));
+
+      setNodes((currentNodes) => currentNodes.map((candidateNode) => updatedNodeById.get(candidateNode.id) || candidateNode));
+      fitRcaNodeSnapshotIntoView(layoutNodes, selectedSession.methodology, {
+        force: true,
+        padding: 0.18,
+        repeatDelays: [120, 320]
+      });
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error));
+      setNodes(historySnapshot);
     } finally {
       setIsWorking(false);
     }
@@ -3953,9 +9114,10 @@ function RcaWorkspaceInner() {
     }
 
     const activeDragNodeIds = activeDragNodeIdsRef.current;
-    const scopedPositionChanges = activeDragNodeIds.size
-      ? positionChanges.filter((change) => activeDragNodeIds.has(change.id))
-      : positionChanges;
+    const scopedPositionChanges = positionChanges.filter((change) => (
+      activeDragNodeIds.has(change.id) ||
+      Boolean((change as NodeChange & { dragging?: boolean }).dragging)
+    ));
 
     if (!scopedPositionChanges.length) {
       return;
@@ -4312,6 +9474,10 @@ function RcaWorkspaceInner() {
       return false;
     }
 
+    if (!connection.source || !connection.target || connection.source === connection.target) {
+      return true;
+    }
+
     return Boolean(getRcaCanvasConnectionChange(connection, nodes, selectedSession.methodology));
   }
 
@@ -4326,7 +9492,7 @@ function RcaWorkspaceInner() {
     const childNode = nodes.find((node) => node.id === connectionChange.childNodeId);
 
     if (!childNode || (
-      childNode.nodeType !== 'STICKY_NOTE' &&
+      !isFreeformRcaAnnotationNode(childNode) &&
       childNode.nodeType !== 'WHY' &&
       childNode.nodeType !== 'FAULT_GATE' &&
       !isFishboneCauseNode(childNode)
@@ -4335,9 +9501,11 @@ function RcaWorkspaceInner() {
     }
 
     if (
+      auditIntent !== 'SPLINE_DELETED' &&
       childNode.parentNodeId === connectionChange.parentNodeId &&
       childNode.nodeType === connectionChange.nodeType &&
-      getRcaConnectionHandleSignature(childNode.connectionHandles) === getRcaConnectionHandleSignature(connectionChange.connectionHandles)
+      getRcaConnectionHandleSignature(childNode.connectionHandles) === getRcaConnectionHandleSignature(connectionChange.connectionHandles) &&
+      (!connectionChange.linkedNodeId || childNode.linkedNodeIds?.includes(connectionChange.linkedNodeId))
     ) {
       return;
     }
@@ -4345,14 +9513,26 @@ function RcaWorkspaceInner() {
     const historySnapshot = cloneRcaNodes(nodes);
     const previousSelectedNodeId = selectedNodeId;
     const previousSelectedFlowNodeIds = new Set(selectedFlowNodeIds);
+    const parentNode = connectionChange.parentNodeId
+      ? nodes.find((node) => node.id === connectionChange.parentNodeId)
+      : null;
+    const nextLinkedNodeIds = connectionChange.linkedNodeId
+      ? auditIntent === 'SPLINE_DELETED'
+        ? normalizeRcaLinkedNodeIds(childNode.linkedNodeIds).filter((linkedNodeId) => linkedNodeId !== connectionChange.linkedNodeId)
+        : [...new Set([...normalizeRcaLinkedNodeIds(childNode.linkedNodeIds), connectionChange.linkedNodeId])]
+      : childNode.linkedNodeIds;
     const nextNodes = nodes.map((node) => (
       node.id === connectionChange.childNodeId
-        ? syncRootCauseTypeWithParentCategory({
-            ...node,
-            connectionHandles: normalizeRcaNodeConnectionHandles(connectionChange.connectionHandles),
-            nodeType: connectionChange.nodeType,
-            parentNodeId: connectionChange.parentNodeId
-          }, nodes)
+        ? syncRootCauseTypeWithParentCategory(
+            applyRcaConnectionDetailFieldUpdates({
+              ...node,
+              connectionHandles: normalizeRcaNodeConnectionHandles(connectionChange.connectionHandles),
+              linkedNodeIds: nextLinkedNodeIds,
+              nodeType: connectionChange.nodeType,
+              parentNodeId: connectionChange.parentNodeId
+            }, parentNode),
+            nodes
+          )
         : node
     ));
     const nextChildNode = nextNodes.find((node) => node.id === connectionChange.childNodeId);
@@ -4368,6 +9548,11 @@ function RcaWorkspaceInner() {
         auditIntent,
         connectionHandles: normalizeRcaNodeConnectionHandles(connectionChange.connectionHandles),
         ...(nextChildNode?.detailFields ? { detailFields: nextChildNode.detailFields } : {}),
+        ...(nextChildNode ? {
+          isRootCause: nextChildNode.isRootCause,
+          isSuspectedCause: nextChildNode.isSuspectedCause
+        } : {}),
+      ...(connectionChange.linkedNodeId ? { linkedNodeIds: nextLinkedNodeIds } : {}),
         nodeType: connectionChange.nodeType,
         parentNodeId: connectionChange.parentNodeId
       });
@@ -4386,6 +9571,200 @@ function RcaWorkspaceInner() {
       setNodes(historySnapshot);
       setSelectedNodeId(previousSelectedNodeId);
       setSelectedFlowNodeIds(previousSelectedFlowNodeIds);
+    } finally {
+      setIsWorking(false);
+    }
+  }
+
+  async function handleCreateRecommendedConnection(action: RcaConnectionCreateRecommendation) {
+    if (
+      !selectedIncident ||
+      !selectedSession ||
+      !selectedNode ||
+      !canEditCanvasConnections ||
+      isReferenceProjectActive ||
+      isWorking
+    ) {
+      return;
+    }
+
+    if (action.disabledReason) {
+      return;
+    }
+
+    if (action.actionType === 'CREATE_FISHBONE') {
+      await handleAddFishboneStructure();
+      return;
+    }
+
+    if (action.actionType === 'CREATE_FIVE_WHYS_ANALYSIS') {
+      await handleCreateFiveWhysAnalysisStructure(selectedNode);
+      return;
+    }
+
+    if (action.actionType === 'CREATE_STANDALONE_FIVE_WHYS_CLOSURE') {
+      await handleEnsureStandaloneFiveWhysApprovalClosure(selectedNode);
+      return;
+    }
+
+    const historySnapshot = cloneRcaNodes(nodes);
+    const selectedPosition = getNodePosition(selectedNode, nodes, Math.max(0, nodes.findIndex((node) => node.id === selectedNode.id)), selectedSession.methodology);
+    const selectedSize = getRcaNodeSize(selectedNode);
+    const selectedRole = getFiveWhysNodeRole(selectedNode);
+    const isVerticalFiveWhysRecommendation =
+      action.direction === 'selected-to-new' &&
+      (
+        (selectedRole === 'PROBLEM' && action.fiveWhysRole === 'FIVE_WHYS') ||
+        (selectedRole === 'FIVE_WHYS' && action.fiveWhysRole === 'ANSWER') ||
+        (selectedRole === 'ANSWER' && action.fiveWhysRole === 'FIVE_WHYS')
+      );
+    const isRootCauseEvidenceRecommendation = isRootCauseRoleNode(selectedNode) &&
+      action.direction === 'new-to-selected' &&
+      action.fiveWhysRole === 'EVIDENCE';
+    const selectedParentNode = selectedNode.parentNodeId
+      ? nodes.find((node) => node.id === selectedNode.parentNodeId)
+      : undefined;
+    const selectedGrandparentNode = selectedParentNode?.parentNodeId
+      ? nodes.find((node) => node.id === selectedParentNode.parentNodeId)
+      : undefined;
+    const isStandaloneFiveWhysRootCauseRecommendation = isRootCauseEvidenceRecommendation &&
+      isFiveWhysInvestigationRoleNode(selectedParentNode) &&
+      isProblemRoleNode(selectedGrandparentNode);
+    const isVerticalRootCauseEvidenceRecommendation = isRootCauseEvidenceRecommendation &&
+      !isStandaloneFiveWhysRootCauseRecommendation &&
+      selectedSession.methodology !== '5_WHYS';
+    const placementX = isVerticalFiveWhysRecommendation || isVerticalRootCauseEvidenceRecommendation
+      ? selectedPosition.x
+      : action.direction === 'selected-to-new'
+        ? selectedPosition.x + selectedSize.width + RCA_CONNECTED_SATELLITE_HORIZONTAL_GAP
+        : selectedPosition.x - RCA_CAUSE_NODE_WIDTH - RCA_CONNECTED_SATELLITE_HORIZONTAL_GAP;
+    const placementY = isVerticalFiveWhysRecommendation
+      ? selectedPosition.y + selectedSize.height + (selectedRole === 'PROBLEM' ? RCA_FIVE_WHYS_CHAIN_TOP_GAP : RCA_CONNECTED_SATELLITE_VERTICAL_GAP)
+      : isVerticalRootCauseEvidenceRecommendation
+      ? selectedPosition.y - RCA_CAUSE_NODE_HEIGHT - RCA_CONNECTED_SATELLITE_VERTICAL_GAP
+      : selectedPosition.y;
+
+    setIsWorking(true);
+    setErrorMessage('');
+
+    try {
+      const createdNode = sanitizeRcaCanvasNode(await createCollaborativeRcaNode(selectedIncident.id, selectedSession.id, {
+        detailFields: action.fiveWhysRole ? buildDefaultRcaNodeDetailFields(action.fiveWhysRole, selectedIncident) : {},
+        ...(isVerticalFiveWhysRecommendation || isVerticalRootCauseEvidenceRecommendation ? { connectionHandles: getVerticalRcaFlowConnectionHandles() } : {}),
+        fiveWhysRole: action.fiveWhysRole || null,
+        label: action.fiveWhysRole
+          ? getDefaultRcaNodeRoleLabel(action.fiveWhysRole, selectedIncident)
+          : '',
+        nodeType: action.nodeType,
+        parentNodeId: null,
+        uiCoordinates: {
+          layoutMethodology: selectedSession.methodology,
+          x: placementX,
+          y: placementY
+        },
+        visualStyle: action.fiveWhysRole ? RCA_FIVE_WHYS_ROLE_VISUAL_STYLE[action.fiveWhysRole] : undefined
+      }));
+
+      if (!createdNode) {
+        throw new Error('The recommended node could not be added to the canvas.');
+      }
+
+      const workingNodes = [...nodes, createdNode];
+      const connection = isVerticalFiveWhysRecommendation
+        ? {
+          source: selectedNode.id,
+          sourceHandle: RCA_SOURCE_BOTTOM_HANDLE,
+          target: createdNode.id,
+          targetHandle: RCA_TARGET_TOP_HANDLE
+        }
+        : isRootCauseEvidenceRecommendation
+        ? {
+          source: createdNode.id,
+          sourceHandle: isStandaloneFiveWhysRootCauseRecommendation || selectedSession.methodology === '5_WHYS' ? RCA_SOURCE_RIGHT_HANDLE : RCA_SOURCE_BOTTOM_HANDLE,
+          target: selectedNode.id,
+          targetHandle: isStandaloneFiveWhysRootCauseRecommendation || selectedSession.methodology === '5_WHYS' ? RCA_TARGET_LEFT_HANDLE : RCA_TARGET_TOP_HANDLE
+        }
+        : action.direction === 'selected-to-new'
+        ? {
+          source: selectedNode.id,
+          sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+          target: createdNode.id,
+          targetHandle: RCA_TARGET_LEFT_HANDLE
+        }
+        : {
+          source: createdNode.id,
+          sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+          target: selectedNode.id,
+          targetHandle: RCA_TARGET_LEFT_HANDLE
+        };
+      const connectionChange = getRcaCanvasConnectionChange(connection, workingNodes, selectedSession.methodology);
+
+      if (!connectionChange) {
+        throw new Error('The recommended connection is no longer valid for the current canvas state.');
+      }
+
+      const parentNode = connectionChange.parentNodeId
+        ? workingNodes.find((node) => node.id === connectionChange.parentNodeId)
+        : null;
+      const connectedNodes = workingNodes.map((node) => (
+        node.id === connectionChange.childNodeId
+          ? syncRootCauseTypeWithParentCategory(
+              applyRcaConnectionDetailFieldUpdates({
+                ...node,
+                connectionHandles: normalizeRcaNodeConnectionHandles(connectionChange.connectionHandles),
+                nodeType: connectionChange.nodeType,
+                parentNodeId: connectionChange.parentNodeId
+              }, parentNode),
+              workingNodes
+            )
+          : node
+      ));
+      const layoutNodes = selectedSession.methodology === 'ISHIKAWA'
+        ? sanitizeRcaCanvasNodes(arrangeRcaCanvasNodes(withMeasuredRcaNodeDimensions(connectedNodes, measuredFlowNodeSizes), selectedSession.methodology))
+        : connectedNodes;
+      const connectedNodeById = new Map(connectedNodes.map((node) => [node.id, node]));
+      const layoutPatch = selectedSession.methodology === 'ISHIKAWA'
+        ? buildRcaCanvasLayoutPatch(workingNodes, new Map(layoutNodes.map((node) => [node.id, node])), selectedSession.methodology)
+        : new Map<string, RcaCanvasLayoutPatchValue>();
+      const nodesToPersist = new Set<string>([connectionChange.childNodeId, createdNode.id, ...layoutPatch.keys()]);
+
+      recordCanvasHistory(historySnapshot);
+      setNodes(layoutNodes);
+      setSelectedNodeId(createdNode.id);
+      setSelectedFlowNodeIds(new Set([createdNode.id]));
+      setSelectedFlowEdgeIds(new Set());
+
+      const updatedNodes = await Promise.all([...nodesToPersist].map((nodeId) => {
+        const layoutValue = layoutPatch.get(nodeId);
+        const connectedNode = connectedNodeById.get(nodeId);
+
+        return updateCollaborativeRcaNode(selectedIncident.id, selectedSession.id, nodeId, {
+          ...(connectedNode ? {
+            connectionHandles: normalizeRcaNodeConnectionHandles(connectedNode.connectionHandles),
+            detailFields: connectedNode.detailFields,
+            fiveWhysRole: connectedNode.fiveWhysRole,
+            isRootCause: connectedNode.isRootCause,
+            isSuspectedCause: connectedNode.isSuspectedCause,
+            nodeType: connectedNode.nodeType,
+            parentNodeId: connectedNode.parentNodeId
+          } : {}),
+          ...(layoutValue?.connectionHandles ? { connectionHandles: normalizeRcaNodeConnectionHandles(layoutValue.connectionHandles) } : {}),
+          ...(layoutValue?.linkedNodeIds ? { linkedNodeIds: normalizeRcaLinkedNodeIds(layoutValue.linkedNodeIds) } : {}),
+          ...(Object.prototype.hasOwnProperty.call(layoutValue || {}, 'parentNodeId') ? { parentNodeId: layoutValue?.parentNodeId ?? null } : {}),
+          ...(layoutValue ? { uiCoordinates: layoutValue.uiCoordinates } : {})
+        });
+      }));
+      const updatedNodeById = new Map(updatedNodes.map((node) => [node.id, node]));
+
+      setNodes((currentNodes) => currentNodes.map((node) => updatedNodeById.get(node.id) || node));
+      fitRcaNodeSnapshotIntoView(layoutNodes, selectedSession.methodology, {
+        force: true,
+        padding: 0.18,
+        repeatDelays: [120, 320]
+      });
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error));
+      setNodes(historySnapshot);
     } finally {
       setIsWorking(false);
     }
@@ -4422,11 +9801,10 @@ function RcaWorkspaceInner() {
   function handleCanvasReconnectEnd(
     _: MouseEvent | TouchEvent,
     edge: Edge,
-    handleType: HandleType,
+    _handleType: HandleType,
     connectionState: FinalConnectionState
   ) {
     if (
-      handleType !== 'target' ||
       connectionState.toNode ||
       !canEditCanvasConnections
     ) {
@@ -4436,20 +9814,31 @@ function RcaWorkspaceInner() {
     const childNodeId = getRcaSplineOwnerNodeId(edge, selectedSession?.methodology || 'ISHIKAWA');
     const childNode = nodes.find((node) => node.id === childNodeId);
 
+    if (!childNode) {
+      return;
+    }
+
+    if (normalizeRcaLinkedNodeIds(childNode.linkedNodeIds).includes(edge.target)) {
+      void applyRcaCanvasConnectionChange({
+        childNodeId,
+        connectionHandles: childNode.connectionHandles,
+        linkedNodeId: edge.target,
+        nodeType: childNode.nodeType,
+        parentNodeId: childNode.parentNodeId
+      }, 'SPLINE_DELETED');
+      return;
+    }
+
     void applyRcaCanvasConnectionChange({
       childNodeId,
       connectionHandles: {},
-      nodeType: childNode?.nodeType || (
-        selectedSession?.methodology === '5_WHYS'
-          ? 'WHY'
-          : 'CAUSE'
-      ),
+      nodeType: childNode.nodeType,
       parentNodeId: null
-    });
+    }, 'SPLINE_DELETED');
   }
 
   function handleNodePreview(input: RcaNodeEditInput) {
-    if (!selectedSession || !inspectedNode || isReferenceProjectActive) {
+    if (!selectedSession || !inspectedNode || isReferenceProjectActive || isSelectedRcaCaseClosed) {
       return;
     }
 
@@ -4489,16 +9878,19 @@ function RcaWorkspaceInner() {
         };
       });
 
-      if (selectedSession.methodology === 'ISHIKAWA') {
-        return arrangeRcaCanvasNodes(nextNodes, selectedSession.methodology);
-      }
-
       return nextNodes;
     });
   }
 
   async function handleNodeSave(input: RcaNodeEditInput) {
-    if (!selectedIncident || !selectedSession || !inspectedNode || isReferenceProjectActive || isWorking) {
+    if (!selectedIncident || !selectedSession || !inspectedNode || isReferenceProjectActive || isWorking || isSelectedRcaCaseClosed) {
+      return;
+    }
+
+    const isClosingRca = input.nodeType === 'WHY' && input.fiveWhysNodeRole === 'APPROVAL_CLOSURE';
+
+    if (isClosingRca && !isApprovalClosureReadyToClose(input.detailFields || {})) {
+      setErrorMessage('Complete the Approval & Closure review before closing this RCA.');
       return;
     }
 
@@ -4513,7 +9905,7 @@ function RcaWorkspaceInner() {
       const candidateWhyChain = input.whyChain ?? inspectedNode.whyChain;
 
       if (!hasCompletedFiveWhys(candidateWhyChain)) {
-        setErrorMessage('Complete the 5 Whys before confirming a root cause.');
+        setErrorMessage('Complete the 5 Whys before confirming a cause.');
         return;
       }
     }
@@ -4534,8 +9926,11 @@ function RcaWorkspaceInner() {
         ...(previewedNode ? { uiCoordinates: previewedNode.uiCoordinates } : {})
       };
       const updatedNode = await updateCollaborativeRcaNode(selectedIncident.id, selectedSession.id, inspectedNode.id, normalizedInput);
+      const updatedIncident = isClosingRca
+        ? await updateRcaIncident(selectedIncident.id, { status: 'CLOSED' })
+        : null;
 
-      const nextNodes = nodes.map((node) => (
+      let nextNodes = nodes.map((node) => (
         node.id === updatedNode.id
           ? {
               ...updatedNode,
@@ -4543,6 +9938,77 @@ function RcaWorkspaceInner() {
             }
           : node
       ));
+      const previousCauseStatement = getRcaCauseStatementForFiveWhys(inspectedNode);
+      const nextCauseStatement = getRcaCauseStatementForFiveWhys(updatedNode);
+      const fiveWhysChildrenToSync = isRootCauseRoleNode(updatedNode) && nextCauseStatement
+        ? nextNodes
+            .filter((node) => {
+              if (node.parentNodeId !== updatedNode.id || !isFiveWhysInvestigationRoleNode(node)) {
+                return false;
+              }
+
+              const currentSelectedCause = node.detailFields?.selectedCause?.trim() || '';
+
+              return !currentSelectedCause || currentSelectedCause === previousCauseStatement;
+            })
+            .map((node) => ({
+              ...node,
+              detailFields: {
+                ...(node.detailFields || {}),
+                selectedCause: nextCauseStatement
+              }
+            }))
+        : [];
+
+      if (fiveWhysChildrenToSync.length) {
+        const syncedChildById = new Map(fiveWhysChildrenToSync.map((node) => [node.id, node]));
+
+        nextNodes = nextNodes.map((node) => syncedChildById.get(node.id) || node);
+
+        const updatedFiveWhysChildren = await Promise.all(fiveWhysChildrenToSync.map((node) => (
+          updateCollaborativeRcaNode(selectedIncident.id, selectedSession.id, node.id, {
+            detailFields: node.detailFields
+          })
+        )));
+        const updatedFiveWhysChildById = new Map(updatedFiveWhysChildren.map((node) => [node.id, node]));
+
+        nextNodes = nextNodes.map((node) => {
+          const updatedFiveWhysChild = updatedFiveWhysChildById.get(node.id);
+
+          return updatedFiveWhysChild
+            ? {
+                ...updatedFiveWhysChild,
+                uiCoordinates: node.uiCoordinates
+              }
+            : node;
+        });
+      }
+
+      const linkedCauseUpdate = buildFiveWhysLinkedCauseUpdate(updatedNode, nextNodes);
+
+      if (linkedCauseUpdate) {
+        nextNodes = nextNodes.map((node) => (
+          node.id === linkedCauseUpdate.optimisticCauseNode.id
+            ? linkedCauseUpdate.optimisticCauseNode
+            : node
+        ));
+
+        const persistedCauseNode = await updateCollaborativeRcaNode(
+          selectedIncident.id,
+          selectedSession.id,
+          linkedCauseUpdate.causeNode.id,
+          linkedCauseUpdate.causeInput
+        );
+
+        nextNodes = nextNodes.map((node) => (
+          node.id === persistedCauseNode.id
+            ? {
+                ...persistedCauseNode,
+                uiCoordinates: node.uiCoordinates
+              }
+            : node
+        ));
+      }
 
       if (
         selectedSession.methodology === 'ISHIKAWA' &&
@@ -4562,6 +10028,17 @@ function RcaWorkspaceInner() {
       recordCanvasHistory(historySnapshot);
       setNodes(nextNodes);
 
+      if (updatedIncident) {
+        setWorkspace((currentWorkspace) => currentWorkspace
+          ? {
+              ...currentWorkspace,
+              incidents: currentWorkspace.incidents.map((incident) => (
+                incident.id === updatedIncident.id ? updatedIncident : incident
+              ))
+            }
+          : currentWorkspace);
+      }
+
       if (
         selectedSession.methodology === 'ISHIKAWA' &&
         (input.parentNodeId !== undefined || input.nodeType !== undefined)
@@ -4572,6 +10049,86 @@ function RcaWorkspaceInner() {
       setErrorMessage(getErrorMessage(error));
     } finally {
       nodeEditHistorySnapshotRef.current.delete(inspectedNode.id);
+      setIsWorking(false);
+    }
+  }
+
+  async function handleAttachLibraryEvidenceToNode(libraryEvidence: RailsEvidence[]) {
+    if (!selectedIncident || !selectedSession || !evidenceLibraryTargetNodeId || isReferenceProjectActive || isWorking || isSelectedRcaCaseClosed) {
+      return;
+    }
+
+    const targetNode = nodes.find((node) => node.id === evidenceLibraryTargetNodeId);
+
+    if (!targetNode || !isEvidenceRoleNode(targetNode)) {
+      setErrorMessage('Select an Evidence node before linking evidence from the library.');
+      return;
+    }
+
+    const evidenceToAttach = libraryEvidence
+      .map(buildRcaAttachedEvidenceFromLibraryEvidence)
+      .filter((item) => item.fileUrl || item.fileName);
+    const existingKeys = new Set(targetNode.attachedEvidence.map(getEvidenceKey));
+    const existingLibraryHashes = new Set(targetNode.attachedEvidence.map((item) => item.fileHash));
+    const nextEvidence = evidenceToAttach.filter((item) => (
+      !existingKeys.has(getEvidenceKey(item)) &&
+      !existingLibraryHashes.has(item.fileHash)
+    ));
+
+    if (!nextEvidence.length) {
+      setIsEvidenceLibraryOpen(false);
+      setEvidenceLibraryTargetNodeId(null);
+      return;
+    }
+
+    const historySnapshot = cloneRcaNodes(nodes);
+    const optimisticAttachedEvidence = [...targetNode.attachedEvidence, ...nextEvidence];
+    const shouldUseLinkedEvidenceLabel = shouldUseLinkedEvidenceDefaultLabel(targetNode.label, targetNode.detailFields || {});
+    const optimisticDetailFields = shouldUseLinkedEvidenceLabel
+      ? {
+          ...(targetNode.detailFields || {}),
+          evidenceTitle: RCA_LINKED_EVIDENCE_NODE_DEFAULT_LABEL
+        }
+      : targetNode.detailFields;
+    const optimisticLabel = shouldUseLinkedEvidenceLabel
+      ? RCA_LINKED_EVIDENCE_NODE_DEFAULT_LABEL
+      : targetNode.label;
+
+    try {
+      setIsWorking(true);
+      setErrorMessage('');
+      recordCanvasHistory(historySnapshot);
+      setNodes((currentNodes) => currentNodes.map((node) => (
+        node.id === targetNode.id
+          ? {
+              ...node,
+              attachedEvidence: optimisticAttachedEvidence,
+              detailFields: optimisticDetailFields,
+              label: optimisticLabel
+            }
+          : node
+      )));
+
+      const updatedNode = await updateCollaborativeRcaNode(selectedIncident.id, selectedSession.id, targetNode.id, {
+        attachedEvidence: optimisticAttachedEvidence,
+        detailFields: optimisticDetailFields,
+        label: optimisticLabel
+      });
+
+      setNodes((currentNodes) => currentNodes.map((node) => (
+        node.id === updatedNode.id
+          ? {
+              ...updatedNode,
+              uiCoordinates: node.uiCoordinates
+            }
+          : node
+      )));
+      setIsEvidenceLibraryOpen(false);
+      setEvidenceLibraryTargetNodeId(null);
+    } catch (error) {
+      setNodes(historySnapshot);
+      setErrorMessage(getErrorMessage(error));
+    } finally {
       setIsWorking(false);
     }
   }
@@ -4597,7 +10154,7 @@ function RcaWorkspaceInner() {
   }
 
   async function handlePasteNodeText(nodeId?: string | null) {
-    if (!selectedIncident || !selectedSession || !nodeId || isReferenceProjectActive || isWorking || !navigator.clipboard?.readText) {
+    if (!selectedIncident || !selectedSession || !nodeId || isReferenceProjectActive || isWorking || isSelectedRcaCaseClosed || !navigator.clipboard?.readText) {
       return;
     }
 
@@ -4664,6 +10221,7 @@ function RcaWorkspaceInner() {
       !selectedSession ||
       isReferenceProjectActive ||
       isWorking ||
+      isSelectedRcaCaseClosed ||
       isEditableShortcutTarget(document.activeElement)
     ) {
       return;
@@ -4679,7 +10237,7 @@ function RcaWorkspaceInner() {
   }
 
   function handleClearCanvas() {
-    if (!selectedIncident || !selectedSession || isReferenceProjectActive || isWorking || !nodes.length) {
+    if (!selectedIncident || !selectedSession || isReferenceProjectActive || isWorking || isSelectedRcaCaseClosed || !nodes.length) {
       return;
     }
 
@@ -4687,13 +10245,13 @@ function RcaWorkspaceInner() {
   }
 
   async function executeDeleteNode(nodeId?: string | null) {
-    if (!selectedIncident || !selectedSession || !nodeId || isReferenceProjectActive || isWorking) {
+    if (!selectedIncident || !selectedSession || !nodeId || isReferenceProjectActive || isWorking || isSelectedRcaCaseClosed) {
       return;
     }
 
     const targetNode = nodes.find((node) => node.id === nodeId);
 
-    if (targetNode && isProtectedFishboneStructureNode(targetNode)) {
+    if (targetNode?.nodeType === 'ISHIKAWA_CATEGORY' && !isEmptyFishboneBranchCategoryNode(targetNode, nodes)) {
       setErrorMessage(getProtectedFishboneStructureDeleteMessage(targetNode));
       return;
     }
@@ -4701,22 +10259,28 @@ function RcaWorkspaceInner() {
     setIsWorking(true);
     setErrorMessage('');
     const historySnapshot = cloneRcaNodes(nodes);
+    const nodeIdsToDelete = targetNode?.nodeType === 'FAULT_GATE'
+      ? getFaultGateFishboneDeleteNodeIds(targetNode, nodes)
+      : new Set([nodeId]);
 
     try {
-      await deleteCollaborativeRcaNode(selectedIncident.id, selectedSession.id, nodeId);
+      await Promise.all([...nodeIdsToDelete].map((deleteNodeId) => (
+        deleteCollaborativeRcaNode(selectedIncident.id, selectedSession.id, deleteNodeId)
+      )));
       recordCanvasHistory(historySnapshot);
-      setNodes((currentNodes) => currentNodes.filter((node) => node.id !== nodeId));
-      setSelectedNodeId((currentNodeId) => currentNodeId === nodeId ? null : currentNodeId);
-      setInspectedNodeId((currentNodeId) => currentNodeId === nodeId ? null : currentNodeId);
+      setNodes((currentNodes) => currentNodes.filter((node) => !nodeIdsToDelete.has(node.id)));
+      setSelectedNodeId((currentNodeId) => currentNodeId && nodeIdsToDelete.has(currentNodeId) ? null : currentNodeId);
+      setInspectedNodeId((currentNodeId) => currentNodeId && nodeIdsToDelete.has(currentNodeId) ? null : currentNodeId);
       setSelectedFlowNodeIds((currentNodeIds) => {
-        if (!currentNodeIds.has(nodeId)) {
+        if (![...nodeIdsToDelete].some((deleteNodeId) => currentNodeIds.has(deleteNodeId))) {
           return currentNodeIds;
         }
 
         const nextNodeIds = new Set(currentNodeIds);
-        nextNodeIds.delete(nodeId);
+        nodeIdsToDelete.forEach((deleteNodeId) => nextNodeIds.delete(deleteNodeId));
         return nextNodeIds;
       });
+      setSelectedFlowEdgeIds(new Set());
     } catch (error) {
       setErrorMessage(getErrorMessage(error));
     } finally {
@@ -4730,6 +10294,7 @@ function RcaWorkspaceInner() {
       !selectedSession ||
       isReferenceProjectActive ||
       isWorking ||
+      isSelectedRcaCaseClosed ||
       isEditableShortcutTarget(document.activeElement)
     ) {
       return;
@@ -4738,9 +10303,25 @@ function RcaWorkspaceInner() {
     const realSelectedNodeIds = new Set(
       [...selectedFlowNodeIds].filter((nodeId) => !isFishboneSpineFlowNodeId(nodeId))
     );
+    const selectedFaultGateNodes = nodes.filter((node) => (
+      realSelectedNodeIds.has(node.id) &&
+      node.status !== 'DELETED' &&
+      node.nodeType === 'FAULT_GATE'
+    ));
+    const fishboneDeleteNodeIds = new Set<string>();
+
+    selectedFaultGateNodes.forEach((faultGateNode) => {
+      getFaultGateFishboneDeleteNodeIds(faultGateNode, nodes).forEach((nodeId) => {
+        fishboneDeleteNodeIds.add(nodeId);
+        realSelectedNodeIds.add(nodeId);
+      });
+    });
+
     const protectedSelectedNodes = nodes.filter((node) => (
       realSelectedNodeIds.has(node.id) &&
-      isProtectedFishboneStructureNode(node)
+      isProtectedFishboneStructureNode(node) &&
+      !fishboneDeleteNodeIds.has(node.id) &&
+      !isEmptyFishboneBranchCategoryNode(node, nodes)
     ));
     const canDeleteSelectedStructure = protectedSelectedNodes.length > 0 &&
       isCompleteFishboneStructureSelection(nodes, selectedFlowNodeIds);
@@ -4761,16 +10342,27 @@ function RcaWorkspaceInner() {
           !isProtectedFishboneStructureNode(node) ||
           isFaultGateCapaSplineOwner(node, nodes);
       });
+    const linkedSplineRemovalsBySourceNodeId = getSelectedRcaLinkedSplineRemovals(nodes, selectedFlowEdgeIds);
+    realSelectedNodeIds.forEach((nodeId) => linkedSplineRemovalsBySourceNodeId.delete(nodeId));
+    [...linkedSplineRemovalsBySourceNodeId.entries()].forEach(([sourceNodeId, linkedNodeIds]) => {
+      const remainingLinkedNodeIds = linkedNodeIds.filter((linkedNodeId) => !realSelectedNodeIds.has(linkedNodeId));
+
+      if (remainingLinkedNodeIds.length) {
+        linkedSplineRemovalsBySourceNodeId.set(sourceNodeId, remainingLinkedNodeIds);
+      } else {
+        linkedSplineRemovalsBySourceNodeId.delete(sourceNodeId);
+      }
+    });
     const selectedSplineAuditDescriptions = getRcaSplineAuditDescriptions(
       nodes,
       selectedSession.methodology,
       selectedEdgeChildNodeIds
-    );
+    ).concat(getRcaLinkedSplineAuditDescriptions(nodes, linkedSplineRemovalsBySourceNodeId));
     const selectedNodeAuditDescriptions = nodes
       .filter((node) => realSelectedNodeIds.has(node.id))
       .map((node) => getRcaNodeAuditDescriptor(node));
 
-    if (!realSelectedNodeIds.size && !selectedEdgeChildNodeIds.length) {
+    if (!realSelectedNodeIds.size && !selectedEdgeChildNodeIds.length && !linkedSplineRemovalsBySourceNodeId.size) {
       return;
     }
 
@@ -4781,6 +10373,12 @@ function RcaWorkspaceInner() {
       .map((node) => (
         selectedEdgeChildNodeIdSet.has(node.id)
           ? { ...node, parentNodeId: null }
+          : linkedSplineRemovalsBySourceNodeId.has(node.id)
+            ? {
+                ...node,
+                linkedNodeIds: normalizeRcaLinkedNodeIds(node.linkedNodeIds)
+                  .filter((linkedNodeId) => !linkedSplineRemovalsBySourceNodeId.get(node.id)?.includes(linkedNodeId))
+              }
           : node
       ));
 
@@ -4806,7 +10404,21 @@ function RcaWorkspaceInner() {
           selectedSession.id,
           nodeId,
           { auditIntent: 'SPLINE_DELETED', parentNodeId: null }
-        ))
+        )),
+        ...[...linkedSplineRemovalsBySourceNodeId.entries()].map(([sourceNodeId, linkedNodeIds]) => {
+          const sourceNode = nodes.find((node) => node.id === sourceNodeId);
+
+          return updateCollaborativeRcaNode(
+            selectedIncident.id,
+            selectedSession.id,
+            sourceNodeId,
+            {
+              auditIntent: 'SPLINE_DELETED',
+              linkedNodeIds: normalizeRcaLinkedNodeIds(sourceNode?.linkedNodeIds)
+                .filter((linkedNodeId) => !linkedNodeIds.includes(linkedNodeId))
+            }
+          );
+        })
       ]);
       const previousValue = [
         selectedNodeAuditDescriptions.length
@@ -4822,6 +10434,9 @@ function RcaWorkspaceInner() {
           : '',
         selectedEdgeChildNodeIds.length
           ? `${selectedEdgeChildNodeIds.length} spline${selectedEdgeChildNodeIds.length === 1 ? '' : 's'}`
+          : '',
+        linkedSplineRemovalsBySourceNodeId.size
+          ? `${[...linkedSplineRemovalsBySourceNodeId.values()].reduce((count, linkedNodeIds) => count + linkedNodeIds.length, 0)} linked spline${[...linkedSplineRemovalsBySourceNodeId.values()].reduce((count, linkedNodeIds) => count + linkedNodeIds.length, 0) === 1 ? '' : 's'}`
           : ''
       ].filter(Boolean);
 
@@ -4841,7 +10456,7 @@ function RcaWorkspaceInner() {
   }
 
   async function executeClearCanvas() {
-    if (!selectedIncident || !selectedSession || isReferenceProjectActive || isWorking || !nodes.length) {
+    if (!selectedIncident || !selectedSession || isReferenceProjectActive || isWorking || isSelectedRcaCaseClosed || !nodes.length) {
       return;
     }
 
@@ -5076,16 +10691,6 @@ function RcaWorkspaceInner() {
     splineStyleSaveTimeoutsRef.current.set(nodeId, timeoutId);
   }
 
-  function handleOpenReferenceProject() {
-    resetActiveCanvasState(null);
-    setIsReferenceProjectActive(true);
-    setIsIncidentShelfOpen(false);
-    setIsCollaboratorInviteOpen(false);
-    setWorkspaceView('canvas');
-    closeSplineStyleEditor();
-    fitVisibleProjectIntoView({ delay: 160, force: true, padding: 0.16 });
-  }
-
   function handleOpenIncidentProject(incidentId: string) {
     resetActiveCanvasState(null);
     setIsReferenceProjectActive(false);
@@ -5286,10 +10891,18 @@ function RcaWorkspaceInner() {
     setAlignmentGuides([]);
 
     if (isReferenceProjectActive) {
-      const resetNodes = arrangeRcaCanvasNodes(referenceNodes, referenceMethodology, REFERENCE_RCA_PROJECT.nodeDetails);
+      const resetNodes = arrangeRcaCanvasNodes(
+        withMeasuredRcaNodeDimensions(referenceNodes, measuredFlowNodeSizes),
+        referenceMethodology,
+        REFERENCE_RCA_PROJECT.nodeDetails
+      );
 
       setReferenceNodes(resetNodes);
-      fitVisibleProjectIntoView({ delay: 140, force: true, padding: 0.16 });
+      fitRcaNodeSnapshotIntoView(resetNodes, referenceMethodology, {
+        force: true,
+        padding: 0.18,
+        repeatDelays: [80, 260, 560]
+      });
       return;
     }
 
@@ -5297,36 +10910,84 @@ function RcaWorkspaceInner() {
       return;
     }
 
-    const arrangedNodes = sanitizeRcaCanvasNodes(arrangeRcaCanvasNodes(nodes, selectedSession.methodology));
+    const normalizedNodes = normalizeMisclassifiedFishboneCauseNodes(nodes);
+    const nodesForLayout = withMeasuredRcaNodeDimensions(normalizedNodes, measuredFlowNodeSizes);
+    const arrangedNodes = sanitizeRcaCanvasNodes(arrangeRcaCanvasNodes(nodesForLayout, selectedSession.methodology));
     const historySnapshot = cloneRcaNodes(nodes);
     const arrangedNodeById = new Map(arrangedNodes.map((node) => [node.id, node]));
-    const layoutPatch = buildRcaCanvasLayoutPatch(nodes, arrangedNodeById, selectedSession.methodology);
+    const normalizedNodeById = new Map(normalizedNodes.map((node) => [node.id, node]));
+    const layoutPatch = buildRcaCanvasLayoutPatch(normalizedNodes, arrangedNodeById, selectedSession.methodology);
+    const classificationPatch = new Map<string, RcaNode>();
+
+    nodes.forEach((node) => {
+      const normalizedNode = normalizedNodeById.get(node.id);
+
+      if (!normalizedNode) {
+        return;
+      }
+
+      const hasClassificationChange =
+        node.nodeType !== normalizedNode.nodeType ||
+        node.fiveWhysRole !== normalizedNode.fiveWhysRole ||
+        node.isRootCause !== normalizedNode.isRootCause ||
+        node.isSuspectedCause !== normalizedNode.isSuspectedCause ||
+        node.label !== normalizedNode.label ||
+        JSON.stringify(node.detailFields || {}) !== JSON.stringify(normalizedNode.detailFields || {}) ||
+        JSON.stringify(node.visualStyle || {}) !== JSON.stringify(normalizedNode.visualStyle || {});
+
+      if (hasClassificationChange) {
+        classificationPatch.set(node.id, normalizedNode);
+      }
+    });
 
     if (arrangedNodes.length !== nodes.length || arrangedNodeById.size !== nodes.length) {
       setErrorMessage('Canvas rearrange was blocked because the layout result did not match the current canvas.');
       return;
     }
 
-    if (areRcaNodeSnapshotsEqual(historySnapshot, arrangedNodes) || !layoutPatch.size) {
-      fitVisibleProjectIntoView({ delay: 140, force: true, padding: 0.16 });
+    if (!layoutPatch.size && !classificationPatch.size) {
+      fitRcaNodeSnapshotIntoView(arrangedNodes, selectedSession.methodology, {
+        force: true,
+        padding: 0.18,
+        repeatDelays: [80, 260, 560]
+      });
       return;
     }
 
     setIsWorking(true);
     setErrorMessage('');
     recordCanvasHistory(historySnapshot);
-    setNodes((currentNodes) => applyRcaCanvasLayoutPatch(currentNodes, layoutPatch));
+    setNodes(arrangedNodes);
 
     try {
-      const updatedNodes = await Promise.all([...layoutPatch].map(([nodeId, uiCoordinates]) => (
-        updateCollaborativeRcaNode(selectedIncident.id, selectedSession.id, nodeId, {
-          uiCoordinates
-        })
-      )));
+      const patchNodeIds = new Set([...layoutPatch.keys(), ...classificationPatch.keys()]);
+      const updatedNodes = await Promise.all([...patchNodeIds].map((nodeId) => {
+        const patchValue = layoutPatch.get(nodeId);
+        const normalizedNode = classificationPatch.get(nodeId);
+
+        return updateCollaborativeRcaNode(selectedIncident.id, selectedSession.id, nodeId, {
+          ...(patchValue?.connectionHandles ? { connectionHandles: patchValue.connectionHandles } : {}),
+          ...(Object.prototype.hasOwnProperty.call(patchValue || {}, 'parentNodeId') ? { parentNodeId: patchValue?.parentNodeId ?? null } : {}),
+          ...(patchValue ? { uiCoordinates: patchValue.uiCoordinates } : {}),
+          ...(normalizedNode ? {
+            detailFields: normalizedNode.detailFields,
+            fiveWhysRole: normalizedNode.fiveWhysRole,
+            isRootCause: normalizedNode.isRootCause,
+            isSuspectedCause: normalizedNode.isSuspectedCause,
+            label: normalizedNode.label,
+            nodeType: normalizedNode.nodeType,
+            visualStyle: normalizedNode.visualStyle
+          } : {})
+        });
+      }));
       const updatedNodeById = new Map(updatedNodes.map((node) => [node.id, node]));
 
       setNodes((currentNodes) => currentNodes.map((node) => updatedNodeById.get(node.id) || node));
-      fitVisibleProjectIntoView({ delay: 140, force: true, padding: 0.16 });
+      fitRcaNodeSnapshotIntoView(arrangedNodes, selectedSession.methodology, {
+        force: true,
+        padding: 0.18,
+        repeatDelays: [80, 260, 560]
+      });
     } catch (error) {
       setErrorMessage(getErrorMessage(error));
       setNodes(historySnapshot);
@@ -5336,7 +10997,7 @@ function RcaWorkspaceInner() {
   }
 
   async function applyCanvasHistorySnapshot(targetSnapshot: RcaCanvasHistorySnapshot) {
-    if (!selectedIncident || !selectedSession || isReferenceProjectActive || isWorking) {
+    if (!selectedIncident || !selectedSession || isReferenceProjectActive || isWorking || isSelectedRcaCaseClosed) {
       return false;
     }
 
@@ -5445,6 +11106,32 @@ function RcaWorkspaceInner() {
 
   const context = workspace?.context || null;
   contextRef.current = context;
+  const evidenceLibraryUsers = React.useMemo(() => {
+    const usersByUid = new Map<string, RcaUserSummary>();
+    const rememberUser = (user?: RcaUserSummary | null) => {
+      if (user?.uid && !usersByUid.has(user.uid)) {
+        usersByUid.set(user.uid, user);
+      }
+    };
+
+    rememberUser(selectedIncident?.owner || null);
+    selectedIncident?.collaborators.forEach(rememberUser);
+    collaboratorCandidates.forEach(rememberUser);
+    selectedCollaborators.forEach(rememberUser);
+
+    if (context?.user.uid && !usersByUid.has(context.user.uid)) {
+      usersByUid.set(context.user.uid, {
+        departmentName: context.department.name,
+        displayName: context.user.displayName,
+        profilePhotoCacheKey: null,
+        profilePhotoUrl: null,
+        roleName: context.user.roleName,
+        uid: context.user.uid
+      });
+    }
+
+    return Array.from(usersByUid.values());
+  }, [collaboratorCandidates, context, selectedCollaborators, selectedIncident]);
   const methodology = selectedSession?.methodology || 'ISHIKAWA';
   const contextMenuTargetNode = canvasContextMenu?.targetNodeId
     ? visibleNodes.find((node) => node.id === canvasContextMenu.targetNodeId) || null
@@ -5453,9 +11140,13 @@ function RcaWorkspaceInner() {
     ? 'category'
     : contextMenuTargetNode?.nodeType === 'STICKY_NOTE'
       ? 'sticky'
-      : contextMenuTargetNode && (isFishboneCauseNode(contextMenuTargetNode) || contextMenuTargetNode.nodeType === 'WHY')
-        ? 'cause'
-        : null;
+      : contextMenuTargetNode?.nodeType === 'COMMENT'
+        ? 'comment'
+        : contextMenuTargetNode?.nodeType === 'FAULT_GATE'
+          ? 'faultGate'
+          : contextMenuTargetNode && (isFishboneCauseNode(contextMenuTargetNode) || contextMenuTargetNode.nodeType === 'WHY')
+            ? 'cause'
+            : null;
   const splineEditorNode = splineStyleEditor
     ? visibleNodes.find((node) => node.id === splineStyleEditor.nodeId) || null
     : null;
@@ -5464,9 +11155,39 @@ function RcaWorkspaceInner() {
     (selectedSession?.methodology === 'ISHIKAWA' || selectedSession?.methodology === '5_WHYS')
     ? contextMenuTargetNode.id
     : undefined;
-  const hasIncidentCanvasNode = nodes.some((node) => getFiveWhysNodeRole(node) === 'INCIDENT');
+  const hasIncidentCanvasNode = nodes.some((node) => node.status !== 'DELETED' && getFiveWhysNodeRole(node) === 'INCIDENT');
+  const hasIncidentDetailsCanvasNode = nodes.some((node) => node.status !== 'DELETED' && getFiveWhysNodeRole(node) === 'INCIDENT_DETAILS');
+  const hasProblemCanvasNode = nodes.some((node) => node.status !== 'DELETED' && getFiveWhysNodeRole(node) === 'PROBLEM');
+  const hasContainmentOrProblemCanvasNode = nodes.some((node) => {
+    const role = getFiveWhysNodeRole(node);
+
+    return node.status !== 'DELETED' && (role === 'CONTAINMENT' || role === 'PROBLEM');
+  });
+  const hasFiveWhysInvestigationCanvasNode = nodes.some((node) => {
+    const role = getFiveWhysNodeRole(node);
+
+    return node.status !== 'DELETED' && node.nodeType === 'WHY' && (role === 'FIVE_WHYS' || role === 'ANSWER');
+  });
+  const canAddFishboneStructure = Boolean(
+    !isReferenceProjectActive &&
+    !isSelectedRcaCaseClosed &&
+    selectedIncident &&
+    selectedSession &&
+    selectedSession.methodology === 'ISHIKAWA' &&
+    hasProblemCanvasNode
+  );
+  const canAddFiveWhysStructure = Boolean(
+    !isReferenceProjectActive &&
+    !isSelectedRcaCaseClosed &&
+    selectedIncident &&
+    selectedSession &&
+    selectedSession.methodology === 'ISHIKAWA' &&
+    hasProblemCanvasNode &&
+    !hasFiveWhysInvestigationCanvasNode
+  );
   const canContextMenuAddNode = Boolean(
     !isReferenceProjectActive &&
+    !isSelectedRcaCaseClosed &&
     selectedIncident &&
     selectedSession &&
     hasIncidentCanvasNode &&
@@ -5474,6 +11195,7 @@ function RcaWorkspaceInner() {
   );
   const canContextMenuCreateIncidentNode = Boolean(
     !isReferenceProjectActive &&
+    !isSelectedRcaCaseClosed &&
     selectedIncident &&
     selectedSession &&
     !hasIncidentCanvasNode &&
@@ -5481,21 +11203,38 @@ function RcaWorkspaceInner() {
   );
   const canContextMenuDeleteNode = Boolean(
     !isReferenceProjectActive &&
+    !isSelectedRcaCaseClosed &&
     selectedIncident &&
     selectedSession &&
-    (contextMenuKind === 'cause' || contextMenuKind === 'sticky')
+    (
+      contextMenuKind === 'cause' ||
+      contextMenuKind === 'faultGate' ||
+      contextMenuKind === 'sticky' ||
+      contextMenuKind === 'comment' ||
+      (contextMenuKind === 'category' && isEmptyFishboneBranchCategoryNode(contextMenuTargetNode, nodes))
+    )
   );
+  const missingFishboneBranchOptions = getMissingFishboneBranchOptions(visibleNodes);
   const canContextMenuEditNode = Boolean(
     !isReferenceProjectActive &&
+    !isSelectedRcaCaseClosed &&
     selectedIncident &&
     selectedSession &&
     contextMenuKind
+  );
+  const canContextMenuReactToNode = Boolean(
+    !isReferenceProjectActive &&
+    !isSelectedRcaCaseClosed &&
+    selectedIncident &&
+    selectedSession &&
+    contextMenuTargetNode
   );
   const contextMenuReportIncidentNode = isRcaIncidentReportNode(contextMenuTargetNode, visibleNodes)
     ? contextMenuTargetNode
     : selectedReportIncidentNode;
   const canContextMenuGenerateReport = Boolean(
     !isReferenceProjectActive &&
+    !isSelectedRcaCaseClosed &&
     selectedIncident &&
     selectedSession &&
     contextMenuReportIncidentNode
@@ -5506,6 +11245,7 @@ function RcaWorkspaceInner() {
   const canUndoCanvas = Boolean(
     workspaceView === 'canvas' &&
     !isReferenceProjectActive &&
+    !isSelectedRcaCaseClosed &&
     selectedIncident &&
     selectedSession &&
     canvasUndoStack.length &&
@@ -5515,20 +11255,37 @@ function RcaWorkspaceInner() {
   const canRedoCanvas = Boolean(
     workspaceView === 'canvas' &&
     !isReferenceProjectActive &&
+    !isSelectedRcaCaseClosed &&
     selectedIncident &&
     selectedSession &&
     canvasRedoStack.length &&
     !isWorking &&
     !isLoadingSession
   );
+  const zoomRegionStyle: React.CSSProperties | null = zoomRegion && canvasSurfaceRef.current
+    ? (() => {
+      const surfaceBounds = canvasSurfaceRef.current.getBoundingClientRect();
+      const left = Math.min(zoomRegion.startClientX, zoomRegion.currentClientX) - surfaceBounds.left;
+      const top = Math.min(zoomRegion.startClientY, zoomRegion.currentClientY) - surfaceBounds.top;
+      const width = Math.abs(zoomRegion.currentClientX - zoomRegion.startClientX);
+      const height = Math.abs(zoomRegion.currentClientY - zoomRegion.startClientY);
+
+      return {
+        height,
+        left,
+        top,
+        width
+      };
+    })()
+    : null;
 
   React.useEffect(() => {
-    if (workspaceView !== 'canvas') {
+    if (workspaceView !== 'canvas' || isPresentationMode) {
       return undefined;
     }
 
     function handleCanvasToolKeyDown(event: KeyboardEvent) {
-      if (event.metaKey || event.ctrlKey || event.altKey || isEditableShortcutTarget(event.target)) {
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || isEditableShortcutEvent(event)) {
         return;
       }
 
@@ -5640,6 +11397,7 @@ function RcaWorkspaceInner() {
     handleAutoArrangeCanvas,
     handleMethodologyChange,
     handleRefreshCanvas,
+    isPresentationMode,
     isWorking,
     openNodeStyleEditor,
     selectedIncident,
@@ -5658,12 +11416,12 @@ function RcaWorkspaceInner() {
   };
 
   React.useEffect(() => {
-    if (workspaceView !== 'canvas' || isReferenceProjectActive) {
+    if (workspaceView !== 'canvas' || isReferenceProjectActive || isPresentationMode) {
       return undefined;
     }
 
     function handleCanvasHistoryKeyDown(event: KeyboardEvent) {
-      if (!(event.metaKey || event.ctrlKey) || event.altKey || isEditableShortcutTarget(event.target)) {
+      if (event.defaultPrevented || !(event.metaKey || event.ctrlKey) || event.altKey || isEditableShortcutEvent(event)) {
         return;
       }
 
@@ -5690,7 +11448,7 @@ function RcaWorkspaceInner() {
     window.addEventListener('keydown', handleCanvasHistoryKeyDown);
 
     return () => window.removeEventListener('keydown', handleCanvasHistoryKeyDown);
-  }, [canvasRedoStack, canvasUndoStack, isReferenceProjectActive, isWorking, workspaceView]);
+  }, [canvasRedoStack, canvasUndoStack, isPresentationMode, isReferenceProjectActive, isWorking, workspaceView]);
 
   return (
     <section
@@ -5698,10 +11456,26 @@ function RcaWorkspaceInner() {
       ref={workspaceRootRef}
       style={{ backgroundColor: canvasThemeStyles.backgroundColor }}
     >
+      <style>
+        {`
+          @keyframes rcaReactionPop {
+            0% { transform: translateY(4px) scale(0.72); opacity: 0; }
+            42% { transform: translateY(-5px) scale(1.18); opacity: 1; }
+            100% { transform: translateY(0) scale(1); opacity: 1; }
+          }
+
+          @keyframes rcaReactionPaletteIn {
+            from { opacity: 0; transform: translateY(8px) scale(0.97); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+          }
+        `}
+      </style>
       <RcaCanvasToastStack
         isLoadingVisible={workspaceView === 'canvas' && isLoadingSession}
         isSavingVisible={isWorking || isTitleAutosaving || isCanvasAutosaving}
       />
+      <RcaClosedCaseFloatingLabel isVisible={workspaceView === 'canvas' && isSelectedRcaCaseClosed} />
+      <RcaSelectedNodeTypeFloatingLabel label={workspaceView === 'canvas' && !isPresentationMode && !isSelectedRcaCaseClosed ? selectedNodeTypeLabel : ''} />
 
       {workspaceView === 'dashboard' ? (
         <>
@@ -5711,7 +11485,6 @@ function RcaWorkspaceInner() {
             isLoading={isLoading}
             onCreateProject={() => setIsIncidentLauncherOpen(true)}
             onDeleteIncident={(incident) => void handleDeleteIncidentProject(incident)}
-            onOpenReferenceProject={handleOpenReferenceProject}
             onRefresh={() => void loadWorkspace()}
             onSelectIncident={handleOpenIncidentProject}
             summary={summary}
@@ -5736,27 +11509,43 @@ function RcaWorkspaceInner() {
       ) : (
         <>
           {selectedIncident && selectedSession ? (
-            <ReactFlow
+            <div
               className="relative z-10 h-full w-full"
+              onContextMenuCapture={(event) => {
+                if (zoomRegionGestureRef.current || event.metaKey || event.ctrlKey) {
+                  event.preventDefault();
+                }
+              }}
+              onPointerDownCapture={handleZoomRegionPointerDownCapture}
+              ref={canvasSurfaceRef}
+            >
+            <ReactFlow
+              className="h-full w-full"
               autoPanOnConnect
               connectionLineStyle={RCA_CONNECTION_LINE_STYLE}
               connectionLineType={ConnectionLineType.Bezier}
-              connectionMode={ConnectionMode.Strict}
+              connectionMode={ConnectionMode.Loose}
               connectionRadius={44}
               edges={flowEdges}
-              edgesReconnectable={canEditCanvasConnections}
+              edgesReconnectable={!isPresentationMode && canEditCanvasConnections}
               edgeTypes={edgeTypes}
-              fitViewOptions={{ maxZoom: 0.78, minZoom: 0.25, padding: 0.14 }}
+              fitViewOptions={{
+                maxZoom: RCA_CANVAS_FIT_MAX_ZOOM,
+                minZoom: RCA_CANVAS_MIN_ZOOM,
+                padding: 0.14
+              }}
               isValidConnection={isValidRcaCanvasConnection}
-              minZoom={0.25}
+              maxZoom={RCA_CANVAS_MANUAL_MAX_ZOOM}
+              minZoom={RCA_CANVAS_MIN_ZOOM}
               nodeExtent={RCA_CANVAS_COORDINATE_EXTENT}
               nodes={flowNodes}
-              nodesConnectable={canEditCanvasConnections}
-              nodesDraggable={!isReferenceProjectActive && !isWorking}
+              nodesConnectable={!isPresentationMode && canEditCanvasConnections}
+              nodesDraggable={!isPresentationMode && !isReferenceProjectActive && !isSelectedRcaCaseClosed && !isWorking}
               nodeTypes={nodeTypes}
               onConnect={handleCanvasConnect}
               multiSelectionKeyCode={['Meta', 'Control']}
               onEdgeClick={(event, edge) => {
+                setNodeHintAnchor(null);
                 const isMultiSelect = event.metaKey || event.ctrlKey || event.shiftKey;
 
                 setSelectedFlowEdgeIds((currentSelection) => {
@@ -5781,6 +11570,7 @@ function RcaWorkspaceInner() {
                 openSplineStyleEditor(event, edge);
               }}
               onNodeClick={(event, flowNode) => {
+                setNodeHintAnchor(null);
                 closeCanvasContextMenu();
                 closeNodeStyleEditor();
                 closeSplineStyleEditor();
@@ -5815,7 +11605,13 @@ function RcaWorkspaceInner() {
               }}
               onNodeContextMenu={(event, flowNode) => {
                 const node = visibleNodes.find((candidateNode) => candidateNode.id === flowNode.id);
-                const targetNodeId = node?.nodeType === 'ISHIKAWA_CATEGORY' || node?.nodeType === 'STICKY_NOTE' || node?.nodeType === 'WHY' || (node && isFishboneCauseNode(node))
+                const targetNodeId = node && (
+                  node.nodeType === 'ISHIKAWA_CATEGORY' ||
+                  node.nodeType === 'FAULT_GATE' ||
+                  node.nodeType === 'WHY' ||
+                  isFreeformRcaAnnotationNode(node) ||
+                  isFishboneCauseNode(node)
+                )
                   ? node.id
                   : undefined;
 
@@ -5827,6 +11623,8 @@ function RcaWorkspaceInner() {
               onNodesChange={handleFlowNodesChange}
               onPaneContextMenu={openCanvasContextMenu}
               onPaneClick={() => {
+                setNodeHintAnchor(null);
+                setReactionPaletteAnchor(null);
                 closeCanvasContextMenu();
                 closeNodeStyleEditor();
                 closeSplineStyleEditor();
@@ -5841,12 +11639,13 @@ function RcaWorkspaceInner() {
               }}
               onReconnect={handleCanvasReconnect}
               onReconnectEnd={handleCanvasReconnectEnd}
-              panOnDrag={canvasInteractionMode === 'pan'}
+              panActivationKeyCode={null}
+              panOnDrag={!zoomRegion && canvasInteractionMode === 'pan'}
               proOptions={{ hideAttribution: true }}
               reconnectRadius={18}
               selectionMode={SelectionMode.Partial}
               selectionKeyCode={null}
-              selectionOnDrag={canvasInteractionMode === 'select'}
+              selectionOnDrag={!zoomRegion && canvasInteractionMode === 'select'}
               snapGrid={canvasSnapGrid}
               snapToGrid={isCanvasSnapEnabled}
               translateExtent={RCA_CANVAS_COORDINATE_EXTENT}
@@ -5862,41 +11661,94 @@ function RcaWorkspaceInner() {
               ) : null}
               <RcaCanvasGuide methodology={selectedSession.methodology} />
               <RcaAlignmentGuides guides={alignmentGuides} />
-              <MiniMap
-                className="!bottom-24 !right-6 !rounded-2xl !border !border-white/50 !bg-white/80 !shadow-xl !backdrop-blur-md max-lg:!hidden"
-                maskColor="rgba(15, 23, 42, 0.08)"
-                nodeColor={(node) => getMiniMapColor(((node.data as unknown) as RcaNodeCardData).node)}
-                pannable
-                zoomable
-              />
-              <Controls
-                className="!bottom-24 !left-6 !rounded-2xl !border !border-white/50 !bg-white/85 !shadow-xl !backdrop-blur-md"
-                showInteractive={false}
-              >
-                <RcaCanvasControlButtons
-                  interactionMode={canvasInteractionMode}
-                  isSnapEnabled={isCanvasSnapEnabled}
-                  onInteractionModeChange={setCanvasInteractionMode}
-                  onSnapToggle={() => setIsCanvasSnapEnabled((isEnabled) => !isEnabled)}
-                />
-              </Controls>
+              {!isPresentationMode ? (
+                <>
+                  <MiniMap
+                    className="!bottom-24 !right-6 !rounded-2xl !border !border-white/50 !bg-white/80 !shadow-xl !backdrop-blur-md max-lg:!hidden"
+                    maskColor="rgba(15, 23, 42, 0.08)"
+                    nodeColor={(node) => getMiniMapColor(((node.data as unknown) as RcaNodeCardData).node)}
+                    pannable
+                    zoomable
+                  />
+                  <Controls
+                    className="!bottom-24 !left-6 !rounded-2xl !border !border-white/50 !bg-white/85 !shadow-xl !backdrop-blur-md"
+                    showInteractive={false}
+                  >
+                    <RcaCanvasControlButtons
+                      interactionMode={canvasInteractionMode}
+                      isSnapEnabled={isCanvasSnapEnabled}
+                      onInteractionModeChange={setCanvasInteractionMode}
+                      onSnapToggle={() => setIsCanvasSnapEnabled((isEnabled) => !isEnabled)}
+                    />
+                  </Controls>
+                </>
+              ) : null}
             </ReactFlow>
+            {zoomRegionStyle ? (
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute z-[80] rounded-[3px] border border-slate-950 bg-slate-950/[0.03] shadow-[0_0_0_1px_rgba(255,255,255,0.55),0_10px_28px_rgba(15,23,42,0.10)]"
+                style={zoomRegionStyle}
+              />
+            ) : null}
+            </div>
           ) : null}
 
-          <RcaCanvasContextMenu
+          {!isPresentationMode ? (
+            <>
+              <RcaNodeHintPopover
+                anchor={nodeHintAnchor}
+                autoOpenEnabled={isNodeHintAutoOpenEnabled}
+                node={hintedNode}
+                nodes={visibleNodes}
+                onClose={() => setNodeHintAnchor(null)}
+                onToggleAutoOpen={() => setIsNodeHintAutoOpenEnabled((isEnabled) => !isEnabled)}
+              />
+
+              <RcaNodeReactionPalette
+                anchor={reactionPaletteAnchor}
+                node={reactionPaletteNode}
+                onClose={() => setReactionPaletteAnchor(null)}
+                onSelectReaction={(nodeId, emoji) => void handleToggleNodeReaction(nodeId, emoji)}
+              />
+
+              <RcaGuidedPathPanel
+                isOpen={isGuidedPathOpen}
+                onClose={() => setIsGuidedPathOpen(false)}
+                selectedNode={selectedNode}
+                summary={guidedPathSummary}
+              />
+
+              <RcaConnectionRecommendationsPanel
+                canEdit={canEditCanvasConnections}
+                isOpen={isConnectionRecommendationsOpen}
+                isWorking={isWorking}
+                onClose={() => setIsConnectionRecommendationsOpen(false)}
+                onCreateRecommendedNode={(action) => void handleCreateRecommendedConnection(action)}
+                selectedNode={selectedNode}
+                summary={connectionRecommendationSummary}
+              />
+
+              <RcaCanvasContextMenu
             canvasTheme={canvasTheme}
+            canAddFishbone={canAddFishboneStructure}
+            canAddFiveWhys={canAddFiveWhysStructure}
             canAddNode={canContextMenuAddNode}
             canCreateIncidentNode={canContextMenuCreateIncidentNode}
             canDeleteNode={canContextMenuDeleteNode}
             canEditNode={canContextMenuEditNode}
             canGenerateReport={canContextMenuGenerateReport}
             canRearrange={canRearrangeCanvas}
+            canReactToNode={canContextMenuReactToNode}
             contextMenu={canvasContextMenu}
             gridSize={canvasGridSize}
+            hasContainmentOrProblemCanvasNode={hasContainmentOrProblemCanvasNode}
+            hasIncidentDetailsCanvasNode={hasIncidentDetailsCanvasNode}
             isGridVisible={isCanvasGridVisible}
             isSnapEnabled={isCanvasSnapEnabled}
             isWorking={isWorking}
             methodology={methodology}
+            missingFishboneBranches={missingFishboneBranchOptions}
             nodeMenuKind={contextMenuKind}
             onAddNode={() => {
               const coordinates = canvasContextMenu
@@ -5910,6 +11762,18 @@ function RcaWorkspaceInner() {
                 parentNodeId: null,
                 skipAutoArrange: Boolean(canvasContextMenu)
               });
+            }}
+            onAddFishbone={() => {
+              closeCanvasContextMenu();
+              void handleAddFishboneStructure();
+            }}
+            onAddFishboneBranch={(branchLabel) => {
+              closeCanvasContextMenu();
+              void handleAddMissingFishboneBranch(branchLabel);
+            }}
+            onAddFiveWhys={() => {
+              closeCanvasContextMenu();
+              void handleAddFiveWhysStructure();
             }}
             onAddFiveWhysNodeRole={(fiveWhysNodeRole) => {
               const coordinates = canvasContextMenu
@@ -5945,6 +11809,19 @@ function RcaWorkspaceInner() {
               void handleAddNode({
                 coordinates,
                 nodeType: 'STICKY_NOTE',
+                parentNodeId: null,
+                skipAutoArrange: true
+              });
+            }}
+            onAddComment={() => {
+              const coordinates = canvasContextMenu
+                ? { x: canvasContextMenu.canvasX, y: canvasContextMenu.canvasY }
+                : undefined;
+
+              closeCanvasContextMenu();
+              void handleAddNode({
+                coordinates,
+                nodeType: 'COMMENT',
                 parentNodeId: null,
                 skipAutoArrange: true
               });
@@ -5998,6 +11875,22 @@ function RcaWorkspaceInner() {
 
               closeCanvasContextMenu();
             }}
+            onOpenReactions={() => {
+              const contextMenuSnapshot = canvasContextMenu;
+
+              if (contextMenuSnapshot?.targetNodeId) {
+                const workspaceBounds = workspaceRootRef.current?.getBoundingClientRect();
+                const targetNode = visibleNodes.find((node) => node.id === contextMenuSnapshot.targetNodeId) || null;
+                handleOpenReactionPalette({
+                  avoidRect: getNodeReactionAvoidRect(targetNode),
+                  nodeId: contextMenuSnapshot.targetNodeId,
+                  x: (workspaceBounds?.left || 0) + contextMenuSnapshot.x,
+                  y: (workspaceBounds?.top || 0) + contextMenuSnapshot.y
+                });
+              }
+
+              closeCanvasContextMenu();
+            }}
             onPasteText={() => {
               const nodeId = canvasContextMenu?.targetNodeId;
 
@@ -6040,61 +11933,93 @@ function RcaWorkspaceInner() {
               setCanvasTheme(nextTheme);
               closeCanvasContextMenu();
             }}
-          />
+              />
 
-          <RcaNodeStyleToolbar
-            editor={nodeStyleEditor}
-            isWorking={isWorking}
-            node={styleEditorNode}
-            onChange={(nodeId, visualStylePatch) => void handleNodeVisualStyleChange(nodeId, visualStylePatch)}
-          />
+              <RcaNodeStyleToolbar
+                editor={nodeStyleEditor}
+                isWorking={isWorking}
+                node={styleEditorNode}
+                onChange={(nodeId, visualStylePatch) => void handleNodeVisualStyleChange(nodeId, visualStylePatch)}
+              />
 
-          <RcaCanvasShortcutPanel
-            isOpen={isCanvasShortcutListOpen}
-            onClose={() => setIsCanvasShortcutListOpen(false)}
-          />
+              <RcaCanvasShortcutPanel
+                isOpen={isCanvasShortcutListOpen}
+                onClose={() => setIsCanvasShortcutListOpen(false)}
+              />
 
-          <RcaSplineStyleToolbar
-            editor={splineStyleEditor}
-            isWorking={isWorking}
-            node={splineEditorNode}
-            onChange={(nodeId, edgeStylePatch) => void handleSplineEdgeStyleChange(nodeId, edgeStylePatch)}
-          />
+              <RcaSplineStyleToolbar
+                editor={splineStyleEditor}
+                isWorking={isWorking}
+                node={splineEditorNode}
+                onChange={(nodeId, edgeStylePatch) => void handleSplineEdgeStyleChange(nodeId, edgeStylePatch)}
+              />
 
-          <RcaWarRoomHeader
+              <RcaWarRoomHeader
             context={context}
             incident={selectedIncident}
             incidents={workspace?.incidents || []}
             isIncidentShelfOpen={isIncidentShelfOpen}
             isLoading={isLoading}
             isReferenceProjectActive={isReferenceProjectActive}
+            onIncidentAssetChange={(assetId) => handleIncidentAssetChange(assetId)}
+            onIncidentRiskFactorsChange={(riskFactors) => handleIncidentRiskFactorsChange(riskFactors)}
             onIncidentTitleChange={(title) => handleIncidentTitleChange(title)}
             onOpenIncidentLauncher={() => setIsIncidentLauncherOpen(true)}
-            onOpenReferenceProject={handleOpenReferenceProject}
             onRefreshIncidentQueue={() => void loadWorkspace()}
             onSelectIncident={handleOpenIncidentProject}
             onTitleSavingChange={setIsTitleAutosaving}
             onToggleIncidentShelf={() => setIsIncidentShelfOpen((isOpen) => !isOpen)}
             selectedIncidentId={selectedIncidentId}
             summary={summary}
-          />
+              />
 
-          <RcaCanvasBackButton
+              <RcaCanvasBackButton
+            canOpenSelectedNodeHint={canOpenSelectedNodeHint}
             canRedo={canRedoCanvas}
             canUndo={canUndoCanvas}
             canInviteCollaborators={Boolean(!isReferenceProjectActive && selectedIncident?.accessRole === 'OWNER')}
+            isEvidenceLibraryOpen={isEvidenceLibraryOpen}
             isCollaboratorInviteOpen={isCollaboratorInviteOpen}
+            isNodeHintOpen={Boolean(nodeHintAnchor)}
             isWorking={isWorking || isLoadingSession}
             onBackToDashboard={() => {
               closeCanvasContextMenu();
               handleBackToDashboard();
             }}
+            onOpenSelectedNodeHint={() => {
+              if (selectedHintNodeId) {
+                openNodeHintFromCanvasControl(selectedHintNodeId);
+              }
+            }}
+            onToggleEvidenceLibrary={() => setIsEvidenceLibraryOpen((isOpen) => !isOpen)}
             onInviteCollaborators={() => void handleToggleCollaboratorInvite()}
             onRedo={handleRedoCanvas}
+            selectedNodeCount={selectedFlowNodeIds.size}
             onUndo={handleUndoCanvas}
-          />
+              />
 
-          <RcaKnowledgeBasePanel
+              <EvidenceLibraryWindow
+            currentUserDisplayName={context?.user.displayName || null}
+            currentUserUid={context?.user.uid || null}
+            isOpen={isEvidenceLibraryOpen}
+            linkedEvidenceIds={evidenceLibraryTargetNode?.attachedEvidence
+              .map(getRcaLibraryEvidenceIdFromAttachedEvidence)
+              .filter((evidenceId): evidenceId is string => Boolean(evidenceId)) || []}
+            onClose={() => {
+              setIsEvidenceLibraryOpen(false);
+              setEvidenceLibraryTargetNodeId(null);
+            }}
+            onLinkEvidence={evidenceLibraryTargetNode ? (items) => void handleAttachLibraryEvidenceToNode(items) : undefined}
+            resolveProfilePhotoUrl={getRcaAuthenticatedObjectUrl}
+            selectionTargetLabel={evidenceLibraryTargetNode ? getRcaGuidedNodeReadinessLabel(evidenceLibraryTargetNode) : undefined}
+            subtitle={evidenceLibraryTargetNode
+              ? 'Select one or more library records, then add them to this Evidence node.'
+              : 'Upload evidence once. RCA and RAILS workflows can link visible evidence records from this shared library.'}
+            title={evidenceLibraryTargetNode ? 'Add Evidence From Library' : 'RCA Evidence Library'}
+            users={evidenceLibraryUsers}
+              />
+
+              <RcaKnowledgeBasePanel
             incident={isReferenceProjectActive ? null : selectedIncident}
             isOpen={isKnowledgeBaseOpen}
             nodes={visibleNodes}
@@ -6107,77 +12032,93 @@ function RcaWorkspaceInner() {
             selectedNode={selectedNode}
             selectedSplineCount={selectedFlowEdgeIds.size}
             session={isReferenceProjectActive ? null : selectedSession}
-          />
-
-          {!isReferenceProjectActive && selectedIncident?.accessRole === 'OWNER' ? (
-            <RcaCollaboratorInvitePanel
-              candidates={collaboratorCandidates}
-              invitedUsers={selectedIncident.collaborators}
-              isLoading={isLoadingCollaborators}
-              isOpen={isCollaboratorInviteOpen}
-              isRemovingUid={removingCollaboratorUid}
-              isSending={isSendingCollaboratorInvite}
-              onCancel={handleCancelCollaboratorInvite}
-              onQueryChange={setCollaboratorSearchQuery}
-              onRemoveInvited={(user) => void handleRemoveInvitedCollaborator(user)}
-              onRemoveSelected={handleRemoveSelectedCollaborator}
-              onSelect={handleSelectCollaborator}
-              onSend={() => void handleSendCollaboratorInvite()}
-              query={collaboratorSearchQuery}
-              selectedUsers={selectedCollaborators}
-            />
-          ) : null}
-
-          <RcaPresenceBar
-            collaborators={selectedIncident?.collaborators || []}
-            context={context}
-            isOffset={isReferenceProjectActive}
-            owner={selectedIncident?.owner || null}
-            participants={realtimeParticipants}
-            realtimeStatus={realtimeStatus}
-          />
-
-          {!isReferenceProjectActive && selectedIncident && selectedSession ? (
-            <RcaActivityLogPanel
-              isLoading={isLoadingActivityLogs}
-              isOpen={isActivityLogOpen}
-              logs={activityLogs}
-              onToggle={() => setIsActivityLogOpen((isOpen) => !isOpen)}
-            />
-          ) : null}
-
-          {isReferenceProjectActive && !selectedNode ? (
-            <button
-              aria-label="Download audit package"
-              className="absolute right-5 top-5 z-[40] grid h-11 w-11 place-items-center rounded-full border border-emerald-200/70 bg-emerald-500 text-white shadow-2xl shadow-emerald-950/20 ring-1 ring-white/40 transition hover:-translate-y-0.5 hover:bg-emerald-400 hover:shadow-emerald-950/30 active:scale-95 max-lg:right-4 max-lg:top-4"
-              onClick={handleDownloadAuditPackage}
-              title="Download audit package"
-              type="button"
-            >
-              <Download aria-hidden="true" size={18} />
-            </button>
-          ) : null}
-
-          {isReferenceProjectActive ? (
-            <>
-              <RcaReferenceJourneyRail
-                activeStepId={referenceStepId}
-                onSelectStep={handleSelectReferenceStep}
-                steps={REFERENCE_RCA_PROJECT.steps}
               />
-              <RcaLiveCursor />
-            </>
-          ) : null}
 
-          <RcaCanvasToolbar
+              {!isReferenceProjectActive && selectedIncident?.accessRole === 'OWNER' ? (
+                <RcaCollaboratorInvitePanel
+                  candidates={collaboratorCandidates}
+                  invitedUsers={selectedIncident.collaborators}
+                  isLoading={isLoadingCollaborators}
+                  isOpen={isCollaboratorInviteOpen}
+                  isRemovingUid={removingCollaboratorUid}
+                  isSending={isSendingCollaboratorInvite}
+                  onCancel={handleCancelCollaboratorInvite}
+                  onQueryChange={setCollaboratorSearchQuery}
+                  onRemoveInvited={(user) => void handleRemoveInvitedCollaborator(user)}
+                  onRemoveSelected={handleRemoveSelectedCollaborator}
+                  onSelect={handleSelectCollaborator}
+                  onSend={() => void handleSendCollaboratorInvite()}
+                  query={collaboratorSearchQuery}
+                  selectedUsers={selectedCollaborators}
+                />
+              ) : null}
+
+              <RcaPresenceBar
+                collaborators={selectedIncident?.collaborators || []}
+                context={context}
+                isOffset={isReferenceProjectActive}
+                owner={selectedIncident?.owner || null}
+                participants={realtimeParticipants}
+                realtimeStatus={realtimeStatus}
+              />
+
+              {!isReferenceProjectActive && selectedIncident && selectedSession ? (
+                <RcaActivityLogPanel
+                  isLoading={isLoadingActivityLogs}
+                  isOpen={isActivityLogOpen}
+                  logs={activityLogs}
+                  onToggle={() => setIsActivityLogOpen((isOpen) => !isOpen)}
+                />
+              ) : null}
+
+              <RcaBranchWalkthroughBar
+                activeStep={activeBranchWalkthroughStep}
+                isOpen={isBranchWalkthroughOpen}
+                onClose={() => setIsBranchWalkthroughOpen(false)}
+                onFitCurrent={() => focusBranchWalkthroughStep(activeBranchWalkthroughStep)}
+                onNext={() => goToBranchWalkthroughStep(branchWalkthroughIndex + 1)}
+                onPrevious={() => goToBranchWalkthroughStep(branchWalkthroughIndex - 1)}
+                onSelectStep={goToBranchWalkthroughStep}
+                stepCount={branchWalkthroughSteps.length}
+                stepIndex={branchWalkthroughIndex}
+                steps={branchWalkthroughSteps}
+              />
+
+              {isReferenceProjectActive && !selectedNode ? (
+                <button
+                  aria-label="Download audit package"
+                  className="absolute right-5 top-5 z-[40] grid h-11 w-11 place-items-center rounded-full border border-emerald-200/70 bg-emerald-500 text-white shadow-2xl shadow-emerald-950/20 ring-1 ring-white/40 transition hover:-translate-y-0.5 hover:bg-emerald-400 hover:shadow-emerald-950/30 active:scale-95 max-lg:right-4 max-lg:top-4"
+                  onClick={handleDownloadAuditPackage}
+                  title="Download audit package"
+                  type="button"
+                >
+                  <Download aria-hidden="true" size={18} />
+                </button>
+              ) : null}
+
+              {isReferenceProjectActive ? (
+                <>
+                  <RcaReferenceJourneyRail
+                    activeStepId={referenceStepId}
+                    onSelectStep={handleSelectReferenceStep}
+                    steps={REFERENCE_RCA_PROJECT.steps}
+                  />
+                  <RcaLiveCursor />
+                </>
+              ) : null}
+
+              <RcaCanvasToolbar
             activityLogCount={activityLogs.filter((log) => log.action !== 'NODE_MOVED').length}
-            canAddFishbone={hasIncidentCanvasNode}
+            canWalkBranches={branchWalkthroughSteps.length > 0}
             canGenerateReport={Boolean(selectedReportIncidentNode)}
             isActivityLogOpen={isActivityLogOpen}
+            isAutoFocusSelectionEnabled={isAutoFocusSelectionEnabled}
+            isBranchWalkthroughOpen={isBranchWalkthroughOpen}
+            isConnectionRecommendationsOpen={isConnectionRecommendationsOpen}
+            isGuidedPathOpen={isGuidedPathOpen}
             isReferenceProject={isReferenceProjectActive}
             isWorking={isWorking}
             methodology={methodology}
-            onAddNode={() => void handleAddFishboneStructure()}
             onAutoArrange={() => void handleAutoArrangeCanvas()}
             onCreateSession={() => void handleCreateSession()}
             onGenerateReport={() => {
@@ -6185,13 +12126,40 @@ function RcaWorkspaceInner() {
                 setReportIncidentNodeId(selectedReportIncidentNode.id);
               }
             }}
+            onOpenBranchWalkthrough={openBranchWalkthrough}
+            onToggleConnectionRecommendations={() => setIsConnectionRecommendationsOpen((isOpen) => !isOpen)}
+            onToggleGuidedPath={() => setIsGuidedPathOpen((isOpen) => !isOpen)}
             onToggleActivityLog={() => setIsActivityLogOpen((isOpen) => !isOpen)}
+            onToggleAutoFocusSelection={() => setIsAutoFocusSelectionEnabled((isEnabled) => !isEnabled)}
             onMethodologyChange={(nextMethodology) => void handleMethodologyChange(nextMethodology)}
             onOpenIncidentLauncher={() => setIsIncidentLauncherOpen(true)}
-            session={selectedSession}
+                onEnterPresentationMode={enterPresentationMode}
+                connectionRecommendationCount={selectedNode ? (
+                  connectionRecommendationSummary.addActions.length
+                ) : 0}
+                recommendationCount={guidedPathSummary.qualityScore.selectedNodeQuality?.gaps.length || 0}
+                session={selectedSession}
+              />
+            </>
+          ) : null}
+
+          <RcaPresentationControlBar
+            activeStep={activePresentationStep}
+            interactionMode={canvasInteractionMode}
+            isOpen={isPresentationMode}
+            onExit={exitPresentationMode}
+            onFitCanvas={() => fitVisibleProjectIntoView({ force: true, padding: 0.16 })}
+            onFitCurrent={() => focusRcaPresentationStep(activePresentationStep)}
+            onInteractionModeChange={setCanvasInteractionMode}
+            onNext={() => goToPresentationStep(presentationStepIndex + 1)}
+            onPrevious={() => goToPresentationStep(presentationStepIndex - 1)}
+            onSelectStep={goToPresentationStep}
+            stepCount={presentationSteps.length}
+            stepIndex={presentationStepIndex}
+            steps={presentationSteps}
           />
 
-          {reportIncidentNode && selectedIncident && selectedSession ? (
+          {!isPresentationMode && reportIncidentNode && selectedIncident && selectedSession ? (
             <RcaIncidentReportModal
               incident={selectedIncident}
               incidentNode={reportIncidentNode}
@@ -6201,14 +12169,16 @@ function RcaWorkspaceInner() {
             />
           ) : null}
 
-          <RcaIncidentLauncher
+          {!isPresentationMode ? (
+            <RcaIncidentLauncher
             draft={incidentDraft}
             isOpen={isIncidentLauncherOpen}
             isWorking={isWorking}
             onClose={() => setIsIncidentLauncherOpen(false)}
             onCreateIncident={handleCreateIncident}
             onDraftChange={setIncidentDraft}
-          />
+            />
+          ) : null}
 
           <RcaCanvasDestructiveActionDialog
             action={pendingCanvasDestructiveAction}
@@ -6217,8 +12187,10 @@ function RcaWorkspaceInner() {
               ? nodes.find((node) => node.id === pendingCanvasDestructiveAction.nodeId) || null
               : null}
             selectedEdgeCount={selectedFlowEdgeIds.size}
+            selectedEmptyBranchCount={nodes.filter((node) => selectedFlowNodeIds.has(node.id) && isEmptyFishboneBranchCategoryNode(node, nodes)).length}
             selectedNodeCount={selectedFlowNodeIds.size}
-            isCompleteFishboneStructureSelection={isCompleteFishboneStructureSelection(nodes, selectedFlowNodeIds)}
+            isCompleteFishboneStructureSelection={isCompleteFishboneStructureSelection(nodes, selectedFlowNodeIds) ||
+              nodes.some((node) => selectedFlowNodeIds.has(node.id) && node.status !== 'DELETED' && node.nodeType === 'FAULT_GATE')}
             totalNodeCount={nodes.length}
             onCancel={() => setPendingCanvasDestructiveAction(null)}
             onConfirm={handleConfirmCanvasDestructiveAction}
@@ -6226,6 +12198,7 @@ function RcaWorkspaceInner() {
 
           <RcaInspectorDrawer
             incidentId={isReferenceProjectActive ? null : selectedIncident?.id || null}
+            isCaseClosed={isSelectedRcaCaseClosed}
             isReferenceProject={isReferenceProjectActive}
             isRealtimeReady={realtimeStatus === 'subscribed'}
             isWorking={isWorking}
@@ -6249,10 +12222,43 @@ function RcaWorkspaceInner() {
               rcaRealtimeClient.sendNodeActivity(selectedIncident.id, selectedSession.id, nodeId, 'editing');
               rcaRealtimeClient.sendNodeLiveLabel(selectedIncident.id, selectedSession.id, nodeId, label);
             }}
+            onOpenEvidenceLibrary={handleOpenEvidenceLibraryForNode}
             onPreview={handleNodePreview}
             onSave={(input) => void handleNodeSave(input)}
             sessionId={isReferenceProjectActive ? null : selectedSession?.id || null}
           />
+          {selectedCanvasEvidencePhoto ? (
+            <RcaEvidencePhotoViewer
+              currentIndex={selectedCanvasEvidencePhotoIndex}
+              item={selectedCanvasEvidencePhoto.item}
+              onClose={() => setCanvasEvidencePhotoViewer(null)}
+              onNext={() => {
+                if (!canvasEvidencePhotoItems.length || !canvasEvidencePhotoViewer) {
+                  return;
+                }
+
+                const nextIndex = (selectedCanvasEvidencePhotoIndex + 1) % canvasEvidencePhotoItems.length;
+                setCanvasEvidencePhotoViewer({
+                  evidenceKey: getEvidenceKey(canvasEvidencePhotoItems[nextIndex].item),
+                  nodeId: canvasEvidencePhotoViewer.nodeId
+                });
+              }}
+              onPrevious={() => {
+                if (!canvasEvidencePhotoItems.length || !canvasEvidencePhotoViewer) {
+                  return;
+                }
+
+                const previousIndex = (selectedCanvasEvidencePhotoIndex - 1 + canvasEvidencePhotoItems.length) % canvasEvidencePhotoItems.length;
+                setCanvasEvidencePhotoViewer({
+                  evidenceKey: getEvidenceKey(canvasEvidencePhotoItems[previousIndex].item),
+                  nodeId: canvasEvidencePhotoViewer.nodeId
+                });
+              }}
+              onOpenOriginal={(item) => void handleOpenCanvasEvidenceOriginal(item)}
+              photoCount={canvasEvidencePhotoItems.length}
+              previewUrl={selectedCanvasEvidencePhoto.previewUrl}
+            />
+          ) : null}
         </>
       )}
       <RcaRemovedAccessDialog
@@ -6273,7 +12279,6 @@ function RcaProjectDashboard({
   isLoading,
   onCreateProject,
   onDeleteIncident,
-  onOpenReferenceProject,
   onRefresh,
   onSelectIncident,
   summary
@@ -6283,27 +12288,15 @@ function RcaProjectDashboard({
   isLoading: boolean;
   onCreateProject: () => void;
   onDeleteIncident: (incident: RcaIncident) => void;
-  onOpenReferenceProject: () => void;
   onRefresh: () => void;
   onSelectIncident: (incidentId: string) => void;
   summary: RcaWorkspaceResponse['summary'];
 }) {
   const companyName = context?.company.companyName || 'RCA workspace';
   const departmentName = context?.department.name || 'All departments';
-  const referencePreviewNodes = React.useMemo(() => buildReferenceProjectNodes(), []);
   const [projectSearch, setProjectSearch] = React.useState('');
   const [projectPreviewNodesByIncidentId, setProjectPreviewNodesByIncidentId] = React.useState<Record<string, RcaNode[]>>({});
   const normalizedProjectSearch = projectSearch.trim().toLowerCase();
-  const referenceSearchText = [
-    REFERENCE_RCA_PROJECT.incident.title,
-    'sealed project',
-    'sealed',
-    'die cut production line',
-    'oven area',
-    'reference project',
-    'rpn 27'
-  ].join(' ').toLowerCase();
-  const shouldShowReferenceProject = !normalizedProjectSearch || referenceSearchText.includes(normalizedProjectSearch);
   const filteredIncidents = React.useMemo(() => {
     if (!normalizedProjectSearch) {
       return incidents;
@@ -6324,7 +12317,7 @@ function RcaProjectDashboard({
     });
   }, [incidents, normalizedProjectSearch]);
   const hasProjectSearch = Boolean(normalizedProjectSearch);
-  const hasProjectSearchResults = shouldShowReferenceProject || filteredIncidents.length > 0;
+  const hasProjectSearchResults = filteredIncidents.length > 0;
 
   React.useEffect(() => {
     let isCurrent = true;
@@ -6418,20 +12411,6 @@ function RcaProjectDashboard({
         </div>
 
         <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(min(100%,220px),1fr))]">
-          {shouldShowReferenceProject ? (
-            <RcaProjectCard
-              assetLabel="Die Cut production line - oven area"
-              dateLabel={formatAuditDate(REFERENCE_RCA_PROJECT.sealedAt)}
-              eyebrow="Sealed project"
-              onOpen={onOpenReferenceProject}
-              rpnScore={REFERENCE_RCA_PROJECT.incident.rpnScore}
-              statusLabel="Sealed"
-              thumbnailNodes={referencePreviewNodes}
-              thumbnailVariant="reference"
-              title={REFERENCE_RCA_PROJECT.incident.title}
-            />
-          ) : null}
-
           {filteredIncidents.map((incident) => (
             <RcaProjectCard
               accessRole={incident.accessRole}
@@ -6472,7 +12451,7 @@ function RcaProjectDashboard({
 
         {!isLoading && !hasProjectSearch && !incidents.length ? (
           <div className="rounded-2xl border border-dashed border-slate-300 bg-white/72 px-4 py-3 text-sm text-slate-500">
-            No additional RCA projects have been created yet.
+            No RCA projects have been created yet.
           </div>
         ) : null}
       </div>
@@ -6645,7 +12624,7 @@ function RcaDeleteProjectDialog({
             {title}
           </p>
           <p className="mt-3 text-sm leading-5 text-slate-600">
-            This removes the project from the RCA dashboard. The sealed default project stays protected.
+            This removes the project from the RCA dashboard and preserves the audit trail according to workspace retention rules.
           </p>
         </div>
 
@@ -6682,6 +12661,7 @@ function RcaCanvasDestructiveActionDialog({
   onCancel,
   onConfirm,
   selectedEdgeCount,
+  selectedEmptyBranchCount,
   selectedNodeCount,
   totalNodeCount
 }: {
@@ -6692,9 +12672,22 @@ function RcaCanvasDestructiveActionDialog({
   onCancel: () => void;
   onConfirm: () => void;
   selectedEdgeCount: number;
+  selectedEmptyBranchCount: number;
   selectedNodeCount: number;
   totalNodeCount: number;
 }) {
+  const bulkDeleteConfirmationPhrase = 'DELETE SELECTED';
+  const selectedCanvasItemCount = selectedNodeCount + selectedEdgeCount;
+  const requiresBulkDeleteConfirmation = action?.kind === 'DELETE_SELECTION' && selectedCanvasItemCount > 5;
+  const [bulkDeleteConfirmationText, setBulkDeleteConfirmationText] = React.useState('');
+  const isBulkDeleteConfirmationValid = !requiresBulkDeleteConfirmation ||
+    bulkDeleteConfirmationText.trim() === bulkDeleteConfirmationPhrase;
+  const canConfirm = !isWorking && isBulkDeleteConfirmationValid;
+
+  React.useEffect(() => {
+    setBulkDeleteConfirmationText('');
+  }, [action?.kind, action?.nodeId, selectedCanvasItemCount]);
+
   React.useEffect(() => {
     if (!action) {
       return;
@@ -6702,13 +12695,21 @@ function RcaCanvasDestructiveActionDialog({
 
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape' && !isWorking) {
+        event.preventDefault();
+        event.stopPropagation();
         onCancel();
+      }
+
+      if (event.key === 'Enter' && canConfirm) {
+        event.preventDefault();
+        event.stopPropagation();
+        onConfirm();
       }
     }
 
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [action, isWorking, onCancel]);
+    window.addEventListener('keydown', handleKeyDown, { capture: true });
+    return () => window.removeEventListener('keydown', handleKeyDown, { capture: true });
+  }, [action, canConfirm, onCancel, onConfirm]);
 
   if (!action) {
     return null;
@@ -6719,6 +12720,7 @@ function RcaCanvasDestructiveActionDialog({
     node,
     selectedNodeCount,
     selectedEdgeCount,
+    selectedEmptyBranchCount,
     totalNodeCount,
     isCompleteFishboneStructureSelection
   );
@@ -6761,6 +12763,28 @@ function RcaCanvasDestructiveActionDialog({
           <p className="mt-3 text-sm leading-5 text-slate-600">
             {copy.body}
           </p>
+
+          {requiresBulkDeleteConfirmation ? (
+            <div className="mt-4 rounded-2xl border border-red-200 bg-red-50/70 px-4 py-3">
+              <label className="block text-xs font-semibold uppercase tracking-[0.16em] text-red-700" htmlFor="rca-bulk-delete-confirmation">
+                Bulk delete confirmation
+              </label>
+              <p className="mt-1 text-sm leading-5 text-red-900">
+                Type <span className="font-semibold">{bulkDeleteConfirmationPhrase}</span> to enable deleting these {selectedCanvasItemCount} selected canvas items.
+              </p>
+              <input
+                autoComplete="off"
+                autoFocus
+                className="mt-3 h-10 w-full rounded-xl border border-red-200 bg-white px-3 text-sm font-semibold text-slate-950 outline-none transition placeholder:font-normal placeholder:text-slate-400 focus:border-red-400 focus:ring-4 focus:ring-red-100 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={isWorking}
+                id="rca-bulk-delete-confirmation"
+                onChange={(event) => setBulkDeleteConfirmationText(event.target.value)}
+                placeholder={bulkDeleteConfirmationPhrase}
+                type="text"
+                value={bulkDeleteConfirmationText}
+              />
+            </div>
+          ) : null}
         </div>
 
         <div className="flex items-center justify-end gap-2 border-t border-slate-100 bg-slate-50/70 px-5 py-4">
@@ -6773,8 +12797,9 @@ function RcaCanvasDestructiveActionDialog({
             Cancel
           </button>
           <button
+            autoFocus={!requiresBulkDeleteConfirmation}
             className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-red-600 px-4 text-sm font-semibold text-white shadow-lg shadow-red-950/15 transition hover:bg-red-500 active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
-            disabled={isWorking}
+            disabled={!canConfirm}
             onClick={onConfirm}
             type="button"
           >
@@ -6792,6 +12817,7 @@ function getRcaCanvasDestructiveActionCopy(
   node: RcaNode | null,
   selectedNodeCount: number,
   selectedEdgeCount: number,
+  selectedEmptyBranchCount: number,
   totalNodeCount: number,
   isCompleteFishboneStructureSelection: boolean
 ) {
@@ -6808,6 +12834,26 @@ function getRcaCanvasDestructiveActionCopy(
   if (action.kind === 'DELETE_NODE') {
     const label = node?.label?.trim() || formatNodeType(node?.nodeType || 'CAUSE');
 
+    if (node?.nodeType === 'FAULT_GATE') {
+      return {
+        body: 'This removes the Fault Gate and the Fishbone work connected under it, including branch categories, causes, evidence nodes, 5 Whys, Root Cause, CAPA work, and any Approval & Closure node connected to that Fault Gate. The main Incident, Incident Details, Containment, and Problem Statement nodes remain in place. Undo can restore the previous canvas state.',
+        confirmLabel: 'Delete Fishbone',
+        eyebrow: 'Delete fishbone',
+        summary: 'The full Fishbone structure connected to this Fault Gate will be removed.',
+        title: 'Delete the Fishbone structure?'
+      };
+    }
+
+    if (node?.nodeType === 'ISHIKAWA_CATEGORY') {
+      return {
+        body: 'This removes only this empty Fishbone branch category. If this was accidental, use Undo. If you need the branch again later, right-click the Fault Gate and use Add Branch to restore the missing category.',
+        confirmLabel: 'Delete branch',
+        eyebrow: 'Delete branch',
+        summary: `${label} has no connected canvas work under it.`,
+        title: 'Delete this empty branch category?'
+      };
+    }
+
     return {
       body: 'This deletes the selected canvas item and its saved collaboration record. Undo can restore the previous canvas state.',
       confirmLabel: 'Delete item',
@@ -6820,6 +12866,8 @@ function getRcaCanvasDestructiveActionCopy(
   return {
     body: isCompleteFishboneStructureSelection
       ? 'The complete Fishbone structure is selected, so this will remove the protected scaffold along with any selected canvas content. Undo can restore the previous canvas state.'
+      : selectedEmptyBranchCount > 0
+        ? 'Selected nodes will be deleted. Empty Fishbone branch categories in this selection will also be removed. If this was accidental, use Undo. If you need a deleted branch again later, right-click the Fault Gate and use Add Branch to restore the missing category.'
       : 'Selected nodes will be deleted. Selected splines will be detached from their connected child nodes. Undo can restore the previous canvas state.',
     confirmLabel: 'Delete selected',
     eyebrow: 'Delete selected',
@@ -7034,27 +13082,45 @@ function RcaProjectCanvasSnapshot({ nodes }: { nodes: RcaNode[] }) {
 
 function RcaCanvasBackButton({
   canInviteCollaborators,
+  canOpenSelectedNodeHint,
   canRedo,
   canUndo,
   isCollaboratorInviteOpen,
+  isEvidenceLibraryOpen,
+  isNodeHintOpen,
   isWorking,
   onBackToDashboard,
   onInviteCollaborators,
+  onOpenSelectedNodeHint,
+  onToggleEvidenceLibrary,
   onRedo,
+  selectedNodeCount,
   onUndo
 }: {
   canInviteCollaborators: boolean;
+  canOpenSelectedNodeHint: boolean;
   canRedo: boolean;
   canUndo: boolean;
   isCollaboratorInviteOpen: boolean;
+  isEvidenceLibraryOpen: boolean;
+  isNodeHintOpen: boolean;
   isWorking: boolean;
   onBackToDashboard: () => void;
   onInviteCollaborators: () => void;
+  onOpenSelectedNodeHint: () => void;
+  onToggleEvidenceLibrary: () => void;
   onRedo: () => void;
+  selectedNodeCount: number;
   onUndo: () => void;
 }) {
+  const nodeHintTitle = selectedNodeCount > 1
+    ? 'Node guide is available for one selected node at a time'
+    : canOpenSelectedNodeHint
+      ? 'Open selected node guide'
+      : 'Select a node to view its guide';
+
   return (
-    <div className="absolute left-4 top-4 z-[55] inline-flex h-10 items-center gap-1 rounded-full border border-white/70 bg-white/86 p-1 text-slate-600 shadow-xl shadow-slate-900/12 ring-1 ring-slate-900/5 backdrop-blur-xl max-lg:left-3 max-lg:top-3">
+    <div className="absolute left-4 top-4 z-[55] inline-flex h-10 items-center gap-1.5 rounded-full border border-white/70 bg-white/86 p-1 text-slate-600 shadow-xl shadow-slate-900/12 ring-1 ring-slate-900/5 backdrop-blur-xl max-lg:left-3 max-lg:top-3">
       <button
         aria-label="Back to RCA dashboard"
         className="grid h-8 w-8 place-items-center rounded-full transition hover:-translate-y-0.5 hover:bg-white hover:text-cyan-700 active:scale-95"
@@ -7081,17 +13147,44 @@ function RcaCanvasBackButton({
       />
       <span className="h-5 w-px bg-slate-200" />
       <button
-        aria-label="Invite Colaborator"
+        aria-label="Open evidence library"
+        aria-pressed={isEvidenceLibraryOpen}
+        className={`grid h-8 w-8 place-items-center rounded-full transition hover:-translate-y-0.5 hover:bg-white hover:text-cyan-700 active:scale-95 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:translate-y-0 disabled:hover:bg-transparent disabled:hover:text-slate-600 ${
+          isEvidenceLibraryOpen ? 'bg-cyan-50 text-cyan-700' : ''
+        }`}
+        disabled={isWorking}
+        onClick={onToggleEvidenceLibrary}
+        title="Evidence Library"
+        type="button"
+      >
+        <FileStack aria-hidden="true" size={16} strokeWidth={2} />
+      </button>
+      <button
+        aria-label="Invite Collaborator"
         aria-pressed={isCollaboratorInviteOpen}
         className={`grid h-8 w-8 place-items-center rounded-full transition hover:-translate-y-0.5 hover:bg-white hover:text-cyan-700 active:scale-95 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:translate-y-0 disabled:hover:bg-transparent disabled:hover:text-slate-600 ${
           isCollaboratorInviteOpen ? 'bg-cyan-50 text-cyan-700' : ''
         }`}
         disabled={!canInviteCollaborators || isWorking}
         onClick={onInviteCollaborators}
-        title="Invite Colaborator"
+        title="Invite Collaborator"
         type="button"
       >
         <UserPlus aria-hidden="true" size={16} strokeWidth={2} />
+      </button>
+      <span className="h-5 w-px bg-slate-200" />
+      <button
+        aria-label="Open selected node guide"
+        aria-pressed={isNodeHintOpen}
+        className={`grid h-8 w-8 place-items-center rounded-full transition hover:-translate-y-0.5 hover:bg-white hover:text-cyan-700 active:scale-95 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:translate-y-0 disabled:hover:bg-transparent disabled:hover:text-slate-600 ${
+          isNodeHintOpen ? 'bg-cyan-50 text-cyan-700' : ''
+        }`}
+        disabled={!canOpenSelectedNodeHint || isWorking}
+        onClick={onOpenSelectedNodeHint}
+        title={nodeHintTitle}
+        type="button"
+      >
+        <MessageSquareText aria-hidden="true" size={16} strokeWidth={2} />
       </button>
     </div>
   );
@@ -7438,8 +13531,9 @@ function RcaWarRoomHeader({
   isReferenceProjectActive,
   isIncidentShelfOpen,
   isLoading,
+  onIncidentAssetChange,
+  onIncidentRiskFactorsChange,
   onIncidentTitleChange,
-  onOpenReferenceProject,
   onOpenIncidentLauncher,
   onRefreshIncidentQueue,
   onSelectIncident,
@@ -7454,8 +13548,9 @@ function RcaWarRoomHeader({
   isReferenceProjectActive: boolean;
   isIncidentShelfOpen: boolean;
   isLoading: boolean;
+  onIncidentAssetChange: (assetId: string) => Promise<void> | void;
+  onIncidentRiskFactorsChange: (riskFactors: Partial<RcaIncident['riskFactors']>) => Promise<void> | void;
   onIncidentTitleChange: (title: string) => Promise<void> | void;
-  onOpenReferenceProject: () => void;
   onOpenIncidentLauncher: () => void;
   onRefreshIncidentQueue: () => void;
   onSelectIncident: (incidentId: string) => void;
@@ -7466,14 +13561,154 @@ function RcaWarRoomHeader({
 }) {
   const [isCollapsed, setIsCollapsed] = React.useState(true);
   const incidentTitle = incident?.title || 'Untitled RCA project';
+  const incidentAssetId = incident?.assetId || '';
+  const incidentEditableAssetId = getRcaEditableIncidentAssetValue(incidentAssetId);
   const [titleDraft, setTitleDraft] = React.useState(incidentTitle);
+  const [assetDraft, setAssetDraft] = React.useState(incidentEditableAssetId);
+  const [assetSaveState, setAssetSaveState] = React.useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [titleSaveState, setTitleSaveState] = React.useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [riskSaveState, setRiskSaveState] = React.useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [occurrenceSuggestion, setOccurrenceSuggestion] = React.useState<RcaOccurrenceSuggestion | null>(null);
+  const [occurrenceSuggestionState, setOccurrenceSuggestionState] = React.useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const assetSaveRequestRef = React.useRef(0);
   const titleSaveRequestRef = React.useRef(0);
+  const riskSaveRequestRef = React.useRef(0);
+  const caseDisplayId = incident ? incident.displayId || buildFriendlyRcaDisplayId('RCA', incident.id, incident.createdAtIso) : 'RCA workspace';
+  const caseStage = incident ? getRcaIncidentStageLabel(incident) : 'No active case';
+  const caseRisk = incident ? getRcaRiskBand(incident.rpnScore) : null;
+  const isDefaultRiskProfile = incident ? isDefaultRcaRiskProfile(incident.riskFactors) : false;
+  const assetSummary = incident ? getRcaIncidentAssetSummary(incident) : { isAssigned: false, label: 'No incident selected' };
+  const openedAtLabel = incident?.createdAtIso ? formatAuditDate(incident.createdAtIso) : 'Open date pending';
+  const updatedAtLabel = incident?.updatedAtIso ? formatAuditDate(incident.updatedAtIso) : openedAtLabel;
+  const ownerLabel = incident?.owner?.displayName || context?.user.displayName || 'Owner pending';
+  const departmentLabel = incident?.departmentName || context?.department.name || 'Department pending';
+  const activeQueueCount = incidents.filter((queuedIncident) => queuedIncident.status !== 'CLOSED').length;
+  const investigatingQueueCount = incidents.filter((queuedIncident) => queuedIncident.status === 'INVESTIGATING').length;
+  const openQueueCount = incidents.filter((queuedIncident) => queuedIncident.status === 'OPEN').length;
+  const closedQueueCount = incidents.filter((queuedIncident) => queuedIncident.status === 'CLOSED').length;
+  const highRiskQueueCount = incidents.filter((queuedIncident) => queuedIncident.rpnScore >= 25 && queuedIncident.status !== 'CLOSED').length;
 
   React.useEffect(() => {
     setTitleDraft(incidentTitle);
+    setAssetDraft(incidentEditableAssetId);
+    setAssetSaveState('idle');
     setTitleSaveState('idle');
-  }, [incident?.id, incidentTitle]);
+    setRiskSaveState('idle');
+    setOccurrenceSuggestion(null);
+    setOccurrenceSuggestionState('idle');
+  }, [incident?.id, incidentEditableAssetId, incidentTitle]);
+
+  React.useEffect(() => {
+    if (!incident || isReferenceProjectActive) {
+      setOccurrenceSuggestion(null);
+      setOccurrenceSuggestionState('idle');
+      return;
+    }
+
+    let isCurrent = true;
+
+    setOccurrenceSuggestionState('loading');
+    void getRcaOccurrenceSuggestion(incident.id)
+      .then((suggestion) => {
+        if (!isCurrent) {
+          return;
+        }
+
+        setOccurrenceSuggestion(suggestion);
+        setOccurrenceSuggestionState('ready');
+      })
+      .catch(() => {
+        if (!isCurrent) {
+          return;
+        }
+
+        setOccurrenceSuggestion(null);
+        setOccurrenceSuggestionState('error');
+      });
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [incident?.id, incident?.updatedAtIso, isReferenceProjectActive]);
+
+  const updateRiskFactor = React.useCallback(async (
+    key: keyof RcaIncident['riskFactors'],
+    value: number
+  ) => {
+    if (!incident || isReferenceProjectActive) {
+      return;
+    }
+
+    if (incident.riskFactors[key] === value) {
+      return;
+    }
+
+    const requestId = riskSaveRequestRef.current + 1;
+    riskSaveRequestRef.current = requestId;
+    setRiskSaveState('saving');
+
+    try {
+      await onIncidentRiskFactorsChange({
+        ...incident.riskFactors,
+        [key]: value
+      });
+
+      if (riskSaveRequestRef.current === requestId) {
+        setRiskSaveState('saved');
+        window.setTimeout(() => {
+          if (riskSaveRequestRef.current === requestId) {
+            setRiskSaveState('idle');
+          }
+        }, 1200);
+      }
+    } catch {
+      if (riskSaveRequestRef.current === requestId) {
+        setRiskSaveState('error');
+      }
+    }
+  }, [incident, isReferenceProjectActive, onIncidentRiskFactorsChange]);
+
+  const commitAsset = React.useCallback(async (nextAssetId: string) => {
+    const trimmedAssetId = nextAssetId.trim();
+
+    if (!incident || isReferenceProjectActive) {
+      return;
+    }
+
+    if (!trimmedAssetId) {
+      setAssetDraft(incidentAssetId);
+      setAssetSaveState('idle');
+      return;
+    }
+
+    if (trimmedAssetId === incidentEditableAssetId.trim()) {
+      setAssetDraft(incidentEditableAssetId);
+      setAssetSaveState('idle');
+      return;
+    }
+
+    const requestId = assetSaveRequestRef.current + 1;
+    assetSaveRequestRef.current = requestId;
+    setAssetSaveState('saving');
+
+    try {
+      await onIncidentAssetChange(trimmedAssetId);
+
+      if (assetSaveRequestRef.current === requestId) {
+        setAssetDraft(trimmedAssetId);
+        setAssetSaveState('saved');
+        window.setTimeout(() => {
+          if (assetSaveRequestRef.current === requestId) {
+            setAssetSaveState('idle');
+          }
+        }, 1200);
+      }
+    } catch {
+      if (assetSaveRequestRef.current === requestId) {
+        setAssetSaveState('error');
+      }
+    }
+  }, [incident, incidentEditableAssetId, isReferenceProjectActive, onIncidentAssetChange]);
 
   const commitTitle = React.useCallback(async (nextTitle: string) => {
     const trimmedTitle = nextTitle.trim();
@@ -7539,22 +13774,18 @@ function RcaWarRoomHeader({
 
   return (
     <>
-      <div className={`absolute left-4 top-16 z-40 flex max-w-[min(680px,calc(100%-470px))] items-start gap-3 transition-[opacity,transform] duration-300 ease-out max-lg:left-3 max-lg:right-3 max-lg:top-16 max-lg:max-w-none ${
-        isCollapsed ? 'pointer-events-none -translate-x-[calc(100%+28px)] opacity-0' : 'translate-x-0 opacity-100'
+      <div className={`pointer-events-none absolute left-4 top-16 z-40 flex max-w-[min(680px,calc(100%-470px))] items-start gap-3 transition-[opacity,transform] duration-300 ease-out max-lg:left-3 max-lg:right-3 max-lg:top-16 max-lg:max-w-none ${
+        isCollapsed ? '-translate-x-[calc(100%+28px)] opacity-0' : 'translate-x-0 opacity-100'
       }`}>
-        <div className="w-[390px] max-w-[calc(100vw-32px)] max-lg:w-full max-lg:max-w-none">
-          <section className="min-w-0 rounded-[22px] border border-white/60 bg-white/78 px-4 py-3 shadow-xl shadow-slate-900/10 ring-1 ring-slate-900/5 backdrop-blur-xl">
+        <div className="rca-case-summary-stack pointer-events-none flex w-[460px] max-w-[calc(100vw-32px)] flex-col overflow-hidden max-lg:w-full max-lg:max-w-none">
+          <section className="rca-case-summary-card rca-hidden-scrollbar pointer-events-auto min-h-0 min-w-0 flex-none overflow-y-auto rounded-[22px] border border-white/60 bg-white/82 px-4 py-3 shadow-xl shadow-slate-900/10 ring-1 ring-slate-900/5 backdrop-blur-xl">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <div className="flex min-w-0 items-center gap-2">
-                  <div className="flex min-w-0 items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-700">
+                  <div className="flex min-w-0 items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-700">
                     {isReferenceProjectActive ? <Flame aria-hidden="true" className="shrink-0" size={13} /> : <Bell aria-hidden="true" className="shrink-0" size={13} />}
-                    <span className="truncate">
-                      {incident
-                        ? isReferenceProjectActive
-                          ? `Sealed enterprise RCA project - RPN ${incident.rpnScore}`
-                          : `New RCA incident - RPN ${incident.rpnScore}`
-                        : 'RCA war room'}
+                    <span className="min-w-0 break-words leading-4">
+                      {incident ? `${caseDisplayId} - ${caseStage}` : 'RCA case command center'}
                     </span>
                   </div>
                 </div>
@@ -7596,33 +13827,172 @@ function RcaWarRoomHeader({
             </div>
 
             <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-600">
-              <span className="inline-flex h-7 items-center gap-1 rounded-full bg-slate-950 px-2.5 font-semibold text-white">
-                <Gauge aria-hidden="true" size={12} />
-                {isReferenceProjectActive ? `RPN ${incident?.rpnScore || 27}` : `Avg RPN ${summary.averageRpn}`}
-              </span>
+              {incident ? (
+                <span
+                  className={`inline-flex h-7 items-center gap-1 rounded-full px-2.5 font-normal ring-1 ${caseRisk?.className || 'bg-slate-950 text-white ring-slate-900'}`}
+                  title={`${isDefaultRiskProfile ? 'Initial default risk profile' : 'Risk profile'} = Severity ${incident.riskFactors.severity} x Occurrence ${incident.riskFactors.occurrence} x Detection ${incident.riskFactors.detection}`}
+                >
+                  <Gauge aria-hidden="true" size={12} />
+                  {isDefaultRiskProfile ? 'Initial risk review pending' : `Risk score ${incident.rpnScore} - ${caseRisk?.label || 'Risk pending'}`}
+                </span>
+              ) : null}
               {isReferenceProjectActive ? (
                 <span className="inline-flex h-7 items-center gap-1 rounded-full bg-emerald-50 px-2.5 font-semibold text-emerald-700 ring-1 ring-emerald-200">
                   <PackageCheck aria-hidden="true" size={12} />
                   Audit package ready
                 </span>
               ) : null}
-              <span className="truncate">{context ? `${context.company.companyName} / ${context.department.name}` : 'Loading tenant workspace...'}</span>
-              {incident ? <span className="truncate">{incident.assetId}</span> : null}
+              <span className="inline-flex h-7 items-center rounded-full bg-white/80 px-2.5 font-normal text-slate-700 ring-1 ring-slate-200">
+                {caseStage}
+              </span>
             </div>
 
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <button
-                className={`inline-flex h-9 items-center justify-center gap-1.5 rounded-full border px-3 text-xs font-semibold shadow-sm transition hover:-translate-y-0.5 active:scale-95 ${
-                  isReferenceProjectActive
-                    ? 'border-cyan-200 bg-cyan-50 text-cyan-700 shadow-cyan-950/5'
-                    : 'border-slate-200 bg-white/90 text-slate-700 hover:border-cyan-300 hover:text-cyan-700'
-                }`}
-                onClick={onOpenReferenceProject}
-                type="button"
-              >
-                <Sparkles aria-hidden="true" size={15} />
-                Fire case
-              </button>
+            {incident ? (
+              <div className="mt-2 grid grid-cols-1 text-xs">
+                <div className="border-b border-slate-200/70 px-1 py-1.5 text-[11px] leading-4 text-slate-700">
+                  <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-cyan-700">Case metadata</p>
+                  <p className="mt-1">
+                    These fields are saved on the incident record, not inside a canvas node. They feed the incident queue, reports, recurrence checks, and system risk recommendations.
+                  </p>
+                </div>
+                <div className="border-b border-slate-200/70 px-1 py-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-slate-400">Case asset / area</p>
+                    {assetSaveState !== 'idle' ? (
+                      <span className={`text-[10px] font-normal uppercase tracking-[0.12em] ${
+                        assetSaveState === 'error'
+                          ? 'text-red-600'
+                          : assetSaveState === 'saved'
+                            ? 'text-emerald-600'
+                            : 'text-cyan-700'
+                      }`}>
+                        {assetSaveState === 'error' ? 'Not saved' : assetSaveState === 'saved' ? 'Saved' : 'Saving'}
+                      </span>
+                    ) : null}
+                  </div>
+                  <input
+                    aria-label="Incident asset or process area"
+                    className={`mt-1 h-8 w-full rounded-xl border bg-white px-2.5 text-xs font-normal text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-cyan-300 focus:ring-2 focus:ring-cyan-500/15 ${
+                      assetSummary.isAssigned ? 'border-slate-200' : 'border-amber-200 text-amber-700'
+                    }`}
+                    disabled={!incident || isReferenceProjectActive}
+                    maxLength={120}
+                    onBlur={(event) => void commitAsset(event.currentTarget.value)}
+                    onChange={(event) => setAssetDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        event.currentTarget.blur();
+                      }
+
+                      if (event.key === 'Escape') {
+                        event.preventDefault();
+                        setAssetDraft(incidentEditableAssetId);
+                        event.currentTarget.blur();
+                      }
+                    }}
+                    placeholder="Add asset, line, equipment, or process area"
+                    value={assetDraft}
+                  />
+                  {assetSummary.isAssigned ? (
+                    <p className="mt-1 text-[11px] leading-4 text-slate-500">
+                      One primary incident-level asset or area used by reports, queue filters, and occurrence recommendations.
+                    </p>
+                  ) : (
+                    <p className="mt-1 text-[11px] leading-4 text-amber-700">
+                      Add one primary asset, line, equipment, or process area before relying on recurrence checks or occurrence recommendations.
+                    </p>
+                  )}
+                </div>
+                <div className="border-b border-slate-200/70 px-1 py-1.5">
+                  <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-slate-400">Owner / Dept.</p>
+                  <p className="mt-1 break-words leading-4 text-slate-900">{ownerLabel} / {departmentLabel}</p>
+                </div>
+                <div className="border-b border-slate-200/70 px-1 py-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-slate-400">{isDefaultRiskProfile ? 'Initial risk profile' : 'Risk calculation'}</p>
+                    {riskSaveState !== 'idle' ? (
+                      <span className={`text-[10px] font-normal uppercase tracking-[0.12em] ${
+                        riskSaveState === 'error'
+                          ? 'text-red-600'
+                          : riskSaveState === 'saved'
+                            ? 'text-emerald-600'
+                            : 'text-cyan-700'
+                      }`}>
+                        {riskSaveState === 'error' ? 'Not saved' : riskSaveState === 'saved' ? 'Saved' : 'Saving'}
+                      </span>
+                    ) : null}
+                  </div>
+                  <p className="mt-1 break-words leading-4 text-slate-900">
+                    {isDefaultRiskProfile
+                      ? 'Severity, occurrence, and detection are initialized at 3 until triage updates the assessment.'
+                      : `Severity ${incident.riskFactors.severity} x Occurrence ${incident.riskFactors.occurrence} x Detection ${incident.riskFactors.detection} = ${incident.rpnScore}`}
+                  </p>
+                  <div className="mt-2 grid grid-cols-3 gap-2">
+                    {([
+                      ['severity', 'Severity'],
+                      ['occurrence', 'Occurrence'],
+                      ['detection', 'Detection']
+                    ] as const).map(([key, label]) => (
+                      <label className="min-w-0 text-[10px] font-normal uppercase tracking-[0.12em] text-slate-500" key={key}>
+                        <span className="mb-1 block truncate">{label}</span>
+                        <select
+                          className="h-8 w-full rounded-xl border border-slate-200 bg-white px-2 text-xs font-normal normal-case tracking-normal text-slate-900 outline-none transition focus:border-cyan-300 focus:ring-2 focus:ring-cyan-500/15 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+                          disabled={isReferenceProjectActive || riskSaveState === 'saving'}
+                          onChange={(event) => void updateRiskFactor(key, Number(event.target.value))}
+                          value={incident.riskFactors[key]}
+                        >
+                          {RCA_RISK_FACTOR_OPTIONS.map((option) => (
+                            <option key={option} value={option}>{option}</option>
+                          ))}
+                        </select>
+                      </label>
+                    ))}
+                  </div>
+                  <div className="mt-1.5 border-t border-cyan-100 bg-cyan-50/45 px-1.5 py-1.5 text-[11px] leading-4 text-slate-700">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-[10px] font-medium uppercase tracking-[0.14em] text-cyan-700">System occurrence recommendation</p>
+                        <p className="mt-1">
+                          {occurrenceSuggestionState === 'loading'
+                            ? 'Checking RCA history for recurrence patterns...'
+                            : occurrenceSuggestionState === 'error'
+                              ? 'Recommendation is temporarily unavailable.'
+                              : occurrenceSuggestion
+                                ? `${occurrenceSuggestion.reason} Recommended occurrence: ${occurrenceSuggestion.recommendedOccurrence}. Confidence: ${formatStatus(occurrenceSuggestion.confidence)}.`
+                                : 'No recommendation loaded yet.'}
+                        </p>
+                      </div>
+                      {occurrenceSuggestion && occurrenceSuggestion.recommendedOccurrence !== incident.riskFactors.occurrence ? (
+                        <button
+                          className="shrink-0 rounded-full border border-cyan-200 bg-white px-2.5 py-1 text-[10px] font-normal uppercase tracking-[0.12em] text-cyan-700 transition hover:border-cyan-300 hover:text-cyan-800 disabled:cursor-not-allowed disabled:opacity-60"
+                          disabled={riskSaveState === 'saving'}
+                          onClick={() => void updateRiskFactor('occurrence', occurrenceSuggestion.recommendedOccurrence)}
+                          type="button"
+                        >
+                          Apply
+                        </button>
+                      ) : null}
+                    </div>
+                    {occurrenceSuggestion?.evidence.length ? (
+                      <div className="mt-2 space-y-1 border-t border-cyan-100 pt-2 text-slate-600">
+                        {occurrenceSuggestion.evidence.slice(0, 2).map((evidence) => (
+                          <p className="break-words" key={evidence}>{evidence}</p>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="px-1 py-1.5">
+                  <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-slate-400">Timeline</p>
+                  <p className="mt-1 break-words leading-4 text-slate-900" title={`Opened ${openedAtLabel}. Last updated ${updatedAtLabel}.`}>
+                    Opened {openedAtLabel} / Updated {updatedAtLabel}
+                  </p>
+                </div>
+              </div>
+            ) : null}
+
+            <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
               <button
                 className="inline-flex h-9 items-center justify-center gap-1.5 rounded-full border border-slate-200 bg-white/90 px-3 text-xs font-semibold text-slate-700 shadow-sm transition hover:-translate-y-0.5 hover:border-cyan-300 hover:text-cyan-700 active:scale-95"
                 onClick={onOpenIncidentLauncher}
@@ -7631,15 +14001,20 @@ function RcaWarRoomHeader({
                 <Plus aria-hidden="true" size={15} />
                 Incident
               </button>
+              <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-[11px] font-semibold text-slate-500">
+                <span className="rounded-full bg-slate-100 px-2 py-1">{activeQueueCount} active</span>
+                <span className="rounded-full bg-blue-50 px-2 py-1 text-blue-700">{openQueueCount} intake</span>
+                <span className="rounded-full bg-cyan-50 px-2 py-1 text-cyan-700">{investigatingQueueCount} investigating</span>
+                <span className="rounded-full bg-amber-50 px-2 py-1 text-amber-700">{highRiskQueueCount} high risk</span>
+                <span className="rounded-full bg-emerald-50 px-2 py-1 text-emerald-700">{closedQueueCount} closed</span>
+              </div>
             </div>
           </section>
 
           {isIncidentShelfOpen ? (
             <RcaIncidentShelf
               incidents={incidents}
-              isReferenceProjectActive={isReferenceProjectActive}
               isLoading={isLoading}
-              onOpenReferenceProject={onOpenReferenceProject}
               onRefresh={onRefreshIncidentQueue}
               onSelectIncident={onSelectIncident}
               selectedIncidentId={selectedIncidentId}
@@ -7647,7 +14022,7 @@ function RcaWarRoomHeader({
           ) : null}
         </div>
 
-        <div className="flex shrink-0 flex-col gap-2">
+        <div className="pointer-events-auto flex shrink-0 flex-col gap-2">
           <button
             aria-expanded={isIncidentShelfOpen}
             className="inline-flex h-9 items-center justify-center gap-1.5 rounded-full border border-white/60 bg-white/78 px-3 text-xs font-semibold text-slate-800 shadow-xl shadow-slate-900/10 backdrop-blur-xl transition hover:-translate-y-0.5 hover:bg-white active:scale-95"
@@ -7656,23 +14031,17 @@ function RcaWarRoomHeader({
           >
             <SlidersHorizontal aria-hidden="true" size={15} />
             Queue
-            <span className="rounded-full bg-red-500 px-1.5 py-0.5 text-[11px] leading-none text-white">{summary.criticalIncidents}</span>
+            <span className="rounded-full bg-red-500 px-1.5 py-0.5 text-[11px] leading-none text-white">{highRiskQueueCount}</span>
             <ChevronDown aria-hidden="true" size={13} />
           </button>
           {incidents.length > 1 ? (
             <select
               className="h-9 max-w-40 rounded-full border border-white/60 bg-white/78 px-3 text-xs font-semibold text-slate-800 shadow-xl shadow-slate-900/10 backdrop-blur-xl outline-none transition hover:bg-white"
               onChange={(event) => {
-                if (event.target.value === REFERENCE_PROJECT_INCIDENT_ID) {
-                  onOpenReferenceProject();
-                  return;
-                }
-
                 onSelectIncident(event.target.value);
               }}
-              value={isReferenceProjectActive ? REFERENCE_PROJECT_INCIDENT_ID : selectedIncidentId || ''}
+              value={selectedIncidentId || ''}
             >
-              <option value={REFERENCE_PROJECT_INCIDENT_ID}>Fire under oven audit project</option>
               {incidents.map((incidentOption) => (
                 <option key={incidentOption.id} value={incidentOption.id}>
                   {incidentOption.title || incidentOption.assetId}
@@ -7831,6 +14200,7 @@ const RCA_KNOWLEDGE_SECTIONS = [
     items: [
       'Create one Incident node first. Treat it as the parent container for the entire RCA.',
       'Capture only verified facts in the Incident and Incident Details nodes.',
+      'Use the Problem node only for the formal problem statement, expected standard, actual condition, measurable gap, and RCA scope.',
       'Use Containment before analysis so the issue is controlled while the team investigates.'
     ]
   },
@@ -7846,14 +14216,14 @@ const RCA_KNOWLEDGE_SECTIONS = [
     heading: 'Evidence Standard',
     items: [
       'Attach photos, records, measurements, logs, interviews, SOPs, batch data, and verification documents to the node they prove.',
-      'Do not mark a root cause because it sounds likely. Mark it only when evidence supports it.',
+      'Do not mark a cause as verified because it sounds likely. Mark it only when evidence supports it.',
       'Keep links traceable and readable by the RCA team.'
     ]
   },
   {
     heading: 'CAPA Closure',
     items: [
-      'Corrective actions must fix the verified root cause.',
+      'Corrective actions must fix the verified cause.',
       'Preventive actions must reduce recurrence risk across the system.',
       'Close only after risk review, effectiveness verification, lessons learned, and approval are complete.'
     ]
@@ -7975,14 +14345,14 @@ function RcaKnowledgeBasePanel({
       <button
         aria-expanded={isOpen}
         aria-label="Open RCA knowledge base"
-        className={`absolute left-[184px] top-4 grid h-11 w-11 place-items-center rounded-2xl border border-white/60 bg-white/84 text-slate-700 shadow-2xl shadow-slate-900/12 ring-1 ring-slate-900/5 backdrop-blur-xl transition duration-200 hover:-translate-y-0.5 hover:border-cyan-200 hover:text-cyan-700 active:scale-95 max-lg:left-[176px] max-lg:top-3 ${
+        className={`absolute left-[304px] top-4 grid h-11 w-11 place-items-center rounded-2xl border border-white/60 bg-white/84 text-slate-700 shadow-2xl shadow-slate-900/12 ring-1 ring-slate-900/5 backdrop-blur-xl transition duration-200 hover:-translate-y-0.5 hover:border-cyan-200 hover:text-cyan-700 active:scale-95 max-lg:left-[294px] max-lg:top-3 ${
           isOpen ? 'z-[58] border-cyan-200 text-cyan-700 opacity-35' : 'z-[70]'
         }`}
         onClick={onToggle}
         title="RCA knowledge base"
         type="button"
       >
-        <BookOpen aria-hidden="true" size={20} />
+        <Bot aria-hidden="true" size={20} strokeWidth={2} />
       </button>
 
       <aside
@@ -8052,7 +14422,7 @@ function RcaKnowledgeBasePanel({
               <h3 className="text-sm font-bold text-slate-950">Ask RCA AI</h3>
             </div>
             <p className="mt-2 text-xs leading-5 text-slate-500">
-              Ask about RCA flow, node usage, evidence gaps, containment, root cause logic, CAPA, or closure readiness.
+              Ask about RCA flow, node usage, evidence gaps, containment, cause logic, CAPA, or closure readiness.
             </p>
             <form className="mt-3 flex items-end gap-2" onSubmit={handleSubmit}>
               <textarea
@@ -8228,6 +14598,8 @@ function getRcaKnowledgeSelectedNodeSummary(
   const role = getFiveWhysNodeRole(node);
   const roleLabel = node.nodeType === 'STICKY_NOTE'
     ? 'Sticky Note'
+    : node.nodeType === 'COMMENT'
+      ? 'Comment'
     : node.nodeType === 'ISHIKAWA_CATEGORY'
       ? 'Fishbone Branch'
       : node.nodeType === 'FAULT_GATE'
@@ -8236,19 +14608,23 @@ function getRcaKnowledgeSelectedNodeSummary(
   const childCount = nodes.filter((candidateNode) => candidateNode.parentNodeId === node.id).length;
   const evidenceCount = node.attachedEvidence.length;
 
-  if (node.nodeType === 'STICKY_NOTE') {
+  if (isFreeformRcaAnnotationNode(node)) {
     return {
       details: [
-        'Sticky Notes are lightweight collaboration notes for comments, observations, and team reminders.',
+        node.nodeType === 'COMMENT'
+          ? 'Comments capture review feedback, follow-up questions, and decision notes without crowding the RCA structure.'
+          : 'Sticky Notes are lightweight collaboration notes for observations and team reminders.',
         'They are not evidence by themselves and should not replace an Evidence node.',
-        `This note currently has ${childCount} connected child item${childCount === 1 ? '' : 's'}.`
+        `This ${node.nodeType === 'COMMENT' ? 'comment' : 'note'} currently has ${childCount} connected child item${childCount === 1 ? '' : 's'}.`
       ],
       guidance: [
-        'Use a Sticky Note to coach the investigation or capture a temporary thought.',
-        'Connect the note to the exact node it explains so collaborators understand its context.',
+        node.nodeType === 'COMMENT'
+          ? 'Use a Comment for discussion that should remain visible and traceable on the canvas.'
+          : 'Use a Sticky Note to coach the investigation or capture a temporary thought.',
+        `Connect the ${node.nodeType === 'COMMENT' ? 'comment' : 'note'} to the exact node it explains so collaborators understand its context.`,
         'Convert important findings into formal RCA nodes before closure.'
       ],
-      subtitle: node.label || 'Canvas note',
+      subtitle: node.label || (node.nodeType === 'COMMENT' ? 'Canvas comment' : 'Canvas note'),
       title: roleLabel
     };
   }
@@ -8287,6 +14663,23 @@ function getRcaKnowledgeSelectedNodeSummary(
     };
   }
 
+  if (role === 'PROBLEM') {
+    return {
+      details: [
+        'The Problem node is the formal problem statement for the investigation.',
+        'It converts verified incident facts into expected standard, actual condition, measurable gap, and RCA scope.',
+        'It should not repeat the who, where, when, category, product, lot, or impact fields already captured in Incident and Incident Details.'
+      ],
+      guidance: [
+        'Write the statement as standard versus actual condition, not as a suspected cause.',
+        'Keep the scope clear enough that the team knows exactly what the RCA is solving and what is excluded.',
+        'Use Containment, Evidence, 5 Whys, Cause, and CAPA nodes for controls, proof, analysis, and action.'
+      ],
+      subtitle: node.label || 'Formal problem statement',
+      title: roleLabel
+    };
+  }
+
   if (role === 'EVIDENCE') {
     return {
       details: [
@@ -8297,7 +14690,7 @@ function getRcaKnowledgeSelectedNodeSummary(
       guidance: [
         'Attach evidence to the node it directly supports.',
         'Use clear file names and links so reviewers can verify the finding later.',
-        'A root cause should not be confirmed without supporting evidence.'
+        'A cause should not be confirmed without supporting evidence.'
       ],
       subtitle: node.label || 'Evidence record',
       title: roleLabel
@@ -8823,6 +15216,581 @@ function RcaCanvasToastStack({
   );
 }
 
+function RcaSelectedNodeTypeFloatingLabel({ label }: { label: string }) {
+  if (!label) {
+    return null;
+  }
+
+  return (
+    <div className="pointer-events-none absolute left-1/2 top-16 z-[85] -translate-x-1/2">
+      <div className="inline-flex h-8 items-center rounded-full border border-slate-200/80 bg-white/88 px-3.5 text-xs font-semibold uppercase tracking-[0.18em] text-slate-700 shadow-lg shadow-slate-950/10 ring-1 ring-white/60 backdrop-blur-xl">
+        {label}
+      </div>
+    </div>
+  );
+}
+
+function RcaClosedCaseFloatingLabel({ isVisible }: { isVisible: boolean }) {
+  if (!isVisible) {
+    return null;
+  }
+
+  return (
+    <div className="pointer-events-none absolute left-1/2 top-16 z-[88] -translate-x-1/2">
+      <div className="inline-flex min-h-9 items-center rounded-full border border-red-200 bg-red-50/95 px-4 text-sm font-semibold text-red-700 shadow-lg shadow-red-950/10 ring-1 ring-white/70 backdrop-blur-xl">
+        Root Cause Analysis Closed - view mode
+      </div>
+    </div>
+  );
+}
+
+function RcaPresentationControlBar({
+  activeStep,
+  interactionMode,
+  isOpen,
+  onExit,
+  onFitCanvas,
+  onFitCurrent,
+  onInteractionModeChange,
+  onNext,
+  onPrevious,
+  onSelectStep,
+  stepCount,
+  stepIndex,
+  steps
+}: {
+  activeStep: RcaPresentationStep | null;
+  interactionMode: RcaCanvasInteractionMode;
+  isOpen: boolean;
+  onExit: () => void;
+  onFitCanvas: () => void;
+  onFitCurrent: () => void;
+  onInteractionModeChange: (mode: RcaCanvasInteractionMode) => void;
+  onNext: () => void;
+  onPrevious: () => void;
+  onSelectStep: (stepIndex: number) => void;
+  stepCount: number;
+  stepIndex: number;
+  steps: RcaPresentationStep[];
+}) {
+  const [isStepMenuOpen, setIsStepMenuOpen] = React.useState(false);
+  const stepMenuRef = React.useRef<HTMLDivElement | null>(null);
+  const selectedStepIndex = Math.min(stepIndex, Math.max(steps.length - 1, 0));
+
+  React.useEffect(() => {
+    if (!isOpen) {
+      setIsStepMenuOpen(false);
+    }
+  }, [isOpen]);
+
+  React.useEffect(() => {
+    if (!isStepMenuOpen) {
+      return undefined;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      if (stepMenuRef.current?.contains(event.target as Node)) {
+        return;
+      }
+
+      setIsStepMenuOpen(false);
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setIsStepMenuOpen(false);
+      }
+    }
+
+    window.addEventListener('pointerdown', handlePointerDown, { capture: true });
+    window.addEventListener('keydown', handleKeyDown, { capture: true });
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown, { capture: true });
+      window.removeEventListener('keydown', handleKeyDown, { capture: true });
+    };
+  }, [isStepMenuOpen]);
+
+  if (!isOpen) {
+    return null;
+  }
+
+  const canGoPrevious = stepIndex > 0;
+  const canGoNext = stepIndex < stepCount - 1;
+  const controlButtonClassName = 'grid h-8 w-8 place-items-center rounded-[11px] border border-slate-200/85 bg-white/84 text-slate-600 shadow-[0_1px_0_rgba(255,255,255,0.9)_inset] transition hover:border-cyan-200 hover:bg-cyan-50 hover:text-cyan-700 hover:shadow-sm active:scale-95 disabled:cursor-not-allowed disabled:opacity-40';
+  const activeControlButtonClassName = 'grid h-8 w-8 place-items-center rounded-[11px] border border-cyan-300 bg-cyan-600 text-white shadow-[0_8px_18px_rgba(8,145,178,0.28)] transition hover:bg-cyan-500 active:scale-95';
+  const presentationIconProps = { size: 17, weight: 'duotone' as const };
+
+  return (
+    <div className="absolute left-1/2 top-4 z-[95] flex w-[min(900px,calc(100%-32px))] -translate-x-1/2 items-center justify-between gap-2 rounded-[18px] border border-white/75 bg-white/90 px-2.5 py-1.5 shadow-[0_18px_52px_rgba(15,23,42,0.16),0_5px_14px_rgba(14,165,233,0.08)] ring-1 ring-slate-900/5 backdrop-blur-2xl">
+      <div className="flex min-w-0 items-center gap-2">
+        <span className="grid h-8 w-8 shrink-0 place-items-center rounded-[11px] bg-slate-950 text-white shadow-sm shadow-slate-950/20">
+          <MonitorPlay aria-hidden="true" {...presentationIconProps} />
+        </span>
+        <div className="min-w-0">
+          <p className="text-[9px] font-semibold uppercase tracking-[0.22em] text-cyan-700">Presentation Mode</p>
+          <div className="relative -ml-1 min-w-0" ref={stepMenuRef}>
+            <button
+              aria-expanded={isStepMenuOpen}
+              aria-haspopup="listbox"
+              className="flex max-w-[320px] min-w-0 items-center gap-1.5 rounded-lg border border-transparent bg-transparent px-1 py-0.5 text-left text-[13px] font-semibold text-slate-950 outline-none transition hover:border-slate-200 hover:bg-white focus:border-cyan-300 focus:bg-white focus:ring-2 focus:ring-cyan-100 max-md:max-w-[220px]"
+              onClick={() => setIsStepMenuOpen((isOpen) => !isOpen)}
+              title="Select presentation focus"
+              type="button"
+            >
+              <span className="truncate">{activeStep?.title || 'RCA overview'}</span>
+              <PhCaretDown
+                aria-hidden="true"
+                className={`shrink-0 transition ${isStepMenuOpen ? 'rotate-180' : ''}`}
+                size={13}
+                weight="bold"
+              />
+            </button>
+
+            {isStepMenuOpen ? (
+              <div
+                className="absolute left-0 top-full z-[125] mt-2 w-[min(360px,calc(100vw-48px))] overflow-hidden rounded-2xl border border-slate-200/90 bg-white/96 py-1.5 shadow-[0_24px_70px_rgba(15,23,42,0.24),0_8px_22px_rgba(15,23,42,0.16)] ring-1 ring-white/70 backdrop-blur-xl"
+                role="listbox"
+              >
+                <div className="max-h-[min(360px,calc(100vh-132px))] overflow-y-auto overscroll-contain px-1.5 py-1">
+                  {steps.length ? steps.map((step, index) => {
+                    const isSelected = index === selectedStepIndex;
+
+                    return (
+                      <button
+                        aria-selected={isSelected}
+                        className={`flex w-full items-start gap-2 rounded-xl px-3 py-2 text-left transition ${
+                          isSelected
+                            ? 'bg-cyan-50 text-cyan-950'
+                            : 'text-slate-700 hover:bg-slate-50 hover:text-slate-950'
+                        }`}
+                        key={step.id}
+                        onClick={() => {
+                          onSelectStep(index);
+                          setIsStepMenuOpen(false);
+                        }}
+                        role="option"
+                        type="button"
+                      >
+                        <span className={`mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full text-xs font-semibold ${
+                          isSelected ? 'bg-cyan-600 text-white' : 'bg-slate-100 text-slate-500'
+                        }`}>
+                          {isSelected ? '✓' : index + 1}
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block truncate text-sm font-semibold">{step.title}</span>
+                          {step.subtitle ? (
+                            <span className="mt-0.5 block line-clamp-2 text-xs leading-4 text-slate-500">{step.subtitle}</span>
+                          ) : null}
+                        </span>
+                      </button>
+                    );
+                  }) : (
+                    <div className="px-3 py-2 text-sm font-semibold text-slate-600">
+                      {activeStep?.title || 'RCA overview'}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : null}
+          </div>
+          {activeStep?.subtitle ? (
+            <p className="truncate text-[10px] leading-3 text-slate-500">{activeStep.subtitle}</p>
+          ) : null}
+        </div>
+      </div>
+      <div className="flex shrink-0 items-center gap-1">
+        <span className="hidden rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-semibold text-slate-600 sm:inline-flex">
+          {Math.min(stepIndex + 1, Math.max(stepCount, 1))} / {Math.max(stepCount, 1)}
+        </span>
+        <span className="mx-1 hidden h-5 w-px bg-slate-200 sm:inline-flex" />
+        <button
+          aria-label="Use selection tool"
+          aria-pressed={interactionMode === 'select'}
+          className={interactionMode === 'select' ? activeControlButtonClassName : controlButtonClassName}
+          onClick={() => onInteractionModeChange('select')}
+          title="V - Select nodes"
+          type="button"
+        >
+          <Cursor aria-hidden="true" {...presentationIconProps} />
+        </button>
+        <button
+          aria-label="Use pan tool"
+          aria-pressed={interactionMode === 'pan'}
+          className={interactionMode === 'pan' ? activeControlButtonClassName : controlButtonClassName}
+          onClick={() => onInteractionModeChange('pan')}
+          title="H - Pan canvas"
+          type="button"
+        >
+          <HandPalm aria-hidden="true" {...presentationIconProps} />
+        </button>
+        <button
+          aria-label="Fit entire canvas into view"
+          className={controlButtonClassName}
+          onClick={onFitCanvas}
+          title="Fit entire canvas into view"
+          type="button"
+        >
+          <ArrowsInSimple aria-hidden="true" {...presentationIconProps} />
+        </button>
+        <span className="mx-1 hidden h-5 w-px bg-slate-200 sm:inline-flex" />
+        <button
+          aria-label="Previous presentation focus"
+          className={controlButtonClassName}
+          disabled={!canGoPrevious}
+          onClick={onPrevious}
+          title="Previous step"
+          type="button"
+        >
+          <CaretLeft aria-hidden="true" size={17} weight="bold" />
+        </button>
+        <button
+          aria-label="Fit current presentation focus"
+          className={controlButtonClassName}
+          onClick={onFitCurrent}
+          title="Fit current focus"
+          type="button"
+        >
+          <ArrowsOutSimple aria-hidden="true" {...presentationIconProps} />
+        </button>
+        <button
+          aria-label="Next presentation focus"
+          className={controlButtonClassName}
+          disabled={!canGoNext}
+          onClick={onNext}
+          title="Next step"
+          type="button"
+        >
+          <CaretRight aria-hidden="true" size={17} weight="bold" />
+        </button>
+        <button
+          className="ml-1 inline-flex h-8 items-center justify-center gap-1.5 rounded-[11px] bg-slate-950 px-3 text-[12px] font-semibold text-white shadow-sm shadow-slate-950/20 transition hover:bg-slate-800 active:scale-95"
+          onClick={onExit}
+          title="Exit Presentation Mode"
+          type="button"
+        >
+          <PhX aria-hidden="true" size={14} weight="bold" />
+          Exit
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function RcaBranchWalkthroughBar({
+  activeStep,
+  isOpen,
+  onClose,
+  onFitCurrent,
+  onNext,
+  onPrevious,
+  onSelectStep,
+  stepCount,
+  stepIndex,
+  steps
+}: {
+  activeStep: RcaBranchWalkthroughStep | null;
+  isOpen: boolean;
+  onClose: () => void;
+  onFitCurrent: () => void;
+  onNext: () => void;
+  onPrevious: () => void;
+  onSelectStep: (stepIndex: number) => void;
+  stepCount: number;
+  stepIndex: number;
+  steps: RcaBranchWalkthroughStep[];
+}) {
+  if (!isOpen || !steps.length) {
+    return null;
+  }
+
+  const canGoPrevious = stepIndex > 0;
+  const canGoNext = stepIndex < stepCount - 1;
+  const buttonClassName = 'grid h-8 w-8 place-items-center rounded-xl border border-slate-200 bg-white text-slate-600 transition hover:border-cyan-200 hover:bg-cyan-50 hover:text-cyan-700 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40';
+
+  return (
+    <div className="absolute left-1/2 top-5 z-[94] flex w-[min(680px,calc(100%-32px))] -translate-x-1/2 items-center justify-between gap-3 rounded-2xl border border-cyan-100/90 bg-white/95 px-3 py-2 shadow-[0_18px_52px_rgba(15,23,42,0.18),0_4px_16px_rgba(14,165,233,0.12)] ring-1 ring-white/80 backdrop-blur-xl">
+      <div className="flex min-w-0 items-center gap-2">
+        <span className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-cyan-600 text-white shadow-sm shadow-cyan-950/15">
+          <GitBranch aria-hidden="true" size={15} strokeWidth={2.05} />
+        </span>
+        <div className="min-w-0">
+          <p className="text-[9px] font-semibold uppercase tracking-[0.22em] text-cyan-700">Branch Walkthrough</p>
+          <label className="sr-only" htmlFor="rca-branch-walkthrough-select">Branch focus</label>
+          <select
+            className="-ml-1 mt-0.5 max-w-[260px] cursor-pointer appearance-none rounded-lg border border-transparent bg-transparent px-1 py-0 text-sm font-semibold text-slate-950 outline-none transition hover:border-slate-200 hover:bg-white focus:border-cyan-300 focus:bg-white focus:ring-2 focus:ring-cyan-100"
+            id="rca-branch-walkthrough-select"
+            onChange={(event) => onSelectStep(Number(event.target.value))}
+            title="Select branch"
+            value={Math.min(stepIndex, Math.max(steps.length - 1, 0))}
+          >
+            {steps.map((step, index) => (
+              <option key={step.id} value={index}>
+                {step.title}
+              </option>
+            ))}
+          </select>
+          <p className="truncate text-[11px] leading-4 text-slate-500">
+            {activeStep?.subtitle || 'Focus one Ishikawa branch without moving canvas nodes.'}
+          </p>
+        </div>
+      </div>
+      <div className="flex shrink-0 items-center gap-1">
+        <span className="hidden rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-600 sm:inline-flex">
+          {Math.min(stepIndex + 1, Math.max(stepCount, 1))} / {Math.max(stepCount, 1)}
+        </span>
+        <button
+          aria-label="Previous branch"
+          className={buttonClassName}
+          disabled={!canGoPrevious}
+          onClick={onPrevious}
+          title="Previous branch"
+          type="button"
+        >
+          <ChevronLeft aria-hidden="true" size={16} />
+        </button>
+        <button
+          aria-label="Fit current branch"
+          className={buttonClassName}
+          onClick={onFitCurrent}
+          title="Fit current branch"
+          type="button"
+        >
+          <Maximize2 aria-hidden="true" size={15} />
+        </button>
+        <button
+          aria-label="Next branch"
+          className={buttonClassName}
+          disabled={!canGoNext}
+          onClick={onNext}
+          title="Next branch"
+          type="button"
+        >
+          <ChevronRight aria-hidden="true" size={16} />
+        </button>
+        <button
+          aria-label="Close branch walkthrough"
+          className="ml-1 grid h-8 w-8 place-items-center rounded-xl bg-slate-950 text-white shadow-sm shadow-slate-950/20 transition hover:bg-slate-800 active:scale-95"
+          onClick={onClose}
+          title="Close Branch Walkthrough"
+          type="button"
+        >
+          <X aria-hidden="true" size={14} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function RcaGuidedPathPanel({
+  isOpen,
+  onClose,
+  selectedNode,
+  summary
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  selectedNode: RcaNode | null;
+  summary: RcaGuidedPathSummary;
+}) {
+  if (!isOpen) {
+    return null;
+  }
+
+  const selectedLabel = selectedNode
+    ? selectedNode.nodeType === 'WHY'
+      ? getFiveWhysRoleLabel(getFiveWhysNodeRole(selectedNode))
+      : selectedNode.nodeType === 'ISHIKAWA_CATEGORY'
+      ? selectedNode.label || 'Branch'
+      : formatNodeType(selectedNode.nodeType)
+    : 'No node selected';
+
+  return (
+    <aside className="absolute right-6 top-24 z-50 flex max-h-[calc(100svh-160px)] w-[min(430px,calc(100vw-32px))] flex-col overflow-hidden rounded-2xl border border-cyan-100/90 bg-white/96 shadow-[0_24px_70px_rgba(15,23,42,0.18),0_6px_20px_rgba(14,165,233,0.10)] ring-1 ring-white/70 backdrop-blur-xl">
+      <div className="border-b border-cyan-100/80 bg-cyan-50/60 px-4 py-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-cyan-700">RCA Validation</p>
+            <h3 className="mt-1 text-base font-semibold text-slate-950">{selectedLabel}</h3>
+            <p className="mt-1 text-[13px] leading-5 text-slate-600">
+              {selectedNode
+                ? 'Missing fields for the selected node and why they matter.'
+                : 'Select one node on the canvas to validate its required RCA fields.'}
+            </p>
+          </div>
+          <button
+            aria-label="Close RCA Validation"
+            className="grid h-8 w-8 shrink-0 place-items-center rounded-full border border-slate-200/80 bg-white/90 text-slate-600 shadow-sm transition hover:bg-white hover:text-slate-950 active:scale-95"
+            onClick={onClose}
+            type="button"
+          >
+            <X aria-hidden="true" size={15} />
+          </button>
+        </div>
+      </div>
+      <div className="rca-node-hint-scroll min-h-0 flex-1 overflow-y-auto px-3.5 py-3.5">
+        <RcaQualityScoreCard summary={summary.qualityScore} />
+      </div>
+    </aside>
+  );
+}
+
+function RcaQualityScoreCard({
+  summary
+}: {
+  summary: RcaQualityScoreSummary;
+}) {
+  const selectedQuality = summary.selectedNodeQuality;
+  const missingCount = selectedQuality?.gaps.length || 0;
+
+  return (
+    <section className="rounded-2xl border border-slate-200/80 bg-white/90 px-3.5 py-3.5 shadow-sm">
+      {selectedQuality ? (
+        <div className="flex items-start justify-between gap-3 border-b border-slate-100 pb-3">
+          <div className="min-w-0">
+            <p className="text-[9px] font-semibold uppercase tracking-[0.22em] text-cyan-700">Validate Selected Node</p>
+            <h4 className="mt-1 truncate text-[15px] font-semibold leading-5 text-slate-950">{selectedQuality.nodeLabel}</h4>
+          </div>
+          <span className={`shrink-0 rounded-full border px-2 py-1 text-[10px] font-semibold ${
+            missingCount
+              ? 'border-amber-200 bg-amber-50 text-amber-700'
+              : 'border-emerald-200 bg-emerald-50 text-emerald-700'
+          }`}>
+            {missingCount ? `${missingCount} missing` : 'Ready'}
+          </span>
+        </div>
+      ) : (
+        <div className="rounded-xl border border-cyan-100 bg-cyan-50/70 px-3 py-3">
+          <p className="text-[15px] font-semibold text-slate-950">Select a node to validate</p>
+          <p className="mt-1 text-[13px] leading-5 text-slate-600">
+            The validator checks only the selected node and explains the missing fields needed for a stronger RCA.
+          </p>
+        </div>
+      )}
+      {selectedQuality ? (
+        selectedQuality.isComplete ? (
+          <div className="mt-3 flex items-start gap-2.5 rounded-xl border border-emerald-100 bg-emerald-50 px-3 py-2.5 text-emerald-800">
+            <CheckCircle2 aria-hidden="true" className="mt-0.5 shrink-0" size={16} />
+            <div>
+              <p className="text-[13px] font-semibold">All required fields are complete.</p>
+              <p className="mt-0.5 text-xs leading-5">This selected node has the required information needed for review.</p>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 space-y-2">
+            {selectedQuality.gaps.map((gap) => (
+              <div className="flex items-start gap-2.5 rounded-xl border border-amber-100 bg-amber-50/45 px-3 py-2.5" key={gap.label}>
+                <span className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full border border-amber-200 bg-white text-amber-600">
+                  <AlertTriangle aria-hidden="true" size={12} />
+                </span>
+                <div className="min-w-0">
+                  <p className="text-[13px] font-semibold leading-5 text-slate-950">{gap.label}</p>
+                  <p className="mt-0.5 text-xs leading-5 text-slate-600">{gap.explanation}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        )
+      ) : null}
+    </section>
+  );
+}
+
+function RcaConnectionRecommendationsPanel({
+  canEdit,
+  isOpen,
+  isWorking,
+  onClose,
+  onCreateRecommendedNode,
+  selectedNode,
+  summary
+}: {
+  canEdit: boolean;
+  isOpen: boolean;
+  isWorking: boolean;
+  onClose: () => void;
+  onCreateRecommendedNode: (action: RcaConnectionCreateRecommendation) => void;
+  selectedNode: RcaNode | null;
+  summary: RcaConnectionRecommendationSummary;
+}) {
+  if (!isOpen) {
+    return null;
+  }
+
+  const selectedLabel = selectedNode
+    ? selectedNode.nodeType === 'WHY'
+      ? getFiveWhysRoleLabel(getFiveWhysNodeRole(selectedNode))
+      : selectedNode.nodeType === 'ISHIKAWA_CATEGORY'
+      ? selectedNode.label || 'Branch'
+      : formatNodeType(selectedNode.nodeType)
+    : '';
+
+  return (
+    <aside className="absolute right-5 top-24 z-[82] flex max-h-[calc(100svh-170px)] w-[360px] flex-col overflow-hidden rounded-[24px] border border-slate-200/80 bg-white/96 shadow-[0_28px_80px_rgba(15,23,42,0.22)] ring-1 ring-white/70 backdrop-blur-xl max-lg:right-3 max-lg:top-20 max-lg:w-[calc(100%-24px)]">
+      <div className="flex items-start justify-between gap-4 border-b border-slate-200/70 bg-slate-50/80 px-4 py-3">
+        <div className="min-w-0">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-cyan-700">Connection Recommendations</p>
+          <h3 className="mt-1 truncate text-sm font-semibold text-slate-950">
+            {selectedNode ? selectedLabel : 'Select one node'}
+          </h3>
+          <p className="mt-1 text-xs leading-5 text-slate-500">
+            {selectedNode
+              ? 'Recommended actions create the next node and connect the spline automatically.'
+              : 'Select one canvas node to see safe next-step options.'}
+          </p>
+        </div>
+        <button
+          aria-label="Close connection recommendations"
+          className="grid h-8 w-8 shrink-0 place-items-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-sm transition hover:border-slate-300 hover:text-slate-900 active:scale-95"
+          onClick={onClose}
+          type="button"
+        >
+          <X aria-hidden="true" size={15} />
+        </button>
+      </div>
+
+      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        {summary.selectedGuide ? (
+          <div className="rounded-[18px] border border-cyan-100 bg-cyan-50/70 px-3.5 py-3">
+            <p className="text-xs leading-5 text-slate-700">{summary.selectedGuide.guidance}</p>
+          </div>
+        ) : null}
+
+        {summary.addActions.length ? (
+          <section>
+            <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">Add next node</p>
+            <div className="space-y-2">
+              {summary.addActions.map((action) => (
+                <button
+                  className="flex w-full items-center justify-between gap-3 rounded-[16px] border border-slate-200 bg-white px-3 py-2.5 text-left shadow-sm transition hover:border-cyan-200 hover:bg-cyan-50/70 active:scale-[0.99] disabled:cursor-not-allowed disabled:bg-slate-50 disabled:opacity-70"
+                  disabled={!canEdit || isWorking || Boolean(action.disabledReason)}
+                  key={action.id}
+                  onClick={() => onCreateRecommendedNode(action)}
+                  title={action.disabledReason || action.title}
+                  type="button"
+                >
+                  <span className="min-w-0">
+                    <span className={`block text-sm font-semibold ${action.disabledReason ? 'text-slate-500' : 'text-slate-950'}`}>{action.title}</span>
+                    <span className="mt-0.5 block text-xs leading-4 text-slate-500">
+                      {action.disabledReason || action.description || action.typeLabel}
+                    </span>
+                  </span>
+                  <Plus aria-hidden="true" className={`shrink-0 ${action.disabledReason ? 'text-slate-300' : 'text-cyan-700'}`} size={16} strokeWidth={2.2} />
+                </button>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        {selectedNode && !summary.addActions.length ? (
+          <div className="rounded-[18px] border border-slate-200 bg-slate-50 px-3.5 py-4 text-xs leading-5 text-slate-600">
+            No missing next-step node is available for this selection right now. Existing valid splines can still be created directly on the canvas.
+          </div>
+        ) : null}
+      </div>
+    </aside>
+  );
+}
+
 function RcaCanvasToast({
   children,
   tone
@@ -8946,87 +15914,86 @@ function RcaLiveCursor() {
 
 function RcaIncidentShelf({
   incidents,
-  isReferenceProjectActive,
   isLoading,
-  onOpenReferenceProject,
   onRefresh,
   onSelectIncident,
   selectedIncidentId
 }: {
   incidents: RcaIncident[];
-  isReferenceProjectActive: boolean;
   isLoading: boolean;
-  onOpenReferenceProject: () => void;
   onRefresh: () => void;
   onSelectIncident: (incidentId: string) => void;
   selectedIncidentId: string | null;
 }) {
+  const activeCount = incidents.filter((incident) => incident.status !== 'CLOSED').length;
+  const investigatingCount = incidents.filter((incident) => incident.status === 'INVESTIGATING').length;
+  const highRiskCount = incidents.filter((incident) => incident.rpnScore >= 25 && incident.status !== 'CLOSED').length;
+
   return (
-    <aside className="mt-3 max-h-[min(440px,calc(100svh-300px))] w-full overflow-hidden rounded-3xl border border-white/60 bg-white/80 shadow-2xl shadow-slate-900/14 ring-1 ring-slate-900/5 backdrop-blur-xl">
-      <div className="flex items-center justify-between border-b border-slate-200/70 px-4 py-3">
+    <aside className="rca-incident-shelf pointer-events-auto mt-2 flex min-h-0 flex-1 flex-col overflow-hidden rounded-[22px] border border-white/60 bg-white/82 shadow-xl shadow-slate-900/10 ring-1 ring-slate-900/5 backdrop-blur-xl">
+      <div className="shrink-0 flex items-center justify-between border-b border-slate-200/70 px-4 py-3">
         <div>
           <h2 className="text-sm font-semibold text-slate-950">Incident queue</h2>
-          <p className="text-xs text-slate-500">{isLoading ? 'Refreshing...' : `${incidents.length} investigations`}</p>
+          <p className="text-xs text-slate-500">
+            {isLoading ? 'Refreshing live queue...' : `${activeCount} active / ${investigatingCount} investigating / ${highRiskCount} elevated risk`}
+          </p>
         </div>
         <button
-          className="inline-flex min-h-[36px] items-center justify-center rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition hover:border-cyan-300 hover:text-cyan-700"
+          className="inline-flex min-h-[36px] items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition hover:border-cyan-300 hover:text-cyan-700"
           onClick={onRefresh}
           type="button"
         >
+          <RefreshCw aria-hidden="true" size={13} />
           Refresh
         </button>
       </div>
-      <div className="max-h-[440px] space-y-2 overflow-auto p-3">
-        <button
-          className={`w-full rounded-2xl border p-3 text-left transition active:scale-[0.99] ${
-            isReferenceProjectActive
-              ? 'border-cyan-300 bg-cyan-50 ring-4 ring-cyan-500/10'
-              : 'border-slate-200 bg-white/80 hover:bg-white'
-          }`}
-          onClick={onOpenReferenceProject}
-          type="button"
-        >
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <p className="line-clamp-2 text-sm font-semibold leading-5 text-slate-950">
-                Fire under oven audit project
-              </p>
-              <p className="mt-1 line-clamp-2 text-xs leading-4 text-slate-500">
-                Full sealed RCA with evidence, CAPA sync, e-signature, and audit package.
-              </p>
-            </div>
-            <span className="shrink-0 rounded-full bg-red-100 px-2.5 py-1 text-xs font-semibold text-red-700">
-              27
-            </span>
-          </div>
-          <div className="mt-3 flex items-center justify-between gap-2 text-xs text-slate-500">
-            <span className="truncate">Die Cut production line - oven area</span>
-            <span>Sealed</span>
-          </div>
-        </button>
-        {incidents.length ? incidents.map((incident) => (
-          <button
-            className={`w-full rounded-2xl border p-3 text-left transition active:scale-[0.99] ${
-              selectedIncidentId === incident.id
-                ? 'border-cyan-300 bg-cyan-50 ring-4 ring-cyan-500/10'
-                : 'border-slate-200 bg-white/80 hover:bg-white'
-            }`}
-            key={incident.id}
-            onClick={() => onSelectIncident(incident.id)}
-            type="button"
-          >
-            <div className="flex items-start justify-between gap-3">
-              <p className="line-clamp-2 text-sm font-semibold leading-5 text-slate-950">{incident.title}</p>
-              <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold ${getRpnClassName(incident.rpnScore)}`}>
-                {incident.rpnScore}
-              </span>
-            </div>
-            <div className="mt-2 flex items-center justify-between gap-2 text-xs text-slate-500">
-              <span className="truncate">{incident.assetId}</span>
-              <span>{formatStatus(incident.status)}</span>
-            </div>
-          </button>
-        )) : (
+      <div className="rca-hidden-scrollbar min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
+        {incidents.length ? incidents.map((incident) => {
+          const assetSummary = getRcaIncidentAssetSummary(incident);
+          const displayId = incident.displayId || buildFriendlyRcaDisplayId('RCA', incident.id, incident.createdAtIso);
+          const riskBand = getRcaRiskBand(incident.rpnScore);
+          const stageLabel = getRcaIncidentStageLabel(incident);
+          const isDefaultRiskProfile = isDefaultRcaRiskProfile(incident.riskFactors);
+
+          return (
+            <button
+              className={`w-full rounded-2xl border px-3 py-2.5 text-left transition active:scale-[0.99] ${
+                selectedIncidentId === incident.id
+                  ? 'border-cyan-300 bg-cyan-50 ring-4 ring-cyan-500/10'
+                  : 'border-slate-200 bg-white/80 hover:bg-white'
+              }`}
+              key={incident.id}
+              onClick={() => onSelectIncident(incident.id)}
+              type="button"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-700">{displayId}</p>
+                  <p className="mt-0.5 line-clamp-2 text-sm font-semibold leading-5 text-slate-950">{incident.title || 'Untitled RCA project'}</p>
+                </div>
+                <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-normal ring-1 ${riskBand.className}`}>
+                  {isDefaultRiskProfile ? 'Risk pending' : `Risk ${incident.rpnScore}`}
+                </span>
+              </div>
+              <div className="mt-1.5 grid grid-cols-[1fr_auto] items-center gap-2 text-xs">
+                <span className={`min-w-0 break-words ${assetSummary.isAssigned ? 'text-slate-500' : 'text-amber-700'}`}>{assetSummary.label}</span>
+                <span className="rounded-full bg-white/80 px-2 py-1 font-normal text-slate-600 ring-1 ring-slate-200">{stageLabel}</span>
+              </div>
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px] font-normal text-slate-500">
+                {isDefaultRiskProfile ? (
+                  <span className="rounded-full bg-slate-100 px-2 py-1">Initial risk values pending triage</span>
+                ) : (
+                  <>
+                    <span className="rounded-full bg-slate-100 px-2 py-1">Severity {incident.riskFactors.severity}</span>
+                    <span className="rounded-full bg-slate-100 px-2 py-1">Occurrence {incident.riskFactors.occurrence}</span>
+                    <span className="rounded-full bg-slate-100 px-2 py-1">Detection {incident.riskFactors.detection}</span>
+                  </>
+                )}
+                <span className="rounded-full bg-slate-100 px-2 py-1">{formatStatus(incident.status)}</span>
+              </div>
+            </button>
+          );
+        }) : (
           <div className="rounded-2xl border border-dashed border-slate-300 bg-white/70 p-5 text-sm text-slate-500">
             No RCA incidents are open yet.
           </div>
@@ -9177,35 +16144,55 @@ function RcaIncidentLauncher({
 
 function RcaCanvasToolbar({
   activityLogCount,
-  canAddFishbone,
+  canWalkBranches,
   canGenerateReport,
+  isAutoFocusSelectionEnabled,
   isActivityLogOpen,
+  isBranchWalkthroughOpen,
+  isConnectionRecommendationsOpen,
+  isGuidedPathOpen,
   isReferenceProject,
   isWorking,
   methodology,
-  onAddNode,
   onAutoArrange,
   onCreateSession,
+  onEnterPresentationMode,
   onGenerateReport,
+  onOpenBranchWalkthrough,
+  onToggleConnectionRecommendations,
   onToggleActivityLog,
+  onToggleAutoFocusSelection,
+  onToggleGuidedPath,
   onMethodologyChange,
   onOpenIncidentLauncher,
+  recommendationCount,
+  connectionRecommendationCount,
   session
 }: {
   activityLogCount: number;
-  canAddFishbone: boolean;
+  canWalkBranches: boolean;
   canGenerateReport: boolean;
+  isAutoFocusSelectionEnabled: boolean;
   isActivityLogOpen: boolean;
+  isBranchWalkthroughOpen: boolean;
+  isConnectionRecommendationsOpen: boolean;
+  isGuidedPathOpen: boolean;
   isReferenceProject: boolean;
   isWorking: boolean;
   methodology: RcaMethodology;
-  onAddNode: () => void;
   onAutoArrange: () => void;
   onCreateSession: () => void;
+  onEnterPresentationMode: () => void;
   onGenerateReport: () => void;
+  onOpenBranchWalkthrough: () => void;
+  onToggleConnectionRecommendations: () => void;
   onToggleActivityLog: () => void;
+  onToggleAutoFocusSelection: () => void;
+  onToggleGuidedPath: () => void;
   onMethodologyChange: (methodology: RcaMethodology) => void;
   onOpenIncidentLauncher: () => void;
+  recommendationCount: number;
+  connectionRecommendationCount: number;
   session: RcaSession | null;
 }) {
   const [isToolbarMinimized, setIsToolbarMinimized] = React.useState(false);
@@ -9224,27 +16211,35 @@ function RcaCanvasToolbar({
     );
   }
 
+  const toolbarButtonClass =
+    'inline-flex min-h-[34px] shrink-0 items-center justify-center gap-1.5 rounded-[12px] px-2.5 text-[12px] font-medium leading-none text-slate-600 transition hover:bg-white hover:text-slate-950 hover:shadow-sm active:scale-95 disabled:cursor-not-allowed disabled:opacity-45';
+  const toolbarPanelButtonClass =
+    'inline-flex min-h-[34px] shrink-0 items-center justify-center gap-1.5 rounded-[12px] border border-slate-200/80 bg-white/72 px-2.5 text-[12px] font-medium leading-none text-slate-600 shadow-[0_1px_0_rgba(255,255,255,0.9)_inset] transition hover:border-cyan-200 hover:bg-white hover:text-cyan-700 hover:shadow-sm active:scale-95 disabled:cursor-not-allowed disabled:opacity-45';
+  const toolbarActiveButtonClass =
+    'border-cyan-200 bg-cyan-50/95 text-cyan-800 shadow-sm shadow-cyan-950/10 ring-1 ring-cyan-100/80';
+  const toolbarDividerClass = 'h-6 w-px shrink-0 bg-gradient-to-b from-transparent via-slate-200 to-transparent';
+
   return (
-    <div className="absolute bottom-6 left-1/2 z-50 flex -translate-x-1/2 items-center gap-1 rounded-[15px] border border-slate-200/80 bg-white/95 p-1 shadow-[0_18px_52px_rgba(15,23,42,0.18),0_4px_16px_rgba(14,165,233,0.12)] ring-1 ring-white/80 backdrop-blur-xl max-lg:bottom-4 max-lg:w-[calc(100%-24px)] max-lg:overflow-x-auto">
+    <div className="absolute bottom-6 left-1/2 z-50 flex -translate-x-1/2 items-center gap-1.5 rounded-[20px] border border-white/75 bg-white/88 p-1.5 shadow-[0_22px_64px_rgba(15,23,42,0.18),0_8px_22px_rgba(14,165,233,0.10)] ring-1 ring-slate-900/5 backdrop-blur-2xl max-lg:bottom-4 max-lg:w-[calc(100%-24px)] max-lg:overflow-x-auto">
       <button
-        className="inline-flex min-h-[30px] items-center justify-center gap-1.5 rounded-[10px] px-2 text-[11px] font-medium leading-none text-slate-600 transition hover:bg-slate-100 hover:text-slate-950 active:scale-95"
+        className={`${toolbarButtonClass} bg-white/40`}
         onClick={onOpenIncidentLauncher}
         type="button"
       >
         <FilePlus2 aria-hidden="true" size={13} strokeWidth={1.85} />
         Incident
       </button>
-      <span className="h-4 w-px bg-slate-200" />
+      <span className={toolbarDividerClass} />
       {methodologyOptions.map((option) => {
         const MethodIcon = option.icon;
         const isSelected = option.value === methodology;
 
         return (
           <button
-            className={`inline-flex min-h-[30px] shrink-0 items-center justify-center gap-1.5 rounded-[10px] px-2 text-[11px] font-medium leading-none transition active:scale-95 ${
+            className={`inline-flex min-h-[34px] shrink-0 items-center justify-center gap-1.5 rounded-[13px] px-3 text-[12px] font-semibold leading-none transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-45 ${
               isSelected
-                ? 'bg-cyan-600 text-white shadow-sm shadow-cyan-950/10'
-                : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950'
+                ? 'bg-cyan-600 text-white shadow-[0_10px_22px_rgba(8,145,178,0.24)] ring-1 ring-cyan-500/30'
+                : 'text-slate-600 hover:bg-white hover:text-slate-950 hover:shadow-sm'
             }`}
             disabled={!session || isWorking}
             key={option.value}
@@ -9257,9 +16252,9 @@ function RcaCanvasToolbar({
           </button>
         );
       })}
-      <span className="h-4 w-px bg-slate-200" />
+      <span className={toolbarDividerClass} />
       <button
-        className="inline-flex min-h-[30px] shrink-0 items-center justify-center gap-1.5 rounded-[10px] border border-cyan-200/80 bg-cyan-50/70 px-2 text-[11px] font-medium leading-none text-cyan-700 transition hover:border-cyan-300 hover:bg-cyan-100/80 hover:text-cyan-800 active:scale-95 disabled:cursor-not-allowed disabled:opacity-45"
+        className="inline-flex min-h-[34px] shrink-0 items-center justify-center gap-1.5 rounded-[13px] border border-cyan-200/80 bg-cyan-50/82 px-3 text-[12px] font-semibold leading-none text-cyan-750 shadow-[0_1px_0_rgba(255,255,255,0.9)_inset] transition hover:border-cyan-300 hover:bg-cyan-100/85 hover:text-cyan-900 hover:shadow-sm active:scale-95 disabled:cursor-not-allowed disabled:opacity-45"
         disabled={!session || isWorking}
         onClick={onAutoArrange}
         title="R - Rearrange canvas"
@@ -9268,40 +16263,128 @@ function RcaCanvasToolbar({
         <AlignHorizontalSpaceBetween aria-hidden="true" size={15} strokeWidth={2.05} />
         Rearrange Canvas
       </button>
-      <span className="h-4 w-px bg-slate-200" />
       {isReferenceProject ? (
-        <span className="inline-flex min-h-[30px] shrink-0 items-center gap-1.5 rounded-[10px] border border-emerald-200/80 bg-emerald-50/80 px-2 text-[11px] font-medium leading-none text-emerald-700">
-          <BadgeCheck aria-hidden="true" size={13} strokeWidth={1.85} />
-          Sealed
+        <>
+          <span className={toolbarDividerClass} />
+          <span className="inline-flex min-h-[34px] shrink-0 items-center gap-1.5 rounded-[13px] border border-emerald-200/80 bg-emerald-50/90 px-2.5 text-[12px] font-semibold leading-none text-emerald-700">
+            <BadgeCheck aria-hidden="true" size={13} strokeWidth={1.85} />
+            Sealed
+          </span>
+        </>
+      ) : !session ? (
+        <>
+          <span className={toolbarDividerClass} />
+          <button
+            className="inline-flex min-h-[34px] shrink-0 items-center justify-center gap-1.5 rounded-[13px] bg-cyan-600 px-3 text-[12px] font-semibold leading-none text-white shadow-[0_10px_22px_rgba(8,145,178,0.24)] transition hover:bg-cyan-500 active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={isWorking}
+            onClick={onCreateSession}
+            type="button"
+          >
+            <ShieldCheck aria-hidden="true" size={13} strokeWidth={1.85} />
+            Start Session
+          </button>
+        </>
+      ) : null}
+      <span className={toolbarDividerClass} />
+      <button
+        className={toolbarPanelButtonClass}
+        disabled={!session}
+        onClick={onEnterPresentationMode}
+        title="Start Presentation Mode"
+        type="button"
+      >
+        <Presentation aria-hidden="true" size={15} strokeWidth={2.05} />
+        Present
+      </button>
+      <button
+        className={`${toolbarPanelButtonClass} ${
+          isBranchWalkthroughOpen
+            ? toolbarActiveButtonClass
+            : ''
+        }`}
+        disabled={!session || !canWalkBranches}
+        onClick={onOpenBranchWalkthrough}
+        title={canWalkBranches ? 'Walk through Ishikawa branches' : 'Add the Fishbone branch structure first'}
+        type="button"
+      >
+        <GitBranch aria-hidden="true" size={15} strokeWidth={2.05} />
+        Branches
+      </button>
+      <button
+        className={`${toolbarPanelButtonClass} ${
+          isGuidedPathOpen
+            ? toolbarActiveButtonClass
+            : ''
+        }`}
+        disabled={!session}
+        onClick={onToggleGuidedPath}
+        title="Validate selected node"
+        type="button"
+      >
+        <ShieldCheck aria-hidden="true" size={15} strokeWidth={2.05} />
+        Validate
+        {recommendationCount > 0 ? (
+          <span className="ml-0.5 rounded-full bg-cyan-100 px-1.5 py-0.5 text-[10px] font-bold text-cyan-800 shadow-sm ring-1 ring-cyan-200/70">
+            {recommendationCount}
+          </span>
+        ) : null}
+      </button>
+      <button
+        className={`${toolbarPanelButtonClass} ${
+          isConnectionRecommendationsOpen
+            ? toolbarActiveButtonClass
+            : ''
+        }`}
+        disabled={!session}
+        onClick={onToggleConnectionRecommendations}
+        title="Open Connection Recommendations"
+        type="button"
+      >
+        <Link2 aria-hidden="true" size={15} strokeWidth={2.05} />
+        Connect
+        {connectionRecommendationCount > 0 ? (
+          <span className="ml-0.5 rounded-full bg-cyan-100 px-1.5 py-0.5 text-[10px] font-bold text-cyan-800 shadow-sm ring-1 ring-cyan-200/70">
+            {connectionRecommendationCount}
+          </span>
+        ) : null}
+      </button>
+      <button
+        aria-pressed={isAutoFocusSelectionEnabled}
+        className={`inline-flex min-h-[34px] shrink-0 items-center justify-center gap-2 rounded-[13px] border px-2.5 text-[12px] font-semibold leading-none shadow-[0_1px_0_rgba(255,255,255,0.9)_inset] transition hover:shadow-sm active:scale-95 disabled:cursor-not-allowed disabled:opacity-45 ${
+          isAutoFocusSelectionEnabled
+            ? 'border-cyan-200 bg-cyan-50/95 text-cyan-800 ring-1 ring-cyan-100/80'
+            : 'border-slate-200/80 bg-white/72 text-slate-600 hover:border-cyan-200 hover:bg-white hover:text-cyan-700'
+        }`}
+        disabled={!session}
+        onClick={onToggleAutoFocusSelection}
+        title={`Auto-focus selected node family is ${isAutoFocusSelectionEnabled ? 'on' : 'off'}`}
+        type="button"
+      >
+        <span className="inline-flex items-center gap-1.5">
+          <Crosshair aria-hidden="true" size={14} strokeWidth={2.05} />
+          Focus
         </span>
-      ) : session ? (
-        <button
-          className="inline-flex min-h-[30px] shrink-0 items-center justify-center gap-1.5 rounded-[10px] bg-cyan-600 px-2.5 text-[11px] font-medium leading-none text-white shadow-sm shadow-cyan-950/10 transition hover:bg-cyan-500 active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
-          disabled={isWorking || !canAddFishbone}
-          onClick={onAddNode}
-          title={canAddFishbone ? 'Add fishbone structure' : 'Create the Incident node first'}
-          type="button"
+        <span
+          aria-hidden="true"
+          className={`relative inline-flex h-[18px] w-[34px] shrink-0 items-center rounded-full border transition ${
+            isAutoFocusSelectionEnabled
+              ? 'border-cyan-600 bg-cyan-600 shadow-inner shadow-cyan-950/10'
+              : 'border-slate-300 bg-slate-200'
+          }`}
         >
-          <Plus aria-hidden="true" size={15} strokeWidth={2.05} />
-          Fishbone
-        </button>
-      ) : (
-        <button
-          className="inline-flex min-h-[30px] shrink-0 items-center justify-center gap-1.5 rounded-[10px] bg-cyan-600 px-2.5 text-[11px] font-medium leading-none text-white shadow-sm shadow-cyan-950/10 transition hover:bg-cyan-500 active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
-          disabled={isWorking}
-          onClick={onCreateSession}
-          type="button"
-        >
-          <ShieldCheck aria-hidden="true" size={13} strokeWidth={1.85} />
-          Start Session
-        </button>
-      )}
-      <span className="h-4 w-px bg-slate-200" />
+          <span
+            className={`absolute top-1/2 h-[14px] w-[14px] -translate-y-1/2 rounded-full bg-white shadow-sm ring-1 ring-slate-900/5 transition-transform ${
+              isAutoFocusSelectionEnabled ? 'translate-x-[17px]' : 'translate-x-[2px]'
+            }`}
+          />
+        </span>
+      </button>
+      <span className={toolbarDividerClass} />
       <button
         aria-label="Generate RCA report"
-        className={`grid h-[30px] w-[30px] shrink-0 place-items-center rounded-[10px] transition active:scale-95 ${
+        className={`grid h-[34px] w-[34px] shrink-0 place-items-center rounded-[12px] transition active:scale-95 ${
           canGenerateReport
-            ? 'bg-cyan-50 text-cyan-700 ring-1 ring-cyan-100 hover:bg-cyan-100 hover:text-cyan-800'
+            ? 'bg-white/72 text-cyan-700 ring-1 ring-cyan-100 hover:bg-cyan-50 hover:text-cyan-800 hover:shadow-sm'
             : 'text-slate-300'
         } disabled:cursor-not-allowed disabled:opacity-55`}
         disabled={isWorking || !session || !canGenerateReport}
@@ -9311,12 +16394,12 @@ function RcaCanvasToolbar({
       >
         <FileText aria-hidden="true" size={16} strokeWidth={2.05} />
       </button>
-      <span className="h-4 w-px bg-slate-200" />
+      <span className={toolbarDividerClass} />
       <button
         aria-expanded={isActivityLogOpen}
         aria-label="Open RCA activity log"
-        className={`relative grid h-[30px] w-[30px] shrink-0 place-items-center rounded-[10px] text-slate-500 transition hover:bg-slate-100 hover:text-cyan-700 active:scale-95 ${
-          isActivityLogOpen ? 'bg-cyan-50 text-cyan-700' : ''
+        className={`relative grid h-[34px] w-[34px] shrink-0 place-items-center rounded-[12px] text-slate-500 transition hover:bg-white hover:text-cyan-700 hover:shadow-sm active:scale-95 ${
+          isActivityLogOpen ? 'bg-cyan-50 text-cyan-700 ring-1 ring-cyan-100/80' : ''
         }`}
         onClick={onToggleActivityLog}
         title="RCA activity log"
@@ -9329,10 +16412,10 @@ function RcaCanvasToolbar({
           </span>
         ) : null}
       </button>
-      <span className="h-4 w-px bg-slate-200" />
+      <span className={toolbarDividerClass} />
       <button
         aria-label="Minimize RCA toolbar"
-        className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-[10px] text-slate-500 transition hover:bg-slate-100 hover:text-slate-950 active:scale-95"
+        className="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-[12px] text-slate-500 transition hover:bg-white hover:text-slate-950 hover:shadow-sm active:scale-95"
         onClick={() => setIsToolbarMinimized(true)}
         title="Minimize toolbar"
         type="button"
@@ -9970,7 +17053,7 @@ function buildRcaReportExportPayload({
     sections: reportSections.map((section) => ({
       nodes: section.nodes.map((node) => {
         const role = node.nodeType === 'WHY' ? getFiveWhysNodeRole(node) : null;
-        const status = node.isRootCause ? 'Root Cause' : node.isSuspectedCause ? 'Suspect' : '';
+        const status = node.isRootCause ? 'Verified cause' : node.isSuspectedCause ? 'Suspect' : '';
 
         return {
           evidence: node.attachedEvidence.map((item) => ({
@@ -10492,7 +17575,7 @@ function RcaIncidentReportNodeCard({
         </div>
         {node.isRootCause ? (
           <span className="shrink-0 rounded-full border border-red-200 bg-red-50 px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide text-red-700">
-            Root Cause
+            Cause
           </span>
         ) : node.isSuspectedCause ? (
           <span className="shrink-0 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide text-amber-700">
@@ -10600,23 +17683,33 @@ function RcaCanvasControlButtons({
 
 function RcaCanvasContextMenu({
   canvasTheme,
+  canAddFishbone,
+  canAddFiveWhys,
   canAddNode,
   canCreateIncidentNode,
   canDeleteNode,
   canEditNode,
   canGenerateReport,
   canRearrange,
+  canReactToNode,
   contextMenu,
   gridSize,
+  hasContainmentOrProblemCanvasNode,
+  hasIncidentDetailsCanvasNode,
   isGridVisible,
   isSnapEnabled,
   isWorking,
   methodology,
+  missingFishboneBranches,
+  onAddFishbone,
+  onAddFishboneBranch,
+  onAddFiveWhys,
   nodeMenuKind,
   onAddFiveWhysNodeRole,
   onAddNode,
   onAddSubCause,
   onAddStickyNote,
+  onAddComment,
   onClearCanvas,
   onCreateIncident,
   onCopyText,
@@ -10624,6 +17717,7 @@ function RcaCanvasContextMenu({
   onEditNode,
   onGenerateReport,
   onNodeDetails,
+  onOpenReactions,
   onPasteText,
   onGridSizeChange,
   onGridToggle,
@@ -10635,23 +17729,33 @@ function RcaCanvasContextMenu({
   onThemeChange
 }: {
   canvasTheme: RcaCanvasTheme;
+  canAddFishbone: boolean;
+  canAddFiveWhys: boolean;
   canAddNode: boolean;
   canCreateIncidentNode: boolean;
   canDeleteNode: boolean;
   canEditNode: boolean;
   canGenerateReport: boolean;
   canRearrange: boolean;
+  canReactToNode: boolean;
   contextMenu: RcaCanvasContextMenuState | null;
   gridSize: number;
+  hasContainmentOrProblemCanvasNode: boolean;
+  hasIncidentDetailsCanvasNode: boolean;
   isGridVisible: boolean;
   isSnapEnabled: boolean;
   isWorking: boolean;
   methodology: RcaMethodology;
+  missingFishboneBranches: RcaMissingFishboneBranchOption[];
+  onAddFishbone: () => void;
+  onAddFishboneBranch: (branchLabel: string) => void;
+  onAddFiveWhys: () => void;
   nodeMenuKind: RcaNodeContextMenuKind | null;
   onAddFiveWhysNodeRole: (role: RcaFiveWhysNodeRole) => void;
   onAddNode: () => void;
   onAddSubCause: () => void;
   onAddStickyNote: () => void;
+  onAddComment: () => void;
   onClearCanvas: () => void;
   onCreateIncident: () => void;
   onCopyText: () => void;
@@ -10659,6 +17763,7 @@ function RcaCanvasContextMenu({
   onEditNode: () => void;
   onGenerateReport: () => void;
   onNodeDetails: () => void;
+  onOpenReactions: () => void;
   onPasteText: () => void;
   onGridSizeChange: (size: number) => void;
   onGridToggle: () => void;
@@ -10670,11 +17775,17 @@ function RcaCanvasContextMenu({
   onThemeChange: (theme: RcaCanvasTheme) => void;
 }) {
   const [isAddNodeSubmenuOpen, setIsAddNodeSubmenuOpen] = React.useState(false);
+  const [isBranchSubmenuOpen, setIsBranchSubmenuOpen] = React.useState(false);
   const [isCapaSubmenuOpen, setIsCapaSubmenuOpen] = React.useState(false);
+  const [isSettingsSubmenuOpen, setIsSettingsSubmenuOpen] = React.useState(false);
+  const [isThemeSubmenuOpen, setIsThemeSubmenuOpen] = React.useState(false);
 
   React.useEffect(() => {
     setIsAddNodeSubmenuOpen(false);
+    setIsBranchSubmenuOpen(false);
     setIsCapaSubmenuOpen(false);
+    setIsSettingsSubmenuOpen(false);
+    setIsThemeSubmenuOpen(false);
   }, [contextMenu?.targetNodeId, contextMenu?.x, contextMenu?.y]);
 
   if (!contextMenu) {
@@ -10687,9 +17798,27 @@ function RcaCanvasContextMenu({
     : 'right-[calc(100%+6px)] origin-top-right';
   const isNodeTargetMenu = Boolean(contextMenu.targetNodeId);
   const isEmptyCanvasPaneMenu = !contextMenu.targetNodeId && contextMenu.isCanvasPaneTarget;
-  const isEditableNodeTarget = nodeMenuKind === 'cause' || nodeMenuKind === 'sticky';
+  const isEditableNodeTarget = nodeMenuKind === 'cause' || nodeMenuKind === 'sticky' || nodeMenuKind === 'comment';
   const shouldShowCopyText = isEditableNodeTarget;
   const shouldShowPasteText = isEditableNodeTarget && Boolean(contextMenu.hasClipboardText);
+  const canAddPostIncidentDetailsNode = canAddNode && hasIncidentDetailsCanvasNode;
+  const canAddPostContainmentOrProblemNode = canAddPostIncidentDetailsNode && hasContainmentOrProblemCanvasNode;
+  const hasMissingFishboneBranch = missingFishboneBranches.some((branch) => !branch.disabled);
+  const canAddRoleFromFlowGate = (role: RcaFiveWhysNodeRole) => {
+    if (role === 'INCIDENT_DETAILS') {
+      return true;
+    }
+
+    if (!hasIncidentDetailsCanvasNode) {
+      return false;
+    }
+
+    if (RCA_ROLES_REQUIRING_CONTAINMENT_OR_PROBLEM.has(role)) {
+      return hasContainmentOrProblemCanvasNode;
+    }
+
+    return true;
+  };
 
   return (
     <div
@@ -10704,7 +17833,7 @@ function RcaCanvasContextMenu({
       {nodeMenuKind === 'category' ? (
         <>
           <RcaContextMenuItem
-            disabled={!canAddNode || isWorking}
+            disabled={!canAddPostIncidentDetailsNode || isWorking}
             icon={Plus}
             label="Add Node"
             onClick={onAddNode}
@@ -10723,11 +17852,81 @@ function RcaCanvasContextMenu({
             onClick={onNodeDetails}
             shortcut="D"
           />
+          <RcaContextMenuItem
+            disabled={!canReactToNode || isWorking}
+            icon={SmilePlus}
+            label="Add Reaction"
+            onClick={onOpenReactions}
+          />
+          <RcaContextMenuItem
+            disabled={!canDeleteNode || isWorking}
+            icon={Trash2}
+            label="Delete Branch"
+            onClick={onDeleteNode}
+            tone="danger"
+          />
+        </>
+      ) : nodeMenuKind === 'faultGate' ? (
+        <>
+          <div className="group/branch-node relative">
+            <RcaContextMenuItem
+              disabled={!hasMissingFishboneBranch || isWorking}
+              icon={GitBranch}
+              label="Add Branch"
+              onClick={() => {
+                setIsBranchSubmenuOpen((isOpen) => !isOpen);
+                setIsAddNodeSubmenuOpen(false);
+                setIsCapaSubmenuOpen(false);
+                setIsSettingsSubmenuOpen(false);
+                setIsThemeSubmenuOpen(false);
+              }}
+              rightSlot={<ChevronRight aria-hidden="true" size={11} strokeWidth={2} />}
+            />
+            <div className={`${isBranchSubmenuOpen ? 'pointer-events-auto translate-y-0 scale-100 opacity-100' : 'pointer-events-none translate-y-1 scale-95 opacity-0 group-hover/branch-node:pointer-events-auto group-hover/branch-node:translate-y-0 group-hover/branch-node:scale-100 group-hover/branch-node:opacity-100'} absolute top-0 z-[94] w-[218px] rounded-xl border border-white/70 bg-white/95 p-1 shadow-[0_18px_48px_rgba(15,23,42,0.17)] ring-1 ring-slate-900/5 backdrop-blur-xl transition duration-150 ease-out ${submenuPlacementClassName}`}>
+              {missingFishboneBranches.map((branch) => (
+                <RcaContextMenuItem
+                  disabled={branch.disabled || isWorking}
+                  icon={GitBranch}
+                  key={branch.label}
+                  label={branch.label}
+                  onClick={() => onAddFishboneBranch(branch.label)}
+                  rightSlot={branch.disabled ? <CheckCircle2 aria-hidden="true" size={11} strokeWidth={2} /> : null}
+                />
+              ))}
+            </div>
+          </div>
+          <RcaContextMenuItem
+            disabled={!canEditNode || isWorking}
+            icon={Palette}
+            label="Edit Node"
+            onClick={onEditNode}
+            shortcut="E"
+          />
+          <RcaContextMenuItem
+            disabled={!canEditNode || isWorking}
+            icon={PanelRightOpen}
+            label="Node Details"
+            onClick={onNodeDetails}
+            shortcut="D"
+          />
+          <RcaContextMenuItem
+            disabled={!canReactToNode || isWorking}
+            icon={SmilePlus}
+            label="Add Reaction"
+            onClick={onOpenReactions}
+          />
+          <RcaContextMenuItem
+            disabled={!canDeleteNode || isWorking}
+            icon={Trash2}
+            label="Delete Fishbone"
+            onClick={onDeleteNode}
+            tone="danger"
+          />
         </>
       ) : nodeMenuKind === 'cause' ? (
         <>
           <RcaContextMenuItem
-            disabled={!canAddNode || isWorking}
+            disabled={!canAddPostIncidentDetailsNode || isWorking}
             icon={GitBranch}
             label="Add Sub Cause"
             onClick={onAddSubCause}
@@ -10745,6 +17944,12 @@ function RcaCanvasContextMenu({
             label="Node Details"
             onClick={onNodeDetails}
             shortcut="D"
+          />
+          <RcaContextMenuItem
+            disabled={!canReactToNode || isWorking}
+            icon={SmilePlus}
+            label="Add Reaction"
+            onClick={onOpenReactions}
           />
           {canGenerateReport ? (
             <RcaContextMenuItem
@@ -10778,7 +17983,7 @@ function RcaCanvasContextMenu({
             tone="danger"
           />
         </>
-      ) : nodeMenuKind === 'sticky' ? (
+      ) : nodeMenuKind === 'sticky' || nodeMenuKind === 'comment' ? (
         <>
           <RcaContextMenuItem
             disabled={!canEditNode || isWorking}
@@ -10794,11 +17999,17 @@ function RcaCanvasContextMenu({
             onClick={onNodeDetails}
             shortcut="D"
           />
+          <RcaContextMenuItem
+            disabled={!canReactToNode || isWorking}
+            icon={SmilePlus}
+            label="Add Reaction"
+            onClick={onOpenReactions}
+          />
           {shouldShowCopyText ? (
             <RcaContextMenuItem
               disabled={isWorking}
               icon={ClipboardCopy}
-              label={contextMenu.hasSelectedText ? 'Copy Text' : 'Copy Note Text'}
+              label={contextMenu.hasSelectedText ? 'Copy Text' : nodeMenuKind === 'comment' ? 'Copy Comment Text' : 'Copy Note Text'}
               onClick={onCopyText}
             />
           ) : null}
@@ -10813,13 +18024,24 @@ function RcaCanvasContextMenu({
           <RcaContextMenuItem
             disabled={!canDeleteNode || isWorking}
             icon={Trash2}
-            label="Delete Note"
+            label={nodeMenuKind === 'comment' ? 'Delete Comment' : 'Delete Note'}
             onClick={onDeleteNode}
             tone="danger"
           />
         </>
       ) : (
         <>
+          {isNodeTargetMenu ? (
+            <>
+              <RcaContextMenuItem
+                disabled={!canReactToNode || isWorking}
+                icon={SmilePlus}
+                label="Add Reaction"
+                onClick={onOpenReactions}
+              />
+              <div className="my-1 h-px bg-slate-200/80" />
+            </>
+          ) : null}
           <div className="group/add-node relative">
             <RcaContextMenuItem
               disabled={!canAddNode || isWorking}
@@ -10828,32 +18050,58 @@ function RcaCanvasContextMenu({
               onClick={() => {
                 setIsAddNodeSubmenuOpen((isOpen) => !isOpen);
                 setIsCapaSubmenuOpen(false);
+                setIsSettingsSubmenuOpen(false);
+                setIsThemeSubmenuOpen(false);
               }}
               rightSlot={<ChevronRight aria-hidden="true" size={11} strokeWidth={2} />}
               shortcut="N"
             />
             <div className={`${isAddNodeSubmenuOpen ? 'pointer-events-auto translate-y-0 scale-100 opacity-100' : 'pointer-events-none translate-y-1 scale-95 opacity-0 group-hover/add-node:pointer-events-auto group-hover/add-node:translate-y-0 group-hover/add-node:scale-100 group-hover/add-node:opacity-100'} absolute top-0 z-[92] w-[218px] rounded-xl border border-white/70 bg-white/95 p-1 shadow-[0_18px_48px_rgba(15,23,42,0.17)] ring-1 ring-slate-900/5 backdrop-blur-xl transition duration-150 ease-out ${submenuPlacementClassName}`}>
+              <RcaContextMenuItem
+                disabled={!canAddPostContainmentOrProblemNode || isWorking}
+                icon={GitBranch}
+                label="Cause"
+                onClick={onAddNode}
+              />
+              <div className="my-1 h-px bg-slate-200/80" />
               {RCA_ADD_NODE_ROLE_OPTIONS.map((option) => (
                 <RcaContextMenuItem
-                  disabled={!canAddNode || isWorking}
+                  disabled={!canAddNode || isWorking || !canAddRoleFromFlowGate(option.value)}
                   icon={option.icon}
                   key={option.value}
                   label={option.label}
                   onClick={() => onAddFiveWhysNodeRole(option.value)}
                 />
               ))}
+              <div className="my-1 h-px bg-slate-200/80" />
+              <RcaContextMenuItem
+                disabled={!canAddFishbone || isWorking}
+                icon={GitBranch}
+                label="Fishbone"
+                onClick={onAddFishbone}
+              />
+              <RcaContextMenuItem
+                disabled={!canAddFiveWhys || isWorking}
+                icon={ListChecks}
+                label="5 Whys"
+                onClick={onAddFiveWhys}
+              />
               <div className="group/capa-node relative">
-                <RcaContextMenuItem
-                  disabled={!canAddNode || isWorking}
-                  icon={PackageCheck}
-                  label="CAPA Stages"
-                  onClick={() => setIsCapaSubmenuOpen((isOpen) => !isOpen)}
-                  rightSlot={<ChevronRight aria-hidden="true" size={11} strokeWidth={2} />}
-                />
+              <RcaContextMenuItem
+                disabled={!canAddPostContainmentOrProblemNode || isWorking}
+                icon={PackageCheck}
+                label="CAPA Stages"
+                onClick={() => {
+                  setIsCapaSubmenuOpen((isOpen) => !isOpen);
+                  setIsSettingsSubmenuOpen(false);
+                  setIsThemeSubmenuOpen(false);
+                }}
+                rightSlot={<ChevronRight aria-hidden="true" size={11} strokeWidth={2} />}
+              />
                 <div className={`${isCapaSubmenuOpen ? 'pointer-events-auto translate-y-0 scale-100 opacity-100' : 'pointer-events-none translate-y-1 scale-95 opacity-0 group-hover/capa-node:pointer-events-auto group-hover/capa-node:translate-y-0 group-hover/capa-node:scale-100 group-hover/capa-node:opacity-100'} absolute top-0 z-[94] w-[218px] rounded-xl border border-white/70 bg-white/95 p-1 shadow-[0_18px_48px_rgba(15,23,42,0.17)] ring-1 ring-slate-900/5 backdrop-blur-xl transition duration-150 ease-out ${submenuPlacementClassName}`}>
                   {RCA_CAPA_NODE_ROLE_OPTIONS.map((option) => (
                     <RcaContextMenuItem
-                      disabled={!canAddNode || isWorking}
+                      disabled={!canAddPostContainmentOrProblemNode || isWorking}
                       icon={option.icon}
                       key={option.value}
                       label={option.label}
@@ -10865,10 +18113,16 @@ function RcaCanvasContextMenu({
             </div>
           </div>
           <RcaContextMenuItem
-            disabled={!canAddNode || isWorking}
+            disabled={!canAddPostIncidentDetailsNode || isWorking}
             icon={StickyNote}
             label="Sticky Note"
             onClick={onAddStickyNote}
+          />
+          <RcaContextMenuItem
+            disabled={!canAddPostIncidentDetailsNode || isWorking}
+            icon={MessageSquareText}
+            label="Comment"
+            onClick={onAddComment}
           />
           <RcaContextMenuItem
             disabled={!canCreateIncidentNode || isWorking}
@@ -10911,13 +18165,28 @@ function RcaCanvasContextMenu({
               shortcut="Shift+R"
             />
           ) : null}
-          <div className="group/settings relative">
+          <div
+            className="group/settings relative"
+            onMouseEnter={() => {
+              setIsSettingsSubmenuOpen(true);
+              setIsAddNodeSubmenuOpen(false);
+              setIsBranchSubmenuOpen(false);
+              setIsCapaSubmenuOpen(false);
+            }}
+          >
             <RcaContextMenuItem
               icon={Settings2}
               label="Settings"
+              onClick={() => {
+                setIsSettingsSubmenuOpen((isOpen) => !isOpen);
+                setIsAddNodeSubmenuOpen(false);
+                setIsBranchSubmenuOpen(false);
+                setIsCapaSubmenuOpen(false);
+                setIsThemeSubmenuOpen(false);
+              }}
               rightSlot={<ChevronRight aria-hidden="true" size={11} strokeWidth={2} />}
             />
-            <div className={`pointer-events-none absolute top-0 z-[92] w-[216px] translate-y-1 scale-95 rounded-xl border border-white/70 bg-white/95 p-1 opacity-0 shadow-[0_18px_48px_rgba(15,23,42,0.17)] ring-1 ring-slate-900/5 backdrop-blur-xl transition duration-150 ease-out group-hover/settings:pointer-events-auto group-hover/settings:translate-y-0 group-hover/settings:scale-100 group-hover/settings:opacity-100 ${submenuPlacementClassName}`}>
+            <div className={`${isSettingsSubmenuOpen ? 'pointer-events-auto translate-y-0 scale-100 opacity-100' : 'pointer-events-none translate-y-1 scale-95 opacity-0 group-hover/settings:pointer-events-auto group-hover/settings:translate-y-0 group-hover/settings:scale-100 group-hover/settings:opacity-100'} absolute top-0 z-[92] w-[216px] rounded-xl border border-white/70 bg-white/95 p-1 shadow-[0_18px_48px_rgba(15,23,42,0.17)] ring-1 ring-slate-900/5 backdrop-blur-xl transition duration-150 ease-out ${submenuPlacementClassName}`}>
               <RcaContextMenuItem
                 active={isGridVisible}
                 icon={Grid2X2}
@@ -10953,13 +18222,17 @@ function RcaCanvasContextMenu({
                   value={gridSize}
                 />
               </div>
-              <div className="group/theme relative">
+              <div
+                className="group/theme relative"
+                onMouseEnter={() => setIsThemeSubmenuOpen(true)}
+              >
                 <RcaContextMenuItem
                   icon={Palette}
                   label="Canvas theme"
+                  onClick={() => setIsThemeSubmenuOpen((isOpen) => !isOpen)}
                   rightSlot={<ChevronRight aria-hidden="true" size={11} strokeWidth={2} />}
                 />
-                <div className={`pointer-events-none absolute top-0 z-[94] w-[172px] translate-y-1 scale-95 rounded-xl border border-white/70 bg-white/95 p-1 opacity-0 shadow-[0_18px_48px_rgba(15,23,42,0.17)] ring-1 ring-slate-900/5 backdrop-blur-xl transition duration-150 ease-out group-hover/theme:pointer-events-auto group-hover/theme:translate-y-0 group-hover/theme:scale-100 group-hover/theme:opacity-100 ${submenuPlacementClassName}`}>
+                <div className={`${isThemeSubmenuOpen ? 'pointer-events-auto translate-y-0 scale-100 opacity-100' : 'pointer-events-none translate-y-1 scale-95 opacity-0 group-hover/theme:pointer-events-auto group-hover/theme:translate-y-0 group-hover/theme:scale-100 group-hover/theme:opacity-100'} absolute top-0 z-[94] w-[172px] rounded-xl border border-white/70 bg-white/95 p-1 shadow-[0_18px_48px_rgba(15,23,42,0.17)] ring-1 ring-slate-900/5 backdrop-blur-xl transition duration-150 ease-out ${submenuPlacementClassName}`}>
                   {RCA_CANVAS_THEME_OPTIONS.map((option) => (
                     <RcaContextMenuItem
                       active={option.value === canvasTheme}
@@ -11551,7 +18824,7 @@ function RcaContextMenuItem({
   shortcut?: string;
   tone?: 'danger' | 'default';
 }) {
-  const title = shortcut ? `${shortcut} - ${label}` : label;
+  const ariaLabel = shortcut ? `${shortcut} - ${label}` : label;
   const defaultClassName = active
     ? 'bg-emerald-50 text-emerald-700 shadow-sm shadow-emerald-950/5 ring-1 ring-emerald-100'
     : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950 active:scale-[0.99]';
@@ -11571,7 +18844,7 @@ function RcaContextMenuItem({
         event.stopPropagation();
         onClick?.();
       }}
-      title={title}
+      aria-label={ariaLabel}
       type="button"
     >
       <span className="grid h-5 w-5 shrink-0 place-items-center rounded-md bg-slate-50 text-current ring-1 ring-slate-200/70">
@@ -11622,11 +18895,14 @@ function RcaNodeCard(props: NodeProps) {
   const detail = data.detail;
   const isCategory = node.nodeType === 'ISHIKAWA_CATEGORY';
   const isFaultGate = node.nodeType === 'FAULT_GATE';
-  const isStickyNote = node.nodeType === 'STICKY_NOTE';
+  const isCommentNode = node.nodeType === 'COMMENT';
+  const isFreeformAnnotation = isFreeformRcaAnnotationNode(node);
+  const isMisclassifiedFishboneCause = isMisclassifiedFishboneCauseNode(node, data.nodes);
   const nodeIndex = Math.max(0, data.nodes.findIndex((candidateNode) => candidateNode.id === node.id));
-  const fiveWhysNodeRole = node.nodeType === 'WHY'
+  const fiveWhysNodeRole = node.nodeType === 'WHY' && !isMisclassifiedFishboneCause
     ? getFiveWhysDisplayRole(node, data.nodes, nodeIndex)
     : null;
+  const isApprovalClosureNode = fiveWhysNodeRole === 'APPROVAL_CLOSURE';
   const fiveWhysBadgeLabel = fiveWhysNodeRole
     ? getFiveWhysNodeBadgeLabel(node, data.nodes, nodeIndex, fiveWhysNodeRole)
     : null;
@@ -11643,13 +18919,26 @@ function RcaNodeCard(props: NodeProps) {
   const inlineDocRef = React.useRef<Y.Doc | null>(null);
   const inlineTextRef = React.useRef<Y.Text | null>(null);
   const inlineTextareaRef = React.useRef<HTMLTextAreaElement | null>(null);
-  const stickyNoteAuthorFirstName = node.createdBy ? getUserFirstName(node.createdBy.displayName) : 'User';
+  const annotationAuthorFirstName = node.createdBy ? getUserFirstName(node.createdBy.displayName) : 'User';
   const nodeSize = getRcaNodeSize(node, detail);
-  const visualStyle = getResolvedNodeVisualStyle(node);
+  const visualStyle = isMisclassifiedFishboneCause
+    ? RCA_DEFAULT_CAUSE_VISUAL_STYLE
+    : getResolvedNodeVisualStyle(node);
+  const isDisplayRootCause = node.isRootCause && !isMisclassifiedFishboneCause;
+  const isDisplaySuspectedCause = node.isSuspectedCause && !isMisclassifiedFishboneCause;
+  const annotationAccentClassName = isCommentNode ? 'text-sky-950' : 'text-amber-950';
+  const annotationMutedClassName = isCommentNode ? 'text-sky-800/55' : 'text-amber-800/55';
+  const annotationEditorClassName = isCommentNode
+    ? 'border-sky-300/70 bg-sky-50/80 ring-sky-400/15'
+    : 'border-amber-300/70 bg-amber-50/80 ring-amber-400/15';
+  const annotationHoverClassName = isCommentNode ? 'hover:bg-sky-50/70' : 'hover:bg-amber-50/70';
+  const annotationRingClassName = isCommentNode
+    ? 'shadow-sky-950/20 ring-sky-300'
+    : 'shadow-amber-950/20 ring-amber-300';
   const nodeVisualStyle: React.CSSProperties = {
-    backgroundColor: node.visualStyle?.backgroundColor || undefined,
-    borderColor: node.visualStyle?.borderColor || undefined,
-    height: node.nodeType === 'STICKY_NOTE' ? nodeSize.height : undefined,
+    backgroundColor: isMisclassifiedFishboneCause ? RCA_DEFAULT_CAUSE_VISUAL_STYLE.backgroundColor : node.visualStyle?.backgroundColor || undefined,
+    borderColor: isMisclassifiedFishboneCause ? RCA_DEFAULT_CAUSE_VISUAL_STYLE.borderColor : node.visualStyle?.borderColor || undefined,
+    height: nodeSize.height,
     minHeight: nodeSize.height,
     width: nodeSize.width
   };
@@ -11660,21 +18949,25 @@ function RcaNodeCard(props: NodeProps) {
     fontStyle: visualStyle.isItalic ? 'italic' : undefined,
     fontWeight: visualStyle.isBold ? 700 : 400,
     textDecorationLine: visualStyle.isUnderline ? 'underline' : undefined,
-    lineHeight: isStickyNote ? 1.3 : 1.22
+    lineHeight: isFreeformAnnotation ? 1.3 : 1.22
   };
   const eyebrowVisualStyle: React.CSSProperties = {
     color: node.visualStyle?.textColor || undefined,
     fontFamily: getNodeFontFamilyCss(visualStyle.fontFamily)
   };
-  const stateClassName = node.isRootCause
+  const stateClassName = isDisplayRootCause
     ? 'border-l-4 border-l-red-500 border-y-red-100 border-r-red-100 bg-red-50/92 shadow-red-950/12'
     : isCategory
       ? 'border-cyan-200 bg-cyan-50/92 ring-1 ring-cyan-500/10'
-      : isStickyNote
-        ? data.selected
-          ? 'border-amber-400 bg-amber-100/95 ring-4 ring-amber-500/20'
-          : 'border-amber-300 bg-amber-100/95'
-      : node.isSuspectedCause
+      : isFreeformAnnotation
+        ? isCommentNode
+          ? data.selected
+            ? 'border-sky-300 bg-sky-50/95 ring-4 ring-sky-500/20'
+            : 'border-sky-200 bg-sky-50/95'
+          : data.selected
+            ? 'border-amber-400 bg-amber-100/95 ring-4 ring-amber-500/20'
+            : 'border-amber-300 bg-amber-100/95'
+      : isDisplaySuspectedCause
         ? 'border-l-4 border-l-amber-400 border-y-amber-100 border-r-amber-100 bg-amber-50/80 shadow-amber-950/10'
         : data.selected
           ? 'border-cyan-300 bg-white ring-4 ring-cyan-500/15'
@@ -11688,9 +18981,35 @@ function RcaNodeCard(props: NodeProps) {
   const outputHandleClassName = data.selected
     ? '!z-30 !h-3.5 !w-3.5 !border-[3px] !border-white !bg-cyan-600 !shadow-md !shadow-cyan-950/25'
     : '!z-30 !h-2.5 !w-2.5 !border-2 !border-white !bg-cyan-500';
+  const resolvedInputHandleClassName = isFreeformAnnotation
+    ? `${inputHandleClassName} !pointer-events-auto !z-50 !h-4 !w-4 !border-[3px]`
+    : inputHandleClassName;
+  const resolvedOutputHandleClassName = isFreeformAnnotation
+    ? `${outputHandleClassName} !pointer-events-auto !z-50 !h-4 !w-4 !border-[3px]`
+    : isApprovalClosureNode
+      ? '!z-20 !h-2.5 !w-2.5 !cursor-not-allowed !border-2 !border-white !bg-slate-300 !opacity-55'
+      : outputHandleClassName;
+  const displayNodeLabel = isMisclassifiedFishboneCause
+    ? node.label.trim() || 'Cause'
+    : getRcaCanvasNodeDisplayLabel(node, fiveWhysNodeRole);
+  const shouldShowEvidenceLibraryAction = isEvidenceRoleNode(node) && !data.isReferenceProject && Boolean(data.onOpenEvidenceLibrary);
+  const evidenceThumbnailItems = isEvidenceRoleNode(node)
+    ? node.attachedEvidence.filter(isImageEvidence).slice(0, 2)
+    : [];
+  const missingDataBadges = (data.missingDataBadges || []).slice(0, 2);
+  const reactionSummaries = getRcaNodeReactionSummaries(node).slice(0, 2);
+  const reactionSignature = reactionSummaries.map((reaction) => `${reaction.emoji}:${reaction.count}:${reaction.latestAtIso}`).join('|');
+  const previousReactionSignatureRef = React.useRef(reactionSignature);
+  const [animatedReactionEmoji, setAnimatedReactionEmoji] = React.useState<string | null>(null);
+  const longPressRef = React.useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    timeoutId: number;
+  } | null>(null);
 
   React.useLayoutEffect(() => {
-    if (!isStickyNote) {
+    if (!isFreeformAnnotation) {
       return undefined;
     }
 
@@ -11699,13 +19018,35 @@ function RcaNodeCard(props: NodeProps) {
     });
 
     return () => window.cancelAnimationFrame(animationFrameId);
-  }, [isStickyNote, node.id, nodeSize.height, nodeSize.width, updateNodeInternals]);
+  }, [isFreeformAnnotation, node.id, nodeSize.height, nodeSize.width, updateNodeInternals]);
 
   React.useEffect(() => {
     if (!isInlineEditing) {
       setInlineLabel(node.label);
     }
   }, [isInlineEditing, node.label]);
+
+  React.useEffect(() => {
+    if (previousReactionSignatureRef.current !== reactionSignature) {
+      const previousCounts = new Map(
+        previousReactionSignatureRef.current
+          .split('|')
+          .filter(Boolean)
+          .map((entry) => {
+            const [emoji, count] = entry.split(':');
+            return [emoji, Number(count) || 0] as const;
+          })
+      );
+      const addedReaction = reactionSummaries.find((reaction) => reaction.count > (previousCounts.get(reaction.emoji) || 0));
+
+      if (addedReaction) {
+        setAnimatedReactionEmoji(addedReaction.emoji);
+        window.setTimeout(() => setAnimatedReactionEmoji((emoji) => emoji === addedReaction.emoji ? null : emoji), 720);
+      }
+
+      previousReactionSignatureRef.current = reactionSignature;
+    }
+  }, [reactionSignature, reactionSummaries]);
 
   React.useEffect(() => {
     setIsInlineTextSynced(false);
@@ -11804,13 +19145,79 @@ function RcaNodeCard(props: NodeProps) {
     }
   }
 
+  function cancelReactionLongPress() {
+    const longPress = longPressRef.current;
+
+    if (longPress) {
+      window.clearTimeout(longPress.timeoutId);
+      longPressRef.current = null;
+    }
+  }
+
+  function shouldIgnoreReactionLongPress(target: EventTarget | null): boolean {
+    if (!(target instanceof HTMLElement)) {
+      return true;
+    }
+
+    return Boolean(target.closest('button, textarea, input, select, [contenteditable="true"], .react-flow__handle, .nodrag, .nopan'));
+  }
+
+  function handleReactionPointerDown(event: React.PointerEvent<HTMLDivElement>) {
+    if (!data.onOpenReactionPalette || isInlineEditing || event.button !== 0 || shouldIgnoreReactionLongPress(event.target)) {
+      return;
+    }
+
+    cancelReactionLongPress();
+
+    const nodeBounds = event.currentTarget.getBoundingClientRect();
+    const pointerId = event.pointerId;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const timeoutId = window.setTimeout(() => {
+      longPressRef.current = null;
+      data.onOpenReactionPalette?.({
+        avoidRect: {
+          bottom: nodeBounds.bottom,
+          left: nodeBounds.left,
+          right: nodeBounds.right,
+          top: nodeBounds.top
+        },
+        nodeId: node.id,
+        x: startX,
+        y: startY
+      });
+    }, RCA_NODE_REACTION_LONG_PRESS_MS);
+
+    longPressRef.current = {
+      pointerId,
+      startX,
+      startY,
+      timeoutId
+    };
+  }
+
+  function handleReactionPointerMove(event: React.PointerEvent<HTMLDivElement>) {
+    const longPress = longPressRef.current;
+
+    if (!longPress || longPress.pointerId !== event.pointerId) {
+      return;
+    }
+
+    const deltaX = Math.abs(event.clientX - longPress.startX);
+    const deltaY = Math.abs(event.clientY - longPress.startY);
+
+    if (Math.max(deltaX, deltaY) > RCA_NODE_REACTION_DRAG_CANCEL_PX) {
+      cancelReactionLongPress();
+    }
+  }
+
   return (
     <div
-      aria-label={`Open RCA node ${node.label || formatNodeType(node.nodeType)}`}
+      aria-label={`Open RCA node ${displayNodeLabel || formatNodeType(node.nodeType)}`}
       className={`relative cursor-grab border shadow-md backdrop-blur-sm transition-all hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-lg active:cursor-grabbing ${
         isCategory
           ? 'min-h-[76px] w-56 rounded-2xl px-5 py-4'
-          : isStickyNote
+          : isFreeformAnnotation
             ? 'overflow-visible rounded-sm p-2 shadow-lg'
           : isFaultGate
             ? 'min-h-28 w-72 rounded-xl p-4'
@@ -11821,6 +19228,11 @@ function RcaNodeCard(props: NodeProps) {
           event.preventDefault();
         }
       }}
+      onPointerCancel={cancelReactionLongPress}
+      onPointerDown={handleReactionPointerDown}
+      onPointerLeave={cancelReactionLongPress}
+      onPointerMove={handleReactionPointerMove}
+      onPointerUp={cancelReactionLongPress}
       role="button"
       style={nodeVisualStyle}
       tabIndex={0}
@@ -11830,34 +19242,107 @@ function RcaNodeCard(props: NodeProps) {
           Selected
         </span>
       ) : null}
+      <button
+        aria-label={`Show quick values for ${displayNodeLabel || formatNodeType(node.nodeType)}`}
+        className="rca-node-hint-button nodrag nopan absolute bottom-2 right-2 z-40 grid h-7 w-7 place-items-center rounded-full border border-cyan-200/80 bg-white/86 text-cyan-700 shadow-md shadow-cyan-950/10 backdrop-blur-md transition hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-50 hover:text-cyan-800 active:scale-95"
+        onClick={(event) => data.onOpenHint?.(node.id, event)}
+        onMouseDown={(event) => event.stopPropagation()}
+        onPointerDown={(event) => event.stopPropagation()}
+        title="Show node values"
+        type="button"
+      >
+        <CircleHelp aria-hidden="true" size={14} strokeWidth={2.4} />
+      </button>
       <Handle
-        className={inputHandleClassName}
+        className={resolvedInputHandleClassName}
         id={RCA_TARGET_LEFT_HANDLE}
+        isConnectableEnd={props.isConnectable}
+        isConnectableStart={false}
         position={Position.Left}
         type="target"
       />
       <Handle
-        className={inputHandleClassName}
+        className={resolvedInputHandleClassName}
         id={RCA_TARGET_TOP_HANDLE}
+        isConnectableEnd={props.isConnectable}
+        isConnectableStart={false}
         position={Position.Top}
         type="target"
       />
       <Handle
-        className={outputHandleClassName}
+        className={resolvedOutputHandleClassName}
         id={RCA_SOURCE_RIGHT_HANDLE}
+        isConnectableEnd={false}
+        isConnectableStart={props.isConnectable && !isApprovalClosureNode}
         position={Position.Right}
         type="source"
       />
       <Handle
-        className={outputHandleClassName}
+        className={resolvedOutputHandleClassName}
         id={RCA_SOURCE_BOTTOM_HANDLE}
+        isConnectableEnd={false}
+        isConnectableStart={props.isConnectable && !isApprovalClosureNode}
         position={Position.Bottom}
         type="source"
       />
-      {isStickyNote ? (
+      {!isFreeformAnnotation && missingDataBadges.length ? (
+        <div className="pointer-events-none absolute bottom-2 left-3 right-12 z-30 flex min-w-0 items-center gap-1 overflow-hidden">
+          {missingDataBadges.map((badge) => (
+            <span
+              className={`inline-flex max-w-[112px] shrink items-center gap-1 rounded-full border px-1.5 py-0.5 text-[9px] font-semibold leading-3 shadow-sm backdrop-blur-sm ${
+                getRcaMissingDataBadgeToneClassName(badge.tone)
+              }`}
+              key={`${badge.label}-${badge.tone}`}
+              title={badge.title}
+            >
+              <span aria-hidden="true" className="h-1 w-1 shrink-0 rounded-full bg-current" />
+              <span className="truncate">{badge.label}</span>
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {reactionSummaries.length ? (
+        <div className="pointer-events-none absolute -top-5 left-3 z-50 flex max-w-[calc(100%-48px)] items-center gap-1.5 overflow-hidden">
+          {reactionSummaries.map((reaction) => (
+            <span
+              className={`inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-white/80 bg-white/94 px-2.5 text-[13px] font-semibold text-slate-700 shadow-lg shadow-slate-950/12 ring-1 ring-slate-200/70 backdrop-blur-md ${
+                animatedReactionEmoji === reaction.emoji ? 'animate-[rcaReactionPop_620ms_cubic-bezier(0.22,1,0.36,1)]' : ''
+              }`}
+              key={reaction.emoji}
+              title={reaction.users.map((user) => user.displayName).join(', ')}
+            >
+              <span className="text-[20px] leading-none">{reaction.emoji}</span>
+              <span className="text-[10px] leading-none">{reaction.count}</span>
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {!isFreeformAnnotation && evidenceThumbnailItems.length ? (
+        <div className="absolute right-3 top-3 z-20 flex max-w-[72px] items-center gap-1 overflow-hidden">
+          {evidenceThumbnailItems.map((item) => (
+            <button
+              aria-label={`Open evidence photo ${item.fileName}`}
+              className="nodrag nopan grid h-8 w-8 shrink-0 place-items-center overflow-hidden rounded-lg border border-white/90 bg-white shadow-sm ring-1 ring-slate-200/70 transition hover:-translate-y-0.5 hover:ring-cyan-300 focus:outline-none focus:ring-2 focus:ring-cyan-400 active:scale-95"
+              key={getEvidenceKey(item)}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                data.onOpenEvidencePhotoViewer?.(node.id, getEvidenceKey(item));
+              }}
+              onMouseDown={(event) => event.stopPropagation()}
+              onPointerDown={(event) => event.stopPropagation()}
+              title={item.fileName}
+              type="button"
+            >
+              <RcaNodeEvidenceThumbnail item={item} />
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {isFreeformAnnotation ? (
         <>
           {node.createdBy ? (
-            <div className="pointer-events-none absolute -left-5 -top-5 z-20 rounded-full bg-white p-1 shadow-lg shadow-amber-950/20 ring-2 ring-amber-300">
+            <div className={`pointer-events-none absolute -left-5 -top-5 z-20 rounded-full bg-white p-1 shadow-lg ring-2 ${annotationRingClassName}`}>
               <RcaUserAvatar size="lg" user={node.createdBy} />
             </div>
           ) : null}
@@ -11869,12 +19354,12 @@ function RcaNodeCard(props: NodeProps) {
             </span>
           ) : null}
           {isInlineEditing ? (
-            <div className="nodrag nopan nowheel flex min-h-[64px] w-full items-start gap-1 rounded-sm border border-amber-300/70 bg-amber-50/80 px-2.5 py-2 outline-none ring-4 ring-amber-400/15">
-              <span className="shrink-0 whitespace-nowrap text-sm font-semibold text-amber-950" style={labelVisualStyle}>
-                {stickyNoteAuthorFirstName} :
+            <div className={`nodrag nopan nowheel flex min-h-[64px] w-full items-start gap-1 rounded-sm border px-2.5 py-2 outline-none ring-4 ${annotationEditorClassName}`}>
+              <span className={`shrink-0 whitespace-nowrap text-sm font-semibold ${annotationAccentClassName}`} style={labelVisualStyle}>
+                {annotationAuthorFirstName} :
               </span>
               <textarea
-                className="nodrag nopan nowheel min-h-[48px] flex-1 resize-none border-0 bg-transparent p-0 text-sm text-amber-950 outline-none"
+                className={`nodrag nopan nowheel min-h-[48px] flex-1 resize-none border-0 bg-transparent p-0 text-sm outline-none ${annotationAccentClassName}`}
                 disabled={data.isRealtimeReady && !isInlineTextSynced}
                 onBlur={() => void finishInlineEditing()}
                 onChange={(event) => updateInlineLabel(event.target.value)}
@@ -11898,7 +19383,7 @@ function RcaNodeCard(props: NodeProps) {
                 onKeyUpCapture={(event) => event.stopPropagation()}
                 onMouseDown={(event) => event.stopPropagation()}
                 onPointerDown={(event) => event.stopPropagation()}
-                placeholder="Write a note..."
+                placeholder={isCommentNode ? 'Write a comment...' : 'Write a note...'}
                 ref={inlineTextareaRef}
                 rows={3}
                 style={labelVisualStyle}
@@ -11907,12 +19392,12 @@ function RcaNodeCard(props: NodeProps) {
             </div>
           ) : (
             <div
-              className="block min-h-[64px] whitespace-pre-wrap break-words rounded-sm px-2.5 py-2 text-sm text-amber-950 transition hover:bg-amber-50/70"
+              className={`block min-h-[64px] whitespace-pre-wrap break-words rounded-sm px-2.5 py-2 text-sm transition ${annotationAccentClassName} ${annotationHoverClassName}`}
               onDoubleClick={startInlineEditing}
               style={labelVisualStyle}
             >
-              <span className="font-semibold">{stickyNoteAuthorFirstName} : </span>
-              {node.label || <span className="text-amber-800/55">Write a note...</span>}
+              <span className="font-semibold">{annotationAuthorFirstName} : </span>
+              {node.label || <span className={annotationMutedClassName}>{isCommentNode ? 'Write a comment...' : 'Write a note...'}</span>}
             </div>
           )}
         </>
@@ -11933,19 +19418,19 @@ function RcaNodeCard(props: NodeProps) {
               ? 'bg-emerald-100 text-emerald-800'
             : fiveWhysNodeRole
               ? 'bg-slate-100 text-slate-600'
-            : node.isRootCause
+            : isDisplayRootCause
               ? 'bg-red-600 text-white'
-              : node.isSuspectedCause
+              : isDisplaySuspectedCause
                 ? 'bg-amber-100 text-amber-800'
               : 'bg-slate-100 text-slate-600'
         }`}>
           {fiveWhysBadgeLabel
             ? fiveWhysBadgeLabel
-            : node.isRootCause
+            : isDisplayRootCause
             ? 'Verified root'
-            : node.isSuspectedCause
+            : isDisplaySuspectedCause
               ? 'Suspect'
-                : formatNodeType(node.nodeType)}
+                : isMisclassifiedFishboneCause ? 'Cause' : formatNodeType(node.nodeType)}
         </span>
         {activeActivity ? (
           <span className="inline-flex max-w-[150px] items-center gap-1 rounded-full bg-emerald-50 px-2 py-1 text-[11px] font-semibold text-emerald-700 ring-1 ring-emerald-100">
@@ -11999,7 +19484,7 @@ function RcaNodeCard(props: NodeProps) {
           onDoubleClick={startInlineEditing}
           style={labelVisualStyle}
         >
-          {node.label || 'Click to describe this cause'}
+          {displayNodeLabel || 'Click to describe this cause'}
         </p>
       )}
       {detail?.verification ? (
@@ -12008,22 +19493,39 @@ function RcaNodeCard(props: NodeProps) {
         </p>
       ) : null}
       <div className="mt-4 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
-        <span className="inline-flex items-center gap-1">
-          <FileLock2 aria-hidden="true" size={13} />
-          {node.attachedEvidence.length} evidence
-        </span>
+        {shouldShowEvidenceLibraryAction ? (
+          <button
+            className="nodrag nopan inline-flex items-center gap-1 rounded-full px-1.5 py-1 text-xs font-semibold text-cyan-700 transition hover:bg-cyan-50 hover:text-cyan-800 active:scale-95"
+            onClick={(event) => {
+              event.stopPropagation();
+              data.onOpenEvidenceLibrary?.(node.id);
+            }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+            title="Add evidence from library"
+            type="button"
+          >
+            <FileLock2 aria-hidden="true" size={13} />
+            {node.attachedEvidence.length} evidence
+          </button>
+        ) : (
+          <span className="inline-flex items-center gap-1">
+            <FileLock2 aria-hidden="true" size={13} />
+            {node.attachedEvidence.length} evidence
+          </span>
+        )}
         {detail?.actions.length ? (
           <span className="inline-flex items-center gap-1 text-emerald-700">
             <Wrench aria-hidden="true" size={13} />
             {detail.actions.length} CAPA
           </span>
         ) : null}
-        {node.isRootCause ? (
+        {isDisplayRootCause ? (
           <span className="inline-flex items-center gap-1 text-red-600">
             <AlertTriangle aria-hidden="true" size={13} />
-            Root cause
+            Cause
           </span>
-        ) : node.isSuspectedCause ? (
+        ) : isDisplaySuspectedCause ? (
           <span className="inline-flex items-center gap-1 text-amber-700">
             <Gauge aria-hidden="true" size={13} />
             Suspect
@@ -12036,8 +19538,592 @@ function RcaNodeCard(props: NodeProps) {
   );
 }
 
+function RcaNodeEvidenceThumbnail({ item }: { item: RcaAttachedEvidence }) {
+  const fallbackSrc = getRcaAttachedEvidenceThumbnailSrc(item);
+  const [thumbnailSrc, setThumbnailSrc] = React.useState(fallbackSrc);
+  const evidenceKey = getEvidenceKey(item);
+
+  React.useEffect(() => {
+    let isCurrent = true;
+    let objectUrl: string | null = null;
+
+    setThumbnailSrc(fallbackSrc);
+
+    if (!canHydrateRcaAttachedEvidenceThumbnail(item)) {
+      return undefined;
+    }
+
+    async function hydrateThumbnail() {
+      try {
+        const cachedBlob = await getStoredEvidencePreviewBlob(evidenceKey);
+        const blob = cachedBlob || await downloadRailsEvidenceBlob(item.fileUrl);
+
+        if (!blob.type.startsWith('image/')) {
+          return;
+        }
+
+        if (!cachedBlob) {
+          await storeEvidencePreviewBlob(evidenceKey, blob);
+        }
+
+        objectUrl = URL.createObjectURL(blob);
+
+        if (isCurrent) {
+          setThumbnailSrc(objectUrl);
+        } else {
+          URL.revokeObjectURL(objectUrl);
+        }
+      } catch {
+        if (isCurrent) {
+          setThumbnailSrc(fallbackSrc);
+        }
+      }
+    }
+
+    void hydrateThumbnail();
+
+    return () => {
+      isCurrent = false;
+
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [evidenceKey, fallbackSrc, item]);
+
+  return (
+    <img
+      alt=""
+      className="h-full w-full object-cover"
+      draggable={false}
+      src={thumbnailSrc}
+    />
+  );
+}
+
+function RcaNodeHintPopover({
+  anchor,
+  autoOpenEnabled,
+  node,
+  nodes,
+  onClose,
+  onToggleAutoOpen
+}: {
+  anchor: RcaNodeHintAnchor | null;
+  autoOpenEnabled: boolean;
+  node: RcaNode | null;
+  nodes: RcaNode[];
+  onClose: () => void;
+  onToggleAutoOpen: () => void;
+}) {
+  const popoverRef = React.useRef<HTMLDivElement | null>(null);
+  const [position, setPosition] = React.useState({ left: 24, top: 84 });
+
+  const nodeIndex = node ? Math.max(0, nodes.findIndex((candidateNode) => candidateNode.id === node.id)) : 0;
+  const displayRole = node?.nodeType === 'WHY'
+    ? getFiveWhysDisplayRole(node, nodes, nodeIndex)
+    : null;
+  const roleLabel = displayRole
+    ? getFiveWhysRoleLabel(displayRole)
+    : node
+      ? formatNodeType(node.nodeType)
+      : 'RCA node';
+  const nodeGuide = React.useMemo(() => (
+    node ? getRcaNodeGuideContent(node, displayRole) : null
+  ), [displayRole, node]);
+
+  React.useLayoutEffect(() => {
+    if (!anchor || !node) {
+      return undefined;
+    }
+
+    const anchorPoint = anchor;
+
+    function positionPopover() {
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      const fallbackWidth = Math.min(760, Math.max(340, viewportWidth - 24));
+      const fallbackHeight = Math.min(680, Math.max(280, viewportHeight - 84));
+      const rect = popoverRef.current?.getBoundingClientRect();
+      const popoverWidth = rect?.width || fallbackWidth;
+      const popoverHeight = rect?.height || fallbackHeight;
+      const margin = 14;
+      const minimumTop = 58;
+      let left = anchorPoint.x + margin;
+      let top = anchorPoint.y + margin;
+
+      if (left + popoverWidth > viewportWidth - margin) {
+        left = anchorPoint.x - popoverWidth - margin;
+      }
+
+      if (top + popoverHeight > viewportHeight - margin) {
+        top = anchorPoint.y - popoverHeight - margin;
+      }
+
+      setPosition({
+        left: Math.min(Math.max(margin, left), Math.max(margin, viewportWidth - popoverWidth - margin)),
+        top: Math.min(Math.max(minimumTop, top), Math.max(minimumTop, viewportHeight - popoverHeight - margin))
+      });
+    }
+
+    positionPopover();
+    window.addEventListener('resize', positionPopover);
+
+    return () => window.removeEventListener('resize', positionPopover);
+  }, [anchor, node]);
+
+  React.useEffect(() => {
+    if (!anchor || !node) {
+      return undefined;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target as Node | null;
+
+      if (target && popoverRef.current?.contains(target)) {
+        return;
+      }
+
+      onClose();
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    }
+
+    window.addEventListener('pointerdown', handlePointerDown, true);
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown, true);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [anchor, node, onClose]);
+
+  if (!anchor || !node) {
+    return null;
+  }
+
+  const popover = (
+    <>
+      <style>
+        {`
+          @keyframes rcaNodeHintDrop {
+            from {
+              opacity: 0;
+              transform: translateY(-14px) scale(0.975);
+            }
+            to {
+              opacity: 1;
+              transform: translateY(0) scale(1);
+            }
+          }
+        `}
+      </style>
+      <section
+        aria-label={`Guide for ${nodeGuide?.title || roleLabel}`}
+        className="rca-node-hint-popover fixed z-[2600] flex w-[min(460px,calc(100vw-24px))] max-w-[calc(100vw-24px)] origin-top-left flex-col overflow-hidden rounded-2xl border border-cyan-100/80 bg-white/96 shadow-[0_18px_48px_rgba(15,23,42,0.18),0_0_0_1px_rgba(14,165,233,0.10)] ring-1 ring-cyan-200/24 backdrop-blur-xl"
+        ref={popoverRef}
+        role="dialog"
+        style={{
+          animation: 'rcaNodeHintDrop 180ms cubic-bezier(0.22, 1, 0.36, 1)',
+          left: position.left,
+          maxHeight: 'min(420px, calc(100svh - 72px))',
+          top: position.top
+        }}
+      >
+        <div className="flex items-start justify-between gap-3 border-b border-cyan-100/80 bg-cyan-50/50 px-4 py-3">
+          <div className="min-w-0">
+            <p className="text-[9px] font-semibold uppercase tracking-[0.26em] text-cyan-700">Node guide</p>
+            <h3 className="mt-1 text-[15px] font-semibold leading-5 text-slate-950">
+              {nodeGuide?.title || roleLabel}
+            </h3>
+            <p className="mt-1 text-xs leading-5 text-slate-600">
+              {nodeGuide?.description || 'Use this guide to understand the purpose and connection rules for this RCA node type.'}
+            </p>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              aria-label={autoOpenEnabled ? 'Turn node guide auto-open off' : 'Turn node guide auto-open on'}
+              aria-pressed={autoOpenEnabled}
+              className={`relative h-5 w-9 rounded-full p-0.5 transition focus:outline-none focus:ring-3 focus:ring-cyan-500/15 active:scale-95 ${
+                autoOpenEnabled
+                  ? 'bg-cyan-600'
+                  : 'bg-slate-300'
+              }`}
+              onClick={onToggleAutoOpen}
+              title="Open guide after adding a node"
+              type="button"
+            >
+              <span
+                className={`block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
+                  autoOpenEnabled ? 'translate-x-4' : 'translate-x-0'
+                }`}
+              />
+            </button>
+            <button
+              className="grid h-7 w-7 place-items-center rounded-full border border-slate-200/80 bg-white/80 text-slate-600 shadow-sm backdrop-blur transition hover:bg-white hover:text-slate-950 active:scale-95"
+              onClick={onClose}
+              type="button"
+            >
+              <X aria-hidden="true" size={14} />
+            </button>
+          </div>
+        </div>
+
+        <div className="rca-node-hint-scroll min-h-0 flex-1 overflow-y-auto px-4 py-3.5">
+          {nodeGuide ? (
+            <section className="text-[13px] leading-5 text-slate-700">
+              <p>{nodeGuide.guidance}</p>
+              <p className="mt-3 text-[11px] leading-4 text-slate-500">
+                Auto-open is {autoOpenEnabled ? 'on' : 'off'}. Use the switch above to change it.
+              </p>
+            </section>
+          ) : null}
+        </div>
+      </section>
+    </>
+  );
+
+  return createPortal(popover, document.body);
+}
+
+function RcaNodeReactionPalette({
+  anchor,
+  node,
+  onClose,
+  onSelectReaction
+}: {
+  anchor: RcaNodeReactionPaletteAnchor | null;
+  node: RcaNode | null;
+  onClose: () => void;
+  onSelectReaction: (nodeId: string, emoji: string) => void;
+}) {
+  const paletteRef = React.useRef<HTMLDivElement | null>(null);
+  const [position, setPosition] = React.useState({ left: 24, top: 84 });
+
+  React.useLayoutEffect(() => {
+    if (!anchor || !node) {
+      return undefined;
+    }
+
+    const anchorPoint = anchor;
+
+    function positionPalette() {
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      const rect = paletteRef.current?.getBoundingClientRect();
+      const paletteWidth = rect?.width || 360;
+      const paletteHeight = rect?.height || 466;
+      const margin = 12;
+      const toolbarSafeTop = 58;
+      const avoidRect = anchorPoint.avoidRect;
+      const verticalClamp = (value: number) => (
+        Math.min(Math.max(toolbarSafeTop, value), Math.max(toolbarSafeTop, viewportHeight - paletteHeight - margin))
+      );
+      const horizontalClamp = (value: number) => (
+        Math.min(Math.max(margin, value), Math.max(margin, viewportWidth - paletteWidth - margin))
+      );
+      let left = anchorPoint.x - paletteWidth / 2;
+      let top = anchorPoint.y + 16;
+
+      if (avoidRect) {
+        const rightCandidate = avoidRect.right + margin;
+        const leftCandidate = avoidRect.left - paletteWidth - margin;
+        const belowCandidate = avoidRect.bottom + margin;
+        const aboveCandidate = avoidRect.top - paletteHeight - margin;
+        const centeredTop = avoidRect.top + (avoidRect.bottom - avoidRect.top) / 2 - paletteHeight / 2;
+
+        if (rightCandidate + paletteWidth <= viewportWidth - margin) {
+          left = rightCandidate;
+          top = verticalClamp(centeredTop);
+        } else if (leftCandidate >= margin) {
+          left = leftCandidate;
+          top = verticalClamp(centeredTop);
+        } else if (belowCandidate + paletteHeight <= viewportHeight - margin) {
+          left = horizontalClamp(avoidRect.left + (avoidRect.right - avoidRect.left) / 2 - paletteWidth / 2);
+          top = belowCandidate;
+        } else if (aboveCandidate >= toolbarSafeTop) {
+          left = horizontalClamp(avoidRect.left + (avoidRect.right - avoidRect.left) / 2 - paletteWidth / 2);
+          top = aboveCandidate;
+        } else {
+          left = anchorPoint.x < viewportWidth / 2
+            ? Math.min(viewportWidth - paletteWidth - margin, avoidRect.right + margin)
+            : Math.max(margin, avoidRect.left - paletteWidth - margin);
+          top = verticalClamp(centeredTop);
+        }
+      }
+
+      if (!avoidRect && top + paletteHeight > viewportHeight - margin) {
+        top = anchorPoint.y - paletteHeight - 16;
+      }
+
+      setPosition({
+        left: horizontalClamp(left),
+        top: verticalClamp(top)
+      });
+    }
+
+    positionPalette();
+    window.addEventListener('resize', positionPalette);
+
+    return () => window.removeEventListener('resize', positionPalette);
+  }, [anchor, node]);
+
+  React.useEffect(() => {
+    if (!anchor || !node) {
+      return undefined;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target as Node | null;
+
+      if (target && paletteRef.current?.contains(target)) {
+        return;
+      }
+
+      onClose();
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    }
+
+    window.addEventListener('pointerdown', handlePointerDown, true);
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown, true);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [anchor, node, onClose]);
+
+  if (!anchor || !node) {
+    return null;
+  }
+
+  const nodeLabel = node.nodeType === 'WHY'
+    ? getFiveWhysRoleLabel(getFiveWhysNodeRole(node))
+    : node.nodeType === 'ISHIKAWA_CATEGORY'
+    ? node.label || 'Branch'
+    : formatNodeType(node.nodeType);
+  const selectReaction = (emoji: string) => {
+    onSelectReaction(node.id, emoji);
+    onClose();
+  };
+
+  const palette = (
+    <section
+      aria-label={`React to ${nodeLabel}`}
+      className="fixed z-[2700] w-[min(360px,calc(100vw-24px))] overflow-hidden rounded-[22px] border border-slate-200/80 bg-white/96 shadow-[0_24px_70px_rgba(15,23,42,0.24)] ring-1 ring-white/70 backdrop-blur-xl"
+      ref={paletteRef}
+      onClick={(event) => event.stopPropagation()}
+      onPointerDown={(event) => event.stopPropagation()}
+      style={{
+        animation: 'rcaReactionPaletteIn 150ms cubic-bezier(0.22, 1, 0.36, 1)',
+        left: position.left,
+        top: position.top
+      }}
+    >
+      <div className="flex items-start justify-between gap-3 border-b border-slate-200/70 bg-slate-50/88 px-3.5 py-3">
+        <div className="min-w-0">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-cyan-700">React to node</p>
+          <p className="mt-0.5 truncate text-sm font-semibold text-slate-950">{nodeLabel}</p>
+        </div>
+        <button
+          aria-label="Close reactions"
+          className="grid h-8 w-8 shrink-0 place-items-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-sm transition hover:border-slate-300 hover:text-slate-900 active:scale-95"
+          onClick={onClose}
+          type="button"
+        >
+          <X aria-hidden="true" size={14} />
+        </button>
+      </div>
+      <div className="border-b border-slate-100 px-3 py-2.5">
+        <div className="flex items-center justify-between gap-1">
+          {RCA_NODE_REACTION_QUICK_EMOJIS.map((emoji) => (
+            <button
+              aria-label={`React with ${emoji}`}
+              className="grid h-9 w-9 place-items-center rounded-full text-lg transition hover:bg-cyan-50 hover:scale-110 active:scale-95"
+              key={emoji}
+              onClick={() => selectReaction(emoji)}
+              type="button"
+            >
+              {emoji}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="max-h-[min(390px,calc(100svh-190px))] overflow-hidden">
+        <EmojiPicker
+          autoFocusSearch={false}
+          emojiStyle={EmojiStyle.NATIVE}
+          height={360}
+          lazyLoadEmojis
+          onEmojiClick={(emojiData: EmojiClickData) => selectReaction(emojiData.emoji)}
+          previewConfig={{ showPreview: false }}
+          searchPlaceHolder="Search reactions"
+          skinTonesDisabled={false}
+          theme={Theme.LIGHT}
+          width="100%"
+        />
+      </div>
+    </section>
+  );
+
+  return createPortal(palette, document.body);
+}
+
+function getRcaMissingDataBadgeToneClassName(tone: RcaMissingDataBadgeTone): string {
+  if (tone === 'critical') {
+    return 'border-red-200 bg-red-50/90 text-red-700';
+  }
+
+  if (tone === 'ready') {
+    return 'border-emerald-200 bg-emerald-50/90 text-emerald-700';
+  }
+
+  if (tone === 'waiting') {
+    return 'border-amber-200 bg-amber-50/90 text-amber-700';
+  }
+
+  return 'border-cyan-200 bg-cyan-50/90 text-cyan-700';
+}
+
+function getRcaNodeReactionSummaries(node: RcaNode): RcaNodeReactionSummary[] {
+  const rawValue = node.detailFields?.[RCA_NODE_REACTIONS_DETAIL_FIELD_KEY];
+
+  if (!rawValue) {
+    return [];
+  }
+
+  try {
+    const parsedValue = JSON.parse(rawValue) as unknown;
+
+    if (!parsedValue || typeof parsedValue !== 'object' || Array.isArray(parsedValue)) {
+      return [];
+    }
+
+    return Object.entries(parsedValue as Record<string, unknown>)
+      .map(([emoji, rawUsers]): RcaNodeReactionSummary | null => {
+        if (!emoji || !Array.isArray(rawUsers)) {
+          return null;
+        }
+
+        const users = rawUsers
+          .map((rawUser): RcaNodeReactionUser | null => {
+            if (!rawUser || typeof rawUser !== 'object' || Array.isArray(rawUser)) {
+              return null;
+            }
+
+            const record = rawUser as Partial<RcaNodeReactionUser>;
+            const uid = typeof record.uid === 'string' ? record.uid.trim().slice(0, 96) : '';
+
+            if (!uid) {
+              return null;
+            }
+
+            return {
+              displayName: typeof record.displayName === 'string' && record.displayName.trim()
+                ? record.displayName.trim().slice(0, 80)
+                : 'User',
+              reactedAtIso: typeof record.reactedAtIso === 'string' && record.reactedAtIso.trim()
+                ? record.reactedAtIso.trim().slice(0, 40)
+                : '',
+              uid
+            };
+          })
+          .filter((user): user is RcaNodeReactionUser => Boolean(user));
+
+        if (!users.length) {
+          return null;
+        }
+
+        const latestAtIso = users.reduce((latest, user) => (
+          user.reactedAtIso > latest ? user.reactedAtIso : latest
+        ), '');
+
+        return {
+          count: users.length,
+          emoji,
+          latestAtIso,
+          users
+        };
+      })
+      .filter((reaction): reaction is RcaNodeReactionSummary => Boolean(reaction))
+      .sort((leftReaction, rightReaction) => (
+        rightReaction.latestAtIso.localeCompare(leftReaction.latestAtIso) ||
+        rightReaction.count - leftReaction.count ||
+        leftReaction.emoji.localeCompare(rightReaction.emoji)
+      ))
+      .slice(0, 12);
+  } catch {
+    return [];
+  }
+}
+
+function buildRcaNodeReactionDetailFields(
+  node: RcaNode,
+  emoji: string,
+  user: RcaNodeReactionUser
+): Record<string, string> {
+  const cleanEmoji = emoji.trim().slice(0, 24);
+  const reactionSummaries = getRcaNodeReactionSummaries(node);
+  const reactionUsersByEmoji = new Map<string, RcaNodeReactionUser[]>();
+
+  reactionSummaries.forEach((reaction) => {
+    reactionUsersByEmoji.set(reaction.emoji, [...reaction.users]);
+  });
+
+  const currentUsers = reactionUsersByEmoji.get(cleanEmoji) || [];
+  const existingUserIndex = currentUsers.findIndex((candidateUser) => candidateUser.uid === user.uid);
+
+  if (existingUserIndex >= 0) {
+    currentUsers.splice(existingUserIndex, 1);
+  } else {
+    currentUsers.push(user);
+  }
+
+  if (currentUsers.length) {
+    reactionUsersByEmoji.set(cleanEmoji, currentUsers);
+  } else {
+    reactionUsersByEmoji.delete(cleanEmoji);
+  }
+
+  const payloadEntries = [...reactionUsersByEmoji.entries()]
+    .map(([entryEmoji, users]) => [
+      entryEmoji,
+      users
+        .sort((leftUser, rightUser) => rightUser.reactedAtIso.localeCompare(leftUser.reactedAtIso))
+        .slice(0, 8)
+    ] as const)
+    .filter(([, users]) => users.length)
+    .sort((leftEntry, rightEntry) => {
+      const leftLatest = leftEntry[1][0]?.reactedAtIso || '';
+      const rightLatest = rightEntry[1][0]?.reactedAtIso || '';
+
+      return rightLatest.localeCompare(leftLatest);
+    })
+    .slice(0, 10);
+  const payload = Object.fromEntries(payloadEntries);
+  const nextDetailFields = { ...(node.detailFields || {}) };
+
+  if (payloadEntries.length) {
+    nextDetailFields[RCA_NODE_REACTIONS_DETAIL_FIELD_KEY] = JSON.stringify(payload);
+  } else {
+    nextDetailFields[RCA_NODE_REACTIONS_DETAIL_FIELD_KEY] = '';
+  }
+
+  return nextDetailFields;
+}
+
 function RcaInspectorDrawer({
   incidentId,
+  isCaseClosed = false,
   isReferenceProject = false,
   isRealtimeReady,
   isWorking,
@@ -12048,11 +20134,13 @@ function RcaInspectorDrawer({
   onClose,
   onDelete,
   onLabelLiveChange,
+  onOpenEvidenceLibrary,
   onPreview,
   onSave,
   sessionId
 }: {
   incidentId: string | null;
+  isCaseClosed?: boolean;
   isReferenceProject?: boolean;
   isRealtimeReady: boolean;
   isWorking: boolean;
@@ -12063,6 +20151,7 @@ function RcaInspectorDrawer({
   onClose: () => void;
   onDelete: () => void;
   onLabelLiveChange: (nodeId: string, label: string) => void;
+  onOpenEvidenceLibrary: (nodeId: string) => void;
   onPreview: (input: RcaNodeEditInput) => void;
   onSave: (input: RcaNodeEditInput) => void;
   sessionId: string | null;
@@ -12087,7 +20176,6 @@ function RcaInspectorDrawer({
   const [selectedEvidencePhotoKey, setSelectedEvidencePhotoKey] = React.useState<string | null>(null);
   const [revealedFiveWhysCount, setRevealedFiveWhysCount] = React.useState(1);
   const labelLiveSaveTimeoutRef = React.useRef<number | null>(null);
-  const evidenceInputRef = React.useRef<HTMLInputElement | null>(null);
   const evidenceObjectUrlsRef = React.useRef<Set<string>>(new Set());
   const migratedEvidenceKeysRef = React.useRef<Set<string>>(new Set());
 
@@ -12123,7 +20211,7 @@ function RcaInspectorDrawer({
       const missingEvidence = draft.attachedEvidence.filter((item) => (
         isImageEvidence(item) &&
         !evidencePreviewUrls.has(getEvidenceKey(item)) &&
-        !isBrowserDisplayableImageUrl(item.fileUrl)
+        (!isBrowserDisplayableImageUrl(item.fileUrl) || isRcaLibraryAttachedEvidence(item))
       ));
 
       if (!missingEvidence.length) {
@@ -12136,6 +20224,15 @@ function RcaInspectorDrawer({
         if (!blob && incidentId && sessionId && isRcaStoredEvidenceUrl(item.fileUrl)) {
           try {
             blob = await downloadRcaEvidenceBlob(incidentId, sessionId, item.fileUrl);
+            await storeEvidencePreviewBlob(getEvidenceKey(item), blob);
+          } catch {
+            blob = null;
+          }
+        }
+
+        if (!blob && getRcaLibraryEvidenceIdFromAttachedEvidence(item) && !item.fileUrl.startsWith('rails-evidence://')) {
+          try {
+            blob = await downloadRailsEvidenceBlob(item.fileUrl);
             await storeEvidencePreviewBlob(getEvidenceKey(item), blob);
           } catch {
             blob = null;
@@ -12422,11 +20519,11 @@ function RcaInspectorDrawer({
       return candidateNode.nodeType === 'WHY' && Boolean(getFiveWhysNodeRole(candidateNode));
     }
 
-    if (draft.nodeType === 'STICKY_NOTE') {
+    if (draft.nodeType === 'STICKY_NOTE' || draft.nodeType === 'COMMENT') {
       return isStickyNoteConnectableTargetNode(candidateNode);
     }
 
-    return candidateNode.nodeType !== 'STICKY_NOTE';
+    return !isFreeformRcaAnnotationNode(candidateNode);
   });
   const directChildNodes = nodes
     .filter((candidateNode) => candidateNode.parentNodeId === inspectedNode.id)
@@ -12437,28 +20534,50 @@ function RcaInspectorDrawer({
       return firstPosition.y === secondPosition.y
         ? firstPosition.x - secondPosition.x
         : firstPosition.y - secondPosition.y;
-    });
+  });
   const isFiveWhysFlowNode = isFiveWhysDetails && draft.fiveWhysNodeRole === 'FIVE_WHYS';
-  const canConfirmRootCause = hasCompletedFiveWhys(draft.whyChain);
   const shouldShowEvidenceSection = isFiveWhysDetails && draft.fiveWhysNodeRole === 'EVIDENCE';
   const fiveWhyAnswers = normalizeFiveWhyDraft(draft.whyChain);
   const fiveWhysParentNode = draft.parentNodeId
     ? nodes.find((candidateNode) => candidateNode.id === draft.parentNodeId)
     : null;
+  const fiveWhysLinkedCauseNode = isFiveWhysFlowNode && (isRootCauseRoleNode(fiveWhysParentNode) || (fiveWhysParentNode ? isFishboneCauseNode(fiveWhysParentNode) : false))
+    ? fiveWhysParentNode
+    : null;
+  const fiveWhysSelectedCause = isFiveWhysFlowNode
+    ? (
+        draft.detailFields.selectedCause?.trim() ||
+        (fiveWhysLinkedCauseNode ? getRcaCauseStatementForFiveWhys(fiveWhysLinkedCauseNode) : '') ||
+        draft.label ||
+        inspectedNode.label
+      )
+    : (draft.label || inspectedNode.label);
   const fiveWhysQuestionSource = isFiveWhysFlowNode
-    ? (fiveWhysParentNode?.label || draft.label || inspectedNode.label)
+    ? fiveWhysSelectedCause
     : (draft.label || inspectedNode.label);
   const fiveWhyQuestions = buildFiveWhyQuestions(fiveWhysQuestionSource, fiveWhyAnswers);
   const activeFiveWhyIndex = Math.min(revealedFiveWhysCount - 1, 4);
+  const fiveWhysCauseDisposition = getFiveWhysCauseDisposition(draft.detailFields);
+  const fiveWhysDecisionReady = hasFiveWhysGovernedDecision(draft.whyChain, draft.detailFields);
+  const fiveWhysLinkedCauseReady = Boolean(fiveWhysLinkedCauseNode);
   const roleDetailFields = isFiveWhysDetails
     ? RCA_NODE_DETAIL_SCHEMA[draft.fiveWhysNodeRole] || []
     : [];
   const primaryLabelFieldKey = draft.nodeType === 'ISHIKAWA_CATEGORY' || !isFiveWhysDetails
     ? null
     : getRcaPrimaryLabelFieldKey(draft.fiveWhysNodeRole);
+  const isApprovalClosureDetails = draft.nodeType === 'WHY' && draft.fiveWhysNodeRole === 'APPROVAL_CLOSURE';
+  const isDetailReadOnly = Boolean(isCaseClosed);
+  const approvalClosureMissingRequiredFields = isApprovalClosureDetails
+    ? getApprovalClosureMissingRequiredFields(draft.detailFields)
+    : [];
+  const canSubmitNodeDetail = !isWorking &&
+    !isDetailReadOnly &&
+    (!isApprovalClosureDetails || approvalClosureMissingRequiredFields.length === 0);
 
   function queueLabelLiveSave(nextDraft: RcaInspectorDraft, label: string) {
     if (
+      isDetailReadOnly ||
       !displayNode ||
       !incidentId ||
       !sessionId ||
@@ -12491,6 +20610,10 @@ function RcaInspectorDrawer({
   }
 
   function handleFiveWhysNodeRoleChange(fiveWhysNodeRole: RcaFiveWhysNodeRole) {
+    if (isDetailReadOnly) {
+      return;
+    }
+
     updateDraft({
       ...draft,
       detailFields: buildDefaultRcaNodeDetailFields(fiveWhysNodeRole),
@@ -12503,18 +20626,33 @@ function RcaInspectorDrawer({
   }
 
   function handleWhyChange(index: number, value: string) {
+    if (isDetailReadOnly) {
+      return;
+    }
+
     const nextWhyChain = normalizeFiveWhyDraft(draft.whyChain);
     nextWhyChain[index] = value;
+    const nextAnalysisStatus = hasCompletedFiveWhys(nextWhyChain)
+      ? 'Ready for Decision'
+      : 'In Progress';
 
     updateDraft({
       ...draft,
-      isRootCause: draft.isRootCause && hasCompletedFiveWhys(nextWhyChain) && draft.attachedEvidence.length > 0,
+      detailFields: {
+        ...draft.detailFields,
+        analysisStatus: nextAnalysisStatus
+      },
+      isRootCause: false,
       isSuspectedCause: true,
       whyChain: nextWhyChain
     });
   }
 
   function handleDetailFieldChange(fieldKey: string, value: string) {
+    if (isDetailReadOnly) {
+      return;
+    }
+
     const fieldDefinition = roleDetailFields.find((field) => field.key === fieldKey);
     const otherTextKey = getRcaOtherDetailFieldKey(fieldKey);
     const shouldClearOtherText = fieldDefinition?.type === 'select' &&
@@ -12549,7 +20687,15 @@ function RcaInspectorDrawer({
     }
   }
 
+  function handleFiveWhysStepFieldChange(index: number, fieldSuffix: string, value: string) {
+    handleDetailFieldChange(`why${index + 1}${fieldSuffix}`, value);
+  }
+
   function handleParentNodeChange(parentNodeId: string) {
+    if (isDetailReadOnly) {
+      return;
+    }
+
     const parentCategory = nodes.find((candidateNode) => candidateNode.id === parentNodeId);
     const rootCauseType = isRootCauseRoleNode(inspectedNode)
       ? getFishboneCategoryValueFromNode(parentCategory)
@@ -12568,6 +20714,10 @@ function RcaInspectorDrawer({
   }
 
   function handleAddFiveWhysAnswer() {
+    if (isDetailReadOnly) {
+      return;
+    }
+
     if (!fiveWhyAnswers[activeFiveWhyIndex]?.trim()) {
       return;
     }
@@ -12580,20 +20730,38 @@ function RcaInspectorDrawer({
     });
   }
 
-  function handleConfirmFiveWhysRootCause() {
-    if (!canConfirmRootCause) {
+  function handleApplyFiveWhysCauseDecision() {
+    if (isDetailReadOnly) {
       return;
     }
 
+    if (!fiveWhysDecisionReady || !fiveWhysLinkedCauseReady) {
+      return;
+    }
+
+    const isDirectCause = isFiveWhysDirectCauseDisposition(fiveWhysCauseDisposition);
+
     persistDraft({
       ...draft,
-      isRootCause: true,
-      isSuspectedCause: true,
+      detailFields: {
+        ...draft.detailFields,
+        analysisStatus: 'Decision Applied',
+        answerStatement: draft.detailFields.answerStatement || fiveWhyAnswers[4] || '',
+        isAnswerVerified: draft.detailFields.isAnswerVerified || 'Yes'
+      },
+      isRootCause: isDirectCause,
+      isSuspectedCause: isDirectCause ||
+        isFiveWhysContributingCauseDisposition(fiveWhysCauseDisposition) ||
+        fiveWhysCauseDisposition === 'Needs More Evidence',
       whyChain: normalizeFiveWhyDraft(draft.whyChain)
     });
   }
 
   function handleLabelDraftChange(label: string) {
+    if (isDetailReadOnly) {
+      return;
+    }
+
     const nextDetailFields = primaryLabelFieldKey
       ? {
           ...draft.detailFields,
@@ -12614,96 +20782,11 @@ function RcaInspectorDrawer({
     rcaRealtimeClient.sendNodeActivity(incidentId, sessionId, displayNode.id, 'idle');
   }
 
-  async function handleEvidenceFiles(files: FileList | File[] | null) {
-    const fileList = files ? Array.from(files) : [];
-
-    if (!fileList.length) {
-      return;
-    }
-
-    if (!incidentId || !sessionId) {
-      return;
-    }
-
-    const nextPreviewUrls = new Map(evidencePreviewUrls);
-    const builtEvidence: RcaAttachedEvidence[] = [];
-
-    await Promise.all(fileList.map(async (file) => {
-      const fileHash = await hashEvidenceFile(file);
-      const isPreviewableImage = isPreviewableImageFile(file);
-      let uploadBlob: Blob = file;
-      let uploadContentType = file.type || 'application/octet-stream';
-      let objectUrl: string | null = null;
-
-      if (isPreviewableImage) {
-        try {
-          const preview = await buildEvidencePreview(file);
-          uploadBlob = preview.blob;
-          uploadContentType = preview.blob.type || uploadContentType || 'image/jpeg';
-          objectUrl = URL.createObjectURL(preview.blob);
-        } catch {
-          // Keep the evidence attached even when the browser cannot decode a preview.
-        }
-      }
-
-      const evidence = await uploadRcaEvidenceFile(incidentId, sessionId, {
-        contentType: uploadContentType,
-        dataUrl: await blobToDataUrl(uploadBlob),
-        fileHash,
-        fileName: file.name
-      });
-
-      builtEvidence.push(evidence);
-
-      if (objectUrl) {
-        await storeEvidencePreviewBlob(getEvidenceKey(evidence), uploadBlob);
-        evidenceObjectUrlsRef.current.add(objectUrl);
-        nextPreviewUrls.set(getEvidenceKey(evidence), objectUrl);
-      }
-    }));
-
-    setEvidencePreviewUrls(nextPreviewUrls);
-
-    persistDraft({
-      ...draft,
-      attachedEvidence: [...draft.attachedEvidence, ...builtEvidence],
-      isSuspectedCause: true
-    });
-  }
-
-  function handleEvidencePaste(event: React.ClipboardEvent<HTMLElement>) {
-    const pastedFiles = Array.from(event.clipboardData.files || []);
-    const pastedUrl = event.clipboardData.getData('text/plain').trim();
-
-    if (pastedFiles.length) {
-      event.preventDefault();
-      void handleEvidenceFiles(pastedFiles);
-      return;
-    }
-
-    if (isLikelyUrl(pastedUrl)) {
-      event.preventDefault();
-      addEvidenceLink(pastedUrl);
-    }
-  }
-
-  function handleEvidenceDrop(event: React.DragEvent<HTMLElement>) {
-    event.preventDefault();
-
-    const droppedFiles = Array.from(event.dataTransfer.files || []);
-    const droppedUrl = event.dataTransfer.getData('text/uri-list') || event.dataTransfer.getData('text/plain');
-
-    if (droppedFiles.length) {
-      void handleEvidenceFiles(droppedFiles);
-      return;
-    }
-
-    if (isLikelyUrl(droppedUrl.trim())) {
-      addEvidenceLink(droppedUrl.trim());
-    }
-  }
-
   function addEvidenceLink(rawUrl = evidenceLinkDraft) {
+    if (isDetailReadOnly) {
+      return;
+    }
+
     const normalizedUrl = normalizeEvidenceUrl(rawUrl);
 
     if (!normalizedUrl) {
@@ -12711,16 +20794,33 @@ function RcaInspectorDrawer({
     }
 
     const evidence = buildEvidenceFromLink(normalizedUrl);
+    const shouldUseLinkedEvidenceLabel = isEvidenceRoleNode(inspectedNode) &&
+      shouldUseLinkedEvidenceDefaultLabel(draft.label, draft.detailFields);
+    const nextDetailFields = shouldUseLinkedEvidenceLabel
+      ? {
+          ...draft.detailFields,
+          evidenceTitle: RCA_LINKED_EVIDENCE_NODE_DEFAULT_LABEL
+        }
+      : draft.detailFields;
+    const nextLabel = shouldUseLinkedEvidenceLabel
+      ? RCA_LINKED_EVIDENCE_NODE_DEFAULT_LABEL
+      : draft.label;
 
     persistDraft({
       ...draft,
       attachedEvidence: [...draft.attachedEvidence, evidence],
-      isSuspectedCause: true
+      detailFields: nextDetailFields,
+      isSuspectedCause: true,
+      label: nextLabel
     });
     setEvidenceLinkDraft('');
   }
 
   function handleEvidenceRename(item: RcaAttachedEvidence, fileName: string) {
+    if (isDetailReadOnly) {
+      return;
+    }
+
     const normalizedFileName = fileName.trim().slice(0, 180);
 
     if (!normalizedFileName || normalizedFileName === item.fileName) {
@@ -12738,6 +20838,10 @@ function RcaInspectorDrawer({
   }
 
   function handleEvidenceRemove(item: RcaAttachedEvidence) {
+    if (isDetailReadOnly) {
+      return;
+    }
+
     const evidenceKey = getEvidenceKey(item);
     const previewUrl = evidencePreviewUrls.get(evidenceKey);
     const nextPreviewUrls = new Map(evidencePreviewUrls);
@@ -12763,6 +20867,28 @@ function RcaInspectorDrawer({
   }
 
   async function handleEvidenceOpenFile(item: RcaAttachedEvidence) {
+    if (isRcaLibraryAttachedEvidence(item) && item.fileUrl && !item.fileUrl.startsWith('rails-evidence://')) {
+      const previewWindow = window.open('', '_blank');
+
+      try {
+        const blob = await downloadRailsEvidenceBlob(item.fileUrl);
+        const objectUrl = URL.createObjectURL(blob);
+
+        if (previewWindow) {
+          previewWindow.location.href = objectUrl;
+        } else {
+          window.open(objectUrl, '_blank', 'noopener,noreferrer');
+        }
+
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 120000);
+      } catch {
+        previewWindow?.close();
+        setEvidenceLinkDraft('');
+      }
+
+      return;
+    }
+
     if (isLikelyUrl(item.fileUrl)) {
       window.open(item.fileUrl, '_blank', 'noopener,noreferrer');
       return;
@@ -12842,7 +20968,18 @@ function RcaInspectorDrawer({
     const actions = activeNodeDetail?.actions || [];
 
     return (
-      <aside className={panelClassName} style={{ width: panelWidth }}>
+      <aside
+        className={`${panelClassName} nodrag nopan nowheel`}
+        onClick={stopRcaCanvasControlEvent}
+        onContextMenu={stopRcaCanvasControlEvent}
+        onDoubleClick={stopRcaCanvasControlEvent}
+        onKeyDown={stopRcaCanvasControlEvent}
+        onKeyUp={stopRcaCanvasControlEvent}
+        onMouseDown={stopRcaCanvasControlEvent}
+        onPointerDown={stopRcaCanvasControlEvent}
+        onWheel={stopRcaCanvasControlEvent}
+        style={{ width: panelWidth }}
+      >
         <button
           aria-label="Resize node details panel"
           className="absolute left-0 top-0 z-10 h-full w-2 cursor-ew-resize bg-transparent transition hover:bg-cyan-400/20 active:bg-cyan-400/30"
@@ -12880,7 +21017,7 @@ function RcaInspectorDrawer({
             {inspectedNode.isRootCause ? (
               <span className="inline-flex items-center gap-1 rounded-full bg-red-50 px-3 py-1 font-semibold text-red-700 ring-1 ring-red-100">
                 <AlertTriangle aria-hidden="true" size={13} />
-                Root cause
+                Cause
               </span>
             ) : null}
           </div>
@@ -12988,7 +21125,18 @@ function RcaInspectorDrawer({
   }
 
   return (
-    <aside className={panelClassName} style={{ width: panelWidth }}>
+    <aside
+      className={`${panelClassName} nodrag nopan nowheel`}
+      onClick={stopRcaCanvasControlEvent}
+      onContextMenu={stopRcaCanvasControlEvent}
+      onDoubleClick={stopRcaCanvasControlEvent}
+      onKeyDown={stopRcaCanvasControlEvent}
+      onKeyUp={stopRcaCanvasControlEvent}
+      onMouseDown={stopRcaCanvasControlEvent}
+      onPointerDown={stopRcaCanvasControlEvent}
+      onWheel={stopRcaCanvasControlEvent}
+      style={{ width: panelWidth }}
+    >
       <button
         aria-label="Resize node details panel"
         className="absolute left-0 top-0 z-10 h-full w-2 cursor-ew-resize bg-transparent transition hover:bg-cyan-400/20 active:bg-cyan-400/30"
@@ -13011,16 +21159,30 @@ function RcaInspectorDrawer({
         </button>
       </div>
 
-      <div className="min-h-0 flex-1 space-y-3 overflow-auto px-5 py-3">
+      <fieldset
+        className="min-h-0 flex-1 space-y-3 overflow-auto px-5 py-3 disabled:cursor-default"
+        disabled={isDetailReadOnly}
+      >
+        {isDetailReadOnly ? (
+          <div className="rounded-2xl border border-red-100 bg-red-50/80 px-3 py-2 text-sm leading-5 text-red-800">
+            This RCA is closed. Node details are available in view mode only, and changes require a governed reopen workflow.
+          </div>
+        ) : null}
+        {isApprovalClosureDetails && approvalClosureMissingRequiredFields.length ? (
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-5 text-amber-900">
+            Complete the closure review before approving the RCA. Missing: {approvalClosureMissingRequiredFields.slice(0, 5).join(', ')}
+            {approvalClosureMissingRequiredFields.length > 5 ? `, and ${approvalClosureMissingRequiredFields.length - 5} more` : ''}.
+          </div>
+        ) : null}
         <label className="block">
           <span className="mb-2 block text-sm font-semibold text-slate-700">Label</span>
           <textarea
             className="min-h-28 w-full resize-none rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm leading-5 text-slate-900 outline-none ring-cyan-500/20 transition placeholder:text-slate-400 focus:border-cyan-400 focus:ring-4"
-            disabled={draft.nodeType === 'ISHIKAWA_CATEGORY'}
+            disabled={isDetailReadOnly || draft.nodeType === 'ISHIKAWA_CATEGORY'}
             onBlur={handleLabelEditingFinished}
             onChange={(event) => handleLabelDraftChange(event.target.value)}
             onFocus={() => {
-              if (displayNode && incidentId && sessionId && isRealtimeReady && draft.nodeType !== 'ISHIKAWA_CATEGORY') {
+              if (!isDetailReadOnly && displayNode && incidentId && sessionId && isRealtimeReady && draft.nodeType !== 'ISHIKAWA_CATEGORY') {
                 rcaRealtimeClient.sendNodeActivity(incidentId, sessionId, displayNode.id, 'editing');
               }
             }}
@@ -13034,16 +21196,18 @@ function RcaInspectorDrawer({
           {isFiveWhysDetails ? (
             <select
               className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none ring-cyan-500/20 transition focus:border-cyan-400 focus:ring-4"
+              disabled={isDetailReadOnly}
               onChange={(event) => handleFiveWhysNodeRoleChange(event.target.value as RcaFiveWhysNodeRole)}
               value={draft.fiveWhysNodeRole}
             >
-              {RCA_FIVE_WHYS_NODE_ROLE_OPTIONS.map((option) => (
+              {getSelectableRcaFiveWhysNodeRoleOptions(draft.fiveWhysNodeRole).map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
               ))}
             </select>
           ) : (
             <select
               className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none ring-cyan-500/20 transition focus:border-cyan-400 focus:ring-4"
+              disabled={isDetailReadOnly}
               onChange={(event) => {
                 const nodeType = event.target.value as RcaNodeType;
 
@@ -13068,7 +21232,7 @@ function RcaInspectorDrawer({
           <span className="mb-2 block text-sm font-semibold text-slate-700">Parent node</span>
           <select
             className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none ring-cyan-500/20 transition focus:border-cyan-400 focus:ring-4"
-            disabled={draft.nodeType === 'FAULT_GATE'}
+            disabled={isDetailReadOnly || draft.nodeType === 'FAULT_GATE'}
             onChange={(event) => handleParentNodeChange(event.target.value)}
             value={draft.parentNodeId}
           >
@@ -13091,6 +21255,7 @@ function RcaInspectorDrawer({
 
         {roleDetailFields.length ? (
           <RcaNodeDetailFieldsSection
+            isReadOnly={isDetailReadOnly}
             fields={roleDetailFields}
             onChange={handleDetailFieldChange}
             values={draft.detailFields}
@@ -13113,9 +21278,30 @@ function RcaInspectorDrawer({
               </span>
             </div>
 
+            <div className={`mb-3 rounded-2xl border px-3 py-2 text-sm leading-5 ${
+              fiveWhysLinkedCauseReady
+                ? 'border-cyan-100 bg-cyan-50/70 text-cyan-950'
+                : 'border-amber-200 bg-amber-50 text-amber-950'
+            }`}>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-700">
+                Cause being tested
+              </p>
+              <p className="mt-1 whitespace-pre-wrap text-slate-900">
+                {fiveWhysSelectedCause || 'Connect a Cause output to this 5 Whys input before applying a decision.'}
+              </p>
+              {!fiveWhysLinkedCauseReady ? (
+                <p className="mt-2 text-xs font-semibold text-amber-800">
+                  A governed 5 Whys decision must be linked from a Cause node so the decision can roll back into the cause record.
+                </p>
+              ) : null}
+            </div>
+
             <div className="space-y-3">
               {fiveWhyAnswers.slice(0, revealedFiveWhysCount).map((answer, index) => {
                 const isActiveStep = index === activeFiveWhyIndex;
+                const verificationKey = `why${index + 1}VerificationStatus`;
+                const evidenceNoteKey = `why${index + 1}EvidenceNote`;
+                const verificationStatus = draft.detailFields[verificationKey] || 'Unverified';
 
                 return (
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3" key={`five-whys-step-${index + 1}`}>
@@ -13132,18 +21318,48 @@ function RcaInspectorDrawer({
                     <p className="rounded-xl bg-cyan-50 px-3 py-2 text-sm font-semibold leading-5 text-cyan-950 ring-1 ring-cyan-100">
                       {fiveWhyQuestions[index]}
                     </p>
-                    <textarea
-                      className="mt-2 min-h-[72px] w-full resize-none rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm leading-5 text-slate-900 outline-none ring-cyan-500/20 transition placeholder:text-slate-400 focus:border-cyan-400 focus:ring-4"
+                      <textarea
+                        className="mt-2 min-h-[72px] w-full resize-none rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm leading-5 text-slate-900 outline-none ring-cyan-500/20 transition placeholder:text-slate-400 focus:border-cyan-400 focus:ring-4"
+                      disabled={isDetailReadOnly}
                       onChange={(event) => handleWhyChange(index, event.target.value)}
                       placeholder="Answer this why"
                       value={answer}
                     />
+                    <div className="mt-2 grid grid-cols-1 gap-2">
+                      <label className="block">
+                        <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                          Verification status
+                        </span>
+                          <select
+                          className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none ring-cyan-500/20 transition focus:border-cyan-400 focus:ring-4"
+                          disabled={isDetailReadOnly}
+                          onChange={(event) => handleFiveWhysStepFieldChange(index, 'VerificationStatus', event.target.value)}
+                          value={verificationStatus}
+                        >
+                          {RCA_FIVE_WHYS_STEP_VERIFICATION_OPTIONS.map((option) => (
+                            <option key={option} value={option}>{option}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="block">
+                        <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                          Evidence / verification note
+                        </span>
+                        <textarea
+                          className="min-h-[58px] w-full resize-none rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm leading-5 text-slate-900 outline-none ring-cyan-500/20 transition placeholder:text-slate-400 focus:border-cyan-400 focus:ring-4"
+                          disabled={isDetailReadOnly}
+                          onChange={(event) => handleFiveWhysStepFieldChange(index, 'EvidenceNote', event.target.value)}
+                          placeholder="Describe what proves, disproves, or still needs evidence for this answer."
+                          value={draft.detailFields[evidenceNoteKey] || ''}
+                        />
+                      </label>
+                    </div>
                     {isActiveStep ? (
                       <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
                         {index < 4 ? (
                           <button
                             className="inline-flex min-h-[36px] items-center justify-center gap-2 rounded-xl bg-cyan-600 px-3 text-xs font-semibold text-white transition hover:bg-cyan-700 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
-                            disabled={!answer.trim()}
+                            disabled={isDetailReadOnly || !answer.trim()}
                             onClick={handleAddFiveWhysAnswer}
                             type="button"
                           >
@@ -13151,28 +21367,9 @@ function RcaInspectorDrawer({
                             Add
                           </button>
                         ) : (
-                          <>
-                            <button
-                              className="inline-flex min-h-[36px] items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition hover:border-cyan-200 hover:text-cyan-700 active:scale-95"
-                              disabled={!answer.trim()}
-                              onClick={handleAddFiveWhysAnswer}
-                              type="button"
-                            >
-                              Extend
-                            </button>
-                            <div className="basis-full rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium leading-5 text-amber-900">
-                              If this Root Cause is resolved, does it fix the original issue?
-                            </div>
-                            <button
-                              className="inline-flex min-h-[36px] items-center justify-center gap-2 rounded-xl bg-red-600 px-3 text-xs font-semibold text-white transition hover:bg-red-700 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
-                              disabled={!canConfirmRootCause}
-                              onClick={handleConfirmFiveWhysRootCause}
-                              type="button"
-                            >
-                              <CheckCircle2 aria-hidden="true" size={15} />
-                              Confirm root Cause
-                            </button>
-                          </>
+                          <div className="basis-full rounded-xl border border-cyan-100 bg-cyan-50/70 px-3 py-2 text-xs font-medium leading-5 text-cyan-950">
+                            Complete the decision section below to rule this Cause in, rule it out, or keep it open for more evidence.
+                          </div>
                         )}
                       </div>
                     ) : null}
@@ -13180,16 +21377,142 @@ function RcaInspectorDrawer({
                 );
               })}
             </div>
+
+            {hasCompletedFiveWhys(draft.whyChain) ? (
+              <div className="mt-3 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
+                <div className="mb-3 flex items-start justify-between gap-3">
+                  <div>
+                    <h4 className="text-sm font-semibold text-slate-950">Cause decision</h4>
+                    <p className="mt-1 text-xs leading-5 text-slate-500">
+                      This decision updates the linked Cause node. Use ruled out or no direct impact when fixing the cause would not reasonably prevent recurrence.
+                    </p>
+                  </div>
+                  <span className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide ${
+                    draft.detailFields.analysisStatus === 'Decision Applied'
+                      ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100'
+                      : 'bg-amber-50 text-amber-700 ring-1 ring-amber-100'
+                  }`}>
+                    {draft.detailFields.analysisStatus || 'Ready for Decision'}
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 gap-3">
+                  <label className="block">
+                    <span className="mb-1.5 block text-xs font-semibold text-slate-600">Cause disposition</span>
+                    <select
+                      className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none ring-cyan-500/20 transition focus:border-cyan-400 focus:ring-4"
+                      disabled={isDetailReadOnly}
+                      onChange={(event) => handleDetailFieldChange('causeDisposition', event.target.value)}
+                      value={fiveWhysCauseDisposition}
+                    >
+                      {RCA_FIVE_WHYS_CAUSE_DISPOSITION_OPTIONS.map((option) => (
+                        <option key={option} value={option}>{option}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="block">
+                    <span className="mb-1.5 block text-xs font-semibold text-slate-600">Final finding</span>
+                    <textarea
+                      className="min-h-[72px] w-full resize-none rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm leading-5 text-slate-900 outline-none ring-cyan-500/20 transition placeholder:text-slate-400 focus:border-cyan-400 focus:ring-4"
+                      disabled={isDetailReadOnly}
+                      onChange={(event) => handleDetailFieldChange('answerStatement', event.target.value)}
+                      placeholder="State what the 5 Whys proved or disproved."
+                      value={draft.detailFields.answerStatement || ''}
+                    />
+                  </label>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <label className="block">
+                      <span className="mb-1.5 block text-xs font-semibold text-slate-600">Evidence strength</span>
+                      <select
+                        className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none ring-cyan-500/20 transition focus:border-cyan-400 focus:ring-4"
+                        disabled={isDetailReadOnly}
+                        onChange={(event) => handleDetailFieldChange('evidenceStrength', event.target.value)}
+                        value={draft.detailFields.evidenceStrength || 'Weak'}
+                      >
+                        {['Weak', 'Medium', 'Strong'].map((option) => (
+                          <option key={option} value={option}>{option}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="block">
+                      <span className="mb-1.5 block text-xs font-semibold text-slate-600">Would fixing this prevent recurrence?</span>
+                      <select
+                        className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none ring-cyan-500/20 transition focus:border-cyan-400 focus:ring-4"
+                        disabled={isDetailReadOnly}
+                        onChange={(event) => handleDetailFieldChange('wouldFixingCausePreventProblem', event.target.value)}
+                        value={draft.detailFields.wouldFixingCausePreventProblem || 'Unknown'}
+                      >
+                        {RCA_FIVE_WHYS_PREVENTION_OPTIONS.map((option) => (
+                          <option key={option} value={option}>{option}</option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <label className="block">
+                      <span className="mb-1.5 block text-xs font-semibold text-slate-600">Finding verified?</span>
+                      <select
+                        className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none ring-cyan-500/20 transition focus:border-cyan-400 focus:ring-4"
+                        disabled={isDetailReadOnly}
+                        onChange={(event) => handleDetailFieldChange('isAnswerVerified', event.target.value)}
+                        value={draft.detailFields.isAnswerVerified || 'Pending'}
+                      >
+                        {['Pending', 'Yes', 'No'].map((option) => (
+                          <option key={option} value={option}>{option}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="block">
+                      <span className="mb-1.5 block text-xs font-semibold text-slate-600">Verified by</span>
+                      <input
+                        className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none ring-cyan-500/20 transition placeholder:text-slate-400 focus:border-cyan-400 focus:ring-4"
+                        disabled={isDetailReadOnly}
+                        onChange={(event) => handleDetailFieldChange('verifiedBy', event.target.value)}
+                        placeholder="Reviewer or owner"
+                        value={draft.detailFields.verifiedBy || ''}
+                      />
+                    </label>
+                  </div>
+                  <label className="block">
+                    <span className="mb-1.5 block text-xs font-semibold text-slate-600">Reason for decision</span>
+                    <textarea
+                      className="min-h-[72px] w-full resize-none rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm leading-5 text-slate-900 outline-none ring-cyan-500/20 transition placeholder:text-slate-400 focus:border-cyan-400 focus:ring-4"
+                      disabled={isDetailReadOnly}
+                      onChange={(event) => handleDetailFieldChange('reasonForDecision', event.target.value)}
+                      placeholder="Explain why this cause was ruled in, ruled out, or needs more evidence."
+                      value={draft.detailFields.reasonForDecision || ''}
+                    />
+                  </label>
+                </div>
+                {!fiveWhysDecisionReady || !fiveWhysLinkedCauseReady ? (
+                  <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+                    {!fiveWhysLinkedCauseReady ? (
+                      <p>Connect a Cause output to this 5 Whys input before applying the decision.</p>
+                    ) : null}
+                    {!draft.detailFields.answerStatement?.trim() ? (
+                      <p>Document the final finding.</p>
+                    ) : null}
+                    {!draft.detailFields.reasonForDecision?.trim() ? (
+                      <p>Document the reason for the decision.</p>
+                    ) : null}
+                  </div>
+                ) : null}
+                <button
+                  className="mt-3 inline-flex min-h-[40px] w-full items-center justify-center gap-2 rounded-xl bg-cyan-700 px-4 text-sm font-semibold text-white transition hover:bg-cyan-800 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={isDetailReadOnly || !fiveWhysDecisionReady || !fiveWhysLinkedCauseReady}
+                  onClick={handleApplyFiveWhysCauseDecision}
+                  type="button"
+                >
+                  <CheckCircle2 aria-hidden="true" size={16} />
+                  Apply decision to linked Cause
+                </button>
+              </div>
+            ) : null}
           </section>
         ) : null}
 
         {shouldShowEvidenceSection ? (
         <section
           className="rounded-2xl border border-slate-200 bg-white p-3"
-          onContextMenu={(event) => event.currentTarget.focus()}
-          onDragOver={(event) => event.preventDefault()}
-          onDrop={handleEvidenceDrop}
-          onPaste={handleEvidencePaste}
           tabIndex={0}
         >
           <div className="mb-2 flex items-center justify-between gap-3">
@@ -13199,28 +21522,22 @@ function RcaInspectorDrawer({
             </div>
             <button
               className="inline-flex min-h-[34px] items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 shadow-sm transition hover:border-cyan-200 hover:text-cyan-700 active:scale-95"
-              onClick={() => evidenceInputRef.current?.click()}
+              disabled={isDetailReadOnly}
+              onClick={() => {
+                if (inspectedNode) {
+                  onOpenEvidenceLibrary(inspectedNode.id);
+                }
+              }}
               type="button"
             >
-              <UploadCloud aria-hidden="true" size={15} />
-              Attach
+              <FileStack aria-hidden="true" size={15} />
+              Add from Library
             </button>
-            <input
-              accept={RCA_EVIDENCE_FILE_ACCEPT}
-              className="hidden"
-              multiple
-              onChange={(event) => {
-                void handleEvidenceFiles(event.target.files);
-                event.target.value = '';
-              }}
-              ref={evidenceInputRef}
-              type="file"
-            />
           </div>
-          <div className="mb-3 rounded-2xl border border-dashed border-cyan-200 bg-cyan-50/45 px-3 py-3 text-sm text-slate-600 outline-none ring-cyan-500/20 transition focus:ring-4">
-            <p className="font-semibold text-slate-800">Drop files here, or right click and paste.</p>
+          <div className="mb-3 rounded-2xl border border-cyan-100 bg-cyan-50/45 px-3 py-3 text-sm text-slate-600 outline-none ring-cyan-500/20 transition focus:ring-4">
+            <p className="font-semibold text-slate-800">Attach evidence from the shared library.</p>
             <p className="mt-1 text-xs leading-4 text-slate-500">
-              Photos, iPhone images, documents, audio, and video can be attached. Links can be added below.
+              Select one or more approved evidence records from the library, then add them to this node. Upload new files from the library window when needed.
             </p>
           </div>
           {draft.attachedEvidence.length ? (
@@ -13250,6 +21567,7 @@ function RcaInspectorDrawer({
             <div className="flex gap-2">
               <input
                 className="h-10 min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none ring-cyan-500/20 transition placeholder:text-slate-400 focus:border-cyan-400 focus:ring-4"
+                disabled={isDetailReadOnly}
                 onChange={(event) => setEvidenceLinkDraft(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
@@ -13262,7 +21580,7 @@ function RcaInspectorDrawer({
               />
               <button
                 className="inline-flex h-10 shrink-0 items-center justify-center rounded-xl bg-slate-950 px-3 text-xs font-semibold text-white transition hover:bg-slate-800 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={!normalizeEvidenceUrl(evidenceLinkDraft)}
+                disabled={isDetailReadOnly || !normalizeEvidenceUrl(evidenceLinkDraft)}
                 onClick={() => addEvidenceLink()}
                 type="button"
               >
@@ -13292,8 +21610,9 @@ function RcaInspectorDrawer({
           />
         ) : null}
 
-      </div>
+      </fieldset>
 
+      {!isDetailReadOnly ? (
       <div className="flex items-center justify-between gap-3 border-t border-slate-200 px-5 py-4">
         <button
           className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-red-200 px-4 text-sm font-semibold text-red-600 transition hover:bg-red-50 active:scale-95"
@@ -13305,7 +21624,7 @@ function RcaInspectorDrawer({
         </button>
         <button
           className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl bg-slate-950 px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
-          disabled={isWorking}
+          disabled={!canSubmitNodeDetail}
           onClick={() => onSave({
             attachedEvidence: draft.attachedEvidence,
             detailFields: draft.detailFields,
@@ -13320,9 +21639,10 @@ function RcaInspectorDrawer({
           type="button"
         >
           <CheckCircle2 aria-hidden="true" size={17} />
-          Save node
+          {isApprovalClosureDetails ? 'Approve & Close RCA' : 'Save node'}
         </button>
       </div>
+      ) : null}
     </aside>
   );
 }
@@ -13397,15 +21717,69 @@ function RcaNodeChildrenField({
 
 function RcaNodeDetailFieldsSection({
   fields,
+  isReadOnly = false,
   onChange,
   values
 }: {
   fields: RcaNodeDetailFieldDefinition[];
+  isReadOnly?: boolean;
   onChange: (fieldKey: string, value: string) => void;
   values: Record<string, string>;
 }) {
+  const [localValues, setLocalValues] = React.useState<Record<string, string>>(values);
+
+  React.useEffect(() => {
+    setLocalValues(values);
+  }, [values]);
+
+  function updateLocalField(fieldKey: string, value: string) {
+    setLocalValues((currentValues) => ({
+      ...currentValues,
+      [fieldKey]: value
+    }));
+  }
+
+  function commitField(fieldKey: string, value: string) {
+    if (isReadOnly || values[fieldKey] === value) {
+      return;
+    }
+
+    onChange(fieldKey, value);
+  }
+
+  function commitOptionField(field: RcaNodeDetailFieldDefinition, value: string) {
+    const otherTextKey = getRcaOtherDetailFieldKey(field.key);
+    const shouldClearOtherText = field.type === 'select' &&
+      hasRcaOtherOption(field) &&
+      value !== 'Other';
+
+    setLocalValues((currentValues) => {
+      const nextValues = {
+        ...currentValues,
+        [field.key]: value
+      };
+
+      if (shouldClearOtherText) {
+        delete nextValues[otherTextKey];
+      }
+
+      return nextValues;
+    });
+    onChange(field.key, value);
+  }
+
   return (
-    <section className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
+    <section
+      className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm"
+      data-rca-form-control="true"
+      onClick={stopRcaCanvasControlEvent}
+      onDoubleClick={stopRcaCanvasControlEvent}
+      onKeyDownCapture={stopRcaCanvasControlEvent}
+      onKeyUpCapture={stopRcaCanvasControlEvent}
+      onMouseDownCapture={stopRcaCanvasControlEvent}
+      onPointerDownCapture={stopRcaCanvasControlEvent}
+      onWheelCapture={stopRcaCanvasControlEvent}
+    >
       <div className="mb-3 flex items-center gap-2">
         <ClipboardList aria-hidden="true" className="text-cyan-700" size={17} />
         <h3 className="text-sm font-semibold text-slate-950">RCA fields</h3>
@@ -13415,7 +21789,9 @@ function RcaNodeDetailFieldsSection({
           const otherTextKey = getRcaOtherDetailFieldKey(field.key);
           const shouldShowOtherText = field.type === 'select' &&
             hasRcaOtherOption(field) &&
-            values[field.key] === 'Other';
+            localValues[field.key] === 'Other';
+          const fieldValue = localValues[field.key] || '';
+          const otherTextValue = localValues[otherTextKey] || '';
 
           return (
             <div className="grid gap-2" key={field.key}>
@@ -13431,20 +21807,23 @@ function RcaNodeDetailFieldsSection({
                 {field.type === 'textarea' ? (
                   <textarea
                     className={`min-h-[82px] w-full resize-y rounded-xl border border-slate-200 px-3 py-2 text-sm leading-5 outline-none ring-cyan-500/20 transition placeholder:text-slate-400 focus:border-cyan-400 focus:ring-4 ${
-                      field.readOnly ? 'cursor-not-allowed bg-slate-50 font-semibold text-slate-600' : 'bg-white text-slate-900'
+                      field.readOnly || isReadOnly ? 'cursor-not-allowed bg-slate-50 font-semibold text-slate-600' : 'bg-white text-slate-900'
                     }`}
-                    disabled={field.readOnly}
-                    onChange={(event) => onChange(field.key, event.target.value)}
-                    value={values[field.key] || ''}
+                    data-rca-form-control="true"
+                    disabled={isReadOnly || field.readOnly}
+                    onBlur={(event) => commitField(field.key, event.target.value)}
+                    onChange={(event) => updateLocalField(field.key, event.target.value)}
+                    value={fieldValue}
                   />
                 ) : field.type === 'select' ? (
                   <select
                     className={`h-10 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none ring-cyan-500/20 transition focus:border-cyan-400 focus:ring-4 ${
-                      field.readOnly ? 'cursor-not-allowed bg-slate-50 font-semibold text-slate-600' : 'bg-white text-slate-900'
+                      field.readOnly || isReadOnly ? 'cursor-not-allowed bg-slate-50 font-semibold text-slate-600' : 'bg-white text-slate-900'
                     }`}
-                    disabled={field.readOnly}
-                    onChange={(event) => onChange(field.key, event.target.value)}
-                    value={values[field.key] || ''}
+                    data-rca-form-control="true"
+                    disabled={isReadOnly || field.readOnly}
+                    onChange={(event) => commitOptionField(field, event.target.value)}
+                    value={fieldValue}
                   >
                     <option value="">Select...</option>
                     {(field.options || []).map((option) => (
@@ -13453,31 +21832,33 @@ function RcaNodeDetailFieldsSection({
                   </select>
                 ) : field.type === 'date' ? (
                   <RcaNodeDetailDatePicker
-                    disabled={field.readOnly}
-                    onChange={(value) => onChange(field.key, value)}
-                    value={values[field.key] || ''}
+                    disabled={isReadOnly || field.readOnly}
+                    onChange={(value) => commitOptionField(field, value)}
+                    value={fieldValue}
                   />
                 ) : field.type === 'time' ? (
                   <RcaNodeDetailTimePicker
-                    disabled={field.readOnly}
-                    onChange={(value) => onChange(field.key, value)}
-                    value={values[field.key] || ''}
+                    disabled={isReadOnly || field.readOnly}
+                    onChange={(value) => commitOptionField(field, value)}
+                    value={fieldValue}
                   />
                 ) : field.type === 'datetime-local' ? (
                   <RcaNodeDetailDateTimePicker
-                    disabled={field.readOnly}
-                    onChange={(value) => onChange(field.key, value)}
-                    value={values[field.key] || ''}
+                    disabled={isReadOnly || field.readOnly}
+                    onChange={(value) => commitOptionField(field, value)}
+                    value={fieldValue}
                   />
                 ) : (
                   <input
                     className={`h-10 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none ring-cyan-500/20 transition placeholder:text-slate-400 focus:border-cyan-400 focus:ring-4 ${
-                      field.readOnly ? 'cursor-not-allowed bg-slate-50 font-semibold text-slate-600' : 'bg-white text-slate-900'
+                      field.readOnly || isReadOnly ? 'cursor-not-allowed bg-slate-50 font-semibold text-slate-600' : 'bg-white text-slate-900'
                     }`}
-                    disabled={field.readOnly}
-                    onChange={(event) => onChange(field.key, event.target.value)}
+                    data-rca-form-control="true"
+                    disabled={isReadOnly || field.readOnly}
+                    onBlur={(event) => commitField(field.key, event.target.value)}
+                    onChange={(event) => updateLocalField(field.key, event.target.value)}
                     type={field.type}
-                    value={values[field.key] || ''}
+                    value={fieldValue}
                   />
                 )}
               </label>
@@ -13488,9 +21869,12 @@ function RcaNodeDetailFieldsSection({
                   </span>
                   <input
                     className="h-10 w-full rounded-xl border border-cyan-200 bg-white px-3 text-sm text-slate-900 outline-none ring-cyan-500/20 transition placeholder:text-slate-400 focus:border-cyan-400 focus:ring-4"
-                    onChange={(event) => onChange(otherTextKey, event.target.value)}
+                    data-rca-form-control="true"
+                    disabled={isReadOnly}
+                    onBlur={(event) => commitField(otherTextKey, event.target.value)}
+                    onChange={(event) => updateLocalField(otherTextKey, event.target.value)}
                     placeholder={`Enter actual ${field.label.toLowerCase()}`}
-                    value={values[otherTextKey] || ''}
+                    value={otherTextValue}
                   />
                 </label>
               ) : null}
@@ -13813,11 +22197,16 @@ function RcaEvidenceAttachmentCard({
         </button>
       ) : (
         <button
-          className="group relative grid aspect-[4/3] w-full place-items-center bg-slate-50 text-cyan-700 transition hover:bg-cyan-50"
+          className="group relative grid aspect-[4/3] w-full place-items-center overflow-hidden bg-slate-50 text-cyan-700 transition hover:bg-cyan-50"
           onClick={() => onOpenFile(item)}
           type="button"
         >
-          {isLink ? <Link2 aria-hidden="true" size={24} /> : <FileLock2 aria-hidden="true" size={24} />}
+          <img
+            alt=""
+            className="h-full w-full object-cover opacity-95 transition duration-300 group-hover:scale-105"
+            draggable={false}
+            src={getRcaAttachedEvidenceThumbnailSrc(item)}
+          />
           <span className="absolute bottom-2 right-2 rounded-full bg-slate-950/75 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-white opacity-95 backdrop-blur transition group-hover:bg-cyan-700">
             Open
           </span>
@@ -13880,12 +22269,13 @@ function RcaEvidencePhotoViewer({
   onOpenOriginal: (item: RcaAttachedEvidence) => void;
   onPrevious: () => void;
   photoCount: number;
-  previewUrl: string;
+  previewUrl: string | null;
 }) {
   const [isMaximized, setIsMaximized] = React.useState(false);
+  const appHeaderClearance = 42;
   const [position, setPosition] = React.useState(() => ({
     x: typeof window === 'undefined' ? 80 : Math.max(16, window.innerWidth - 900),
-    y: 84
+    y: typeof window === 'undefined' ? 84 : Math.max(appHeaderClearance + 12, 84)
   }));
   const dragStartRef = React.useRef<{
     pointerX: number;
@@ -13930,10 +22320,11 @@ function RcaEvidencePhotoViewer({
       const nextY = dragStart.startY + event.clientY - dragStart.pointerY;
       const maxX = Math.max(16, window.innerWidth - 360);
       const maxY = Math.max(16, window.innerHeight - 220);
+      const minY = appHeaderClearance + 12;
 
       setPosition({
         x: Math.min(Math.max(16, nextX), maxX),
-        y: Math.min(Math.max(16, nextY), maxY)
+        y: Math.min(Math.max(minY, nextY), maxY)
       });
     }
 
@@ -13951,7 +22342,12 @@ function RcaEvidencePhotoViewer({
   }, [isMaximized]);
 
   const viewerStyle = isMaximized
-    ? undefined
+    ? {
+        bottom: '12px',
+        left: '12px',
+        right: '12px',
+        top: `calc(env(safe-area-inset-top, 0px) + ${appHeaderClearance}px)`
+      }
     : {
         height: 'min(720px, calc(100svh - 112px))',
         left: position.x,
@@ -13963,7 +22359,7 @@ function RcaEvidencePhotoViewer({
     <div
       className={`fixed z-[130] flex flex-col overflow-hidden border border-white/15 bg-slate-950 shadow-2xl shadow-slate-950/50 ${
         isMaximized
-          ? 'inset-3 rounded-2xl'
+          ? 'rounded-2xl'
           : 'rounded-xl'
       }`}
       role="dialog"
@@ -14013,7 +22409,17 @@ function RcaEvidencePhotoViewer({
           </div>
         </div>
         <div className="relative min-h-0 flex-1">
-          <img alt="" className="h-full w-full object-contain" src={previewUrl} />
+          {previewUrl ? (
+            <img alt="" className="h-full w-full object-contain" src={previewUrl} />
+          ) : (
+            <div className="grid h-full w-full place-items-center bg-slate-950 text-center">
+              <div>
+                <div className="mx-auto h-10 w-10 animate-spin rounded-full border-2 border-white/20 border-t-cyan-300" />
+                <p className="mt-4 text-sm font-semibold text-white">Preparing secure preview</p>
+                <p className="mt-1 text-xs text-white/55">The original file remains available from the detail panel.</p>
+              </div>
+            </div>
+          )}
           {photoCount > 1 ? (
             <>
               <button
@@ -14120,14 +22526,20 @@ function buildFlowNodes(
   measuredNodeSizes: Map<string, { height: number; width: number }> = new Map(),
   onLabelCommit: (nodeId: string, input: RcaNodeInput) => Promise<RcaNode> = async () => {
     throw new Error('RCA node editing is not available.');
-  }
+  },
+  onOpenHint?: (nodeId: string, event: React.MouseEvent<HTMLElement>) => void,
+  onOpenEvidenceLibrary?: (nodeId: string) => void,
+  onOpenReactionPalette?: (anchor: RcaNodeReactionPaletteAnchor) => void,
+  onOpenEvidencePhotoViewer?: (nodeId: string, evidenceKey: string) => void
 ): RcaFlowNode[] {
+  const nodeLayerRankById = getRcaFlowNodeLayerRanks(nodes);
+  const missingDataBadgesByNodeId = buildRcaMissingDataBadgesByNodeId(nodes, methodology);
   const flowNodes: RcaFlowNode[] = nodes.map((node, index) => {
     const detail = nodeDetails[node.id];
     const estimatedNodeSize = getRcaNodeSize(node, detail);
-    const nodeSize = node.nodeType === 'STICKY_NOTE'
-      ? estimatedNodeSize
-      : measuredNodeSizes.get(node.id) || estimatedNodeSize;
+    const nodeSize = isFreeformRcaAnnotationNode(node)
+      ? measuredNodeSizes.get(node.id) || estimatedNodeSize
+      : estimatedNodeSize;
     const isSelected = node.id === selectedNodeId || selectedNodeIds.has(node.id);
 
     return {
@@ -14138,10 +22550,15 @@ function buildFlowNodes(
         isReferenceProject,
         isRealtimeReady,
         methodology,
+        missingDataBadges: missingDataBadgesByNodeId.get(node.id) || [],
         node,
         nodes,
+        onOpenEvidenceLibrary,
         onInspect,
         onLabelCommit: (nodeId: string, label: string) => onLabelCommit(nodeId, { label }),
+        onOpenHint,
+        onOpenEvidencePhotoViewer,
+        onOpenReactionPalette,
         selected: isSelected,
         sessionId
       },
@@ -14154,12 +22571,13 @@ function buildFlowNodes(
       selected: isSelected,
       sourcePosition: Position.Right,
       style: {
-        height: node.nodeType === 'STICKY_NOTE' ? estimatedNodeSize.height : undefined,
+        height: isFreeformRcaAnnotationNode(node) ? estimatedNodeSize.height : undefined,
         minHeight: estimatedNodeSize.height,
         width: estimatedNodeSize.width
       },
       targetPosition: Position.Left,
-      type: 'rcaNode'
+      type: 'rcaNode',
+      zIndex: getRcaFlowNodeZIndex(node, nodeLayerRankById.get(node.id) ?? index, isSelected)
     };
   });
 
@@ -14171,20 +22589,54 @@ function buildFlowNodes(
         faultGateId: spineLayout.faultGateId,
         selected: selectedNodeIds.has(spineLayout.id)
       },
-      draggable: !isReferenceProject,
+      draggable: false,
       id: spineLayout.id,
       position: spineLayout.position,
-      selectable: true,
-      selected: selectedNodeIds.has(spineLayout.id),
+      selectable: false,
+      selected: false,
       style: {
         height: RCA_FISHBONE_SPINE_CONTROL_HEIGHT,
         width: spineLayout.width
       },
-      type: 'rcaFishboneSpine'
+      type: 'rcaFishboneSpine',
+      zIndex: 0
     });
   }
 
   return flowNodes;
+}
+
+function getRcaFlowNodeLayerRanks(nodes: RcaNode[]): Map<string, number> {
+  const rankedNodes = nodes
+    .map((node, index) => ({ index, node }))
+    .sort((leftEntry, rightEntry) => {
+      const leftTime = getRcaFlowNodeLayerTime(leftEntry.node, leftEntry.index);
+      const rightTime = getRcaFlowNodeLayerTime(rightEntry.node, rightEntry.index);
+
+      return leftTime - rightTime || leftEntry.index - rightEntry.index || leftEntry.node.id.localeCompare(rightEntry.node.id);
+    });
+
+  return new Map(rankedNodes.map((entry, rank) => [entry.node.id, rank]));
+}
+
+function getRcaFlowNodeLayerTime(node: RcaNode, fallbackIndex: number): number {
+  const createdTime = node.createdAtIso ? Date.parse(node.createdAtIso) : Number.NaN;
+
+  if (Number.isFinite(createdTime)) {
+    return createdTime;
+  }
+
+  const updatedTime = node.updatedAtIso ? Date.parse(node.updatedAtIso) : Number.NaN;
+
+  return Number.isFinite(updatedTime) ? updatedTime : fallbackIndex;
+}
+
+function getRcaFlowNodeZIndex(node: RcaNode, layerRank: number, isSelected: boolean): number {
+  if (isSelected) {
+    return 20_000 + layerRank;
+  }
+
+  return (isFreeformRcaAnnotationNode(node) ? 10_000 : 1_000) + layerRank;
 }
 
 function buildFlowEdges(
@@ -14217,12 +22669,17 @@ function buildFlowEdges(
 
   const explicitEdges = nodes
     .filter((node) => node.parentNodeId && nodeIds.has(node.parentNodeId))
-    .map((node) => {
+    .map((node): Edge | null => {
       const parentNodeId = node.parentNodeId as string;
+      const parentNode = nodesById.get(parentNodeId);
       const siblings = childrenByParent.get(parentNodeId) || [node];
       const siblingIndex = Math.max(0, siblings.findIndex((sibling) => sibling.id === node.id));
 
-      if (node.nodeType === 'STICKY_NOTE') {
+      if (isApprovalClosureRoleNode(node) && isCapaRoleNode(parentNode)) {
+        return null;
+      }
+
+      if (isFreeformRcaAnnotationNode(node)) {
         const nodeIndex = nodes.findIndex((candidateNode) => candidateNode.id === node.id);
         const nodePosition = getNodePosition(node, nodes, Math.max(0, nodeIndex), methodology);
         const nodeSize = getRcaNodeSize(node);
@@ -14238,12 +22695,44 @@ function buildFlowEdges(
           siblings.length,
           { x: nodePosition.x + nodeSize.width, y: nodePosition.y + nodeSize.height / 2 },
           {
-            kind: 'sticky-annotation',
+            kind: node.nodeType === 'COMMENT' ? 'comment-annotation' : 'sticky-annotation',
             selected: selectedEdgeIds.has(`${node.id}-${parentNodeId}`),
-            sourceHandle: node.connectionHandles?.sourceHandle || RCA_SOURCE_RIGHT_HANDLE,
-            targetHandle: node.connectionHandles?.targetHandle || getStickyNoteAnnotationTargetHandle(node, targetNode, nodes, methodology)
+            sourceHandle: node.nodeType === 'COMMENT'
+              ? RCA_SOURCE_RIGHT_HANDLE
+              : node.connectionHandles?.sourceHandle || RCA_SOURCE_RIGHT_HANDLE,
+            targetHandle: node.nodeType === 'COMMENT'
+              ? RCA_TARGET_LEFT_HANDLE
+              : node.connectionHandles?.targetHandle || getStickyNoteAnnotationTargetHandle(node, targetNode, nodes, methodology)
           }
         );
+      }
+
+      if (isEvidenceRoleNode(parentNode) && isRootCauseRoleNode(node)) {
+        const isStandaloneFiveWhysRootCauseEvidence = isStandaloneFiveWhysRootCauseEvidenceSupportFlowEdge(parentNode, node, nodes);
+
+        return buildEdge(parentNodeId, node.id, methodology, parentNode, node, 0, 1, undefined, {
+          selected: selectedEdgeIds.has(`${parentNodeId}-${node.id}`),
+          sourceHandle: isStandaloneFiveWhysRootCauseEvidence || methodology === '5_WHYS' ? RCA_SOURCE_RIGHT_HANDLE : RCA_SOURCE_BOTTOM_HANDLE,
+          targetHandle: isStandaloneFiveWhysRootCauseEvidence || methodology === '5_WHYS' ? RCA_TARGET_LEFT_HANDLE : RCA_TARGET_TOP_HANDLE
+        });
+      }
+
+      if (isEvidenceRoleNode(node) && isRootCauseRoleNode(parentNode)) {
+        const isStandaloneFiveWhysRootCauseEvidence = isStandaloneFiveWhysRootCauseEvidenceSupportFlowEdge(node, parentNode, nodes);
+
+        return buildEdge(node.id, parentNodeId, methodology, node, parentNode, 0, 1, undefined, {
+          selected: selectedEdgeIds.has(`${node.id}-${parentNodeId}`),
+          sourceHandle: isStandaloneFiveWhysRootCauseEvidence || methodology === '5_WHYS' ? RCA_SOURCE_RIGHT_HANDLE : RCA_SOURCE_BOTTOM_HANDLE,
+          targetHandle: isStandaloneFiveWhysRootCauseEvidence || methodology === '5_WHYS' ? RCA_TARGET_LEFT_HANDLE : RCA_TARGET_TOP_HANDLE
+        });
+      }
+
+      if (isStandaloneFiveWhysInvestigationToRootCauseFlowEdge(node, parentNode, nodes)) {
+        return buildEdge(parentNodeId, node.id, methodology, parentNode, node, 0, 1, undefined, {
+          selected: selectedEdgeIds.has(`${parentNodeId}-${node.id}`),
+          sourceHandle: RCA_SOURCE_BOTTOM_HANDLE,
+          targetHandle: RCA_TARGET_TOP_HANDLE
+        });
       }
 
       if (methodology === '5_WHYS') {
@@ -14254,7 +22743,25 @@ function buildFlowEdges(
         });
       }
 
-      if (isMainViewForwardFlowEdge(node, nodesById.get(parentNodeId))) {
+      if (isRcaForwardFlowEdge(node, nodesById.get(parentNodeId))) {
+        const parentNode = nodesById.get(parentNodeId);
+
+        if (isProblemToFaultGateFlowEdge(node, parentNode) || isFiveWhysLadderFlowEdge(node, parentNode)) {
+          return buildEdge(parentNodeId, node.id, methodology, nodesById.get(parentNodeId), node, 0, 1, undefined, {
+            selected: selectedEdgeIds.has(`${parentNodeId}-${node.id}`),
+            sourceHandle: RCA_SOURCE_BOTTOM_HANDLE,
+            targetHandle: RCA_TARGET_TOP_HANDLE
+          });
+        }
+
+        if (isFiveWhysInvestigationToRootCauseFlowEdge(node, parentNode)) {
+          return buildEdge(parentNodeId, node.id, methodology, nodesById.get(parentNodeId), node, 0, 1, undefined, {
+            selected: selectedEdgeIds.has(`${parentNodeId}-${node.id}`),
+            sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+            targetHandle: RCA_TARGET_LEFT_HANDLE
+          });
+        }
+
         return buildEdge(parentNodeId, node.id, methodology, nodesById.get(parentNodeId), node, 0, 1, undefined, {
           selected: selectedEdgeIds.has(`${parentNodeId}-${node.id}`),
           sourceHandle: node.connectionHandles?.sourceHandle || RCA_SOURCE_RIGHT_HANDLE,
@@ -14269,7 +22776,59 @@ function buildFlowEdges(
       });
     });
 
-  return explicitEdges;
+  return [
+    ...explicitEdges.filter((edge): edge is Edge => Boolean(edge)),
+    ...buildCapaStageApprovalClosureLinkedEdges(nodes, methodology, selectedEdgeIds),
+    ...buildProblemFaultGateLinkedEdges(nodes, methodology)
+  ];
+}
+
+function buildCapaStageApprovalClosureLinkedEdges(
+  nodes: RcaNode[],
+  methodology: RcaMethodology,
+  selectedEdgeIds: Set<string> = new Set()
+): Edge[] {
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+
+  return nodes
+    .filter(isCapaDownstreamStageRoleNode)
+    .flatMap((stageNode) => normalizeRcaLinkedNodeIds(stageNode.linkedNodeIds)
+      .map((linkedNodeId) => nodesById.get(linkedNodeId))
+      .filter((approvalNode): approvalNode is RcaNode => Boolean(approvalNode && isApprovalClosureRoleNode(approvalNode)))
+      .map((approvalNode) => buildEdge(stageNode.id, approvalNode.id, methodology, stageNode, approvalNode, 0, 1, undefined, {
+        selected: selectedEdgeIds.has(`${stageNode.id}-${approvalNode.id}`),
+        sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+        targetHandle: RCA_TARGET_LEFT_HANDLE
+      })));
+}
+
+function buildProblemFaultGateLinkedEdges(
+  nodes: RcaNode[],
+  methodology: RcaMethodology
+): Edge[] {
+  if (methodology !== 'ISHIKAWA') {
+    return [];
+  }
+
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const edges: Edge[] = [];
+
+  nodes
+    .filter(isProblemRoleNode)
+    .forEach((problemNode) => {
+      normalizeRcaLinkedNodeIds(problemNode.linkedNodeIds)
+        .map((linkedNodeId) => nodesById.get(linkedNodeId))
+        .filter((node): node is RcaNode => Boolean(node && node.status !== 'DELETED' && node.nodeType === 'FAULT_GATE'))
+        .forEach((faultGateNode) => {
+          edges.push(buildEdge(problemNode.id, faultGateNode.id, methodology, problemNode, faultGateNode, 0, 1, undefined, {
+            kind: 'capa-convergence',
+            sourceHandle: RCA_SOURCE_BOTTOM_HANDLE,
+            targetHandle: RCA_TARGET_TOP_HANDLE
+          }));
+        });
+    });
+
+  return edges;
 }
 
 function getFishboneSpineNodeId(faultGateId: string): string {
@@ -14309,7 +22868,7 @@ function getSelectedRcaSplineEdgeIdsForNodeSelection(
       return;
     }
 
-    if (methodology === '5_WHYS' || isMainViewForwardFlowEdge(node, nodes.find((candidateNode) => candidateNode.id === node.parentNodeId))) {
+    if (methodology === '5_WHYS' || isRcaForwardFlowEdge(node, nodes.find((candidateNode) => candidateNode.id === node.parentNodeId))) {
       selectedEdgeIds.add(`${node.parentNodeId}-${node.id}`);
       return;
     }
@@ -14337,6 +22896,48 @@ function getSelectedRcaSplineChildNodeIds(
     .map((node) => node.id);
 }
 
+function getSelectedRcaLinkedSplineRemovals(
+  nodes: RcaNode[],
+  selectedEdgeIds: Set<string>
+): Map<string, string[]> {
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const removalsBySourceNodeId = new Map<string, string[]>();
+
+  nodes.forEach((node) => {
+    normalizeRcaLinkedNodeIds(node.linkedNodeIds)
+      .filter((linkedNodeId) => nodeIds.has(linkedNodeId) && selectedEdgeIds.has(`${node.id}-${linkedNodeId}`))
+      .forEach((linkedNodeId) => {
+        removalsBySourceNodeId.set(node.id, [
+          ...(removalsBySourceNodeId.get(node.id) || []),
+          linkedNodeId
+        ]);
+      });
+  });
+
+  return removalsBySourceNodeId;
+}
+
+function getRcaLinkedSplineAuditDescriptions(
+  nodes: RcaNode[],
+  removalsBySourceNodeId: Map<string, string[]>
+): string[] {
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+
+  return [...removalsBySourceNodeId.entries()]
+    .flatMap(([sourceNodeId, linkedNodeIds]) => {
+      const sourceNode = nodeById.get(sourceNodeId);
+
+      return linkedNodeIds.map((linkedNodeId) => {
+        const targetNode = nodeById.get(linkedNodeId);
+
+        return sourceNode && targetNode
+          ? `${getRcaNodeAuditDescriptor(sourceNode)} output to ${getRcaNodeAuditDescriptor(targetNode)} input`
+          : '';
+      });
+    })
+    .filter(Boolean);
+}
+
 function getRcaSplineEdgeIdForNode(node: RcaNode, methodology: RcaMethodology, nodes: RcaNode[]): string {
   if (!node.parentNodeId) {
     return node.id;
@@ -14344,7 +22945,7 @@ function getRcaSplineEdgeIdForNode(node: RcaNode, methodology: RcaMethodology, n
 
   const parentNode = nodes.find((candidateNode) => candidateNode.id === node.parentNodeId);
 
-  return methodology === '5_WHYS' || isMainViewForwardFlowEdge(node, parentNode)
+  return methodology === '5_WHYS' || isRcaForwardFlowEdge(node, parentNode)
     ? `${node.parentNodeId}-${node.id}`
     : `${node.id}-${node.parentNodeId}`;
 }
@@ -14365,7 +22966,7 @@ function getRcaSplineAuditDescriptions(
         return '';
       }
 
-      const isForwardFlowEdge = methodology === '5_WHYS' || isMainViewForwardFlowEdge(childNode, parentNode);
+      const isForwardFlowEdge = methodology === '5_WHYS' || isRcaForwardFlowEdge(childNode, parentNode);
       const sourceNode = isForwardFlowEdge ? parentNode : childNode;
       const targetNode = isForwardFlowEdge ? childNode : parentNode;
 
@@ -14389,14 +22990,14 @@ function getRcaNodeAuditPrimaryText(node: RcaNode): string {
     return truncateRcaAuditText(label, 160);
   }
 
-  const fields = node.detailFields || {};
   const role = node.nodeType === 'WHY' ? getFiveWhysNodeRole(node) : null;
+  const fields = getActiveRcaNodeDetailFields(role, node.detailFields || {});
   const preferredKeys = role === 'INCIDENT_DETAILS'
     ? ['whereDidItHappen', 'whenDidItHappen', 'whoWasInvolved', 'detailedDescription', 'whatHappened']
     : role === 'INCIDENT'
       ? ['incidentTitle', 'lineMachineProcess', 'areaLocation', 'dateOfIncident', 'incidentDescription']
       : role === 'PROBLEM'
-        ? ['problemStatement', 'problemLocation', 'knownFacts']
+        ? ['problemStatement', 'expectedStandard', 'actualCondition', 'measurableGap', 'analysisScope']
         : [];
   const preferredValues = preferredKeys
     .map((key) => (fields[key] || '').trim())
@@ -14474,13 +23075,14 @@ function buildEdge(
     targetHandle?: string;
   } = {}
 ): Edge {
-  const isStickyAnnotationEdge = options.kind === 'sticky-annotation';
+  const isFreeformAnnotationEdge = options.kind === 'sticky-annotation' || options.kind === 'comment-annotation';
+  const isCapaConvergenceEdge = options.kind === 'capa-convergence';
   const isRcaTreeEdge = methodology !== '5_WHYS';
   const isCategorySpineEdge = methodology === 'ISHIKAWA' &&
     sourceNode?.nodeType === 'ISHIKAWA_CATEGORY' &&
     targetNode?.nodeType === 'FAULT_GATE';
   const isMainViewForwardEdge = methodology === 'ISHIKAWA' &&
-    isMainViewForwardFlowEdge(targetNode, sourceNode);
+    isRcaForwardFlowEdge(targetNode, sourceNode);
   const categorySpineY = isCategorySpineEdge && targetNode
     ? getNodePosition(targetNode, [targetNode], 0, methodology).y + getRcaNodeSize(targetNode).height / 2
     : RCA_FISHBONE_SPINE_Y;
@@ -14489,26 +23091,29 @@ function buildEdge(
     sourceNode &&
     targetNode &&
     (
-      isStickyAnnotationEdge
-        ? sourceNode.nodeType === 'STICKY_NOTE'
-      : methodology === '5_WHYS'
+      isFreeformAnnotationEdge
+        ? isFreeformRcaAnnotationNode(sourceNode)
+      : isCapaConvergenceEdge
+        ? false
+        : methodology === '5_WHYS'
         ? sourceNode.nodeType === 'WHY' && targetNode.nodeType === 'WHY'
         : isMainViewForwardEdge || isRcaConnectableChildNode(sourceNode)
     )
   );
-  const strokeColor = isStickyAnnotationEdge ? '#f59e0b' : isRcaTreeEdge ? '#0284c7' : '#64748b';
-  const defaultWeight = isStickyAnnotationEdge ? 2 : isRcaTreeEdge ? 2.4 : 2;
-  const edgeOwnerNode = isStickyAnnotationEdge
+  const edgeOwnerNode = isFreeformAnnotationEdge
     ? sourceNode
     : methodology === '5_WHYS' || isMainViewForwardEdge
       ? targetNode
       : sourceNode;
+  const strokeColor = getDefaultRcaSplineColor(edgeOwnerNode, isFreeformAnnotationEdge, isRcaTreeEdge);
+  const defaultWeight = isFreeformAnnotationEdge ? 2 : isRcaTreeEdge ? 2.4 : 2;
   const splineStyle = getResolvedRcaSplineStyle(edgeOwnerNode, strokeColor, defaultWeight);
 
   return {
     data: {
       ...(isCategorySpineEdge ? { kind: 'category-spine' as const, spineY: categorySpineY } : {}),
-      ...(isStickyAnnotationEdge ? { kind: 'sticky-annotation' as const } : {}),
+      ...(isFreeformAnnotationEdge ? { kind: options.kind as 'comment-annotation' | 'sticky-annotation' } : {}),
+      ...(isCapaConvergenceEdge ? { kind: 'capa-convergence' as const } : {}),
       ...(edgeOwnerNode ? { ownerNodeId: edgeOwnerNode.id } : {}),
       ...(sourceAnchor ? { sourceAnchor } : {}),
       splineStyle
@@ -14630,6 +23235,26 @@ function getResolvedRcaSplineStyle(
   };
 }
 
+function getDefaultRcaSplineColor(
+  node: RcaNode | null | undefined,
+  isStickyAnnotationEdge = false,
+  isRcaTreeEdge = true
+): string {
+  if (node && isEvidenceRoleNode(node)) {
+    return RCA_DEFAULT_EVIDENCE_SPLINE_COLOR;
+  }
+
+  if (node?.nodeType) {
+    return RCA_DEFAULT_SPLINE_COLOR_BY_NODE_TYPE[node.nodeType] || RCA_DEFAULT_SPLINE_STYLE.color;
+  }
+
+  if (isStickyAnnotationEdge) {
+    return RCA_DEFAULT_SPLINE_COLOR_BY_NODE_TYPE.STICKY_NOTE;
+  }
+
+  return isRcaTreeEdge ? RCA_DEFAULT_SPLINE_STYLE.color : '#64748b';
+}
+
 function getNormalizedRcaSplineLineType(lineType: RcaSplineLineType | null | undefined): RcaSplineLineType {
   return RCA_SPLINE_LINE_TYPE_OPTIONS.some((option) => option.value === lineType) ? lineType as RcaSplineLineType : 'CONTINUOUS';
 }
@@ -14706,6 +23331,79 @@ function isValidHexColor(color: string | null | undefined): color is string {
   return typeof color === 'string' && /^#[0-9A-Fa-f]{6}$/.test(color);
 }
 
+function applyRcaConnectionDetailFieldUpdates(childNode: RcaNode, parentNode: RcaNode | null | undefined): RcaNode {
+  if (isRootCauseRoleNode(childNode) && parentNode && isFiveWhysInvestigationRoleNode(parentNode)) {
+    const fiveWhysNode = parentNode;
+    const fiveWhysFields = fiveWhysNode.detailFields || {};
+    const selectedCause = fiveWhysFields.selectedCause?.trim() || getRcaCauseStatementForFiveWhys(fiveWhysNode);
+    const disposition = getFiveWhysCauseDisposition(fiveWhysFields);
+    const isDirectCause = isFiveWhysDirectCauseDisposition(disposition);
+    const isContributingCause = isFiveWhysContributingCauseDisposition(disposition);
+    const isRuledOut = isFiveWhysRuledOutDisposition(disposition);
+    const existingFields = childNode.detailFields || {};
+
+    return {
+      ...childNode,
+      detailFields: {
+        ...existingFields,
+        causeClassification: isDirectCause
+          ? 'Root Cause'
+          : isContributingCause
+            ? 'Contributing Cause'
+            : isRuledOut
+              ? 'Ruled Out'
+              : existingFields.causeClassification || 'Needs More Evidence',
+        fiveWhysDecisionSourceNodeId: fiveWhysNode.id,
+        fiveWhysDisposition: disposition,
+        fiveWhysEvidenceStrength: fiveWhysFields.evidenceStrength || existingFields.fiveWhysEvidenceStrength || '',
+        fiveWhysFinding: fiveWhysFields.answerStatement || existingFields.fiveWhysFinding || '',
+        fiveWhysDecisionReason: fiveWhysFields.reasonForDecision || existingFields.fiveWhysDecisionReason || '',
+        rootCauseStatement: existingFields.rootCauseStatement || selectedCause,
+        validationComments: existingFields.validationComments || buildFiveWhysDecisionSummary(fiveWhysNode),
+        validationStatus: isDirectCause || isContributingCause
+          ? 'Approved'
+          : isRuledOut
+            ? 'Rejected'
+            : existingFields.validationStatus || 'Needs More Investigation',
+        wouldFixingPreventRecurrence: fiveWhysFields.wouldFixingCausePreventProblem || existingFields.wouldFixingPreventRecurrence || 'Unknown'
+      },
+      isRootCause: childNode.isRootCause || isDirectCause,
+      isSuspectedCause: childNode.isSuspectedCause || isDirectCause || isContributingCause || disposition === 'Needs More Evidence'
+    };
+  }
+
+  if (!isFiveWhysInvestigationRoleNode(childNode) || !parentNode || (!isRootCauseRoleNode(parentNode) && !isFishboneCauseNode(parentNode))) {
+    return childNode;
+  }
+
+  const causeStatement = getRcaCauseStatementForFiveWhys(parentNode);
+
+  if (!causeStatement) {
+    return childNode;
+  }
+
+  return {
+    ...childNode,
+    detailFields: {
+      ...(childNode.detailFields || {}),
+      selectedCause: causeStatement
+    }
+  };
+}
+
+function getRcaCauseStatementForFiveWhys(causeNode: RcaNode): string {
+  const fields = causeNode.detailFields || {};
+  const statement = fields.rootCauseStatement?.trim() ||
+    fields.rootCauseDescription?.trim() ||
+    fields.selectedCause?.trim() ||
+    fields.answerStatement?.trim() ||
+    fields.causeStatement?.trim() ||
+    fields.problemStatement?.trim() ||
+    stripFiveWhysRolePrefix(causeNode.label || '').trim();
+
+  return statement ? truncateRcaAuditText(statement, 220) : '';
+}
+
 function getRcaCanvasConnectionChange(
   connection: Edge | Connection,
   nodes: RcaNode[],
@@ -14715,15 +23413,15 @@ function getRcaCanvasConnectionChange(
     (methodology !== 'ISHIKAWA' && methodology !== '5_WHYS') ||
     !connection.source ||
     !connection.target ||
-    connection.source === connection.target ||
-    !isRcaSourceHandleId(connection.sourceHandle) ||
-    !isRcaTargetHandleId(connection.targetHandle)
+    connection.source === connection.target
   ) {
     return null;
   }
 
   const sourceNode = nodes.find((node) => node.id === connection.source);
   const targetNode = nodes.find((node) => node.id === connection.target);
+  const isForwardHandlePair = isRcaSourceHandleId(connection.sourceHandle) &&
+    isRcaTargetHandleId(connection.targetHandle);
 
   if (
     !sourceNode ||
@@ -14732,23 +23430,44 @@ function getRcaCanvasConnectionChange(
     return null;
   }
 
-  if (sourceNode.nodeType === 'STICKY_NOTE') {
-    if (
-      !isStickyNoteConnectableTargetNode(targetNode) ||
-      wouldCreateRcaParentCycle(sourceNode.id, targetNode.id, nodes)
-    ) {
+  if (isFreeformRcaAnnotationNode(sourceNode) && isStickyNoteConnectableTargetNode(targetNode)) {
+    const isCommentSource = sourceNode.nodeType === 'COMMENT';
+
+    if (wouldCreateRcaParentCycle(sourceNode.id, targetNode.id, nodes)) {
       return null;
     }
 
     return {
       childNodeId: sourceNode.id,
       connectionHandles: {
-        sourceHandle: getNormalizedRcaSourceHandleId(connection.sourceHandle),
-        targetHandle: getNormalizedRcaTargetHandleId(connection.targetHandle)
+        sourceHandle: isCommentSource ? RCA_SOURCE_RIGHT_HANDLE : getNormalizedRcaSourceHandleId(connection.sourceHandle),
+        targetHandle: isCommentSource ? RCA_TARGET_LEFT_HANDLE : getNormalizedRcaTargetHandleId(connection.targetHandle)
       },
-      nodeType: 'STICKY_NOTE',
+      nodeType: sourceNode.nodeType,
       parentNodeId: targetNode.id
     };
+  }
+
+  if (isFreeformRcaAnnotationNode(targetNode) && isStickyNoteConnectableTargetNode(sourceNode)) {
+    const isCommentSource = targetNode.nodeType === 'COMMENT';
+
+    if (wouldCreateRcaParentCycle(targetNode.id, sourceNode.id, nodes)) {
+      return null;
+    }
+
+    return {
+      childNodeId: targetNode.id,
+      connectionHandles: {
+        sourceHandle: isCommentSource ? RCA_SOURCE_RIGHT_HANDLE : getNormalizedRcaSourceHandleId(connection.targetHandle),
+        targetHandle: isCommentSource ? RCA_TARGET_LEFT_HANDLE : getNormalizedRcaTargetHandleId(connection.sourceHandle)
+      },
+      nodeType: targetNode.nodeType,
+      parentNodeId: sourceNode.id
+    };
+  }
+
+  if (!isForwardHandlePair) {
+    return null;
   }
 
   if (methodology === '5_WHYS') {
@@ -14758,6 +23477,34 @@ function getRcaCanvasConnectionChange(
       wouldCreateRcaParentCycle(targetNode.id, sourceNode.id, nodes)
     ) {
       return null;
+    }
+
+    const isRootCauseEvidenceConnection = isEvidenceRoleNode(sourceNode) && isRootCauseRoleNode(targetNode);
+
+    if (isRootCauseEvidenceConnection) {
+      return {
+        childNodeId: sourceNode.id,
+        connectionHandles: {
+          sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+          targetHandle: RCA_TARGET_LEFT_HANDLE
+        },
+        nodeType: sourceNode.nodeType,
+        parentNodeId: targetNode.id
+      };
+    }
+
+    if (isFiveWhysInvestigationRoleNode(sourceNode) && isRootCauseRoleNode(targetNode)) {
+      if (wouldCreateRcaParentCycle(targetNode.id, sourceNode.id, nodes)) {
+        return null;
+      }
+
+      return {
+        childNodeId: targetNode.id,
+        connectionHandles: getVerticalRcaFlowConnectionHandles(),
+        nodeType: targetNode.nodeType,
+        parentNodeId: sourceNode.id,
+        sourceNodeId: sourceNode.id
+      };
     }
 
     return {
@@ -14771,7 +23518,118 @@ function getRcaCanvasConnectionChange(
     };
   }
 
+  if (isIncidentRoleNode(sourceNode) && isIncidentDetailsRoleNode(targetNode)) {
+    if (wouldCreateRcaParentCycle(targetNode.id, sourceNode.id, nodes)) {
+      return null;
+    }
+
+    return {
+      childNodeId: targetNode.id,
+      connectionHandles: {
+        sourceHandle: getNormalizedRcaSourceHandleId(connection.sourceHandle),
+        targetHandle: getNormalizedRcaTargetHandleId(connection.targetHandle)
+      },
+      nodeType: targetNode.nodeType,
+      parentNodeId: sourceNode.id
+    };
+  }
+
+  if (isIncidentDetailsRoleNode(sourceNode) && isContainmentRoleNode(targetNode)) {
+    if (wouldCreateRcaParentCycle(targetNode.id, sourceNode.id, nodes)) {
+      return null;
+    }
+
+    return {
+      childNodeId: targetNode.id,
+      connectionHandles: {
+        sourceHandle: getNormalizedRcaSourceHandleId(connection.sourceHandle),
+        targetHandle: getNormalizedRcaTargetHandleId(connection.targetHandle)
+      },
+      nodeType: targetNode.nodeType,
+      parentNodeId: sourceNode.id
+    };
+  }
+
+  if (isContainmentRoleNode(sourceNode) && isProblemRoleNode(targetNode)) {
+    if (wouldCreateRcaParentCycle(targetNode.id, sourceNode.id, nodes)) {
+      return null;
+    }
+
+    return {
+      childNodeId: targetNode.id,
+      connectionHandles: {
+        sourceHandle: getNormalizedRcaSourceHandleId(connection.sourceHandle),
+        targetHandle: getNormalizedRcaTargetHandleId(connection.targetHandle)
+      },
+      nodeType: targetNode.nodeType,
+      parentNodeId: sourceNode.id
+    };
+  }
+
+  if (isIncidentDetailsRoleNode(sourceNode) && isProblemRoleNode(targetNode)) {
+    const hasContainmentNode = nodes.some((node) => isContainmentRoleNode(node));
+
+    if (hasContainmentNode || wouldCreateRcaParentCycle(targetNode.id, sourceNode.id, nodes)) {
+      return null;
+    }
+
+    return {
+      childNodeId: targetNode.id,
+      connectionHandles: {
+        sourceHandle: getNormalizedRcaSourceHandleId(connection.sourceHandle),
+        targetHandle: getNormalizedRcaTargetHandleId(connection.targetHandle)
+      },
+      nodeType: targetNode.nodeType,
+      parentNodeId: sourceNode.id
+    };
+  }
+
+  if (isProblemRoleNode(sourceNode) && targetNode.nodeType === 'FAULT_GATE') {
+    if (
+      targetNode.status === 'DELETED' ||
+      (!isFaultGateCapaSplineOwner(targetNode, nodes) && wouldCreateRcaParentCycle(targetNode.id, sourceNode.id, nodes))
+    ) {
+      return null;
+    }
+
+    if (isFaultGateCapaSplineOwner(targetNode, nodes)) {
+      return {
+        childNodeId: sourceNode.id,
+        connectionHandles: getVerticalRcaFlowConnectionHandles(),
+        linkedNodeId: targetNode.id,
+        nodeType: sourceNode.nodeType,
+        parentNodeId: sourceNode.parentNodeId
+      };
+    }
+
+    return {
+      childNodeId: targetNode.id,
+      connectionHandles: {
+        sourceHandle: RCA_SOURCE_BOTTOM_HANDLE,
+        targetHandle: RCA_TARGET_TOP_HANDLE
+      },
+      nodeType: 'FAULT_GATE',
+      parentNodeId: sourceNode.id
+    };
+  }
+
   if (sourceNode.nodeType === 'FAULT_GATE') {
+    if (isApprovalClosureRoleNode(targetNode)) {
+      if (wouldCreateRcaParentCycle(targetNode.id, sourceNode.id, nodes)) {
+        return null;
+      }
+
+      return {
+        childNodeId: targetNode.id,
+        connectionHandles: {
+          sourceHandle: getNormalizedRcaSourceHandleId(connection.sourceHandle),
+          targetHandle: getNormalizedRcaTargetHandleId(connection.targetHandle)
+        },
+        nodeType: targetNode.nodeType,
+        parentNodeId: sourceNode.id
+      };
+    }
+
     if (
       !isCapaDestinationNode(targetNode) ||
       wouldCreateRcaParentCycle(sourceNode.id, targetNode.id, nodes)
@@ -14798,6 +23656,160 @@ function getRcaCanvasConnectionChange(
     return null;
   }
 
+  if (isFishboneCauseNode(sourceNode) && isFiveWhysInvestigationRoleNode(targetNode)) {
+    if (wouldCreateRcaParentCycle(targetNode.id, sourceNode.id, nodes)) {
+      return null;
+    }
+
+    return {
+      childNodeId: targetNode.id,
+      connectionHandles: {
+        sourceHandle: getNormalizedRcaSourceHandleId(connection.sourceHandle),
+        targetHandle: getNormalizedRcaTargetHandleId(connection.targetHandle)
+      },
+      nodeType: targetNode.nodeType,
+      parentNodeId: sourceNode.id,
+      sourceNodeId: sourceNode.id
+    };
+  }
+
+  if (isFiveWhysInvestigationRoleNode(sourceNode) && isRootCauseRoleNode(targetNode)) {
+    if (wouldCreateRcaParentCycle(targetNode.id, sourceNode.id, nodes)) {
+      return null;
+    }
+
+    if (isStandaloneFiveWhysInvestigationToRootCauseFlowEdge(targetNode, sourceNode, nodes)) {
+      return {
+        childNodeId: targetNode.id,
+        connectionHandles: getVerticalRcaFlowConnectionHandles(),
+        nodeType: targetNode.nodeType,
+        parentNodeId: sourceNode.id,
+        sourceNodeId: sourceNode.id
+      };
+    }
+
+    return {
+      childNodeId: targetNode.id,
+      connectionHandles: {
+        sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+        targetHandle: RCA_TARGET_LEFT_HANDLE
+      },
+      nodeType: targetNode.nodeType,
+      parentNodeId: sourceNode.id,
+      sourceNodeId: sourceNode.id
+    };
+  }
+
+  if (isCapaDownstreamStageRoleNode(sourceNode)) {
+    if (
+      !isApprovalClosureRoleNode(targetNode) ||
+      !isStandaloneFiveWhysCapaStageApprovalClosureEdge(sourceNode, targetNode, nodes) ||
+      wouldCreateRcaParentCycle(sourceNode.id, targetNode.id, nodes)
+    ) {
+      return null;
+    }
+
+    return {
+      childNodeId: sourceNode.id,
+      connectionHandles: {
+        sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+        targetHandle: RCA_TARGET_LEFT_HANDLE
+      },
+      linkedNodeId: targetNode.id,
+      nodeType: sourceNode.nodeType,
+      parentNodeId: sourceNode.parentNodeId
+    };
+  }
+
+  if (isCapaRoleNode(sourceNode) && isCapaDownstreamStageRoleNode(targetNode)) {
+    if (wouldCreateRcaParentCycle(targetNode.id, sourceNode.id, nodes)) {
+      return null;
+    }
+
+    return {
+      childNodeId: targetNode.id,
+      connectionHandles: {
+        sourceHandle: getNormalizedRcaSourceHandleId(connection.sourceHandle),
+        targetHandle: getNormalizedRcaTargetHandleId(connection.targetHandle)
+      },
+      nodeType: targetNode.nodeType,
+      parentNodeId: sourceNode.id
+    };
+  }
+
+  if (isEvidenceRoleNode(sourceNode) && isCapaDownstreamStageRoleNode(targetNode)) {
+    if (wouldCreateRcaParentCycle(sourceNode.id, targetNode.id, nodes)) {
+      return null;
+    }
+
+    return {
+      childNodeId: sourceNode.id,
+      connectionHandles: {
+        sourceHandle: getNormalizedRcaSourceHandleId(connection.sourceHandle),
+        targetHandle: getNormalizedRcaTargetHandleId(connection.targetHandle)
+      },
+      nodeType: sourceNode.nodeType,
+      parentNodeId: targetNode.id
+    };
+  }
+
+  if (isEvidenceRoleNode(sourceNode) && isRootCauseRoleNode(targetNode)) {
+    if (wouldCreateRcaParentCycle(sourceNode.id, targetNode.id, nodes)) {
+      return null;
+    }
+
+    if (isStandaloneFiveWhysRootCauseEvidenceSupportFlowEdge(sourceNode, targetNode, nodes)) {
+      return {
+        childNodeId: sourceNode.id,
+        connectionHandles: {
+          sourceHandle: RCA_SOURCE_RIGHT_HANDLE,
+          targetHandle: RCA_TARGET_LEFT_HANDLE
+        },
+        nodeType: sourceNode.nodeType,
+        parentNodeId: targetNode.id
+      };
+    }
+
+    return {
+      childNodeId: sourceNode.id,
+      connectionHandles: getVerticalRcaFlowConnectionHandles(),
+      nodeType: sourceNode.nodeType,
+      parentNodeId: targetNode.id
+    };
+  }
+
+  if (isCapaDownstreamStageRoleNode(targetNode) || isApprovalClosureRoleNode(targetNode)) {
+    return null;
+  }
+
+  if (isApprovalClosureRoleNode(sourceNode)) {
+    return null;
+  }
+
+  if (isMainViewForwardFlowParentNode(sourceNode) && isMainViewForwardFlowChildNode(targetNode)) {
+    if (wouldCreateRcaParentCycle(targetNode.id, sourceNode.id, nodes)) {
+      return null;
+    }
+
+    return {
+      childNodeId: targetNode.id,
+      connectionHandles: {
+        sourceHandle: isFiveWhysLadderFlowEdge(targetNode, sourceNode)
+          ? RCA_SOURCE_BOTTOM_HANDLE
+          : getNormalizedRcaSourceHandleId(connection.sourceHandle),
+        targetHandle: isFiveWhysLadderFlowEdge(targetNode, sourceNode)
+          ? RCA_TARGET_TOP_HANDLE
+          : getNormalizedRcaTargetHandleId(connection.targetHandle)
+      },
+      nodeType: targetNode.nodeType,
+      parentNodeId: sourceNode.id
+    };
+  }
+
+  if (isFiveWhysInvestigationRoleNode(sourceNode) || isFiveWhysInvestigationRoleNode(targetNode)) {
+    return null;
+  }
+
   if (isEvidenceRoleNode(sourceNode)) {
     if (
       !isRcaConnectableParentNode(targetNode) ||
@@ -14814,22 +23826,6 @@ function getRcaCanvasConnectionChange(
       },
       nodeType: sourceNode.nodeType,
       parentNodeId: targetNode.id
-    };
-  }
-
-  if (isMainViewForwardFlowParentNode(sourceNode) && isMainViewForwardFlowChildNode(targetNode)) {
-    if (wouldCreateRcaParentCycle(targetNode.id, sourceNode.id, nodes)) {
-      return null;
-    }
-
-    return {
-      childNodeId: targetNode.id,
-      connectionHandles: {
-        sourceHandle: getNormalizedRcaSourceHandleId(connection.sourceHandle),
-        targetHandle: getNormalizedRcaTargetHandleId(connection.targetHandle)
-      },
-      nodeType: targetNode.nodeType,
-      parentNodeId: sourceNode.id
     };
   }
 
@@ -14889,7 +23885,7 @@ function isMainViewForwardFlowParentNode(node: RcaNode | undefined): boolean {
 
   const role = getFiveWhysNodeRole(node);
 
-  return role === 'PROBLEM' || role === 'ROOT_CAUSE';
+  return role === 'PROBLEM' || role === 'FIVE_WHYS' || role === 'ROOT_CAUSE';
 }
 
 function isMainViewForwardFlowChildNode(node: RcaNode | undefined): boolean {
@@ -14899,15 +23895,277 @@ function isMainViewForwardFlowChildNode(node: RcaNode | undefined): boolean {
 
   const role = getFiveWhysNodeRole(node);
 
-  return role !== 'PROBLEM' && role !== 'INCIDENT' && role !== 'EVIDENCE';
+  return role !== 'PROBLEM' &&
+    role !== 'INCIDENT' &&
+    role !== 'INCIDENT_DETAILS' &&
+    role !== 'CONTAINMENT' &&
+    role !== 'EVIDENCE';
 }
 
 function isMainViewForwardFlowEdge(childNode: RcaNode | undefined, parentNode: RcaNode | undefined): boolean {
   return isMainViewForwardFlowParentNode(parentNode) && isMainViewForwardFlowChildNode(childNode);
 }
 
+function isRcaForwardFlowEdge(childNode: RcaNode | undefined, parentNode: RcaNode | undefined): boolean {
+  return isMainViewForwardFlowEdge(childNode, parentNode) ||
+    isCauseToFiveWhysFlowEdge(childNode, parentNode) ||
+    isFiveWhysLadderFlowEdge(childNode, parentNode) ||
+    isIncidentToIncidentDetailsFlowEdge(childNode, parentNode) ||
+    isIncidentDetailsToContainmentFlowEdge(childNode, parentNode) ||
+    isContainmentToProblemFlowEdge(childNode, parentNode) ||
+    isIncidentDetailsToProblemFlowEdge(childNode, parentNode) ||
+    isProblemToFaultGateFlowEdge(childNode, parentNode) ||
+    isFaultGateToApprovalClosureFlowEdge(childNode, parentNode) ||
+    isCapaToDownstreamFlowEdge(childNode, parentNode);
+}
+
+function isCauseToFiveWhysFlowEdge(childNode: RcaNode | undefined, parentNode: RcaNode | undefined): boolean {
+  return Boolean(childNode && parentNode && isFiveWhysInvestigationRoleNode(childNode) && isFishboneCauseNode(parentNode));
+}
+
+function isFiveWhysLadderFlowEdge(childNode: RcaNode | undefined, parentNode: RcaNode | undefined): boolean {
+  if (
+    !childNode ||
+    !parentNode ||
+    childNode.status === 'DELETED' ||
+    parentNode.status === 'DELETED' ||
+    childNode.nodeType !== 'WHY' ||
+    parentNode.nodeType !== 'WHY'
+  ) {
+    return false;
+  }
+
+  const childRole = getFiveWhysNodeRole(childNode);
+  const parentRole = getFiveWhysNodeRole(parentNode);
+
+  return (parentRole === 'PROBLEM' && childRole === 'FIVE_WHYS') ||
+    (parentRole === 'FIVE_WHYS' && childRole === 'ANSWER') ||
+    (parentRole === 'ANSWER' && childRole === 'FIVE_WHYS');
+}
+
+function isFiveWhysInvestigationToRootCauseFlowEdge(childNode: RcaNode | undefined, parentNode: RcaNode | undefined): boolean {
+  return Boolean(
+    childNode &&
+    parentNode &&
+    childNode.status !== 'DELETED' &&
+    parentNode.status !== 'DELETED' &&
+    isRootCauseRoleNode(childNode) &&
+    isFiveWhysInvestigationRoleNode(parentNode)
+  );
+}
+
+function isStandaloneFiveWhysInvestigationToRootCauseFlowEdge(
+  childNode: RcaNode | undefined,
+  parentNode: RcaNode | undefined,
+  nodes: RcaNode[]
+): boolean {
+  if (!isFiveWhysInvestigationToRootCauseFlowEdge(childNode, parentNode) || !parentNode?.parentNodeId) {
+    return false;
+  }
+
+  const problemNode = nodes.find((node) => node.id === parentNode.parentNodeId);
+  return isProblemRoleNode(problemNode);
+}
+
+function isStandaloneFiveWhysRootCauseEvidenceSupportFlowEdge(
+  childNode: RcaNode | undefined,
+  parentNode: RcaNode | undefined,
+  nodes: RcaNode[]
+): boolean {
+  if (!isRootCauseEvidenceSupportFlowEdge(childNode, parentNode) || !parentNode?.parentNodeId) {
+    return false;
+  }
+
+  const fiveWhysNode = nodes.find((node) => node.id === parentNode.parentNodeId);
+  const problemNode = fiveWhysNode?.parentNodeId
+    ? nodes.find((node) => node.id === fiveWhysNode.parentNodeId)
+    : undefined;
+
+  return isFiveWhysInvestigationRoleNode(fiveWhysNode) && isProblemRoleNode(problemNode);
+}
+
+function isRootCauseEvidenceSupportFlowEdge(childNode: RcaNode | undefined, parentNode: RcaNode | undefined): boolean {
+  return Boolean(
+    childNode &&
+    parentNode &&
+    childNode.status !== 'DELETED' &&
+    parentNode.status !== 'DELETED' &&
+    isEvidenceRoleNode(childNode) &&
+    isRootCauseRoleNode(parentNode)
+  );
+}
+
+function isIncidentToIncidentDetailsFlowEdge(childNode: RcaNode | undefined, parentNode: RcaNode | undefined): boolean {
+  return isIncidentRoleNode(parentNode) && isIncidentDetailsRoleNode(childNode);
+}
+
+function isIncidentDetailsToProblemFlowEdge(childNode: RcaNode | undefined, parentNode: RcaNode | undefined): boolean {
+  return isIncidentDetailsRoleNode(parentNode) && isProblemRoleNode(childNode);
+}
+
+function isIncidentDetailsToContainmentFlowEdge(childNode: RcaNode | undefined, parentNode: RcaNode | undefined): boolean {
+  return isIncidentDetailsRoleNode(parentNode) && isContainmentRoleNode(childNode);
+}
+
+function isContainmentToProblemFlowEdge(childNode: RcaNode | undefined, parentNode: RcaNode | undefined): boolean {
+  return isContainmentRoleNode(parentNode) && isProblemRoleNode(childNode);
+}
+
+function isProblemToFaultGateFlowEdge(childNode: RcaNode | undefined, parentNode: RcaNode | undefined): boolean {
+  return isProblemRoleNode(parentNode) && Boolean(childNode && childNode.status !== 'DELETED' && childNode.nodeType === 'FAULT_GATE');
+}
+
+function isFaultGateToApprovalClosureFlowEdge(childNode: RcaNode | undefined, parentNode: RcaNode | undefined): boolean {
+  return Boolean(parentNode && parentNode.status !== 'DELETED' && parentNode.nodeType === 'FAULT_GATE') &&
+    isApprovalClosureRoleNode(childNode);
+}
+
+function isCapaToDownstreamFlowEdge(childNode: RcaNode | undefined, parentNode: RcaNode | undefined): boolean {
+  return isCapaRoleNode(parentNode) && isCapaDownstreamStageRoleNode(childNode);
+}
+
+function isStandaloneFiveWhysCapaStageApprovalClosureEdge(
+  stageNode: RcaNode | undefined,
+  approvalNode: RcaNode | undefined,
+  nodes: RcaNode[]
+): boolean {
+  if (!stageNode || !isCapaDownstreamStageRoleNode(stageNode) || !isApprovalClosureRoleNode(approvalNode) || !stageNode.parentNodeId) {
+    return false;
+  }
+
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const capaNode = nodeById.get(stageNode.parentNodeId);
+  const rootCauseNode = capaNode?.parentNodeId ? nodeById.get(capaNode.parentNodeId) : undefined;
+  const fiveWhysNode = rootCauseNode?.parentNodeId ? nodeById.get(rootCauseNode.parentNodeId) : undefined;
+  const problemNode = fiveWhysNode?.parentNodeId ? nodeById.get(fiveWhysNode.parentNodeId) : undefined;
+
+  return isCapaRoleNode(capaNode) &&
+    isRootCauseRoleNode(rootCauseNode) &&
+    isFiveWhysInvestigationRoleNode(fiveWhysNode) &&
+    isProblemRoleNode(problemNode);
+}
+
+function getStandaloneFiveWhysCapaStageBlock(
+  node: RcaNode | undefined,
+  nodes: RcaNode[]
+): {
+  approvalNode?: RcaNode;
+  capaNode: RcaNode;
+  problemNode: RcaNode;
+  rootCauseNode: RcaNode;
+  stageNodes: RcaNode[];
+} | null {
+  if (!node || node.status === 'DELETED') {
+    return null;
+  }
+
+  const nodeById = new Map(nodes.map((candidateNode) => [candidateNode.id, candidateNode]));
+  const capaNode = isCapaRoleNode(node)
+    ? node
+    : node.parentNodeId
+      ? nodeById.get(node.parentNodeId)
+      : undefined;
+
+  if (!capaNode || !isCapaRoleNode(capaNode) || !capaNode.parentNodeId) {
+    return null;
+  }
+
+  const rootCauseNode = nodeById.get(capaNode.parentNodeId);
+  const fiveWhysNode = rootCauseNode?.parentNodeId ? nodeById.get(rootCauseNode.parentNodeId) : undefined;
+  const problemNode = fiveWhysNode?.parentNodeId ? nodeById.get(fiveWhysNode.parentNodeId) : undefined;
+
+  if (!rootCauseNode || !isRootCauseRoleNode(rootCauseNode) || !fiveWhysNode || !isFiveWhysInvestigationRoleNode(fiveWhysNode) || !problemNode || !isProblemRoleNode(problemNode)) {
+    return null;
+  }
+
+  const stageNodes = nodes
+    .filter((candidateNode) => candidateNode.parentNodeId === capaNode.id && isCapaDownstreamStageRoleNode(candidateNode))
+    .sort((leftNode, rightNode) => getCapaWorkflowRoleRank(leftNode) - getCapaWorkflowRoleRank(rightNode) || leftNode.id.localeCompare(rightNode.id));
+  const approvalNode = nodes
+    .filter(isApprovalClosureRoleNode)
+    .find((candidateNode) => (
+      candidateNode.parentNodeId === capaNode.id ||
+      stageNodes.some((stageNode) => normalizeRcaLinkedNodeIds(stageNode.linkedNodeIds).includes(candidateNode.id))
+    ));
+
+  return {
+    approvalNode,
+    capaNode,
+    problemNode,
+    rootCauseNode,
+    stageNodes
+  };
+}
+
+function isIncidentRoleNode(node: RcaNode | undefined): boolean {
+  return Boolean(node && node.status !== 'DELETED' && node.nodeType === 'WHY' && getFiveWhysNodeRole(node) === 'INCIDENT');
+}
+
+function isIncidentDetailsRoleNode(node: RcaNode | undefined): boolean {
+  return Boolean(node && node.status !== 'DELETED' && node.nodeType === 'WHY' && getFiveWhysNodeRole(node) === 'INCIDENT_DETAILS');
+}
+
+function isContainmentRoleNode(node: RcaNode | undefined): boolean {
+  return Boolean(node && node.status !== 'DELETED' && node.nodeType === 'WHY' && getFiveWhysNodeRole(node) === 'CONTAINMENT');
+}
+
+function isProblemRoleNode(node: RcaNode | undefined): boolean {
+  return Boolean(node && node.status !== 'DELETED' && node.nodeType === 'WHY' && getFiveWhysNodeRole(node) === 'PROBLEM');
+}
+
+function isFiveWhysInvestigationRoleNode(node: RcaNode | null | undefined): boolean {
+  return Boolean(node && node.status !== 'DELETED' && node.nodeType === 'WHY' && getFiveWhysNodeRole(node) === 'FIVE_WHYS');
+}
+
 function isEvidenceRoleNode(node: RcaNode | undefined): boolean {
   return Boolean(node && node.status !== 'DELETED' && node.nodeType === 'WHY' && getFiveWhysNodeRole(node) === 'EVIDENCE');
+}
+
+function isCapaRoleNode(node: RcaNode | undefined): boolean {
+  return Boolean(node && node.status !== 'DELETED' && node.nodeType === 'WHY' && getFiveWhysNodeRole(node) === 'CAPA');
+}
+
+function isCapaDownstreamRoleNode(node: RcaNode | undefined): boolean {
+  if (!node || node.status === 'DELETED' || node.nodeType !== 'WHY') {
+    return false;
+  }
+
+  const role = getFiveWhysNodeRole(node);
+
+  return role === 'CORRECTIVE_ACTION' ||
+    role === 'PREVENTIVE_ACTION' ||
+    role === 'RISK_ASSESSMENT' ||
+    role === 'EFFECTIVENESS' ||
+    role === 'LESSONS_LEARNED' ||
+    role === 'APPROVAL_CLOSURE';
+}
+
+function isApprovalClosureRoleNode(node: RcaNode | undefined): boolean {
+  return Boolean(node && node.status !== 'DELETED' && node.nodeType === 'WHY' && getFiveWhysNodeRole(node) === 'APPROVAL_CLOSURE');
+}
+
+function getApprovalClosureMissingRequiredFields(fields: Record<string, string>): string[] {
+  return RCA_APPROVAL_CLOSURE_REQUIRED_FIELDS
+    .filter((requirement) => {
+      const value = (fields[requirement.key] || '').trim();
+
+      if (!value) {
+        return true;
+      }
+
+      return requirement.validValues
+        ? !requirement.validValues.includes(value)
+        : false;
+    })
+    .map((requirement) => requirement.label);
+}
+
+function isApprovalClosureReadyToClose(fields: Record<string, string>): boolean {
+  return getApprovalClosureMissingRequiredFields(fields).length === 0;
+}
+
+function isCapaDownstreamStageRoleNode(node: RcaNode | undefined): boolean {
+  return isCapaDownstreamRoleNode(node) && !isApprovalClosureRoleNode(node);
 }
 
 function isCapaDestinationNode(node: RcaNode): boolean {
@@ -14927,7 +24185,11 @@ function isRcaConnectableParentNode(node: RcaNode): boolean {
 }
 
 function isStickyNoteConnectableTargetNode(node: RcaNode): boolean {
-  return node.status !== 'DELETED';
+  return node.status !== 'DELETED' && !isFreeformRcaAnnotationNode(node);
+}
+
+function isFreeformRcaAnnotationNode(node: Pick<RcaNode, 'nodeType'> | null | undefined): boolean {
+  return node?.nodeType === 'STICKY_NOTE' || node?.nodeType === 'COMMENT';
 }
 
 function wouldCreateRcaParentCycle(childNodeId: string, parentNodeId: string | null, nodes: RcaNode[]): boolean {
@@ -15021,7 +24283,7 @@ function RcaSplineEdge({
     );
   }
 
-  if (edgeData?.kind === 'sticky-annotation') {
+  if (edgeData?.kind === 'sticky-annotation' || edgeData?.kind === 'comment-annotation') {
     const arrowApproachPoint = getRcaSplineArrowApproachPoint(arrowBasePoint, targetPosition);
     const distanceX = Math.abs(arrowApproachPoint.x - resolvedSourceX);
     const distanceY = Math.abs(arrowApproachPoint.y - resolvedSourceY);
@@ -15313,18 +24575,35 @@ function getRcaCauseFooterRows(node: RcaNode, detail?: ReferenceRcaNodeDetail): 
 }
 
 function getRcaNodeSize(node: RcaNode, detail?: ReferenceRcaNodeDetail): { height: number; width: number } {
-  if (node.nodeType === 'STICKY_NOTE') {
-    return getStickyNoteContentSize(node);
+  const measuredHeight = node.dimensions?.height;
+  const measuredWidth = node.dimensions?.width;
+  const measuredDimensions = Number.isFinite(measuredHeight) && Number.isFinite(measuredWidth)
+    ? {
+        height: Math.max(1, Math.round(measuredHeight as number)),
+        width: Math.max(1, Math.round(measuredWidth as number))
+      }
+    : null;
+
+  if (isFreeformRcaAnnotationNode(node)) {
+    const stickySize = getStickyNoteContentSize(node);
+
+    return measuredDimensions
+      ? {
+          height: Math.max(stickySize.height, measuredDimensions.height),
+          width: Math.max(stickySize.width, measuredDimensions.width)
+        }
+      : stickySize;
   }
 
   if (node.nodeType === 'ISHIKAWA_CATEGORY') {
     const categoryLabelLines = estimateWrappedLineCount(node.label || 'Branch', 18);
     const categoryHeight = 16 + 14 + Math.max(1, categoryLabelLines) * 20 + 16;
-
-    return {
+    const estimatedSize = {
       height: Math.max(RCA_CATEGORY_NODE_HEIGHT, categoryHeight),
       width: RCA_CATEGORY_NODE_WIDTH
     };
+
+    return estimatedSize;
   }
 
   const minimumHeight = node.nodeType === 'FAULT_GATE'
@@ -15349,10 +24628,1820 @@ function getRcaNodeSize(node: RcaNode, detail?: ReferenceRcaNodeDetail): { heigh
   const footerHeight = 16 + (footerRows - 1) * 22;
   const estimatedCardHeight = 32 + 36 + labelHeight + verificationHeight + 16 + footerHeight;
 
-  return {
+  const estimatedSize = {
     height: Math.max(minimumHeight, estimatedCardHeight),
     width
   };
+
+  return estimatedSize;
+}
+
+function getRcaNodeBoundsForViewport(
+  nodes: RcaNode[],
+  nodeDetails: Record<string, ReferenceRcaNodeDetail> = {}
+): { height: number; width: number; x: number; y: number } | null {
+  const positionedNodes = nodes.filter((node) => (
+    node.status !== 'DELETED' &&
+    Number.isFinite(node.uiCoordinates?.x) &&
+    Number.isFinite(node.uiCoordinates?.y)
+  ));
+
+  if (!positionedNodes.length) {
+    return null;
+  }
+
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+
+  positionedNodes.forEach((node) => {
+    const x = sanitizeRcaCanvasCoordinate(node.uiCoordinates?.x) ?? 0;
+    const y = sanitizeRcaCanvasCoordinate(node.uiCoordinates?.y) ?? 0;
+    const nodeSize = getRcaNodeSize(node, nodeDetails[node.id]);
+
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x + nodeSize.width);
+    maxY = Math.max(maxY, y + nodeSize.height);
+  });
+
+  return {
+    height: Math.max(1, maxY - minY),
+    width: Math.max(1, maxX - minX),
+    x: minX,
+    y: minY
+  };
+}
+
+function getRcaAutoFocusSelectionNodes(
+  nodes: RcaNode[],
+  selectedNodeIds: Set<string>
+): RcaNode[] {
+  if (!selectedNodeIds.size) {
+    return [];
+  }
+
+  const activeNodes = nodes.filter((node) => node.status !== 'DELETED');
+  const nodeById = new Map(activeNodes.map((node) => [node.id, node]));
+  const focusNodeIds = new Set<string>();
+
+  selectedNodeIds.forEach((nodeId) => {
+    const realNodeId = isFishboneSpineFlowNodeId(nodeId)
+      ? getFishboneSpineFaultGateId(nodeId)
+      : nodeId;
+    const selectedNode = nodeById.get(realNodeId);
+
+    if (!selectedNode) {
+      return;
+    }
+
+    focusNodeIds.add(selectedNode.id);
+
+    if (selectedNode.parentNodeId && nodeById.has(selectedNode.parentNodeId)) {
+      focusNodeIds.add(selectedNode.parentNodeId);
+    }
+
+    normalizeRcaLinkedNodeIds(selectedNode.linkedNodeIds).forEach((linkedNodeId) => {
+      if (nodeById.has(linkedNodeId)) {
+        focusNodeIds.add(linkedNodeId);
+      }
+    });
+  });
+
+  activeNodes.forEach((node) => {
+    if (node.parentNodeId && focusNodeIds.has(node.parentNodeId)) {
+      focusNodeIds.add(node.id);
+    }
+
+    normalizeRcaLinkedNodeIds(node.linkedNodeIds).forEach((linkedNodeId) => {
+      if (focusNodeIds.has(linkedNodeId)) {
+        focusNodeIds.add(node.id);
+      }
+    });
+  });
+
+  return activeNodes
+    .filter((node) => focusNodeIds.has(node.id))
+    .sort((leftNode, rightNode) => (
+      sanitizeRcaCanvasCoordinate(leftNode.uiCoordinates?.y) ?? 0
+    ) - (
+      sanitizeRcaCanvasCoordinate(rightNode.uiCoordinates?.y) ?? 0
+    ) || (
+      sanitizeRcaCanvasCoordinate(leftNode.uiCoordinates?.x) ?? 0
+    ) - (
+      sanitizeRcaCanvasCoordinate(rightNode.uiCoordinates?.x) ?? 0
+    ));
+}
+
+function buildRcaGuidedPathSummary(
+  nodes: RcaNode[],
+  incident: RcaIncident | null,
+  methodology: RcaMethodology,
+  selectedNodeId: string | null
+): RcaGuidedPathSummary {
+  const activeNodes = nodes.filter((node) => node.status !== 'DELETED');
+  const nodeById = new Map(activeNodes.map((node) => [node.id, node]));
+  const childrenByParentId = new Map<string, RcaNode[]>();
+  const recommendations: RcaGuidedPathRecommendation[] = [];
+  const checks: boolean[] = [];
+
+  activeNodes.forEach((node) => {
+    if (!node.parentNodeId || !nodeById.has(node.parentNodeId)) {
+      return;
+    }
+
+    const siblings = childrenByParentId.get(node.parentNodeId) || [];
+    siblings.push(node);
+    childrenByParentId.set(node.parentNodeId, siblings);
+  });
+
+  const addCheck = (isComplete: boolean) => {
+    checks.push(isComplete);
+  };
+  const addRecommendation = (recommendation: RcaGuidedPathRecommendation) => {
+    if (recommendations.some((entry) => entry.id === recommendation.id)) {
+      return;
+    }
+
+    recommendations.push(recommendation);
+  };
+  const addReadinessGapRecommendation = (
+    id: string,
+    title: string,
+    descriptionPrefix: string,
+    gaps: RcaNodeReadinessGap[],
+    priority: RcaGuidedPathPriority,
+    actionLabel: string
+  ) => {
+    addCheck(gaps.length === 0);
+
+    if (!gaps.length) {
+      return;
+    }
+
+    const previewGaps = gaps.slice(0, 3).map((gap) => (
+      `${getRcaGuidedNodeReadinessLabel(gap.node)}: ${gap.missingLabels.slice(0, 4).join(', ')}`
+    ));
+
+    addRecommendation({
+      actionLabel,
+      description: `${descriptionPrefix} ${previewGaps.join('; ')}${gaps.length > 3 ? `; and ${gaps.length - 3} more node${gaps.length - 3 === 1 ? '' : 's'}` : ''}.`,
+      id,
+      nodeIds: gaps.slice(0, 4).map((gap) => gap.node.id),
+      priority,
+      title
+    });
+  };
+  const getRoleNode = (role: RcaFiveWhysNodeRole) => getPreferredRcaRoleNode(activeNodes, role);
+  const selectedNode = selectedNodeId ? nodeById.get(selectedNodeId) || null : null;
+  const incidentNode = getRoleNode('INCIDENT');
+  const incidentDetailsNode = getRoleNode('INCIDENT_DETAILS');
+  const containmentNode = getRoleNode('CONTAINMENT');
+  const problemNode = getRoleNode('PROBLEM');
+  const faultGateNode = activeNodes.find((node) => node.nodeType === 'FAULT_GATE');
+  const causeNodes = activeNodes.filter(isFishboneCauseNode);
+  const fiveWhysNodes = activeNodes.filter(isFiveWhysInvestigationRoleNode);
+  const rootCauseNodes = activeNodes.filter((node) => (
+    getFiveWhysNodeRoleSafe(node) === 'ROOT_CAUSE' || Boolean(node.isRootCause)
+  ));
+  const capaNodes = activeNodes.filter(isCapaRoleNode);
+  const capaStageRoles: RcaFiveWhysNodeRole[] = [
+    'CORRECTIVE_ACTION',
+    'PREVENTIVE_ACTION',
+    'RISK_ASSESSMENT',
+    'EFFECTIVENESS',
+    'LESSONS_LEARNED'
+  ];
+  const selectedContextRecommendation = selectedNode
+    ? getRcaSelectedNodeGuidedPathRecommendation(selectedNode, activeNodes, childrenByParentId, nodeById)
+    : null;
+  const incidentRecordGaps = getRcaIncidentRecordReadinessGaps(incident);
+  const incidentReadinessGaps = [incidentNode, incidentDetailsNode, containmentNode, problemNode]
+    .filter((node): node is RcaNode => Boolean(node))
+    .map(getRcaNodeReadinessGap)
+    .filter((gap): gap is RcaNodeReadinessGap => Boolean(gap));
+  const causeReadinessGaps = causeNodes
+    .map((node) => getRcaCauseNodeReadinessGap(node, childrenByParentId, nodeById))
+    .filter((gap): gap is RcaNodeReadinessGap => Boolean(gap));
+  const evidenceReadinessGaps = activeNodes
+    .filter(isEvidenceRoleNode)
+    .map(getRcaNodeReadinessGap)
+    .filter((gap): gap is RcaNodeReadinessGap => Boolean(gap));
+  const fiveWhysReadinessGaps = fiveWhysNodes
+    .map(getRcaFiveWhysNodeReadinessGap)
+    .filter((gap): gap is RcaNodeReadinessGap => Boolean(gap));
+  const rootCauseReadinessGaps = rootCauseNodes
+    .map((node) => getRcaRootCauseNodeReadinessGap(node, childrenByParentId))
+    .filter((gap): gap is RcaNodeReadinessGap => Boolean(gap));
+  const capaReadinessGaps = capaNodes
+    .map((node) => getRcaCapaNodeReadinessGap(node, childrenByParentId))
+    .filter((gap): gap is RcaNodeReadinessGap => Boolean(gap));
+  const capaStageReadinessGaps = activeNodes
+    .filter((node) => capaStageRoles.includes(getFiveWhysNodeRoleSafe(node) as RcaFiveWhysNodeRole))
+    .map((node) => getRcaCapaStageNodeReadinessGap(node, childrenByParentId, nodeById))
+    .filter((gap): gap is RcaNodeReadinessGap => Boolean(gap));
+
+  if (selectedContextRecommendation) {
+    addRecommendation(selectedContextRecommendation);
+  }
+
+  addCheck(incidentRecordGaps.length === 0);
+  if (incidentRecordGaps.length) {
+    addRecommendation({
+      actionLabel: 'Open case summary',
+      description: `The case-level incident record still needs ${incidentRecordGaps.join(', ')}. These fields feed the queue, recurrence checks, risk score, reports, and final closure review.`,
+      id: 'incident-record-readiness-gaps',
+      nodeIds: incidentNode ? [incidentNode.id] : [],
+      priority: 'critical',
+      title: 'Complete case metadata'
+    });
+  }
+
+  addCheck(Boolean(incidentNode && incidentDetailsNode && problemNode));
+  if (!incidentNode || !incidentDetailsNode || !problemNode) {
+    addRecommendation({
+      actionLabel: 'Focus incident path',
+      description: 'Complete the intake chain before deep analysis. The RCA should clearly show the incident, incident details, containment when applicable, and the problem statement.',
+      id: 'main-intake-chain',
+      nodeIds: [incidentNode?.id, incidentDetailsNode?.id, containmentNode?.id, problemNode?.id].filter(Boolean) as string[],
+      priority: 'critical',
+      title: 'Complete the incident path'
+    });
+  }
+
+  addReadinessGapRecommendation(
+    'incident-path-readiness-gaps',
+    'Complete incident intake details',
+    'The incident path is present, but required approval-quality details are still missing.',
+    incidentReadinessGaps,
+    'critical',
+    'Focus intake details'
+  );
+
+  addCheck(Boolean(problemNode && faultGateNode));
+  if (problemNode && !faultGateNode) {
+    addRecommendation({
+      actionLabel: 'Focus problem statement',
+      description: 'The Problem Statement should feed a Fault Gate before branch analysis and CAPA work. Add or connect the Fault Gate so the investigation has a clear decision point.',
+      id: 'missing-fault-gate',
+      nodeIds: [problemNode.id],
+      priority: 'critical',
+      title: 'Connect the Fault Gate'
+    });
+  }
+
+  if (methodology === 'ISHIKAWA') {
+    const categoryNodes = activeNodes.filter((node) => node.nodeType === 'ISHIKAWA_CATEGORY');
+    const categoriesWithCauses = categoryNodes.filter((categoryNode) => (
+      (childrenByParentId.get(categoryNode.id) || []).some((childNode) => isFishboneCauseNode(childNode))
+    ));
+
+    addCheck(!categoryNodes.length || categoriesWithCauses.length === categoryNodes.length);
+
+    const emptyCategories = categoryNodes.filter((categoryNode) => !categoriesWithCauses.includes(categoryNode));
+    if (emptyCategories.length) {
+      const branchNames = emptyCategories
+        .slice(0, 6)
+        .map((categoryNode) => categoryNode.label || 'Unnamed branch')
+        .join(', ');
+
+      addRecommendation({
+        actionLabel: 'Focus empty branches',
+        description: `${emptyCategories.length} branch${emptyCategories.length === 1 ? ' has' : 'es have'} no connected cause yet: ${branchNames}${emptyCategories.length > 6 ? `, and ${emptyCategories.length - 6} more` : ''}. Add likely causes to each empty branch so the team can compare contributors before deciding on Root Cause.`,
+        id: 'empty-categories',
+        nodeIds: emptyCategories.map((categoryNode) => categoryNode.id),
+        priority: 'important',
+        title: 'Add causes to empty branches'
+      });
+    }
+  }
+
+  addReadinessGapRecommendation(
+    'cause-readiness-gaps',
+    'Complete Cause details',
+    'Some Cause nodes are connected on the canvas but are not ready for investigation review.',
+    causeReadinessGaps,
+    'important',
+    'Focus Cause details'
+  );
+
+  addReadinessGapRecommendation(
+    'evidence-readiness-gaps',
+    'Complete Evidence records',
+    'Some Evidence nodes are linked but are not review-ready.',
+    evidenceReadinessGaps,
+    'important',
+    'Focus Evidence details'
+  );
+
+  const causesWithoutEvidence = causeNodes.filter((causeNode) => !hasRcaEvidenceSupport(causeNode, childrenByParentId, nodeById));
+  const causesWithoutFiveWhys = causeNodes.filter((causeNode) => (
+    !(childrenByParentId.get(causeNode.id) || []).some(isFiveWhysInvestigationRoleNode) &&
+    !activeNodes.some((node) => isFiveWhysInvestigationRoleNode(node) && normalizeRcaLinkedNodeIds(node.linkedNodeIds).includes(causeNode.id))
+  ));
+
+  addCheck(!causeNodes.length || causesWithoutEvidence.length === 0);
+  if (causesWithoutEvidence.length) {
+    addRecommendation({
+      actionLabel: 'Focus unsupported causes',
+      description: `${causesWithoutEvidence.length} cause ${causesWithoutEvidence.length === 1 ? 'node does' : 'nodes do'} not have evidence support yet. Connect Evidence or attach evidence to the cause before treating it as verified.`,
+      id: 'causes-without-evidence',
+      nodeIds: causesWithoutEvidence.slice(0, 4).map((node) => node.id),
+      priority: 'important',
+      title: 'Support likely causes with evidence'
+    });
+  }
+
+  addCheck(!causeNodes.length || causesWithoutFiveWhys.length === 0 || rootCauseNodes.length > 0);
+  if (causesWithoutFiveWhys.length && !rootCauseNodes.length) {
+    addRecommendation({
+      actionLabel: 'Focus causes',
+      description: 'Several possible causes are not connected to a 5 Whys analysis. Use 5 Whys to validate whether a cause is a Root Cause, contributing factor, or ruled out.',
+      id: 'causes-without-five-whys',
+      nodeIds: causesWithoutFiveWhys.slice(0, 4).map((node) => node.id),
+      priority: 'next',
+      title: 'Investigate causes with 5 Whys'
+    });
+  }
+
+  const incompleteFiveWhysNodes = fiveWhysNodes.filter((node) => getFilledFiveWhysAnswerCount(node) < 5);
+  addCheck(!fiveWhysNodes.length || incompleteFiveWhysNodes.length === 0);
+  if (incompleteFiveWhysNodes.length) {
+    addRecommendation({
+      actionLabel: 'Focus 5 Whys',
+      description: `${incompleteFiveWhysNodes.length} 5 Whys ${incompleteFiveWhysNodes.length === 1 ? 'node is' : 'nodes are'} not fully answered. Complete the why chain or document why fewer levels are enough before confirming Root Cause.`,
+      id: 'incomplete-five-whys',
+      nodeIds: incompleteFiveWhysNodes.slice(0, 4).map((node) => node.id),
+      priority: 'important',
+      title: 'Complete the 5 Whys analysis'
+    });
+  }
+
+  addReadinessGapRecommendation(
+    'five-whys-readiness-gaps',
+    'Complete 5 Whys decisions',
+    'Some 5 Whys nodes are connected but do not yet have the governed decision details needed for Root Cause approval.',
+    fiveWhysReadinessGaps,
+    'critical',
+    'Focus 5 Whys details'
+  );
+
+  addCheck(!fiveWhysNodes.length || rootCauseNodes.length > 0);
+  if (fiveWhysNodes.length && !rootCauseNodes.length) {
+    addRecommendation({
+      actionLabel: 'Focus 5 Whys',
+      description: 'The canvas has 5 Whys work but no Root Cause node yet. Connect the validated 5 Whys outcome to Root Cause when the cause has been verified.',
+      id: 'missing-root-cause',
+      nodeIds: fiveWhysNodes.slice(0, 3).map((node) => node.id),
+      priority: 'critical',
+      title: 'Connect a Root Cause'
+    });
+  }
+
+  addReadinessGapRecommendation(
+    'root-cause-readiness-gaps',
+    'Validate Root Cause records',
+    'Some Root Cause nodes are present but are not yet validated enough for closure.',
+    rootCauseReadinessGaps,
+    'critical',
+    'Focus Root Cause details'
+  );
+
+  const rootCausesWithoutCapa = rootCauseNodes.filter((rootCauseNode) => (
+    !(childrenByParentId.get(rootCauseNode.id) || []).some(isCapaRoleNode) &&
+    !capaNodes.some((capaNode) => normalizeRcaLinkedNodeIds(capaNode.linkedNodeIds).includes(rootCauseNode.id))
+  ));
+
+  addCheck(!rootCauseNodes.length || rootCausesWithoutCapa.length === 0 || capaNodes.length > 0);
+  if (rootCauseNodes.length && !capaNodes.length) {
+    addRecommendation({
+      actionLabel: 'Focus root causes',
+      description: 'Verified Root Cause work should flow into CAPA so corrective and preventive action can be planned, verified, and closed.',
+      id: 'missing-capa',
+      nodeIds: rootCauseNodes.slice(0, 3).map((node) => node.id),
+      priority: 'critical',
+      title: 'Start the CAPA workflow'
+    });
+  }
+
+  addReadinessGapRecommendation(
+    'capa-readiness-gaps',
+    'Complete CAPA planning details',
+    'Some CAPA nodes are connected but are missing action-planning fields needed for review and accountability.',
+    capaReadinessGaps,
+    'important',
+    'Focus CAPA details'
+  );
+
+  const capaStageGaps = capaNodes
+    .map((capaNode) => ({
+      capaNode,
+      missingRoles: capaStageRoles.filter((role) => (
+        !(childrenByParentId.get(capaNode.id) || []).some((node) => getFiveWhysNodeRoleSafe(node) === role)
+      ))
+    }))
+    .filter((gap) => gap.missingRoles.length);
+
+  addCheck(!capaNodes.length || capaStageGaps.length === 0);
+  if (capaStageGaps.length) {
+    const firstGap = capaStageGaps[0];
+
+    addRecommendation({
+      actionLabel: 'Focus CAPA',
+      description: `This CAPA is missing ${firstGap.missingRoles.map(getFiveWhysRoleLabel).join(', ')}. Each Root Cause CAPA should carry its own action, risk, verification, and learning records.`,
+      id: `missing-capa-stages-${firstGap.capaNode.id}`,
+      nodeIds: [firstGap.capaNode.id],
+      priority: 'important',
+      title: 'Complete CAPA stage coverage'
+    });
+  }
+
+  addReadinessGapRecommendation(
+    'capa-stage-readiness-gaps',
+    'Complete CAPA stage records',
+    'Some CAPA stage nodes are present but still need completion, risk, verification, or learning details before final closure.',
+    capaStageReadinessGaps,
+    'important',
+    'Focus CAPA stages'
+  );
+
+  const approvalClosureNode = activeNodes.filter(isApprovalClosureRoleNode).sort(sortRcaNodesByCurrentCanvasPosition)[0];
+  const isApprovalConnectedFromFaultGate = Boolean(
+    approvalClosureNode &&
+    faultGateNode &&
+    approvalClosureNode.parentNodeId === faultGateNode.id
+  );
+
+  addCheck(!faultGateNode || Boolean(approvalClosureNode));
+  if (faultGateNode && !approvalClosureNode) {
+    addRecommendation({
+      actionLabel: 'Focus Fault Gate',
+      description: 'Add one Approval & Closure node for the entire RCA case. It should be connected from the Fault Gate as the final governance and closeout point.',
+      id: 'missing-case-approval-closure',
+      nodeIds: [faultGateNode.id],
+      priority: 'critical',
+      title: 'Add case-level Approval & Closure'
+    });
+  }
+
+  addCheck(!approvalClosureNode || isApprovalConnectedFromFaultGate);
+  if (approvalClosureNode && faultGateNode && !isApprovalConnectedFromFaultGate) {
+    addRecommendation({
+      actionLabel: 'Focus closure path',
+      description: 'Approval & Closure should be connected from the Fault Gate, not from CAPA stages. This keeps final approval as one case-level decision and keeps the canvas readable.',
+      id: 'case-approval-not-linked-from-fault-gate',
+      nodeIds: [faultGateNode.id, approvalClosureNode.id],
+      priority: 'important',
+      title: 'Connect closure from Fault Gate'
+    });
+  }
+
+  const approvalClosureReadinessGap = approvalClosureNode
+    ? getRcaNodeReadinessGap(approvalClosureNode)
+    : null;
+
+  addReadinessGapRecommendation(
+    'approval-closure-readiness-gaps',
+    'Complete final closure review',
+    'The Approval & Closure node is present but cannot support final RCA closeout yet.',
+    approvalClosureReadinessGap ? [approvalClosureReadinessGap] : [],
+    'critical',
+    'Focus closure review'
+  );
+
+  if (!recommendations.length) {
+    recommendations.push({
+      actionLabel: 'Review canvas',
+      description: 'The core RCA path has incident definition, cause analysis, Root Cause or CAPA readiness, and closure traceability in place. Review evidence quality and approval details before closing the case.',
+      id: 'guided-path-healthy',
+      nodeIds: activeNodes.slice(0, 8).map((node) => node.id),
+      priority: 'complete',
+      title: 'RCA path is structurally healthy'
+    });
+  }
+
+  const completedCount = checks.filter(Boolean).length;
+  const totalCount = Math.max(1, checks.length);
+  const qualityScore = buildRcaQualityScoreSummary(
+    activeNodes,
+    incident,
+    methodology,
+    childrenByParentId,
+    nodeById,
+    selectedNode
+  );
+
+  return {
+    completedCount,
+    qualityScore,
+    recommendations: recommendations
+      .sort((leftRecommendation, rightRecommendation) => (
+        getRcaGuidedPathWorkflowRank(leftRecommendation.id) - getRcaGuidedPathWorkflowRank(rightRecommendation.id) ||
+        getRcaGuidedPathPriorityRank(leftRecommendation.priority) - getRcaGuidedPathPriorityRank(rightRecommendation.priority)
+      )),
+    readinessScore: Math.round((completedCount / totalCount) * 100),
+    totalCount
+  };
+}
+
+function getRcaSelectedNodeGuidedPathRecommendation(
+  selectedNode: RcaNode,
+  nodes: RcaNode[],
+  childrenByParentId: Map<string, RcaNode[]>,
+  nodeById: Map<string, RcaNode>
+): RcaGuidedPathRecommendation | null {
+  const selectedRole = getFiveWhysNodeRoleSafe(selectedNode);
+  const childNodes = childrenByParentId.get(selectedNode.id) || [];
+  const selectedNodeLabel = selectedRole
+    ? getFiveWhysRoleLabel(selectedRole)
+    : selectedNode.nodeType === 'ISHIKAWA_CATEGORY'
+    ? selectedNode.label || 'Branch'
+    : formatNodeType(selectedNode.nodeType);
+  const selectedReadinessGap = isFishboneCauseNode(selectedNode)
+    ? getRcaCauseNodeReadinessGap(selectedNode, childrenByParentId, nodeById)
+    : selectedRole === 'FIVE_WHYS'
+    ? getRcaFiveWhysNodeReadinessGap(selectedNode)
+    : isRootCauseRoleNode(selectedNode)
+    ? getRcaRootCauseNodeReadinessGap(selectedNode, childrenByParentId)
+    : isCapaRoleNode(selectedNode)
+    ? getRcaCapaNodeReadinessGap(selectedNode, childrenByParentId)
+    : selectedRole && ['CORRECTIVE_ACTION', 'PREVENTIVE_ACTION', 'RISK_ASSESSMENT', 'EFFECTIVENESS', 'LESSONS_LEARNED'].includes(selectedRole)
+    ? getRcaCapaStageNodeReadinessGap(selectedNode, childrenByParentId, nodeById)
+    : getRcaNodeReadinessGap(selectedNode);
+
+  if (selectedReadinessGap) {
+    return {
+      actionLabel: 'Focus selected node',
+      description: `${selectedNodeLabel} is selected and still needs ${selectedReadinessGap.missingLabels.slice(0, 6).join(', ')}${selectedReadinessGap.missingLabels.length > 6 ? ', and more' : ''} before it can support approval and closure.`,
+      id: `selected-readiness-${selectedNode.id}`,
+      nodeIds: [selectedNode.id],
+      priority: isApprovalClosureRoleNode(selectedNode) || isRootCauseRoleNode(selectedNode) || selectedRole === 'FIVE_WHYS'
+        ? 'critical'
+        : 'important',
+      title: 'Complete selected node details'
+    };
+  }
+
+  if (selectedNode.nodeType === 'ISHIKAWA_CATEGORY' && !childNodes.some(isFishboneCauseNode)) {
+    return {
+      actionLabel: 'Focus branch',
+      description: `${selectedNodeLabel} is selected and does not have connected causes yet. Add likely causes to this branch before moving into verification.`,
+      id: `selected-empty-branch-${selectedNode.id}`,
+      nodeIds: [selectedNode.id],
+      priority: 'next',
+      title: 'Build out this branch'
+    };
+  }
+
+  if (isFishboneCauseNode(selectedNode)) {
+    if (!hasRcaEvidenceSupport(selectedNode, childrenByParentId, nodeById)) {
+      return {
+        actionLabel: 'Focus cause',
+        description: 'The selected Cause does not have evidence support yet. Attach evidence or connect an Evidence node before using this cause as a verified finding.',
+        id: `selected-cause-evidence-${selectedNode.id}`,
+        nodeIds: [selectedNode.id],
+        priority: 'important',
+        title: 'Support the selected Cause'
+      };
+    }
+
+    if (!childNodes.some(isFiveWhysInvestigationRoleNode)) {
+      return {
+        actionLabel: 'Focus cause',
+        description: 'The selected Cause has support but is not connected to 5 Whys. Run 5 Whys when the team needs to validate whether it is a Root Cause or contributing factor.',
+        id: `selected-cause-five-whys-${selectedNode.id}`,
+        nodeIds: [selectedNode.id],
+        priority: 'next',
+        title: 'Investigate this Cause'
+      };
+    }
+  }
+
+  if (selectedRole === 'FIVE_WHYS' && getFilledFiveWhysAnswerCount(selectedNode) < 5) {
+    return {
+      actionLabel: 'Focus 5 Whys',
+      description: 'The selected 5 Whys node is not fully answered. Complete the why chain or document why the analysis reached a verified cause earlier.',
+      id: `selected-five-whys-${selectedNode.id}`,
+      nodeIds: [selectedNode.id],
+      priority: 'important',
+      title: 'Complete selected 5 Whys'
+    };
+  }
+
+  if (isRootCauseRoleNode(selectedNode) && !childNodes.some(isCapaRoleNode)) {
+    return {
+      actionLabel: 'Focus Root Cause',
+      description: 'The selected Root Cause is not connected to CAPA. Verified causes should flow into CAPA so action planning and closure remain traceable.',
+      id: `selected-root-cause-capa-${selectedNode.id}`,
+      nodeIds: [selectedNode.id],
+      priority: 'critical',
+      title: 'Connect this Root Cause to CAPA'
+    };
+  }
+
+  if (isCapaRoleNode(selectedNode)) {
+    const missingStageRoles = [
+      'CORRECTIVE_ACTION',
+      'PREVENTIVE_ACTION',
+      'RISK_ASSESSMENT',
+      'EFFECTIVENESS',
+      'LESSONS_LEARNED'
+    ].filter((role) => !childNodes.some((childNode) => getFiveWhysNodeRoleSafe(childNode) === role));
+
+    if (missingStageRoles.length) {
+      return {
+        actionLabel: 'Focus CAPA',
+        description: `The selected CAPA is missing ${missingStageRoles.map((role) => getFiveWhysRoleLabel(role as RcaFiveWhysNodeRole)).join(', ')}. Add the missing stage nodes before closure.`,
+        id: `selected-capa-stages-${selectedNode.id}`,
+        nodeIds: [selectedNode.id],
+        priority: 'important',
+        title: 'Complete selected CAPA'
+      };
+    }
+  }
+
+  if (isApprovalClosureRoleNode(selectedNode)) {
+    const faultGateNode = nodes.find((node) => node.status !== 'DELETED' && node.nodeType === 'FAULT_GATE');
+
+    if (!faultGateNode || selectedNode.parentNodeId !== faultGateNode.id) {
+      return {
+        actionLabel: 'Focus closure',
+        description: 'The selected Approval & Closure node should be connected from the Fault Gate as the final case-level governance point. CAPA stages should stay under their CAPA blocks and should not connect to closure.',
+        id: `selected-approval-links-${selectedNode.id}`,
+        nodeIds: [selectedNode.id, faultGateNode?.id].filter(Boolean) as string[],
+        priority: 'important',
+        title: 'Connect closure from Fault Gate'
+      };
+    }
+  }
+
+  return null;
+}
+
+function buildRcaQualityScoreSummary(
+  activeNodes: RcaNode[],
+  incident: RcaIncident | null,
+  methodology: RcaMethodology,
+  childrenByParentId: Map<string, RcaNode[]>,
+  nodeById: Map<string, RcaNode>,
+  selectedNode: RcaNode | null
+): RcaQualityScoreSummary {
+  const capaStageRoles: RcaFiveWhysNodeRole[] = [
+    'CORRECTIVE_ACTION',
+    'PREVENTIVE_ACTION',
+    'RISK_ASSESSMENT',
+    'EFFECTIVENESS',
+    'LESSONS_LEARNED'
+  ];
+  const incidentNodes = activeNodes.filter((node) => (
+    ['INCIDENT', 'INCIDENT_DETAILS', 'CONTAINMENT', 'PROBLEM'].includes(getFiveWhysNodeRoleSafe(node) || '')
+  ));
+  const causeNodes = activeNodes.filter(isFishboneCauseNode);
+  const evidenceNodes = activeNodes.filter(isEvidenceRoleNode);
+  const fiveWhysNodes = activeNodes.filter(isFiveWhysInvestigationRoleNode);
+  const rootCauseNodes = activeNodes.filter(isRootCauseRoleNode);
+  const capaNodes = activeNodes.filter(isCapaRoleNode);
+  const capaStageNodes = activeNodes.filter((node) => capaStageRoles.includes(getFiveWhysNodeRoleSafe(node) as RcaFiveWhysNodeRole));
+  const approvalClosureNodes = activeNodes.filter(isApprovalClosureRoleNode);
+  const faultGateNode = activeNodes.find((node) => node.nodeType === 'FAULT_GATE');
+  const components: RcaQualityScoreComponent[] = [];
+  const gaps: RcaQualityScoreGap[] = [];
+  const hasStartedEvidence = evidenceNodes.length > 0;
+  const hasStartedCauseValidation = causeNodes.length > 0;
+  const hasStartedFiveWhys = fiveWhysNodes.length > 0;
+  const hasStartedRootCause = rootCauseNodes.length > 0;
+  const hasStartedCapa = capaNodes.length > 0 || capaStageNodes.length > 0;
+  const hasStartedApproval = approvalClosureNodes.length > 0;
+  const addGap = (gap: RcaQualityScoreGap) => {
+    if (gaps.some((existingGap) => existingGap.id === gap.id)) {
+      return;
+    }
+
+    gaps.push(gap);
+  };
+  const createComponent = (
+    id: string,
+    title: string,
+    weight: number,
+    description: string,
+    checks: boolean[]
+  ): RcaQualityScoreComponent => {
+    const totalChecks = Math.max(1, checks.length);
+    const completedChecks = checks.filter(Boolean).length;
+
+    return {
+      completedChecks,
+      description,
+      id,
+      score: Math.round((completedChecks / totalChecks) * 100),
+      title,
+      totalChecks,
+      weight
+    };
+  };
+  const addComponent = (
+    id: string,
+    title: string,
+    weight: number,
+    description: string,
+    checks: boolean[]
+  ) => {
+    components.push(createComponent(id, title, weight, description, checks));
+  };
+
+  const incidentRecordGaps = getRcaIncidentRecordReadinessGaps(incident);
+  const incidentNodeGaps = incidentNodes
+    .map(getRcaNodeReadinessGap)
+    .filter((gap): gap is RcaNodeReadinessGap => Boolean(gap));
+  const hasIncidentPath = ['INCIDENT', 'INCIDENT_DETAILS', 'PROBLEM'].every((role) => (
+    activeNodes.some((node) => getFiveWhysNodeRoleSafe(node) === role)
+  ));
+  const foundationChecks = [
+    incidentRecordGaps.length === 0,
+    hasIncidentPath,
+    incidentNodeGaps.length === 0,
+    Boolean(activeNodes.some((node) => getFiveWhysNodeRoleSafe(node) === 'PROBLEM'))
+  ];
+
+  if (incidentRecordGaps.length || incidentNodeGaps.length || !hasIncidentPath) {
+    addGap({
+      description: [
+        incidentRecordGaps.length ? `Case metadata needs ${incidentRecordGaps.slice(0, 4).join(', ')}` : '',
+        incidentNodeGaps.length ? `${incidentNodeGaps.length} intake node${incidentNodeGaps.length === 1 ? '' : 's'} still need governed detail fields` : '',
+        !hasIncidentPath ? 'The incident path is not complete from Incident to Problem Statement' : ''
+      ].filter(Boolean).join('. '),
+      id: 'quality-foundation',
+      nodeIds: incidentNodes.map((node) => node.id),
+      title: 'Case foundation'
+    });
+  }
+
+  addComponent(
+    'foundation',
+    'Case foundation',
+    10,
+    'Incident metadata, intake path, containment context, and problem definition.',
+    foundationChecks
+  );
+
+  const evidenceReadinessGaps = evidenceNodes
+    .map(getRcaNodeReadinessGap)
+    .filter((gap): gap is RcaNodeReadinessGap => Boolean(gap));
+  const evidenceSupportedNodes = [...causeNodes, ...rootCauseNodes, ...capaStageNodes];
+  const unsupportedNodes = evidenceSupportedNodes.filter((node) => !hasRcaEvidenceSupport(node, childrenByParentId, nodeById));
+  const evidenceChecks = [
+    evidenceNodes.length > 0 || evidenceSupportedNodes.length === 0,
+    evidenceReadinessGaps.length === 0,
+    unsupportedNodes.length === 0,
+    evidenceNodes.some((node) => (node.detailFields?.evidenceVerified || '').trim() === 'Yes') || evidenceNodes.length === 0
+  ];
+
+  if (hasStartedEvidence && (unsupportedNodes.length || evidenceReadinessGaps.length)) {
+    addGap({
+      description: `${unsupportedNodes.length ? `${unsupportedNodes.length} analysis node${unsupportedNodes.length === 1 ? '' : 's'} need evidence support` : ''}${unsupportedNodes.length && evidenceReadinessGaps.length ? '; ' : ''}${evidenceReadinessGaps.length ? `${evidenceReadinessGaps.length} Evidence node${evidenceReadinessGaps.length === 1 ? '' : 's'} need review-ready fields` : ''}.`,
+      id: 'quality-evidence',
+      nodeIds: [...unsupportedNodes, ...evidenceReadinessGaps.map((gap) => gap.node)].slice(0, 6).map((node) => node.id),
+      title: 'Evidence completeness'
+    });
+  }
+
+  if (hasStartedEvidence) {
+    addComponent(
+      'evidence',
+      'Evidence completeness',
+      18,
+      'Evidence nodes, attachments, verification, and support links to causes, Root Causes, and CAPA stages.',
+      evidenceChecks
+    );
+  }
+
+  const causeReadinessGaps = causeNodes
+    .map((node) => getRcaCauseNodeReadinessGap(node, childrenByParentId, nodeById))
+    .filter((gap): gap is RcaNodeReadinessGap => Boolean(gap));
+  const causesWithInvestigation = causeNodes.filter((causeNode) => (
+    (childrenByParentId.get(causeNode.id) || []).some(isFiveWhysInvestigationRoleNode) ||
+    activeNodes.some((node) => isFiveWhysInvestigationRoleNode(node) && normalizeRcaLinkedNodeIds(node.linkedNodeIds).includes(causeNode.id))
+  ));
+  const causeChecks = [
+    methodology !== 'ISHIKAWA' || causeNodes.length > 0,
+    causeReadinessGaps.length === 0,
+    !causeNodes.length || causesWithInvestigation.length > 0 || rootCauseNodes.length > 0,
+    !causeNodes.length || causeNodes.some((node) => hasRcaEvidenceSupport(node, childrenByParentId, nodeById))
+  ];
+
+  if (hasStartedCauseValidation && (causeReadinessGaps.length || (causeNodes.length && !causesWithInvestigation.length && !rootCauseNodes.length))) {
+    addGap({
+      description: `${causeReadinessGaps.length ? `${causeReadinessGaps.length} Cause node${causeReadinessGaps.length === 1 ? '' : 's'} need clearer statements, branch links, or evidence` : 'Causes need 5 Whys investigation before Root Cause decisions are defensible'}.`,
+      id: 'quality-cause-validation',
+      nodeIds: (causeReadinessGaps.length ? causeReadinessGaps.map((gap) => gap.node) : causeNodes).slice(0, 6).map((node) => node.id),
+      title: 'Cause validation'
+    });
+  }
+
+  if (hasStartedCauseValidation) {
+    addComponent(
+      'cause-validation',
+      'Cause validation',
+      16,
+      'Likely causes are connected, described, supported, and ready for validation.',
+      causeChecks
+    );
+  }
+
+  const fiveWhysReadinessGaps = fiveWhysNodes
+    .map(getRcaFiveWhysNodeReadinessGap)
+    .filter((gap): gap is RcaNodeReadinessGap => Boolean(gap));
+  const fiveWhysChecks = [
+    fiveWhysNodes.length > 0,
+    fiveWhysNodes.length === 0 || fiveWhysNodes.every((node) => getFilledFiveWhysAnswerCount(node) >= 5),
+    fiveWhysReadinessGaps.length === 0,
+    fiveWhysNodes.length === 0 || rootCauseNodes.length > 0
+  ];
+
+  if (hasStartedFiveWhys && fiveWhysReadinessGaps.length) {
+    addGap({
+      description: `${fiveWhysReadinessGaps.length} 5 Whys node${fiveWhysReadinessGaps.length === 1 ? '' : 's'} need completed why levels, decision owner, evidence strength, or final disposition.`,
+      id: 'quality-five-whys',
+      nodeIds: fiveWhysReadinessGaps.slice(0, 5).map((gap) => gap.node.id),
+      title: '5 Whys completion'
+    });
+  }
+
+  if (hasStartedFiveWhys) {
+    addComponent(
+      'five-whys',
+      '5 Whys completion',
+      14,
+      'Why-chain depth, governed decision fields, evidence strength, and disposition.',
+      fiveWhysChecks
+    );
+  }
+
+  const rootCauseReadinessGaps = rootCauseNodes
+    .map((node) => getRcaRootCauseNodeReadinessGap(node, childrenByParentId))
+    .filter((gap): gap is RcaNodeReadinessGap => Boolean(gap));
+  const rootCauseChecks = [
+    rootCauseNodes.length > 0,
+    rootCauseReadinessGaps.length === 0,
+    !rootCauseNodes.length || rootCauseNodes.every((node) => hasRcaEvidenceSupport(node, childrenByParentId, nodeById)),
+    !rootCauseNodes.length || rootCauseNodes.some((node) => ['Root Cause', 'Contributing Cause'].includes((node.detailFields?.causeClassification || '').trim()))
+  ];
+
+  if (hasStartedRootCause && rootCauseReadinessGaps.length) {
+    addGap({
+      description: `${rootCauseReadinessGaps.length} Root Cause node${rootCauseReadinessGaps.length === 1 ? '' : 's'} need classification, validation, evidence, or CAPA linkage.`,
+      id: 'quality-root-cause',
+      nodeIds: rootCauseReadinessGaps.slice(0, 5).map((gap) => gap.node.id),
+      title: 'Root Cause classification'
+    });
+  }
+
+  if (hasStartedRootCause) {
+    addComponent(
+      'root-cause',
+      'Root Cause classification',
+      17,
+      'Verified Root Cause or contributing factor records, classification, validation, and CAPA linkage.',
+      rootCauseChecks
+    );
+  }
+
+  const capaReadinessGaps = capaNodes
+    .map((node) => getRcaCapaNodeReadinessGap(node, childrenByParentId))
+    .filter((gap): gap is RcaNodeReadinessGap => Boolean(gap));
+  const capaStageReadinessGaps = capaStageNodes
+    .map((node) => getRcaCapaStageNodeReadinessGap(node, childrenByParentId, nodeById))
+    .filter((gap): gap is RcaNodeReadinessGap => Boolean(gap));
+  const capaStageCoverageComplete = capaNodes.every((capaNode) => {
+    const childRoles = new Set((childrenByParentId.get(capaNode.id) || []).map(getFiveWhysNodeRoleSafe));
+    return capaStageRoles.every((role) => childRoles.has(role));
+  });
+  const capaChecks = [
+    capaNodes.length > 0 || rootCauseNodes.length === 0,
+    capaReadinessGaps.length === 0,
+    capaStageCoverageComplete,
+    capaStageReadinessGaps.length === 0,
+    capaStageNodes.length === 0 || capaStageNodes.every((node) => hasRcaEvidenceSupport(node, childrenByParentId, nodeById))
+  ];
+
+  if (hasStartedCapa && (capaReadinessGaps.length || capaStageReadinessGaps.length || !capaStageCoverageComplete)) {
+    addGap({
+      description: [
+        capaReadinessGaps.length ? `${capaReadinessGaps.length} CAPA node${capaReadinessGaps.length === 1 ? '' : 's'} need planning fields or stages` : '',
+        capaStageReadinessGaps.length ? `${capaStageReadinessGaps.length} CAPA stage node${capaStageReadinessGaps.length === 1 ? '' : 's'} need completion details or evidence` : '',
+        !capaStageCoverageComplete ? 'Add the missing CAPA stage nodes for this CAPA block' : ''
+      ].filter(Boolean).join('. '),
+      id: 'quality-capa',
+      nodeIds: [...capaReadinessGaps.map((gap) => gap.node), ...capaStageReadinessGaps.map((gap) => gap.node), ...rootCauseNodes].slice(0, 6).map((node) => node.id),
+      title: 'CAPA completeness'
+    });
+  }
+
+  if (hasStartedCapa) {
+    addComponent(
+      'capa',
+      'CAPA completeness',
+      18,
+      'CAPA ownership, due dates, stage coverage, evidence support, and completion records.',
+      capaChecks
+    );
+  }
+
+  const approvalClosureNode = approvalClosureNodes.sort(sortRcaNodesByCurrentCanvasPosition)[0];
+  const approvalClosureGap = approvalClosureNode ? getRcaNodeReadinessGap(approvalClosureNode) : null;
+  const isFishboneApprovalLinked = Boolean(approvalClosureNode && faultGateNode && approvalClosureNode.parentNodeId === faultGateNode.id);
+  const isStandaloneApprovalLinked = Boolean(
+    approvalClosureNode &&
+    capaStageNodes.some((stageNode) => normalizeRcaLinkedNodeIds(stageNode.linkedNodeIds).includes(approvalClosureNode.id))
+  );
+  const approvalChecks = [
+    Boolean(approvalClosureNode),
+    methodology === 'ISHIKAWA' ? isFishboneApprovalLinked || !faultGateNode : isStandaloneApprovalLinked || isFishboneApprovalLinked,
+    !approvalClosureGap
+  ];
+
+  if (hasStartedApproval && (approvalClosureGap || (methodology === 'ISHIKAWA' && faultGateNode && !isFishboneApprovalLinked))) {
+    addGap({
+      description: approvalClosureGap
+        ? `Approval & Closure needs ${approvalClosureGap.missingLabels.slice(0, 5).join(', ')}.`
+        : 'Add the final Approval & Closure record and connect it according to the selected RCA methodology.',
+      id: 'quality-approval',
+      nodeIds: [approvalClosureNode?.id, faultGateNode?.id, ...capaStageNodes.map((node) => node.id)].filter(Boolean).slice(0, 6) as string[],
+      title: 'Approval state'
+    });
+  }
+
+  if (hasStartedApproval) {
+    addComponent(
+      'approval',
+      'Approval state',
+      7,
+      'Final closure record, governance link, approval fields, and residual risk decision.',
+      approvalChecks
+    );
+  }
+
+  const activeWeight = Math.max(1, components.reduce((total, component) => total + component.weight, 0));
+  const score = Math.round(components.reduce((total, component) => (
+    total + component.score * component.weight
+  ), 0) / activeWeight);
+  const level: RcaQualityScoreLevel = score >= 90
+    ? 'ready'
+    : score >= 75
+    ? 'strong'
+    : score >= 55
+    ? 'developing'
+    : 'at-risk';
+  const highConfidenceSignals = [
+    evidenceNodes.length > 0,
+    rootCauseNodes.length > 0,
+    capaNodes.length > 0,
+    Boolean(approvalClosureNode)
+  ].filter(Boolean).length;
+
+  return {
+    components,
+    confidenceLabel: highConfidenceSignals >= 3
+      ? 'Confidence: high. Enough RCA records exist to make this score useful for review.'
+      : highConfidenceSignals >= 2
+      ? 'Confidence: moderate. The score will improve as more RCA records are completed.'
+      : 'Confidence: limited. Only the started workflow is being scored.',
+    explanation: 'Scores only the workflow sections already started on this canvas.',
+    gaps,
+    level,
+    score,
+    selectedNodeQuality: selectedNode
+      ? buildRcaSelectedNodeQualitySummary(selectedNode, childrenByParentId, nodeById)
+      : null
+  };
+}
+
+function buildRcaSelectedNodeQualitySummary(
+  selectedNode: RcaNode,
+  childrenByParentId: Map<string, RcaNode[]>,
+  nodeById: Map<string, RcaNode>
+): RcaSelectedNodeQualitySummary {
+  const role = getFiveWhysNodeRoleSafe(selectedNode);
+  const requirements = role ? RCA_GUIDED_REQUIRED_FIELDS_BY_ROLE[role] || [] : [];
+  const readinessGap = getRcaNodeContextualReadinessGap(selectedNode, childrenByParentId, nodeById);
+  const missingLabels = [...new Set(readinessGap?.missingLabels || [])];
+  const totalExpectedFields = Math.max(
+    missingLabels.length,
+    requirements.length + getRcaSelectedNodeContextualRequirementCount(selectedNode, childrenByParentId, nodeById),
+    1
+  );
+  const completedFields = Math.max(0, totalExpectedFields - missingLabels.length);
+  const selectedNodeLabel = getRcaGuidedNodeReadinessLabel(selectedNode);
+
+  return {
+    gaps: missingLabels.map((label) => ({
+      explanation: getRcaMissingFieldEnterpriseExplanation(selectedNode, label),
+      label: formatStatus(label)
+    })),
+    isComplete: missingLabels.length === 0,
+    nodeId: selectedNode.id,
+    nodeLabel: selectedNodeLabel,
+    score: Math.round((completedFields / totalExpectedFields) * 100)
+  };
+}
+
+function getRcaSelectedNodeContextualRequirementCount(
+  node: RcaNode,
+  childrenByParentId: Map<string, RcaNode[]>,
+  nodeById: Map<string, RcaNode>
+): number {
+  const role = getFiveWhysNodeRoleSafe(node);
+
+  if (isFishboneCauseNode(node)) {
+    return 3;
+  }
+
+  if (isRootCauseRoleNode(node)) {
+    return (childrenByParentId.get(node.id) || []).some(isCapaRoleNode) ? 0 : 1;
+  }
+
+  if (
+    role === 'CORRECTIVE_ACTION' ||
+    role === 'PREVENTIVE_ACTION' ||
+    role === 'RISK_ASSESSMENT' ||
+    role === 'EFFECTIVENESS' ||
+    role === 'LESSONS_LEARNED'
+  ) {
+    return 2;
+  }
+
+  if (isCapaRoleNode(node)) {
+    return 5;
+  }
+
+  return 0;
+}
+
+function getRcaMissingFieldEnterpriseExplanation(
+  node: RcaNode,
+  missingLabel: string
+): string {
+  const normalizedLabel = missingLabel.toLowerCase();
+  const role = getFiveWhysNodeRoleSafe(node);
+
+  if (normalizedLabel.includes('incident title')) {
+    return 'This names the event clearly so reports, queues, and approvals all refer to the same incident.';
+  }
+
+  if (normalizedLabel.includes('incident category')) {
+    return 'This classifies the incident for routing, trend analysis, and recurrence checks.';
+  }
+
+  if (normalizedLabel.includes('department') || normalizedLabel.includes('area') || normalizedLabel.includes('location') || normalizedLabel.includes('line') || normalizedLabel.includes('machine') || normalizedLabel.includes('process')) {
+    return 'This identifies where the issue belongs, which helps assign owners and compare similar incidents.';
+  }
+
+  if (normalizedLabel.includes('date') || normalizedLabel.includes('when')) {
+    return 'This anchors the timeline so evidence, containment, recurrence, and closure decisions can be reviewed accurately.';
+  }
+
+  if (normalizedLabel.includes('reported by') || normalizedLabel.includes('owner') || normalizedLabel.includes('validated by') || normalizedLabel.includes('approver')) {
+    return 'This creates accountability, so the RCA has a clear person responsible for the decision or action.';
+  }
+
+  if (normalizedLabel.includes('severity') || normalizedLabel.includes('risk') || normalizedLabel.includes('priority')) {
+    return 'This explains how serious the issue is and helps the team choose the right urgency and approval level.';
+  }
+
+  if (normalizedLabel.includes('description') || normalizedLabel.includes('summary') || normalizedLabel.includes('statement') || normalizedLabel.includes('what happened') || normalizedLabel.includes('actual condition') || normalizedLabel.includes('expected standard') || normalizedLabel.includes('measurable gap')) {
+    return 'This makes the issue specific enough for the team to investigate facts instead of assumptions.';
+  }
+
+  if (normalizedLabel.includes('containment')) {
+    return 'This shows what was done to control the immediate risk while the investigation is still open.';
+  }
+
+  if (normalizedLabel.includes('clear cause statement')) {
+    return 'A Cause should describe one possible contributor in plain language so it can be tested with evidence.';
+  }
+
+  if (normalizedLabel.includes('branch connection')) {
+    return 'The Cause needs to sit under the correct branch so the Fishbone view stays organized and reviewable.';
+  }
+
+  if (normalizedLabel.includes('evidence support') || normalizedLabel.includes('evidence')) {
+    return 'Evidence shows why this node is credible. It protects the RCA from unsupported opinions.';
+  }
+
+  if (normalizedLabel.includes('five answered why levels')) {
+    return 'The 5 Whys chain should go deep enough to explain the mechanism behind the cause, not only the symptom.';
+  }
+
+  if (normalizedLabel.includes('cause being tested') || normalizedLabel.includes('why the cause is worth testing')) {
+    return 'This tells reviewers exactly which cause is being investigated and why it deserves attention.';
+  }
+
+  if (normalizedLabel.includes('governed cause decision') || normalizedLabel.includes('decision') || normalizedLabel.includes('disposition') || normalizedLabel.includes('finding verified')) {
+    return 'This records whether the analysis ruled the cause in or out, so Root Cause decisions are traceable.';
+  }
+
+  if (normalizedLabel.includes('root cause statement') || normalizedLabel.includes('cause classification') || normalizedLabel.includes('cause type')) {
+    return 'This defines whether the finding is a Root Cause or contributing cause, which drives the CAPA plan.';
+  }
+
+  if (normalizedLabel.includes('recurrence prevention')) {
+    return 'This confirms whether fixing the cause should reduce or prevent recurrence.';
+  }
+
+  if (normalizedLabel.includes('system failure') || normalizedLabel.includes('other causes ruled out') || normalizedLabel.includes('validation')) {
+    return 'This shows the cause was challenged and approved before action planning starts.';
+  }
+
+  if (normalizedLabel.includes('capa connection')) {
+    return role === 'ROOT_CAUSE'
+      ? 'A verified Root Cause must flow into CAPA so the corrective work is linked to the finding.'
+      : 'The stage must remain tied to its CAPA plan so action status, evidence, and closure stay traceable.';
+  }
+
+  if (normalizedLabel.includes('stage')) {
+    return 'Each CAPA stage covers a different control point: correction, prevention, risk review, effectiveness, and learning.';
+  }
+
+  if (normalizedLabel.includes('due date') || normalizedLabel.includes('completion date')) {
+    return 'Dates make the action measurable and allow overdue work to be escalated.';
+  }
+
+  if (normalizedLabel.includes('action status') || normalizedLabel.includes('completion') || normalizedLabel.includes('verification result') || normalizedLabel.includes('lesson approval status')) {
+    return 'This confirms the work is finished or reviewed, which is required before closure.';
+  }
+
+  if (normalizedLabel.includes('closure') || normalizedLabel.includes('final') || normalizedLabel.includes('residual risk') || normalizedLabel.includes('regulatory')) {
+    return 'This supports the final governance decision that the RCA can be closed responsibly.';
+  }
+
+  return 'This field gives reviewers the information needed to understand, verify, and approve this part of the RCA.';
+}
+
+function buildRcaMissingDataBadgesByNodeId(
+  nodes: RcaNode[],
+  methodology: RcaMethodology
+): Map<string, RcaMissingDataBadge[]> {
+  const activeNodes = nodes.filter((node) => node.status !== 'DELETED');
+  const nodeById = new Map(activeNodes.map((node) => [node.id, node]));
+  const childrenByParentId = new Map<string, RcaNode[]>();
+
+  activeNodes.forEach((node) => {
+    if (!node.parentNodeId || !nodeById.has(node.parentNodeId)) {
+      return;
+    }
+
+    const siblings = childrenByParentId.get(node.parentNodeId) || [];
+    siblings.push(node);
+    childrenByParentId.set(node.parentNodeId, siblings);
+  });
+
+  return new Map(activeNodes.map((node) => [
+    node.id,
+    getRcaMissingDataBadgesForNode(node, activeNodes, childrenByParentId, nodeById, methodology)
+  ]));
+}
+
+function getRcaMissingDataBadgesForNode(
+  node: RcaNode,
+  nodes: RcaNode[],
+  childrenByParentId: Map<string, RcaNode[]>,
+  nodeById: Map<string, RcaNode>,
+  methodology: RcaMethodology
+): RcaMissingDataBadge[] {
+  if (isFreeformRcaAnnotationNode(node)) {
+    return [];
+  }
+
+  const childNodes = childrenByParentId.get(node.id) || [];
+  const badges: RcaMissingDataBadge[] = [];
+  const addBadge = (badge: RcaMissingDataBadge) => {
+    if (badges.some((existingBadge) => existingBadge.label === badge.label)) {
+      return;
+    }
+
+    badges.push(badge);
+  };
+
+  if (node.nodeType === 'ISHIKAWA_CATEGORY') {
+    if (methodology === 'ISHIKAWA' && !childNodes.some(isFishboneCauseNode)) {
+      addBadge({
+        label: 'Needs causes',
+        title: 'This Fishbone branch has no connected Cause node yet.',
+        tone: 'important'
+      });
+    }
+
+    return badges;
+  }
+
+  if (node.nodeType === 'FAULT_GATE') {
+    const hasCaseApproval = nodes.some((candidateNode) => (
+      isApprovalClosureRoleNode(candidateNode) && candidateNode.parentNodeId === node.id
+    ));
+
+    if (!hasCaseApproval) {
+      addBadge({
+        label: 'Awaiting closure',
+        title: 'Add one case-level Approval & Closure node from the Fault Gate.',
+        tone: 'waiting'
+      });
+    }
+
+    return badges;
+  }
+
+  if (hasRcaLinkedEvidenceFiles(node, childrenByParentId, nodeById)) {
+    addBadge({
+      label: 'Evidence linked',
+      title: 'This node has linked evidence records available for review.',
+      tone: 'ready'
+    });
+  }
+
+  const readinessGap = getRcaNodeContextualReadinessGap(node, childrenByParentId, nodeById);
+  const missingLabels = readinessGap?.missingLabels || [];
+
+  if (isRootCauseRoleNode(node) && !hasRcaEvidenceSupport(node, childrenByParentId, nodeById)) {
+    addBadge({
+      label: 'Needs evidence',
+      title: 'Connect Evidence to this Root Cause before it is used for CAPA planning.',
+      tone: 'important'
+    });
+  }
+
+  missingLabels.forEach((missingLabel) => {
+    const badge = getRcaMissingDataBadgeFromMissingLabel(node, missingLabel);
+
+    if (badge) {
+      addBadge(badge);
+    }
+  });
+
+  if (
+    isRootCauseRoleNode(node) &&
+    !childNodes.some(isCapaRoleNode) &&
+    !missingLabels.some((label) => label !== 'CAPA connection') &&
+    hasRcaEvidenceSupport(node, childrenByParentId, nodeById)
+  ) {
+    addBadge({
+      label: 'Ready for CAPA',
+      title: 'Root Cause details and evidence are ready. Connect this Root Cause to CAPA.',
+      tone: 'ready'
+    });
+  }
+
+  if (isApprovalClosureRoleNode(node) && missingLabels.length) {
+    addBadge({
+      label: 'Awaiting approval',
+      title: `Final closure review is not complete: ${missingLabels.slice(0, 5).join(', ')}.`,
+      tone: 'waiting'
+    });
+  }
+
+  return badges.slice(0, 2);
+}
+
+function getRcaNodeContextualReadinessGap(
+  node: RcaNode,
+  childrenByParentId: Map<string, RcaNode[]>,
+  nodeById: Map<string, RcaNode>
+): RcaNodeReadinessGap | null {
+  const role = getFiveWhysNodeRoleSafe(node);
+
+  if (isFishboneCauseNode(node)) {
+    return getRcaCauseNodeReadinessGap(node, childrenByParentId, nodeById);
+  }
+
+  if (role === 'FIVE_WHYS') {
+    return getRcaFiveWhysNodeReadinessGap(node);
+  }
+
+  if (isRootCauseRoleNode(node)) {
+    return getRcaRootCauseNodeReadinessGap(node, childrenByParentId);
+  }
+
+  if (isCapaRoleNode(node)) {
+    return getRcaCapaNodeReadinessGap(node, childrenByParentId);
+  }
+
+  if (isCapaDownstreamStageRoleNode(node)) {
+    return getRcaCapaStageNodeReadinessGap(node, childrenByParentId, nodeById);
+  }
+
+  return getRcaNodeReadinessGap(node);
+}
+
+function getRcaMissingDataBadgeFromMissingLabel(
+  node: RcaNode,
+  missingLabel: string
+): RcaMissingDataBadge | null {
+  const normalizedLabel = missingLabel.toLowerCase();
+  const title = `Missing required RCA data: ${missingLabel}.`;
+
+  if (normalizedLabel.includes('evidence support') || normalizedLabel.includes('attachment') || normalizedLabel === 'evidence') {
+    return { label: 'Needs evidence', title, tone: 'important' };
+  }
+
+  if (normalizedLabel.includes('owner') || normalizedLabel.includes('approver') || normalizedLabel.includes('reported by') || normalizedLabel.includes('validated by')) {
+    return { label: 'Needs owner', title, tone: 'important' };
+  }
+
+  if (normalizedLabel.includes('verification') || normalizedLabel.includes('verified') || normalizedLabel.includes('validation')) {
+    return { label: 'Needs verification', title, tone: 'critical' };
+  }
+
+  if (normalizedLabel.includes('capa connection')) {
+    return isRootCauseRoleNode(node)
+      ? { label: 'Ready for CAPA', title: 'Connect this validated Root Cause to CAPA.', tone: 'ready' }
+      : { label: 'Needs CAPA', title, tone: 'critical' };
+  }
+
+  if (normalizedLabel.includes('stage')) {
+    return { label: 'Needs stages', title, tone: 'important' };
+  }
+
+  if (normalizedLabel.includes('why') || normalizedLabel.includes('decision') || normalizedLabel.includes('disposition')) {
+    return { label: 'Needs decision', title, tone: 'critical' };
+  }
+
+  if (normalizedLabel.includes('statement') || normalizedLabel.includes('description') || normalizedLabel.includes('summary')) {
+    return { label: 'Needs details', title, tone: 'important' };
+  }
+
+  if (normalizedLabel.includes('status') || normalizedLabel.includes('completion') || normalizedLabel.includes('complete')) {
+    return { label: 'Needs completion', title, tone: 'waiting' };
+  }
+
+  if (normalizedLabel.includes('date') || normalizedLabel.includes('due')) {
+    return { label: 'Needs date', title, tone: 'important' };
+  }
+
+  if (normalizedLabel.includes('risk')) {
+    return { label: 'Needs risk', title, tone: 'critical' };
+  }
+
+  if (isApprovalClosureRoleNode(node)) {
+    return { label: 'Awaiting approval', title, tone: 'waiting' };
+  }
+
+  return { label: 'Needs data', title, tone: 'important' };
+}
+
+function getRcaGuidedNodeReadinessLabel(node: RcaNode): string {
+  const role = getFiveWhysNodeRoleSafe(node);
+  const roleLabel = role
+    ? getFiveWhysRoleLabel(role)
+    : isFishboneCauseNode(node)
+    ? 'Cause'
+    : formatNodeType(node.nodeType);
+  const nodeLabel = (node.label || '').trim();
+
+  return nodeLabel && nodeLabel !== roleLabel
+    ? `${roleLabel} "${truncateRcaGuidedPathText(nodeLabel, 42)}"`
+    : roleLabel;
+}
+
+function getRcaIncidentRecordReadinessGaps(incident: RcaIncident | null): string[] {
+  if (!incident) {
+    return ['active RCA case'];
+  }
+
+  const gaps: string[] = [];
+  const assetId = (incident.assetId || '').trim();
+
+  if (!assetId || /^unassigned\s+asset$/i.test(assetId)) {
+    gaps.push('case asset or process area');
+  }
+
+  if (!incident.title?.trim()) {
+    gaps.push('incident title');
+  }
+
+  if (!incident.departmentName?.trim()) {
+    gaps.push('owner department');
+  }
+
+  if (isDefaultRcaRiskProfile(incident.riskFactors)) {
+    gaps.push('triaged risk scores');
+  }
+
+  return gaps;
+}
+
+function truncateRcaGuidedPathText(value: string, maxLength: number): string {
+  return value.length > maxLength ? `${value.slice(0, Math.max(0, maxLength - 1)).trim()}...` : value;
+}
+
+function getRcaNodeReadinessGap(node: RcaNode): RcaNodeReadinessGap | null {
+  const role = getFiveWhysNodeRoleSafe(node);
+  const requirements = role ? RCA_GUIDED_REQUIRED_FIELDS_BY_ROLE[role] || [] : [];
+  const missingLabels = getMissingRcaGuidedRequiredFieldLabels(node.detailFields || {}, requirements);
+
+  return missingLabels.length ? { missingLabels, node } : null;
+}
+
+function getRcaCauseNodeReadinessGap(
+  node: RcaNode,
+  childrenByParentId: Map<string, RcaNode[]>,
+  nodeById: Map<string, RcaNode>
+): RcaNodeReadinessGap | null {
+  const missingLabels: string[] = [];
+  const causeStatement = getRcaCauseStatementForFiveWhys(node).trim();
+
+  if (!causeStatement || /^cause$/i.test(causeStatement) || /^click\s+to\s+describe/i.test(causeStatement)) {
+    missingLabels.push('clear cause statement');
+  }
+
+  if (!node.parentNodeId || !nodeById.has(node.parentNodeId)) {
+    missingLabels.push('branch connection');
+  }
+
+  if (!hasRcaEvidenceSupport(node, childrenByParentId, nodeById)) {
+    missingLabels.push('evidence support');
+  }
+
+  return missingLabels.length ? { missingLabels, node } : null;
+}
+
+function getRcaFiveWhysNodeReadinessGap(node: RcaNode): RcaNodeReadinessGap | null {
+  const missingLabels = getMissingRcaGuidedRequiredFieldLabels(
+    node.detailFields || {},
+    RCA_GUIDED_REQUIRED_FIELDS_BY_ROLE.FIVE_WHYS || []
+  );
+
+  if (getFilledFiveWhysAnswerCount(node) < 5) {
+    missingLabels.unshift('five answered why levels');
+  }
+
+  if (!hasFiveWhysGovernedDecision(node.whyChain, node.detailFields || {})) {
+    missingLabels.push('governed cause decision');
+  }
+
+  return missingLabels.length ? { missingLabels: [...new Set(missingLabels)], node } : null;
+}
+
+function getRcaRootCauseNodeReadinessGap(
+  node: RcaNode,
+  childrenByParentId: Map<string, RcaNode[]>
+): RcaNodeReadinessGap | null {
+  const missingLabels = getMissingRcaGuidedRequiredFieldLabels(
+    node.detailFields || {},
+    RCA_GUIDED_REQUIRED_FIELDS_BY_ROLE.ROOT_CAUSE || []
+  );
+
+  if (!(childrenByParentId.get(node.id) || []).some(isCapaRoleNode)) {
+    missingLabels.push('CAPA connection');
+  }
+
+  return missingLabels.length ? { missingLabels: [...new Set(missingLabels)], node } : null;
+}
+
+function getRcaCapaNodeReadinessGap(
+  node: RcaNode,
+  childrenByParentId: Map<string, RcaNode[]>
+): RcaNodeReadinessGap | null {
+  const missingLabels = getMissingRcaGuidedRequiredFieldLabels(
+    node.detailFields || {},
+    RCA_GUIDED_REQUIRED_FIELDS_BY_ROLE.CAPA || []
+  );
+  const childRoles = new Set((childrenByParentId.get(node.id) || []).map(getFiveWhysNodeRoleSafe));
+
+  [
+    'CORRECTIVE_ACTION',
+    'PREVENTIVE_ACTION',
+    'RISK_ASSESSMENT',
+    'EFFECTIVENESS',
+    'LESSONS_LEARNED'
+  ].forEach((role) => {
+    if (!childRoles.has(role as RcaFiveWhysNodeRole)) {
+      missingLabels.push(`${getFiveWhysRoleLabel(role as RcaFiveWhysNodeRole)} stage`);
+    }
+  });
+
+  return missingLabels.length ? { missingLabels: [...new Set(missingLabels)], node } : null;
+}
+
+function getRcaCapaStageNodeReadinessGap(
+  node: RcaNode,
+  childrenByParentId: Map<string, RcaNode[]>,
+  nodeById: Map<string, RcaNode>
+): RcaNodeReadinessGap | null {
+  const role = getFiveWhysNodeRoleSafe(node);
+  const missingLabels = getMissingRcaGuidedRequiredFieldLabels(
+    node.detailFields || {},
+    role ? RCA_GUIDED_REQUIRED_FIELDS_BY_ROLE[role] || [] : []
+  );
+  const parentNode = node.parentNodeId ? nodeById.get(node.parentNodeId) : null;
+
+  if (!parentNode || !isCapaRoleNode(parentNode)) {
+    missingLabels.push('CAPA connection');
+  }
+
+  if (!hasRcaEvidenceSupport(node, childrenByParentId, nodeById)) {
+    missingLabels.push('Evidence support');
+  }
+
+  return missingLabels.length ? { missingLabels: [...new Set(missingLabels)], node } : null;
+}
+
+function getMissingRcaGuidedRequiredFieldLabels(
+  fields: Record<string, string>,
+  requirements: RcaGuidedRequiredField[]
+): string[] {
+  return requirements.filter((requirement) => {
+    const value = (fields[requirement.key] || '').trim();
+
+    if (!value) {
+      return true;
+    }
+
+    return requirement.validValues
+      ? !requirement.validValues.includes(value)
+      : false;
+  }).map((requirement) => requirement.label);
+}
+
+function hasRcaEvidenceSupport(
+  node: RcaNode,
+  childrenByParentId: Map<string, RcaNode[]>,
+  nodeById: Map<string, RcaNode>
+): boolean {
+  return hasRcaLinkedEvidenceFiles(node, childrenByParentId, nodeById);
+}
+
+function hasRcaLinkedEvidenceFiles(
+  node: RcaNode,
+  childrenByParentId: Map<string, RcaNode[]>,
+  nodeById: Map<string, RcaNode>
+): boolean {
+  if (node.attachedEvidence?.length) {
+    return true;
+  }
+
+  if ((childrenByParentId.get(node.id) || []).some((childNode) => Boolean(childNode.attachedEvidence?.length))) {
+    return true;
+  }
+
+  if (node.parentNodeId) {
+    const parentNode = nodeById.get(node.parentNodeId);
+
+    if (parentNode && isEvidenceRoleNode(parentNode) && parentNode.attachedEvidence?.length) {
+      return true;
+    }
+  }
+
+  return normalizeRcaLinkedNodeIds(node.linkedNodeIds)
+    .map((linkedNodeId) => nodeById.get(linkedNodeId))
+    .some((linkedNode) => Boolean(linkedNode?.attachedEvidence?.length));
+}
+
+function getFilledFiveWhysAnswerCount(node: RcaNode): number {
+  const detailAnswers = [
+    node.detailFields?.why1,
+    node.detailFields?.why2,
+    node.detailFields?.why3,
+    node.detailFields?.why4,
+    node.detailFields?.why5
+  ].filter((value) => Boolean(value?.trim())).length;
+  const chainAnswers = (node.whyChain || []).filter((value) => Boolean(value?.trim())).length;
+
+  return Math.max(detailAnswers, chainAnswers);
+}
+
+function getRcaGuidedPathPriorityRank(priority: RcaGuidedPathPriority): number {
+  if (priority === 'critical') return 0;
+  if (priority === 'important') return 1;
+  if (priority === 'next') return 2;
+  return 3;
+}
+
+function getRcaGuidedPathWorkflowRank(recommendationId: string): number {
+  if (
+    recommendationId.includes('incident-record') ||
+    recommendationId.includes('incident-path') ||
+    recommendationId.includes('main-intake') ||
+    recommendationId.includes('missing-fault-gate')
+  ) {
+    return 10;
+  }
+
+  if (
+    recommendationId.includes('empty-category') ||
+    recommendationId.includes('empty-categories') ||
+    recommendationId.includes('cause-readiness') ||
+    recommendationId.includes('causes-without-evidence') ||
+    recommendationId.includes('evidence-readiness') ||
+    recommendationId.includes('causes-without-five-whys')
+  ) {
+    return 20;
+  }
+
+  if (
+    recommendationId.includes('five-whys') ||
+    recommendationId.includes('missing-root-cause')
+  ) {
+    return 30;
+  }
+
+  if (recommendationId.includes('root-cause')) {
+    return 40;
+  }
+
+  if (
+    recommendationId.includes('missing-capa') ||
+    recommendationId.includes('capa-readiness')
+  ) {
+    return 50;
+  }
+
+  if (
+    recommendationId.includes('capa-stage') ||
+    recommendationId.includes('missing-capa-stages')
+  ) {
+    return 60;
+  }
+
+  if (
+    recommendationId.includes('approval') ||
+    recommendationId.includes('closure')
+  ) {
+    return 70;
+  }
+
+  if (recommendationId.includes('selected')) {
+    return 5;
+  }
+
+  return 90;
+}
+
+function buildRcaPresentationSteps(nodes: RcaNode[], methodology: RcaMethodology): RcaPresentationStep[] {
+  const activeNodes = nodes.filter((node) => node.status !== 'DELETED');
+  const steps: RcaPresentationStep[] = [];
+  const activeNodeIds = activeNodes.map((node) => node.id);
+
+  if (activeNodeIds.length) {
+    steps.push({
+      id: 'overview',
+      nodeIds: activeNodeIds,
+      subtitle: 'Complete RCA canvas structure',
+      title: 'RCA overview'
+    });
+  }
+
+  const mainPathRoles = new Set<RcaFiveWhysNodeRole>([
+    'INCIDENT',
+    'INCIDENT_DETAILS',
+    'CONTAINMENT',
+    'PROBLEM'
+  ]);
+  const mainPathNodeIds = activeNodes
+    .filter((node) => mainPathRoles.has(getFiveWhysNodeRole(node)) || node.nodeType === 'FAULT_GATE')
+    .sort((leftNode, rightNode) => getRcaPresentationNodeSortValue(leftNode) - getRcaPresentationNodeSortValue(rightNode))
+    .map((node) => node.id);
+
+  if (mainPathNodeIds.length) {
+    steps.push({
+      id: 'main-path',
+      nodeIds: mainPathNodeIds,
+      subtitle: 'Incident definition, containment, problem statement, and fault gate',
+      title: 'Incident path'
+    });
+  }
+
+  if (methodology === 'ISHIKAWA') {
+    const childrenByParentId = new Map<string, RcaNode[]>();
+
+    activeNodes.forEach((node) => {
+      if (!node.parentNodeId) {
+        return;
+      }
+
+      const siblings = childrenByParentId.get(node.parentNodeId) || [];
+      siblings.push(node);
+      childrenByParentId.set(node.parentNodeId, siblings);
+    });
+
+    activeNodes
+      .filter((node) => node.nodeType === 'ISHIKAWA_CATEGORY')
+      .sort((leftNode, rightNode) => (
+        (sanitizeRcaCanvasCoordinate(leftNode.uiCoordinates?.x) ?? 0) - (sanitizeRcaCanvasCoordinate(rightNode.uiCoordinates?.x) ?? 0) ||
+        (sanitizeRcaCanvasCoordinate(leftNode.uiCoordinates?.y) ?? 0) - (sanitizeRcaCanvasCoordinate(rightNode.uiCoordinates?.y) ?? 0)
+      ))
+      .forEach((categoryNode) => {
+        const branchNodeIds = collectRcaDescendantNodeIds(categoryNode.id, childrenByParentId);
+
+        steps.push({
+          id: `branch:${categoryNode.id}`,
+          nodeIds: [categoryNode.id, ...branchNodeIds],
+          subtitle: 'Branch-specific causes, evidence, 5 Whys, and linked RCA work',
+          title: `${categoryNode.label?.trim() || 'Branch'} branch`
+        });
+      });
+  }
+
+  const rootCauseNodeIds = activeNodes
+    .filter((node) => getFiveWhysNodeRole(node) === 'ROOT_CAUSE')
+    .map((node) => node.id);
+
+  if (rootCauseNodeIds.length) {
+    steps.push({
+      id: 'root-causes',
+      nodeIds: rootCauseNodeIds,
+      subtitle: 'Validated root causes and contributing factors',
+      title: 'Root causes'
+    });
+  }
+
+  const capaRoles = new Set<RcaFiveWhysNodeRole>([
+    'CAPA',
+    'CORRECTIVE_ACTION',
+    'PREVENTIVE_ACTION',
+    'RISK_ASSESSMENT',
+    'EFFECTIVENESS',
+    'LESSONS_LEARNED',
+    'APPROVAL_CLOSURE'
+  ]);
+  const capaNodeIds = activeNodes
+    .filter((node) => capaRoles.has(getFiveWhysNodeRole(node)))
+    .sort((leftNode, rightNode) => getRcaPresentationNodeSortValue(leftNode) - getRcaPresentationNodeSortValue(rightNode))
+    .map((node) => node.id);
+
+  if (capaNodeIds.length) {
+    steps.push({
+      id: 'capa-closure',
+      nodeIds: capaNodeIds,
+      subtitle: 'Corrective actions, preventive actions, risk review, effectiveness, lessons learned, and approval',
+      title: 'CAPA and closure'
+    });
+  }
+
+  return steps;
+}
+
+function buildRcaBranchWalkthroughSteps(nodes: RcaNode[], methodology: RcaMethodology): RcaBranchWalkthroughStep[] {
+  if (methodology !== 'ISHIKAWA') {
+    return [];
+  }
+
+  const activeNodes = nodes.filter((node) => node.status !== 'DELETED');
+  const childrenByParentId = new Map<string, RcaNode[]>();
+
+  activeNodes.forEach((node) => {
+    if (!node.parentNodeId) {
+      return;
+    }
+
+    const siblings = childrenByParentId.get(node.parentNodeId) || [];
+    siblings.push(node);
+    childrenByParentId.set(node.parentNodeId, siblings);
+  });
+
+  return getOrderedFishboneCategoryNodes(activeNodes).map((categoryNode) => {
+    const descendantNodeIds = collectRcaDescendantNodeIds(categoryNode.id, childrenByParentId);
+    const branchNodeIds = [categoryNode.id, ...descendantNodeIds];
+    const branchWorkCount = Math.max(0, branchNodeIds.length - 1);
+    const title = `${categoryNode.label?.trim() || 'Branch'} branch`;
+
+    return {
+      categoryNodeId: categoryNode.id,
+      id: `branch-walkthrough:${categoryNode.id}`,
+      nodeCount: branchWorkCount,
+      nodeIds: branchNodeIds,
+      subtitle: branchWorkCount
+        ? `${branchWorkCount} connected canvas item${branchWorkCount === 1 ? '' : 's'} in this branch`
+        : 'Empty branch ready for cause discovery',
+      title
+    };
+  });
+}
+
+function collectRcaDescendantNodeIds(parentNodeId: string, childrenByParentId: Map<string, RcaNode[]>): string[] {
+  const descendants: string[] = [];
+  const visitedNodeIds = new Set<string>();
+  const queue = [...(childrenByParentId.get(parentNodeId) || [])];
+
+  while (queue.length) {
+    const node = queue.shift();
+
+    if (!node || visitedNodeIds.has(node.id)) {
+      continue;
+    }
+
+    visitedNodeIds.add(node.id);
+    descendants.push(node.id);
+    queue.push(...(childrenByParentId.get(node.id) || []));
+  }
+
+  return descendants;
+}
+
+function getRcaPresentationNodeSortValue(node: RcaNode): number {
+  const x = sanitizeRcaCanvasCoordinate(node.uiCoordinates?.x) ?? 0;
+  const y = sanitizeRcaCanvasCoordinate(node.uiCoordinates?.y) ?? 0;
+
+  return y * 100000 + x;
 }
 
 function getStickyNoteContentSize(node: RcaNode): { height: number; width: number } {
@@ -15507,8 +26596,104 @@ function isFishboneCauseNode(node: RcaNode): boolean {
   return node.nodeType === 'CAUSE' || node.nodeType === 'SUB_CAUSE';
 }
 
+function isMisclassifiedFishboneCauseNode(node: RcaNode, nodes: RcaNode[]): boolean {
+  if (!isRootCauseRoleNode(node) || !node.parentNodeId) {
+    return false;
+  }
+
+  const parentNode = nodes.find((candidateNode) => candidateNode.id === node.parentNodeId);
+
+  return Boolean(parentNode && (parentNode.nodeType === 'ISHIKAWA_CATEGORY' || isFishboneCauseNode(parentNode)));
+}
+
+function normalizeMisclassifiedFishboneCauseNodes(nodes: RcaNode[]): RcaNode[] {
+  return nodes.map((node) => {
+    if (!isMisclassifiedFishboneCauseNode(node, nodes)) {
+      return node;
+    }
+
+    return normalizeMisclassifiedFishboneCauseNode(node);
+  });
+}
+
+function normalizeMisclassifiedFishboneCauseNode(node: RcaNode): RcaNode {
+  const nextLabel = /^root\s+cause$/i.test(node.label.trim())
+    ? 'Cause'
+    : node.label;
+
+  return {
+    ...node,
+    detailFields: {
+      ...(node.detailFields || {}),
+      causeClassification: '',
+      rootCauseStatement: '',
+      validationStatus: ''
+    },
+    fiveWhysRole: null,
+    isRootCause: false,
+    isSuspectedCause: false,
+    label: nextLabel,
+    nodeType: 'CAUSE',
+    visualStyle: {
+      ...RCA_DEFAULT_CAUSE_VISUAL_STYLE
+    }
+  };
+}
+
 function isProtectedFishboneStructureNode(node: RcaNode): boolean {
   return node.nodeType === 'ISHIKAWA_CATEGORY' || node.nodeType === 'FAULT_GATE';
+}
+
+function isEmptyFishboneBranchCategoryNode(
+  node: RcaNode | null | undefined,
+  nodes: RcaNode[]
+): boolean {
+  return Boolean(
+    node &&
+    node.status !== 'DELETED' &&
+    node.nodeType === 'ISHIKAWA_CATEGORY' &&
+    !nodes.some((candidateNode) => (
+      candidateNode.status !== 'DELETED' &&
+      candidateNode.parentNodeId === node.id
+    ))
+  );
+}
+
+function getFaultGateFishboneDeleteNodeIds(faultGateNode: RcaNode, nodes: RcaNode[]): Set<string> {
+  const nodeIdsToDelete = new Set<string>([faultGateNode.id]);
+  let didAddNode = true;
+
+  while (didAddNode) {
+    didAddNode = false;
+
+    nodes.forEach((node) => {
+      if (
+        node.parentNodeId &&
+        nodeIdsToDelete.has(node.parentNodeId) &&
+        !nodeIdsToDelete.has(node.id)
+      ) {
+        nodeIdsToDelete.add(node.id);
+        didAddNode = true;
+      }
+    });
+  }
+
+  return nodeIdsToDelete;
+}
+
+function getMissingFishboneBranchOptions(nodes: RcaNode[]): RcaMissingFishboneBranchOption[] {
+  const activeBranchNames = new Set(nodes
+    .filter((node) => node.status !== 'DELETED' && node.nodeType === 'ISHIKAWA_CATEGORY')
+    .map((node) => normalizeFishboneCategoryName(node.label)));
+
+  return RCA_DEFAULT_FISHBONE_CATEGORIES.map((category) => {
+    const normalizedLabel = normalizeFishboneCategoryName(category.label);
+
+    return {
+      disabled: activeBranchNames.has(normalizedLabel),
+      label: category.label
+    };
+  });
 }
 
 function isFaultGateCapaSplineOwner(node: RcaNode, nodes: RcaNode[]): boolean {
@@ -15523,10 +26708,10 @@ function isFaultGateCapaSplineOwner(node: RcaNode, nodes: RcaNode[]): boolean {
 
 function getProtectedFishboneStructureDeleteMessage(node: RcaNode): string {
   if (node.nodeType === 'FAULT_GATE') {
-    return 'The fault gate is part of the protected Fishbone structure. It cannot be deleted from the canvas. Edit its text or move it, but keep the structure intact.';
+    return 'The Fault Gate controls the Fishbone structure. Use Delete Node on the Fault Gate if you need to remove the full Fishbone structure after reviewing the warning.';
   }
 
-  return 'Branch nodes are part of the protected Fishbone structure. They cannot be deleted from the canvas. Add, edit, move, or delete causes under a branch instead.';
+  return 'This branch category has connected RCA work under it, so it cannot be deleted directly. Remove or reconnect the child nodes first. Empty branches can be deleted after a warning, and missing branches can be restored by right-clicking the Fault Gate and choosing Add Branch.';
 }
 
 function isCompleteFishboneStructureSelection(nodes: RcaNode[], selectedNodeIds: Set<string>): boolean {
@@ -15652,7 +26837,7 @@ function buildRcaIncidentReportSections(reportNodes: RcaNode[]): RcaReportSectio
     {
       id: 'problem',
       matcher: (node: RcaNode) => getFiveWhysNodeRoleSafe(node) === 'PROBLEM',
-      subtitle: 'Defined problem statement and confirmed known facts.',
+      subtitle: 'Defined problem statement, expected standard, actual condition, gap, and RCA scope.',
       title: '4. Problem Definition'
     },
     {
@@ -15670,14 +26855,14 @@ function buildRcaIncidentReportSections(reportNodes: RcaNode[]): RcaReportSectio
     {
       id: 'five-whys',
       matcher: (node: RcaNode) => ['FIVE_WHYS', 'ANSWER'].includes(getFiveWhysNodeRoleSafe(node) || ''),
-      subtitle: '5 Whys reasoning and answer trail.',
+      subtitle: '5 Whys reasoning, answers, evidence, and verification record.',
       title: '7. 5 Whys'
     },
     {
       id: 'root-cause',
       matcher: (node: RcaNode) => getFiveWhysNodeRoleSafe(node) === 'ROOT_CAUSE' || node.isRootCause,
-      subtitle: 'Validated root cause candidates and supporting rationale.',
-      title: '8. Root Cause'
+      subtitle: 'Validated cause candidates and supporting rationale.',
+      title: '8. Cause'
     },
     {
       id: 'capa',
@@ -15693,7 +26878,7 @@ function buildRcaIncidentReportSections(reportNodes: RcaNode[]): RcaReportSectio
     },
     {
       id: 'notes',
-      matcher: (node: RcaNode) => node.nodeType === 'STICKY_NOTE',
+      matcher: (node: RcaNode) => isFreeformRcaAnnotationNode(node),
       subtitle: 'Collaboration notes and comments added during the RCA.',
       title: '11. Notes'
     }
@@ -15738,7 +26923,7 @@ function getRcaReportSectionRank(node: RcaNode): number {
   if (role === 'ROOT_CAUSE' || node.isRootCause) return 8;
   if (role === 'CAPA' || role === 'CORRECTIVE_ACTION' || role === 'PREVENTIVE_ACTION' || role === 'RISK_ASSESSMENT' || role === 'EFFECTIVENESS') return 9;
   if (role === 'LESSONS_LEARNED' || role === 'APPROVAL_CLOSURE') return 10;
-  if (node.nodeType === 'STICKY_NOTE') return 11;
+  if (isFreeformRcaAnnotationNode(node)) return 11;
 
   return 12;
 }
@@ -15778,6 +26963,359 @@ function getRcaReportFieldEntries(node: RcaNode): Array<{ key: string; label: st
   }
 
   return entries;
+}
+
+function getRcaNodeGuideContent(
+  node: RcaNode,
+  role: RcaFiveWhysNodeRole | null
+): RcaNodeGuideContent {
+  if (role) {
+    const guideByRole: Partial<Record<RcaFiveWhysNodeRole, RcaNodeGuideContent>> = {
+      INCIDENT: {
+        acceptsFrom: ['Top level'],
+        connectsTo: ['Incident Details'],
+        description: 'The starting point of the RCA. It captures what happened in plain operational language.',
+        guidance: 'The Incident node is used to capture the event that started the RCA. Use simple factual language and connect it to Incident Details so the team can record the context, impact, and timeline. Press D to open the node detail panel when you need to complete the required fields. Press R or use Rearrange to keep the canvas structured, and use the AI panel when you need more insight about the incident flow.',
+        title: 'Incident'
+      },
+      INCIDENT_DETAILS: {
+        acceptsFrom: ['Incident'],
+        connectsTo: ['Containment', 'Problem Statement'],
+        description: 'Adds the time, place, impact, and initial context needed before analysis begins.',
+        guidance: 'The Incident Details node is used to describe the event with time, location, impact, and important facts. Connect it after the Incident node, then continue to Containment or Problem Statement depending on the investigation flow. Press D to fill in the detail panel. Use Rearrange or press R after connecting nodes so the structure stays readable.',
+        title: 'Incident Details'
+      },
+      CONTAINMENT: {
+        acceptsFrom: ['Incident Details'],
+        connectsTo: ['Problem Statement'],
+        description: 'Documents the immediate action taken to control risk while the investigation continues.',
+        guidance: 'The Containment node is used to document the immediate action taken to reduce risk while the RCA is still in progress. Connect it from Incident Details and then connect it to the Problem Statement. Use the detail panel to record what was controlled, who owns the action, and whether more permanent action is still needed.',
+        title: 'Containment'
+      },
+      PROBLEM: {
+        acceptsFrom: ['Containment', 'Incident Details'],
+        connectsTo: ['Fault Gate', '5 Whys', 'Evidence'],
+        description: 'Defines the exact problem statement that the investigation must explain.',
+        guidance: 'The Problem Statement node is used to define the exact issue the RCA must explain. Keep the statement clear, specific, and measurable. Connect it to the Fault Gate before moving into branch analysis or CAPA work. Evidence, Comment, Sticky Note, and 5 Whys nodes can support this node when more context is needed.',
+        title: 'Problem Statement'
+      },
+      EVIDENCE: {
+        acceptsFrom: ['Cause', '5 Whys', 'CAPA stage', 'Comment', 'Sticky Note'],
+        connectsTo: ['Cause', 'CAPA stage', 'Comment', 'Sticky Note'],
+        description: 'Stores supporting facts such as photos, files, observations, measurements, or records.',
+        guidance: 'The Evidence node is used to attach facts such as photos, records, measurements, files, or observations. Connect it to the exact node it supports, such as Cause, 5 Whys, CAPA stages, Comment, or Sticky Note. Use evidence to confirm or reject assumptions, and keep opinions in Comment or Sticky Note nodes.',
+        title: 'Evidence'
+      },
+      FIVE_WHYS: {
+        acceptsFrom: ['Problem Statement', 'Cause', 'Evidence'],
+        connectsTo: ['5 Whys answer', 'Cause', 'Evidence'],
+        description: 'Supports iterative why-question analysis to expose deeper causal logic.',
+        guidance: 'The 5 Whys node is used to investigate why a problem or cause happened. Connect it to a Problem Statement, Cause, or Evidence node, then use the detail panel to capture the why analysis. Evidence, Cause, Comment, and Sticky Note nodes can connect to it. Use Rearrange or press R after connecting it so the analysis stays aligned.',
+        title: '5 Whys'
+      },
+      ANSWER: {
+        acceptsFrom: ['5 Whys'],
+        connectsTo: ['5 Whys', 'Cause', 'Evidence'],
+        description: 'Captures an answer in the 5 Whys chain.',
+        guidance: 'The 5 Whys Answer node is used to capture one answer in the why chain. Connect it from the related 5 Whys node, then connect it to another 5 Whys step, a Cause, or Evidence when the answer needs support. Keep each answer short and based on facts rather than guesses.',
+        title: '5 Whys Answer'
+      },
+      ROOT_CAUSE: {
+        acceptsFrom: ['5 Whys', 'Cause', 'Evidence'],
+        connectsTo: ['CAPA', 'Evidence'],
+        description: 'Marks a verified cause that must be controlled through corrective and preventive action.',
+        guidance: 'The Root Cause node is used when a cause has been validated and needs action. Connect it from 5 Whys, Cause, or Evidence, then connect it to CAPA when action planning begins. Use the detail panel to explain why this is the verified cause and what evidence supports it.',
+        title: 'Root Cause'
+      },
+      CAPA: {
+        acceptsFrom: ['Fault Gate', 'Root Cause'],
+        connectsTo: ['Corrective Action', 'Preventive Action', 'Risk Assessment', 'Effectiveness', 'Lessons Learned'],
+        description: 'Starts the corrective and preventive action workflow after the fault gate/root cause path is ready.',
+        guidance: 'The CAPA node is used as the hub for corrective and preventive action tied to a verified Root Cause. Connect it from Root Cause, then connect its output to Corrective Action, Preventive Action, Risk Assessment, Effectiveness, and Lessons Learned. In Fishbone analysis, final Approval & Closure connects from the Fault Gate. In standalone 5 Why analysis, each CAPA stage can link into the one Approval & Closure node for final closeout review.',
+        title: 'CAPA'
+      },
+      CORRECTIVE_ACTION: {
+        acceptsFrom: ['CAPA', 'Evidence'],
+        connectsTo: ['Approval & Closure in standalone 5 Why'],
+        description: 'Defines what will fix the confirmed issue or remove the verified cause.',
+        guidance: 'The Corrective Action node is used to define what will fix the confirmed issue or remove the verified cause. Connect it from CAPA, then connect Evidence into this node to prove completion or implementation. In standalone 5 Why analysis, this stage can link into the single Approval & Closure node. In Fishbone analysis, final closure stays connected from the Fault Gate.',
+        title: 'Corrective Action'
+      },
+      PREVENTIVE_ACTION: {
+        acceptsFrom: ['CAPA', 'Evidence'],
+        connectsTo: ['Approval & Closure in standalone 5 Why'],
+        description: 'Defines controls that prevent recurrence across the process or system.',
+        guidance: 'The Preventive Action node is used to define controls that prevent the issue from happening again. Connect it from CAPA, then connect Evidence into this node to prove the prevention control, standard update, or system change. In standalone 5 Why analysis, this stage can link into the single Approval & Closure node. In Fishbone analysis, final closure stays connected from the Fault Gate.',
+        title: 'Preventive Action'
+      },
+      RISK_ASSESSMENT: {
+        acceptsFrom: ['CAPA', 'Evidence'],
+        connectsTo: ['Approval & Closure in standalone 5 Why'],
+        description: 'Evaluates residual risk and confirms the action plan is proportionate.',
+        guidance: 'The Risk Assessment node is used to evaluate risk before and after CAPA actions. Connect it from CAPA, then connect Evidence into this node when risk scoring, data, inspection results, or risk acceptance needs proof. In standalone 5 Why analysis, this stage can link into the single Approval & Closure node. In Fishbone analysis, residual risk acceptance is reviewed through the Fault Gate closure path.',
+        title: 'Risk Assessment'
+      },
+      EFFECTIVENESS: {
+        acceptsFrom: ['CAPA', 'Evidence'],
+        connectsTo: ['Approval & Closure in standalone 5 Why'],
+        description: 'Verifies that the corrective/preventive actions actually worked.',
+        guidance: 'The Effectiveness node is used to verify that CAPA actions worked. Connect it from CAPA, then connect Evidence into this node to prove the verification method, result, and follow-up decision. In standalone 5 Why analysis, this stage can link into the single Approval & Closure node. In Fishbone analysis, it remains under the CAPA block and is reviewed through the Fault Gate closure path.',
+        title: 'Effectiveness Verification'
+      },
+      LESSONS_LEARNED: {
+        acceptsFrom: ['CAPA', 'Evidence'],
+        connectsTo: ['Approval & Closure in standalone 5 Why'],
+        description: 'Captures what the organization should retain, standardize, or share after the RCA.',
+        guidance: 'The Lessons Learned node is used to capture what the team should retain, share, or standardize after the RCA. Connect it from CAPA, then connect Evidence into this node when training records, standard updates, communication proof, or knowledge-sharing artifacts are available. In standalone 5 Why analysis, it can link into the single Approval & Closure node with the other CAPA stages.',
+        title: 'Lessons Learned'
+      },
+      APPROVAL_CLOSURE: {
+        acceptsFrom: ['Fault Gate', 'CAPA stages in standalone 5 Why'],
+        connectsTo: ['Evidence'],
+        description: 'Final case-level review point for approving and closing the entire RCA.',
+        guidance: 'The Approval & Closure node is the final case-level review point for the entire RCA. In Fishbone analysis, connect it from the Fault Gate. In standalone 5 Why analysis, place it to the right of the CAPA stage stack and connect each CAPA stage output into its side input. Use the detail panel to verify Root Causes, CAPA stage readiness, evidence review, residual risk acceptance, final approver, closure conditions, and reopen triggers.',
+        title: 'Approval & Closure'
+      }
+    };
+
+    return guideByRole[role] || {
+      acceptsFrom: ['Related RCA nodes'],
+      connectsTo: ['Evidence', 'Related RCA nodes'],
+      description: 'A structured RCA node used to document investigation information and preserve traceability.',
+      guidance: 'This RCA node is used to document a structured part of the investigation. Connect it to the node it supports, press D to complete its detail panel, and attach Evidence when facts are available. Press R or use Rearrange after connecting it so the canvas stays organized.',
+      title: getFiveWhysRoleLabel(role)
+    };
+  }
+
+  if (node.nodeType === 'FAULT_GATE') {
+    return {
+      acceptsFrom: ['Problem Statement', 'Fishbone Branch'],
+      connectsTo: ['CAPA', 'Approval & Closure', 'Fishbone Branch'],
+      description: 'The fault gate is the decision/control point between the defined problem, branch analysis, CAPA workflow, and final case closure.',
+      guidance: 'The Fault Gate node is used as the governance point between the defined problem, branch analysis, CAPA workflow, and final case closure. Connect it from the Problem Statement or branch structure, then connect it to the case-level Approval & Closure node when the RCA is ready for final review. Use Rearrange to keep the gate aligned with the branch line and preserve the RCA structure.',
+      title: 'Fault Gate'
+    };
+  }
+
+  if (node.nodeType === 'ISHIKAWA_CATEGORY') {
+    return {
+      acceptsFrom: ['Fault Gate'],
+      connectsTo: ['Cause', 'Sub Cause', 'Evidence', '5 Whys'],
+      description: 'A fishbone branch groups related causes such as People, Machine, Method, Material, Measurement, or Environment.',
+      guidance: 'The Branch node is used to group causes by category, such as People, Machine, Method, Material, Measurement, or Environment. Connect causes, evidence, or 5 Whys nodes to the correct branch. Press R or use Rearrange to keep branch nodes clear and maintain the fault gate layout.',
+      title: 'Branch'
+    };
+  }
+
+  if (node.nodeType === 'CAUSE' || node.nodeType === 'SUB_CAUSE') {
+    return {
+      acceptsFrom: ['Branch', 'Cause', 'Evidence', 'Sticky Note', 'Comment'],
+      connectsTo: ['Sub Cause', '5 Whys', 'Evidence', 'Root Cause'],
+      description: 'A cause node captures a possible or verified contributor to the problem.',
+      guidance: 'The Cause node is used to capture a likely cause contributing to the incident. After adding a Cause node, connect it to the correct Branch or related Cause, then press D to open the detail panel and fill in the needed information. Evidence, Comment, Sticky Note, and 5 Whys nodes can connect to this Cause node. Press R or use Rearrange to restructure the canvas, and use the AI panel when you need more insight about this node and its flow.',
+      title: node.nodeType === 'SUB_CAUSE' ? 'Sub Cause' : 'Cause'
+    };
+  }
+
+  if (node.nodeType === 'COMMENT') {
+    return {
+      acceptsFrom: ['Sticky Note', 'Evidence', 'Any RCA node'],
+      connectsTo: ['Any RCA node', 'Evidence', 'Sticky Note'],
+      description: 'A comment is a lightweight collaboration note used to explain, question, or coach work on the canvas.',
+      guidance: 'The Comment node is used for collaboration notes, questions, or explanations on the canvas. Add it near the area you are discussing, then connect it to the exact node it refers to. A Comment can connect with Evidence, Sticky Note, and other RCA nodes, but factual proof should still be stored in an Evidence node.',
+      title: 'Comment'
+    };
+  }
+
+  if (node.nodeType === 'STICKY_NOTE') {
+    return {
+      acceptsFrom: ['Comment', 'Evidence', 'Any RCA node'],
+      connectsTo: ['Any RCA node', 'Evidence', 'Comment'],
+      description: 'A sticky note captures temporary thinking, reminders, or facilitation notes without changing the investigation structure.',
+      guidance: 'The Sticky Note node is used for quick thinking, reminders, or facilitation notes. Add it where the note belongs and connect it to the node it refers to. It can connect with Comment, Evidence, and other RCA nodes. When the note becomes a verified fact, move that information into Evidence or the correct structured node.',
+      title: 'Sticky Note'
+    };
+  }
+
+  return {
+    acceptsFrom: ['Related RCA nodes'],
+    connectsTo: ['Evidence', 'Related RCA nodes'],
+    description: 'A node on the RCA canvas used to document, connect, and explain part of the investigation.',
+    guidance: 'This node is used to document part of the RCA investigation. Connect it to the correct upstream or downstream node, press D to complete the detail panel, and attach Evidence when the statement needs support. Use Rearrange or press R after connecting it so the canvas remains readable.',
+    title: formatNodeType(node.nodeType)
+  };
+}
+
+function buildRcaConnectionRecommendationSummary(
+  selectedNode: RcaNode | null,
+  nodes: RcaNode[],
+  methodology: RcaMethodology
+): RcaConnectionRecommendationSummary {
+  if (!selectedNode || selectedNode.status === 'DELETED') {
+    return {
+      addActions: [],
+      selectedGuide: null
+    };
+  }
+
+  const activeNodes = nodes.filter((node) => node.status !== 'DELETED');
+  const selectedRole = selectedNode.nodeType === 'WHY' ? getFiveWhysNodeRole(selectedNode) : null;
+  const selectedGuide = getRcaNodeGuideContent(selectedNode, selectedRole);
+
+  return {
+    addActions: buildRcaConnectionCreateRecommendations(selectedNode, activeNodes, methodology),
+    selectedGuide
+  };
+}
+
+function buildRcaConnectionCreateRecommendations(
+  selectedNode: RcaNode,
+  nodes: RcaNode[],
+  methodology: RcaMethodology
+): RcaConnectionCreateRecommendation[] {
+  if (methodology !== 'ISHIKAWA' && methodology !== '5_WHYS') {
+    return [];
+  }
+
+  const actions: RcaConnectionCreateRecommendation[] = [];
+  const selectedNodeId = selectedNode.id;
+  const childNodes = nodes.filter((node) => node.parentNodeId === selectedNode.id);
+  const addRoleAction = (
+    role: RcaFiveWhysNodeRole,
+    direction: RcaConnectionCreateRecommendation['direction'],
+    title?: string
+  ) => {
+    actions.push({
+      direction,
+      fiveWhysRole: role,
+      id: `${selectedNode.id}-${role}-${direction}`,
+      nodeType: 'WHY',
+      title: title || `Add ${getFiveWhysRoleLabel(role)}`,
+      typeLabel: getFiveWhysRoleLabel(role)
+    });
+  };
+
+  if (isIncidentRoleNode(selectedNode) && !childNodes.some(isIncidentDetailsRoleNode)) {
+    addRoleAction('INCIDENT_DETAILS', 'selected-to-new');
+  } else if (isIncidentDetailsRoleNode(selectedNode)) {
+    if (!childNodes.some(isContainmentRoleNode)) {
+      addRoleAction('CONTAINMENT', 'selected-to-new');
+    }
+    if (!nodes.some(isContainmentRoleNode) && !childNodes.some(isProblemRoleNode)) {
+      addRoleAction('PROBLEM', 'selected-to-new');
+    }
+  } else if (isContainmentRoleNode(selectedNode) && !childNodes.some(isProblemRoleNode)) {
+    addRoleAction('PROBLEM', 'selected-to-new');
+  } else if (isProblemRoleNode(selectedNode)) {
+    if (shouldEnsureDefaultFishboneScaffold(nodes)) {
+      actions.push({
+        actionType: 'CREATE_FISHBONE',
+        description: 'Create the full Fault Gate and Fishbone branch structure for category-based cause analysis.',
+        direction: 'selected-to-new',
+        id: `${selectedNode.id}-fishbone-analysis-selected-to-new`,
+        nodeType: 'FAULT_GATE',
+        title: 'Fishbone Analysis',
+        typeLabel: 'Methodology'
+      });
+    }
+
+    if (!childNodes.some(isFiveWhysInvestigationRoleNode)) {
+      actions.push({
+        description: 'Add the first 5 Whys investigation node under the Problem Statement. Continue selecting each new node to build the 5 Why path step by step.',
+        direction: 'selected-to-new',
+        fiveWhysRole: 'FIVE_WHYS',
+        id: `${selectedNode.id}-five-why-analysis-selected-to-new`,
+        nodeType: 'WHY',
+        title: '5 Why Analysis',
+        typeLabel: 'Methodology'
+      });
+    }
+  } else if (selectedNode.nodeType === 'FAULT_GATE' && !nodes.some(isApprovalClosureRoleNode)) {
+    addRoleAction('APPROVAL_CLOSURE', 'selected-to-new', 'Add Approval & Closure');
+  } else if (selectedNode.nodeType === 'ISHIKAWA_CATEGORY') {
+    actions.push({
+      direction: 'new-to-selected',
+      id: `${selectedNode.id}-cause-new-to-selected`,
+      nodeType: 'CAUSE',
+      title: 'Add Cause',
+      typeLabel: 'Cause'
+    });
+  } else if (isFishboneCauseNode(selectedNode)) {
+    if (!childNodes.some(isEvidenceRoleNode)) {
+      addRoleAction('EVIDENCE', 'new-to-selected');
+    }
+    if (!childNodes.some(isFiveWhysInvestigationRoleNode)) {
+      addRoleAction('FIVE_WHYS', 'selected-to-new', 'Add 5 Whys');
+    }
+  } else if (isFiveWhysInvestigationRoleNode(selectedNode) && !childNodes.some(isRootCauseRoleNode)) {
+    addRoleAction('ROOT_CAUSE', 'selected-to-new', 'Add Root Cause');
+  } else if (isRootCauseRoleNode(selectedNode)) {
+    if (!childNodes.some(isEvidenceRoleNode)) {
+      addRoleAction('EVIDENCE', 'new-to-selected', 'Add Evidence');
+    }
+    if (!childNodes.some(isCapaRoleNode)) {
+      addRoleAction('CAPA', 'selected-to-new', 'Add CAPA');
+    }
+  } else if (isCapaRoleNode(selectedNode)) {
+    const existingStageRoles = new Set(childNodes.map(getFiveWhysNodeRoleSafe).filter(Boolean));
+
+    RCA_CAPA_STAGE_WORKFLOW_ROLES
+      .filter((role) => !existingStageRoles.has(role))
+      .forEach((role) => addRoleAction(role, 'selected-to-new'));
+  } else if (isCapaDownstreamStageRoleNode(selectedNode)) {
+    const standaloneBlock = getStandaloneFiveWhysCapaStageBlock(selectedNode, nodes);
+
+    const hasUnlinkedApprovalStage = Boolean(standaloneBlock?.approvalNode && standaloneBlock.stageNodes.some((stageNode) => (
+      !normalizeRcaLinkedNodeIds(stageNode.linkedNodeIds).includes(standaloneBlock.approvalNode?.id || '')
+    )));
+
+    if (standaloneBlock && (!standaloneBlock.approvalNode || hasUnlinkedApprovalStage)) {
+      actions.push({
+        actionType: 'CREATE_STANDALONE_FIVE_WHYS_CLOSURE',
+        description: standaloneBlock.approvalNode
+          ? 'Link every existing CAPA stage in this standalone 5 Why path into the single Approval & Closure node.'
+          : 'Add one Approval & Closure node for this standalone 5 Why path and link every existing CAPA stage into it.',
+        direction: 'selected-to-new',
+        fiveWhysRole: 'APPROVAL_CLOSURE',
+        id: `${standaloneBlock.capaNode.id}-standalone-five-whys-approval-closure`,
+        nodeType: 'WHY',
+        title: standaloneBlock.approvalNode ? 'Link CAPA stages to Approval & Closure' : 'Add Approval & Closure',
+        typeLabel: 'Final closure'
+      });
+    }
+
+    if (!childNodes.some(isEvidenceRoleNode)) {
+      actions.push({
+        description: 'Add an Evidence node and connect it into this CAPA stage so completion, risk, verification, or learning claims have proof.',
+        direction: 'new-to-selected',
+        fiveWhysRole: 'EVIDENCE',
+        id: `${selectedNodeId}-evidence-new-to-capa-stage`,
+        nodeType: 'WHY',
+        title: 'Add Evidence',
+        typeLabel: 'Evidence support'
+      });
+    }
+  }
+
+  return actions.slice(0, 6);
+}
+
+
+function getActiveRcaNodeDetailFields(
+  role: RcaFiveWhysNodeRole | null,
+  fields: Record<string, string>
+): Record<string, string> {
+  const deprecatedKeys = new Set(RCA_DEPRECATED_NODE_DETAIL_FIELD_KEYS[role || 'FIVE_WHYS'] || []);
+
+  if (!deprecatedKeys.size) {
+    return fields;
+  }
+
+  return Object.fromEntries(
+    Object.entries(fields).filter(([key]) => (
+      !deprecatedKeys.has(key) && !deprecatedKeys.has(key.replace(/OtherText$/, ''))
+    ))
+  );
 }
 
 function getFiveWhysRoleLabel(role: RcaFiveWhysNodeRole): string {
@@ -15857,7 +27395,26 @@ function buildDefaultRcaNodeDetailFields(
 
   if (role === 'PROBLEM') {
     defaults.problemStatement = incident?.title || '';
-    defaults.problemStatus = 'Open';
+  }
+
+  if (role === 'FIVE_WHYS') {
+    defaults.priorityLevel = 'Medium';
+    defaults.analysisStatus = 'Draft';
+    defaults.causeDisposition = 'Needs More Evidence';
+    defaults.evidenceStrength = 'Weak';
+    defaults.isAnswerVerified = 'Pending';
+    defaults.wouldFixingCausePreventProblem = 'Unknown';
+
+    for (let whyIndex = 1; whyIndex <= 5; whyIndex += 1) {
+      defaults[`why${whyIndex}VerificationStatus`] = 'Unverified';
+    }
+  }
+
+  if (role === 'ROOT_CAUSE') {
+    defaults.causeClassification = 'Root Cause';
+    defaults.validationStatus = 'Proposed';
+    defaults.wouldFixingPreventRecurrence = 'Unknown';
+    defaults.otherCausesRuledOut = 'In Progress';
   }
 
   if (role === 'CAPA') {
@@ -15902,6 +27459,16 @@ function getFiveWhysNodeBadgeLabel(
   role: RcaFiveWhysNodeRole = getFiveWhysDisplayRole(node, nodes, fallbackIndex)
 ): string {
   return getFiveWhysRoleLabel(role);
+}
+
+function getRcaCanvasNodeDisplayLabel(node: RcaNode, role: RcaFiveWhysNodeRole | null): string {
+  const label = node.label?.trim() || '';
+
+  if (role === 'ROOT_CAUSE' && (!label || /^cause$/i.test(label))) {
+    return 'Root Cause';
+  }
+
+  return label;
 }
 
 function getFiveWhysNodeRole(node: RcaNode): RcaFiveWhysNodeRole {
@@ -15965,7 +27532,7 @@ function getFiveWhysLegacyLabelRole(node: RcaNode): RcaFiveWhysNodeRole | null {
     return 'ANSWER';
   }
 
-  if (/^(verified\s+root\s+cause|root\s+cause)\b/i.test(label)) {
+  if (/^(verified\s+root\s+cause|root\s+cause|verified\s+cause)\b/i.test(label)) {
     return 'ROOT_CAUSE';
   }
 
@@ -16086,7 +27653,7 @@ function getFiveWhysChainDepth(node: RcaNode, nodes: RcaNode[]): number {
 
 function stripFiveWhysRolePrefix(label: string): string {
   return label
-    .replace(/^\s*(incident\s+details|incident\s*\/\s*problem statement|incident|problem\s+statement|problem\s+statment|containment|evidence|5\s*whys?|corrective\s+action|preventive\s+action|risk\s+assessment|effectiveness|lessons\s+learned|approval\s*&?\s*closure|verified\s+root\s+cause|root\s+cause|capa\s*\/\s*effectiveness verification|capa|answer|why\s*\d+)\s*[:\-]?\s*/i, '')
+    .replace(/^\s*(incident\s+details|incident\s*\/\s*problem statement|incident|problem\s+statement|problem\s+statment|containment|evidence|5\s*whys?|corrective\s+action|preventive\s+action|risk\s+assessment|effectiveness|lessons\s+learned|approval\s*&?\s*closure|verified\s+root\s+cause|root\s+cause|verified\s+cause|cause|capa\s*\/\s*effectiveness verification|capa|answer|why\s*\d+)\s*[:\-]?\s*/i, '')
     .trim();
 }
 
@@ -16095,7 +27662,7 @@ function getRcaNodePanelTitle(node: RcaNode): string {
     return getFiveWhysRoleLabel(getFiveWhysNodeRole(node));
   }
 
-  return node.isRootCause ? 'Verified root cause' : formatNodeType(node.nodeType);
+  return node.isRootCause ? 'Verified cause' : formatNodeType(node.nodeType);
 }
 
 function isRootCauseRoleNode(node: RcaNode | null | undefined): node is RcaNode {
@@ -16151,6 +27718,8 @@ function syncRootCauseTypeWithParentCategory(node: RcaNode, nodes: RcaNode[]): R
 function getResolvedNodeVisualStyle(node: RcaNode): RcaResolvedNodeVisualStyle {
   const defaults = node.nodeType === 'ISHIKAWA_CATEGORY'
     ? RCA_DEFAULT_CATEGORY_VISUAL_STYLE
+    : node.nodeType === 'COMMENT'
+      ? RCA_DEFAULT_COMMENT_VISUAL_STYLE
     : node.nodeType === 'STICKY_NOTE'
       ? RCA_DEFAULT_STICKY_NOTE_VISUAL_STYLE
       : RCA_DEFAULT_CAUSE_VISUAL_STYLE;
@@ -16196,6 +27765,7 @@ function cloneRcaNode(node: RcaNode): RcaNode {
 	    createdBy: node.createdBy ? { ...node.createdBy } : null,
 	    dimensions: node.dimensions ? { ...node.dimensions } : undefined,
 	    edgeStyle: node.edgeStyle ? { ...node.edgeStyle } : undefined,
+	    linkedNodeIds: [...(node.linkedNodeIds || [])],
 	    uiCoordinates: { ...node.uiCoordinates },
 	    visualStyle: node.visualStyle ? { ...node.visualStyle } : undefined,
     whyChain: [...node.whyChain]
@@ -16224,6 +27794,31 @@ function mergeRcaCanvasNodes(currentNodes: RcaNode[], incomingNodes: RcaNode[]):
   return mergedNodes;
 }
 
+function withMeasuredRcaNodeDimensions(
+  nodes: RcaNode[],
+  measuredNodeSizes: Map<string, { height: number; width: number }>
+): RcaNode[] {
+  if (!measuredNodeSizes.size) {
+    return nodes;
+  }
+
+  return nodes.map((node) => {
+    const measuredSize = measuredNodeSizes.get(node.id);
+
+    if (!measuredSize) {
+      return node;
+    }
+
+    return {
+      ...node,
+      dimensions: {
+        height: Math.max(1, Math.round(measuredSize.height)),
+        width: Math.max(1, Math.round(measuredSize.width))
+      }
+    };
+  });
+}
+
 function getRcaCanvasStateKey(incidentId: string, sessionId: string): string {
   return `${incidentId}:${sessionId}`;
 }
@@ -16239,8 +27834,8 @@ function buildRcaCanvasLayoutPatch(
   currentNodes: RcaNode[],
   arrangedNodeById: Map<string, RcaNode>,
   methodology: RcaMethodology
-): Map<string, RcaNode['uiCoordinates']> {
-  const layoutPatch = new Map<string, RcaNode['uiCoordinates']>();
+): Map<string, RcaCanvasLayoutPatchValue> {
+  const layoutPatch = new Map<string, RcaCanvasLayoutPatchValue>();
 
   currentNodes.forEach((node) => {
     const arrangedNode = arrangedNodeById.get(node.id);
@@ -16258,41 +27853,36 @@ function buildRcaCanvasLayoutPatch(
 
     const currentX = sanitizeRcaCanvasCoordinate(node.uiCoordinates?.x);
     const currentY = sanitizeRcaCanvasCoordinate(node.uiCoordinates?.y);
-
-    if (
+    const arrangedConnectionHandles = normalizeRcaNodeConnectionHandles(arrangedNode.connectionHandles);
+    const arrangedLinkedNodeIds = normalizeRcaLinkedNodeIds(arrangedNode.linkedNodeIds);
+    const shouldUpdateParentNode = node.parentNodeId !== arrangedNode.parentNodeId;
+    const shouldUpdateCoordinates = !(
       currentX === x &&
       currentY === y &&
       node.uiCoordinates?.layoutMethodology === methodology
-    ) {
+    );
+    const shouldUpdateConnectionHandles = getRcaConnectionHandleSignature(node.connectionHandles) !==
+      getRcaConnectionHandleSignature(arrangedConnectionHandles);
+    const shouldUpdateLinkedNodeIds = normalizeRcaLinkedNodeIds(node.linkedNodeIds).join('\u0000') !==
+      arrangedLinkedNodeIds.join('\u0000');
+
+    if (!shouldUpdateParentNode && !shouldUpdateCoordinates && !shouldUpdateConnectionHandles && !shouldUpdateLinkedNodeIds) {
       return;
     }
 
     layoutPatch.set(node.id, {
-      layoutMethodology: methodology,
-      x,
-      y
+      ...(shouldUpdateConnectionHandles ? { connectionHandles: arrangedConnectionHandles } : {}),
+      ...(shouldUpdateLinkedNodeIds ? { linkedNodeIds: arrangedLinkedNodeIds } : {}),
+      ...(shouldUpdateParentNode ? { parentNodeId: arrangedNode.parentNodeId } : {}),
+      uiCoordinates: {
+        layoutMethodology: methodology,
+        x,
+        y
+      }
     });
   });
 
   return layoutPatch;
-}
-
-function applyRcaCanvasLayoutPatch(
-  currentNodes: RcaNode[],
-  layoutPatch: Map<string, RcaNode['uiCoordinates']>
-): RcaNode[] {
-  return currentNodes.map((node) => {
-    const uiCoordinates = layoutPatch.get(node.id);
-
-    if (!uiCoordinates) {
-      return node;
-    }
-
-    return {
-      ...node,
-      uiCoordinates
-    };
-  });
 }
 
 function ensureRcaCanvasHasLocalVisibleNodes(
@@ -16361,8 +27951,11 @@ function sanitizeRcaCanvasNode(node: RcaNode): RcaNode | null {
     return null;
   }
 
-  const isStickyNote = node.nodeType === 'STICKY_NOTE';
-  const safeNodeType = isStickyNote ||
+  const isFreeformAnnotation = isFreeformRcaAnnotationNode(node);
+  const defaultAnnotationVisualStyle = node.nodeType === 'COMMENT'
+    ? RCA_DEFAULT_COMMENT_VISUAL_STYLE
+    : RCA_DEFAULT_STICKY_NOTE_VISUAL_STYLE;
+  const safeNodeType = isFreeformAnnotation ||
     node.nodeType === 'ISHIKAWA_CATEGORY' ||
     node.nodeType === 'CAUSE' ||
     node.nodeType === 'SUB_CAUSE' ||
@@ -16370,15 +27963,16 @@ function sanitizeRcaCanvasNode(node: RcaNode): RcaNode | null {
     node.nodeType === 'WHY'
     ? node.nodeType
     : 'WHY';
-  const stickyNoteContentSize = isStickyNote ? getStickyNoteContentSize(node) : null;
+  const annotationContentSize = isFreeformAnnotation ? getStickyNoteContentSize(node) : null;
 
   return {
     ...node,
     attachedEvidence: Array.isArray(node.attachedEvidence) ? node.attachedEvidence : [],
     connectionHandles: normalizeRcaNodeConnectionHandles(node.connectionHandles),
     detailFields: normalizeRcaNodeDetailFields(node.detailFields),
-    dimensions: stickyNoteContentSize || undefined,
+    dimensions: annotationContentSize || undefined,
     fiveWhysRole: safeNodeType === 'WHY' && isFiveWhysNodeRole(node.fiveWhysRole) ? node.fiveWhysRole : null,
+    linkedNodeIds: normalizeRcaLinkedNodeIds(node.linkedNodeIds),
     nodeType: safeNodeType,
     parentNodeId: node.parentNodeId,
     uiCoordinates: {
@@ -16386,15 +27980,15 @@ function sanitizeRcaCanvasNode(node: RcaNode): RcaNode | null {
       x,
       y
     },
-    visualStyle: isStickyNote && !node.visualStyle ? {
-      backgroundColor: RCA_DEFAULT_STICKY_NOTE_VISUAL_STYLE.backgroundColor,
-      borderColor: RCA_DEFAULT_STICKY_NOTE_VISUAL_STYLE.borderColor,
-      fontFamily: RCA_DEFAULT_STICKY_NOTE_VISUAL_STYLE.fontFamily,
-      fontSize: RCA_DEFAULT_STICKY_NOTE_VISUAL_STYLE.fontSize,
-      isBold: RCA_DEFAULT_STICKY_NOTE_VISUAL_STYLE.isBold,
-      isItalic: RCA_DEFAULT_STICKY_NOTE_VISUAL_STYLE.isItalic,
-      isUnderline: RCA_DEFAULT_STICKY_NOTE_VISUAL_STYLE.isUnderline,
-      textColor: RCA_DEFAULT_STICKY_NOTE_VISUAL_STYLE.textColor
+    visualStyle: isFreeformAnnotation && !node.visualStyle ? {
+      backgroundColor: defaultAnnotationVisualStyle.backgroundColor,
+      borderColor: defaultAnnotationVisualStyle.borderColor,
+      fontFamily: defaultAnnotationVisualStyle.fontFamily,
+      fontSize: defaultAnnotationVisualStyle.fontSize,
+      isBold: defaultAnnotationVisualStyle.isBold,
+      isItalic: defaultAnnotationVisualStyle.isItalic,
+      isUnderline: defaultAnnotationVisualStyle.isUnderline,
+      textColor: defaultAnnotationVisualStyle.textColor
     } : node.visualStyle,
     whyChain: Array.isArray(node.whyChain) ? node.whyChain : []
   };
@@ -16429,6 +28023,17 @@ function normalizeRcaNodeConnectionHandles(value: unknown): RcaNode['connectionH
   return connectionHandles;
 }
 
+function normalizeRcaLinkedNodeIds(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return [...new Set(value
+    .map((item) => String(item ?? '').trim())
+    .filter((item) => /^[A-Za-z0-9_-]{8,128}$/.test(item))
+  )].slice(0, 40);
+}
+
 function getNormalizedRcaNodeConnectionHandles(value: unknown): NonNullable<RcaNode['connectionHandles']> {
   return normalizeRcaNodeConnectionHandles(value) || {};
 }
@@ -16441,6 +28046,7 @@ function buildRcaHistoryNodeInput(node: RcaNode): RcaNodeInput {
 	    isRootCause: node.isRootCause,
     isSuspectedCause: node.isSuspectedCause,
     label: node.label,
+    linkedNodeIds: normalizeRcaLinkedNodeIds(node.linkedNodeIds),
     nodeType: node.nodeType,
     parentNodeId: node.parentNodeId,
     status: 'ACTIVE',
@@ -16464,6 +28070,7 @@ function getRcaNodeSnapshotSignature(nodes: RcaNode[]): string {
       isRootCause: node.isRootCause,
       isSuspectedCause: node.isSuspectedCause,
       label: node.label,
+      linkedNodeIds: normalizeRcaLinkedNodeIds(node.linkedNodeIds),
       nodeType: node.nodeType,
       parentNodeId: node.parentNodeId,
       status: node.status,
@@ -16483,7 +28090,30 @@ function isEditableShortcutTarget(target: EventTarget | null): boolean {
     return true;
   }
 
-  return ['INPUT', 'SELECT', 'TEXTAREA'].includes(target.tagName);
+  if (['INPUT', 'SELECT', 'TEXTAREA'].includes(target.tagName)) {
+    return true;
+  }
+
+  return Boolean(target.closest(
+    'input, select, textarea, [contenteditable="true"], [contenteditable="plaintext-only"], [role="textbox"], [data-rca-form-control="true"]'
+  ));
+}
+
+function isEditableShortcutEvent(event: KeyboardEvent): boolean {
+  if (isEditableShortcutTarget(event.target) || isEditableShortcutTarget(document.activeElement)) {
+    return true;
+  }
+
+  const eventPath = typeof event.composedPath === 'function' ? event.composedPath() : [];
+
+  return eventPath.some((target) => isEditableShortcutTarget(target));
+}
+
+function stopRcaCanvasControlEvent(event: React.SyntheticEvent<HTMLElement>) {
+  event.stopPropagation();
+  if ('stopImmediatePropagation' in event.nativeEvent && typeof event.nativeEvent.stopImmediatePropagation === 'function') {
+    event.nativeEvent.stopImmediatePropagation();
+  }
 }
 
 function getMiniMapColor(node: RcaNode): string {
@@ -16501,6 +28131,14 @@ function getMiniMapColor(node: RcaNode): string {
 
   if (node.nodeType === 'ISHIKAWA_CATEGORY') {
     return '#0891b2';
+  }
+
+  if (node.nodeType === 'COMMENT') {
+    return '#38bdf8';
+  }
+
+  if (node.nodeType === 'STICKY_NOTE') {
+    return '#f59e0b';
   }
 
   return '#64748b';
@@ -16582,17 +28220,206 @@ function hasCompletedFiveWhys(whyChain: string[] = []): boolean {
   return normalizeFiveWhyDraft(whyChain).every((why) => why.trim().length > 0);
 }
 
+function getFiveWhysCauseDisposition(fields: Record<string, string> = {}): string {
+  const disposition = fields.causeDisposition?.trim();
+
+  return disposition && RCA_FIVE_WHYS_CAUSE_DISPOSITION_OPTIONS.includes(disposition as typeof RCA_FIVE_WHYS_CAUSE_DISPOSITION_OPTIONS[number])
+    ? disposition
+    : 'Needs More Evidence';
+}
+
+function isFiveWhysDirectCauseDisposition(disposition: string): boolean {
+  return disposition === 'Ruled In - Direct Cause';
+}
+
+function isFiveWhysContributingCauseDisposition(disposition: string): boolean {
+  return disposition === 'Ruled In - Contributing Cause';
+}
+
+function isFiveWhysRuledOutDisposition(disposition: string): boolean {
+  return disposition === 'Ruled Out' || disposition === 'No Direct Impact';
+}
+
+function hasFiveWhysGovernedDecision(whyChain: string[] = [], fields: Record<string, string> = {}): boolean {
+  return hasCompletedFiveWhys(whyChain) &&
+    Boolean((fields.answerStatement || '').trim()) &&
+    Boolean((fields.reasonForDecision || '').trim()) &&
+    Boolean(getFiveWhysCauseDisposition(fields));
+}
+
+function buildFiveWhysDecisionSummary(fiveWhysNode: RcaNode): string {
+  const fields = fiveWhysNode.detailFields || {};
+  const disposition = getFiveWhysCauseDisposition(fields);
+  const selectedCause = fields.selectedCause?.trim() || getRcaCauseStatementForFiveWhys(fiveWhysNode);
+  const finalFinding = fields.answerStatement?.trim() || normalizeFiveWhyDraft(fiveWhysNode.whyChain)[4]?.trim();
+  const reason = fields.reasonForDecision?.trim();
+  const evidenceStrength = fields.evidenceStrength?.trim();
+  const preventionJudgment = fields.wouldFixingCausePreventProblem?.trim();
+  const summaryParts = [
+    `5 Whys decision: ${disposition}.`,
+    selectedCause ? `Cause tested: ${selectedCause}.` : '',
+    finalFinding ? `Final finding: ${finalFinding}.` : '',
+    reason ? `Reason: ${reason}.` : '',
+    evidenceStrength ? `Evidence strength: ${evidenceStrength}.` : '',
+    preventionJudgment ? `Would fixing this prevent recurrence: ${preventionJudgment}.` : ''
+  ].filter(Boolean);
+
+  return summaryParts.join('\n');
+}
+
+function appendRuledOutCause(existingValue: string | undefined, causeStatement: string): string {
+  const normalizedCauseStatement = causeStatement.trim();
+
+  if (!normalizedCauseStatement) {
+    return existingValue || '';
+  }
+
+  const existingLines = (existingValue || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const alreadyListed = existingLines.some((line) => line.toLowerCase() === normalizedCauseStatement.toLowerCase());
+
+  return alreadyListed
+    ? existingLines.join('\n')
+    : [...existingLines, normalizedCauseStatement].join('\n');
+}
+
+function buildFiveWhysLinkedCauseUpdate(
+  fiveWhysNode: RcaNode,
+  nodes: RcaNode[]
+): {
+  causeInput: RcaNodeInput;
+  causeNode: RcaNode;
+  optimisticCauseNode: RcaNode;
+} | null {
+  if (!isFiveWhysInvestigationRoleNode(fiveWhysNode)) {
+    return null;
+  }
+
+  const fields = fiveWhysNode.detailFields || {};
+
+  if (fields.analysisStatus !== 'Decision Applied' || !hasFiveWhysGovernedDecision(fiveWhysNode.whyChain, fields)) {
+    return null;
+  }
+
+  const causeNode = nodes.find((node) => node.parentNodeId === fiveWhysNode.id && isRootCauseRoleNode(node));
+
+  if (!causeNode) {
+    return null;
+  }
+
+  const disposition = getFiveWhysCauseDisposition(fields);
+  const isDirectCause = isFiveWhysDirectCauseDisposition(disposition);
+  const isContributingCause = isFiveWhysContributingCauseDisposition(disposition);
+  const isRuledOut = isFiveWhysRuledOutDisposition(disposition);
+  const selectedCause = fields.selectedCause?.trim() || getRcaCauseStatementForFiveWhys(causeNode);
+  const validationStatus = isDirectCause || isContributingCause
+    ? 'Approved'
+    : isRuledOut
+      ? 'Rejected'
+      : 'Needs More Investigation';
+  const existingCauseFields = causeNode.detailFields || {};
+  const nextCauseFields: Record<string, string> = {
+    ...existingCauseFields,
+    fiveWhysDecisionSourceNodeId: fiveWhysNode.id,
+    causeClassification: isDirectCause
+      ? 'Root Cause'
+      : isContributingCause
+        ? 'Contributing Cause'
+        : isRuledOut
+          ? 'Ruled Out'
+          : existingCauseFields.causeClassification || 'Needs More Evidence',
+    fiveWhysDisposition: disposition,
+    fiveWhysEvidenceStrength: fields.evidenceStrength || existingCauseFields.fiveWhysEvidenceStrength || '',
+    fiveWhysFinding: fields.answerStatement || existingCauseFields.fiveWhysFinding || '',
+    fiveWhysDecisionReason: fields.reasonForDecision || existingCauseFields.fiveWhysDecisionReason || '',
+    rootCauseStatement: existingCauseFields.rootCauseStatement || selectedCause,
+    validationComments: buildFiveWhysDecisionSummary(fiveWhysNode),
+    validationDate: new Date().toISOString().slice(0, 10),
+    validationStatus,
+    validatedBy: fields.decisionOwner || fields.verifiedBy || existingCauseFields.validatedBy || '',
+    wouldFixingPreventRecurrence: fields.wouldFixingCausePreventProblem || existingCauseFields.wouldFixingPreventRecurrence || 'Unknown'
+  };
+
+  if (isRuledOut) {
+    nextCauseFields.otherCausesRuledOut = 'Yes';
+    nextCauseFields.ruledOutCauseList = appendRuledOutCause(existingCauseFields.ruledOutCauseList, selectedCause);
+  }
+
+  const causeInput: RcaNodeInput = {
+    detailFields: nextCauseFields,
+    isRootCause: isDirectCause,
+    isSuspectedCause: isDirectCause || isContributingCause || disposition === 'Needs More Evidence'
+  };
+
+  return {
+    causeInput,
+    causeNode,
+    optimisticCauseNode: {
+      ...causeNode,
+      detailFields: nextCauseFields,
+      isRootCause: Boolean(causeInput.isRootCause),
+      isSuspectedCause: Boolean(causeInput.isSuspectedCause)
+    }
+  };
+}
+
 function buildEvidenceFromLink(url: string): RcaAttachedEvidence {
   const parsedUrl = new URL(url);
   const pathName = decodeURIComponent(parsedUrl.pathname.split('/').filter(Boolean).pop() || '');
   const fileName = pathName || parsedUrl.hostname;
 
   return {
+    contentType: null,
     fileHash: `link-${hashString(url)}`,
     fileName,
     fileUrl: url,
     uploadedAtIso: new Date().toISOString()
   };
+}
+
+const RCA_LINKED_EVIDENCE_NODE_DEFAULT_LABEL = 'Evidence is Linked';
+
+function shouldUseLinkedEvidenceDefaultLabel(label: string, detailFields: Record<string, string>): boolean {
+  const currentLabel = (label || '').trim();
+  const currentEvidenceTitle = (detailFields.evidenceTitle || '').trim();
+  const hasCustomEvidenceTitle = currentEvidenceTitle &&
+    !/^evidence$/i.test(currentEvidenceTitle) &&
+    currentEvidenceTitle !== currentLabel;
+
+  if (hasCustomEvidenceTitle) {
+    return false;
+  }
+
+  return !currentLabel ||
+    /^evidence$/i.test(currentLabel) ||
+    /^untitled\s+node$/i.test(currentLabel);
+}
+
+function buildRcaAttachedEvidenceFromLibraryEvidence(evidence: RailsEvidence): RcaAttachedEvidence {
+  const fileName = (evidence.fileName || evidence.label || 'Evidence record').trim();
+  const fileUrl = (evidence.fileUrl || `rails-evidence://${evidence.evidenceId}`).trim();
+
+  return {
+    contentType: evidence.contentType || null,
+    fileHash: `library-${evidence.evidenceId}`,
+    fileName,
+    fileUrl,
+    uploadedAtIso: evidence.uploadedAtIso || new Date().toISOString()
+  };
+}
+
+function getRcaLibraryEvidenceIdFromAttachedEvidence(evidence: RcaAttachedEvidence): string | null {
+  const hashMatch = evidence.fileHash.match(/^library-(.+)$/);
+
+  if (hashMatch?.[1]) {
+    return hashMatch[1];
+  }
+
+  const urlMatch = evidence.fileUrl.match(/^rails-evidence:\/\/(.+)$/);
+
+  return urlMatch?.[1] || null;
 }
 
 function buildRcaProjectCanvasSnapshot(nodes: RcaNode[]): {
@@ -16699,11 +28526,14 @@ function buildRcaProjectCanvasSnapshot(nodes: RcaNode[]): {
       const visualStyle = getResolvedNodeVisualStyle(layout.node);
       const isCategory = layout.node.nodeType === 'ISHIKAWA_CATEGORY';
       const isStickyNote = layout.node.nodeType === 'STICKY_NOTE';
+      const isCommentNode = layout.node.nodeType === 'COMMENT';
       const isFaultGate = layout.node.nodeType === 'FAULT_GATE';
 
       return {
         fill: isStickyNote
           ? '#fef3c7'
+          : isCommentNode
+            ? '#e0f2fe'
           : layout.node.isRootCause
             ? '#fff1f2'
             : isCategory
@@ -16725,6 +28555,8 @@ function buildRcaProjectCanvasSnapshot(nodes: RcaNode[]): {
             ? '#67e8f9'
             : isStickyNote
               ? '#f59e0b'
+              : isCommentNode
+                ? '#38bdf8'
               : visualStyle.borderColor || '#cbd5e1',
         width: Math.max(18, layout.width * scale),
         x: scaleX(layout.x),
@@ -16733,32 +28565,6 @@ function buildRcaProjectCanvasSnapshot(nodes: RcaNode[]): {
     }),
     width: viewport.width
   };
-}
-
-async function buildEvidencePreview(file: File): Promise<{ blob: Blob }> {
-  if (isHeicEvidenceFile(file)) {
-    const { default: heic2any } = await import('heic2any');
-    const convertedBlob = await heic2any({
-      blob: file,
-      quality: 0.86,
-      toType: 'image/jpeg'
-    });
-    const previewBlob = Array.isArray(convertedBlob) ? convertedBlob[0] : convertedBlob;
-
-    return { blob: previewBlob };
-  }
-
-  return { blob: file };
-}
-
-function isPreviewableImageFile(file: File): boolean {
-  return file.type.startsWith('image/') || /\.(heic|heif)$/i.test(file.name);
-}
-
-function isHeicEvidenceFile(file: File): boolean {
-  return file.type === 'image/heic' ||
-    file.type === 'image/heif' ||
-    /\.(heic|heif)$/i.test(file.name);
 }
 
 function blobToDataUrl(blob: Blob): Promise<string> {
@@ -16858,6 +28664,10 @@ function getEvidencePreviewUrl(item: RcaAttachedEvidence, previewUrls: Map<strin
     return previewUrl;
   }
 
+  if (isRcaLibraryAttachedEvidence(item)) {
+    return null;
+  }
+
   if (isImageEvidence(item) && isBrowserDisplayableImageUrl(item.fileUrl)) {
     return item.fileUrl;
   }
@@ -16865,8 +28675,62 @@ function getEvidencePreviewUrl(item: RcaAttachedEvidence, previewUrls: Map<strin
   return null;
 }
 
+function getRcaAttachedEvidenceThumbnailSrc(item: RcaAttachedEvidence): string {
+  if (!isRcaLibraryAttachedEvidence(item) && isImageEvidence(item) && (
+    isBrowserDisplayableImageUrl(item.fileUrl) ||
+    item.fileUrl.startsWith('/')
+  )) {
+    return item.fileUrl;
+  }
+
+  const extension = item.fileName.split('.').pop()?.toLowerCase() || '';
+  const fileUrl = item.fileUrl.toLowerCase();
+
+  if (extension === 'pdf' || fileUrl.includes('.pdf')) {
+    return '/assets/pdf-thumnail.png';
+  }
+
+  if (['xls', 'xlsx', 'xlsm', 'xlsb'].includes(extension)) {
+    return '/assets/Excel-Thumnail.png';
+  }
+
+  if (['doc', 'docx', 'docm'].includes(extension)) {
+    return '/assets/word-thumnail.png';
+  }
+
+  if (['ppt', 'pptx', 'pptm'].includes(extension)) {
+    return '/assets/PowerPoint-Thumnail.png';
+  }
+
+  if (extension === 'csv') {
+    return '/assets/csv-thumnail.png';
+  }
+
+  if (extension === 'json') {
+    return '/assets/JSON-Thumnail.png';
+  }
+
+  if (extension === 'txt') {
+    return '/assets/txt-thumnail.png';
+  }
+
+  return '/assets/Document-Thumnail.png';
+}
+
+function canHydrateRcaAttachedEvidenceThumbnail(item: RcaAttachedEvidence): boolean {
+  return isRcaLibraryAttachedEvidence(item) &&
+    isImageEvidence(item) &&
+    Boolean(item.fileUrl) &&
+    !item.fileUrl.startsWith('rails-evidence://');
+}
+
+function isRcaLibraryAttachedEvidence(item: RcaAttachedEvidence): boolean {
+  return Boolean(getRcaLibraryEvidenceIdFromAttachedEvidence(item));
+}
+
 function isImageEvidence(item: RcaAttachedEvidence): boolean {
-  return /\.(apng|avif|gif|heic|heif|jpe?g|png|svg|tiff?|webp)$/i.test(item.fileName) ||
+  return /^image\//i.test(item.contentType || '') ||
+    /\.(apng|avif|gif|heic|heif|jpe?g|png|svg|tiff?|webp)$/i.test(item.fileName) ||
     /\.(apng|avif|gif|heic|heif|jpe?g|png|svg|tiff?|webp)(\?|#|$)/i.test(item.fileUrl) ||
     item.fileUrl.startsWith('blob:') ||
     item.fileUrl.startsWith('data:image/');
@@ -16958,15 +28822,6 @@ function hashString(value: string): string {
   return Math.abs(hash).toString(16);
 }
 
-async function hashEvidenceFile(file: File): Promise<string> {
-  if (window.crypto?.subtle) {
-    const digest = await window.crypto.subtle.digest('SHA-256', await file.arrayBuffer());
-    return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
-  }
-
-  return window.crypto?.randomUUID?.() || `${Date.now()}-${file.name}`;
-}
-
 function getRpnClassName(rpnScore: number): string {
   if (rpnScore >= 100) {
     return 'bg-red-100 text-red-700';
@@ -16979,6 +28834,61 @@ function getRpnClassName(rpnScore: number): string {
   return 'bg-emerald-100 text-emerald-700';
 }
 
+function getRcaRiskBand(rpnScore: number): { className: string; label: string } {
+  if (rpnScore >= 100) {
+    return {
+      className: 'bg-red-50 text-red-700 ring-red-200',
+      label: 'Critical'
+    };
+  }
+
+  if (rpnScore >= 25) {
+    return {
+      className: 'bg-amber-50 text-amber-700 ring-amber-200',
+      label: 'Elevated'
+    };
+  }
+
+  return {
+    className: 'bg-emerald-50 text-emerald-700 ring-emerald-200',
+    label: 'Controlled'
+  };
+}
+
+function isDefaultRcaRiskProfile(riskFactors: RcaIncident['riskFactors']): boolean {
+  return riskFactors.severity === 3 && riskFactors.occurrence === 3 && riskFactors.detection === 3;
+}
+
+function getRcaIncidentStageLabel(incident: RcaIncident): string {
+  if (incident.status === 'CLOSED') {
+    return 'Closed';
+  }
+
+  if (incident.status === 'INVESTIGATING') {
+    return incident.activeSessionId ? 'Investigation active' : 'Investigation setup';
+  }
+
+  return incident.activeSessionId ? 'Canvas ready' : 'Intake triage';
+}
+
+function getRcaIncidentAssetSummary(incident: RcaIncident): { isAssigned: boolean; label: string } {
+  const assetId = getRcaEditableIncidentAssetValue(incident.assetId);
+
+  return {
+    isAssigned: Boolean(assetId),
+    label: assetId ? assetId : 'Asset assignment required'
+  };
+}
+
+function getRcaEditableIncidentAssetValue(assetId: string | null | undefined): string {
+  const value = String(assetId || '').trim();
+  const normalizedValue = value.toLowerCase();
+
+  return !value || normalizedValue === 'unassigned asset' || normalizedValue === 'asset not assigned'
+    ? ''
+    : value;
+}
+
 function formatStatus(status: string): string {
   return status
     .split('_')
@@ -16987,6 +28897,10 @@ function formatStatus(status: string): string {
 }
 
 function formatNodeType(nodeType: RcaNodeType): string {
+  if (nodeType === 'WHY') {
+    return 'RCA Stage';
+  }
+
   return nodeType
     .split('_')
     .map((part) => `${part.slice(0, 1)}${part.slice(1).toLowerCase()}`)
@@ -17147,19 +29061,19 @@ function buildReferenceAuditPackageHtml(project: ReferenceRcaProject, nodes: Rca
     ['Customers', 'Consumers, QA, operations, EHS, regulatory auditors, customer quality representatives']
   ];
   const causeVerificationMatrix = [
-    ['Lower oven return-panel seal gap', 'Machine', 'Physical inspection, photo, thermal scan, PM history', 'Seal gap visible; heat signature aligned with accumulation zone; PM route omitted lower return seal', 'Validated root cause'],
-    ['Under-oven inspection missing from PM and sanitation route', 'Method', 'Checklist review, gemba walk, pre-op record audit', 'No required under-oven cavity check or photo verification before incident', 'Validated root cause'],
-    ['Flour applicator containment skirt escape', 'Material', 'Line observation, dust sample, changeover standard review', 'Dust plume observed after format change; sample confirmed fine flour', 'Validated contributing root cause'],
+    ['Lower oven return-panel seal gap', 'Machine', 'Physical inspection, photo, thermal scan, PM history', 'Seal gap visible; heat signature aligned with accumulation zone; PM route omitted lower return seal', 'Validated cause'],
+    ['Under-oven inspection missing from PM and sanitation route', 'Method', 'Checklist review, gemba walk, pre-op record audit', 'No required under-oven cavity check or photo verification before incident', 'Validated cause'],
+    ['Flour applicator containment skirt escape', 'Material', 'Line observation, dust sample, changeover standard review', 'Dust plume observed after format change; sample confirmed fine flour', 'Validated contributing cause'],
     ['Negative airflow toward oven underside', 'Environment', 'Smoke pencil test and facilities airflow review', 'Airflow pulled dust from Die Cut discharge toward oven lower cavity', 'Validated contributing condition'],
-    ['Operator training gap', 'People', 'Training roster and interview review', 'Roster complete but training did not include hidden oven underside examples', 'System weakness, not direct root cause'],
+    ['Operator training gap', 'People', 'Training roster and interview review', 'Roster complete but training did not include hidden oven underside examples', 'System weakness, not direct cause'],
     ['Conveyor rub point generated ignition heat', 'Machine', 'Inspection and thermal scan', 'Rub point minor and outside ignition location; no matching heat signature', 'Eliminated'],
     ['Humidity spike caused clumping', 'Environment', 'Humidity trend and residue review', 'Humidity helped adherence but did not explain dust source or ignition path', 'Contributing background only'],
     ['Metal detector failure', 'Measurement', 'Challenge test and calibration review', 'Detector passed before restart and is downstream from fire mechanism', 'Eliminated']
   ];
   const fiveWhyAnalyses = [
-    ['Lower oven return-panel seal gap', project.nodeDetails['machine-seal-gap']?.whyChain || [], 'Validated root cause'],
-    ['PM and sanitation route did not include under-oven cavity inspection', project.nodeDetails['method-pm-under-oven-missing']?.whyChain || [], 'Validated root cause'],
-    ['Fine flour escaped Die Cut applicator', project.nodeDetails['material-flour-escape']?.whyChain || [], 'Validated contributing root cause'],
+    ['Lower oven return-panel seal gap', project.nodeDetails['machine-seal-gap']?.whyChain || [], 'Validated cause'],
+    ['PM and sanitation route did not include under-oven cavity inspection', project.nodeDetails['method-pm-under-oven-missing']?.whyChain || [], 'Validated cause'],
+    ['Fine flour escaped Die Cut applicator', project.nodeDetails['material-flour-escape']?.whyChain || [], 'Validated contributing cause'],
     ['Negative airflow pulled dust toward oven underside', [
       'Why did dust migrate under the oven? Airflow moved from the Die Cut discharge toward the lower oven cavity.',
       'Why was airflow moving that way? The discharge area was under negative draw compared with the oven underside.',
@@ -17172,7 +29086,7 @@ function buildReferenceAuditPackageHtml(project: ReferenceRcaProject, nodes: Rca
       'Why was it treated that way? Stop authority examples focused on jams, injury risk, and product contamination.',
       'Why did examples miss combustible dust? Training was written for ingredient handling rooms, not this oven geometry.',
       'Why was training not updated? Near-miss learning was not routed to the training owner.',
-      'Why is this not the root cause? The hazard existed because controls allowed dust to escape and accumulate.'
+      'Why is this not the verified cause? The hazard existed because controls allowed dust to escape and accumulate.'
     ], 'System weakness, CAPA included'],
     ['Conveyor tracking rub point', [
       'Why was heat suspected? A rub mark was found near the transfer path.',
@@ -17185,7 +29099,7 @@ function buildReferenceAuditPackageHtml(project: ReferenceRcaProject, nodes: Rca
       'Why was capture reduced? Nozzle was not centered after changeover.',
       'Why did changeover miss it? Setup check confirmed product flow, not dust capture.',
       'Why was dust capture omitted? The process standard lacked a capture efficiency check.',
-      'Why is it not standalone root cause? Dust still needed seal gap and airflow path to reach hot surfaces.',
+      'Why is it not a standalone cause? Dust still needed seal gap and airflow path to reach hot surfaces.',
       'Why retain it? It is a preventive action input for containment skirt validation.'
     ], 'Contributing process weakness'],
     ['Metal detector control failure', [
@@ -17592,7 +29506,7 @@ function buildReferenceAuditPackageHtml(project: ReferenceRcaProject, nodes: Rca
           <li>Cause Verification Matrix</li>
           <li>Detailed 5 Whys</li>
           <li>Evidence-Based Elimination</li>
-          <li>Root Cause Validation</li>
+          <li>Cause Validation</li>
           <li>Risk Assessment</li>
           <li>Corrective and Preventive Actions</li>
           <li>Complete CAPA</li>
@@ -17605,7 +29519,7 @@ function buildReferenceAuditPackageHtml(project: ReferenceRcaProject, nodes: Rca
       <section class="card">
         <p class="eyebrow">1. Executive Summary</p>
         <h2>Executive Summary</h2>
-        <p>The investigation determined that flour dust escaped from the Die Cut applicator, migrated through an unsealed lower oven return-panel path, accumulated in a hidden under-oven cavity, and contacted a hot surface. The event was contained immediately, affected product was placed on QA hold, and the RCA team validated three root causes plus one contributing environmental condition using attached evidence, 5 Whys, Fishbone analysis, maintenance records, lab data, and controlled restart checks.</p>
+        <p>The investigation determined that flour dust escaped from the Die Cut applicator, migrated through an unsealed lower oven return-panel path, accumulated in a hidden under-oven cavity, and contacted a hot surface. The event was contained immediately, affected product was placed on QA hold, and the RCA team validated three causes plus one contributing environmental condition using attached evidence, 5 Whys, Fishbone analysis, maintenance records, lab data, and controlled restart checks.</p>
         <div class="grid-three">
           <div class="metric"><span>Primary Cause</span><strong>Oven lower seal gap</strong></div>
           <div class="metric"><span>System Cause</span><strong>Missing under-oven inspection</strong></div>
@@ -17663,7 +29577,7 @@ function buildReferenceAuditPackageHtml(project: ReferenceRcaProject, nodes: Rca
       <section class="card">
         <p class="eyebrow">9. 6M Fishbone Analysis</p>
         <h2>6M Fishbone Analysis</h2>
-        <p>The 6M Fishbone branch set was built in the RCA canvas and sealed with the audit package. Root causes are marked in the branch lists below.</p>
+        <p>The 6M Fishbone branch set was built in the RCA canvas and sealed with the audit package. Verified causes are marked in the branch lists below.</p>
       </section>
       <div class="grid">
         ${branchHtml}
@@ -17700,10 +29614,10 @@ function buildReferenceAuditPackageHtml(project: ReferenceRcaProject, nodes: Rca
         )}
       </section>
       <section class="card">
-        <p class="eyebrow">13. Root Cause Validation</p>
-        <h2>Root Cause Validation</h2>
+        <p class="eyebrow">13. Cause Validation</p>
+        <h2>Cause Validation</h2>
         ${renderAuditTable(
-          ['Validated Cause', 'Validation Evidence', 'CAPA Link'],
+          ['Validated Root Cause', 'Validation Evidence', 'CAPA Link'],
           validatedNodes.map((node) => [
             node.label,
             (project.nodeDetails[node.id]?.evidence || [])
@@ -17809,7 +29723,7 @@ function buildReferenceAuditPackageHtml(project: ReferenceRcaProject, nodes: Rca
       </section>
       <section class="card">
         <p class="eyebrow">Legacy Summary</p>
-        <h2>Verified Root Causes</h2>
+        <h2>Verified Causes</h2>
         <ul>
           ${rootCauses.map((node) => `<li>${escapeHtml(node.label)}</li>`).join('')}
         </ul>

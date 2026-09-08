@@ -174,20 +174,54 @@ done
 
 ## Deploy
 
-Prepare the non-secret environment file:
+> **Read this before using `--env-vars-file`.**
+>
+> `--env-vars-file` **replaces** every environment variable on the service. It
+> does not merge. Any variable that is live but missing from
+> `cloudrun.env.yaml` is deleted, with no warning, while the service keeps
+> serving traffic.
+>
+> On 4 September 2026 the file had drifted four variables behind the running
+> service. Deploying with it would have removed `SYNZAPP_PUBLIC_BASE_URL`,
+> `SYNZAPP_RETENTION_SCHEDULER_SECRET`, `SYNZAPP_STAFF_DOMAIN` and
+> `GOOGLE_CLOUD_PROJECT`.
+>
+> There is now a check that refuses when this would happen. Use it.
+
+### Routine deploy: code changed, environment did not
+
+This is almost every deploy. Pass no environment flags at all, and the live
+values are left exactly as they are.
 
 ```bash
 cd /Users/geraldnyah/Documents/MeetingIntelligence/SYNZAPP/backend
-cp cloudrun.env.example.yaml cloudrun.env.yaml
+npm test                       # read the result yourself, do not chain with &&
+gcloud run deploy synzapp-backend --source . --region us-central1
 ```
 
-Before production, edit `cloudrun.env.yaml`:
+Service account, scaling, secrets and environment all persist from the previous
+revision when their flags are omitted.
 
-- Change `CORS_ORIGIN` from `*` to the deployed Synzapp web origin.
-- Change `APNS_ENVIRONMENT` to `production` for production iOS builds.
-- Set `SYNZAPP_REQUIRE_APP_CHECK=true` only after App Check is fully configured for web and mobile clients.
+### Deploy that also changes environment variables
 
-Deploy:
+Run the check first. It compares the live service against the file and refuses
+if anything would be lost.
+
+```bash
+bash scripts/checkCloudRunEnv.sh
+```
+
+If it refuses, either deploy without env flags as above, or bring the file up to
+date from the live service and then deploy with it:
+
+```bash
+bash scripts/checkCloudRunEnv.sh --sync
+```
+
+`--sync` rewrites `cloudrun.env.yaml` from what is actually running, so nothing
+is lost. The file is gitignored and is written mode 600.
+
+Only once the check passes:
 
 ```bash
 export PROJECT_ID="synzapp-a7ee3"
@@ -208,6 +242,37 @@ gcloud run deploy "$SERVICE_NAME" \
   --timeout 3600 \
   --env-vars-file cloudrun.env.yaml \
   --set-secrets OPENAI_API_KEY=synzapp-openai-api-key:latest,PHONE_HASH_SECRET=synzapp-phone-hash-secret:latest,PHONE_ENCRYPTION_SECRET=synzapp-phone-encryption-secret:latest,APNS_TEAM_ID=synzapp-apns-team-id:latest,APNS_KEY_ID=synzapp-apns-key-id:latest,APNS_AUTH_KEY=synzapp-apns-auth-key:latest
+```
+
+### First ever deploy of a new service
+
+Start from the example file, then follow the section above.
+
+```bash
+cp cloudrun.env.example.yaml cloudrun.env.yaml
+```
+
+Before production, edit `cloudrun.env.yaml`:
+
+- Change `CORS_ORIGIN` from `*` to the deployed Synzapp web origin.
+- Change `APNS_ENVIRONMENT` to `production` for production iOS builds.
+- Set `SYNZAPP_REQUIRE_APP_CHECK=true` only after App Check is fully configured
+  for web and mobile clients.
+
+### Before any deploy, save the current config
+
+One command, and it is the difference between a bad deploy being an annoyance
+and being an outage.
+
+```bash
+gcloud run services describe synzapp-backend --region us-central1 --format=yaml > /tmp/synzapp-backend.before.yaml
+```
+
+To roll back, Cloud Run keeps every revision:
+
+```bash
+gcloud run revisions list --service synzapp-backend --region us-central1
+gcloud run services update-traffic synzapp-backend --region us-central1 --to-revisions REVISION_NAME=100
 ```
 
 After deploy, Cloud Run prints a service URL. Test it:

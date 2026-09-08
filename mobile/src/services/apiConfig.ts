@@ -1,7 +1,7 @@
 import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 
-const SYNZAPP_HOSTED_API_URL = 'https://synzapp-backend-psqxb3sewa-uc.a.run.app';
+const SYNZAPP_HOSTED_API_URL = 'https://synzapp-backend-291906951893.us-central1.run.app';
 const LOCAL_API_FLAG_VALUES = new Set(['1', 'true', 'yes', 'local']);
 
 interface ExpoHostConfig {

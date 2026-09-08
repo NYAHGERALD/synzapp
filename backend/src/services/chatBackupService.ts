@@ -68,6 +68,20 @@ export async function saveEncryptedChatBackup(
     throw validationError('Encrypted backup is too large for this backup path.');
   }
 
+  // The generation about to be replaced is kept first.
+  //
+  // There is one backup per person and every upload overwrites it, which is
+  // fine until the moment it is not: reinstall the app, and the fresh device
+  // holds nothing readable — the old messages are sealed to a device key that
+  // went with the uninstall. Back up from there before restoring and the only
+  // copy of the history is replaced by an empty one, irrecoverably, from a
+  // single tap on a button that says "Back up now".
+  //
+  // So the previous generation is copied aside before the new one lands. It
+  // costs one object per person and it turns an unrecoverable mistake into a
+  // recoverable one.
+  await keepPreviousBackupGeneration(storagePath, context.tenantId, decodedToken.uid);
+
   try {
     await storageBucket.file(storagePath).save(payload, {
       contentType: 'application/json',
@@ -187,6 +201,55 @@ async function getActiveBackupContext(
   }
 
   return { tenantId: context.tenantId };
+}
+
+/**
+ * Copies the stored backup aside before it is overwritten.
+ *
+ * Best effort on purpose. Somebody's backup failing to run because the previous
+ * one could not be copied would be a worse outcome than having only one
+ * generation, so a failure here is left for the next upload to retry.
+ */
+async function keepPreviousBackupGeneration(
+  storagePath: string,
+  tenantId: string,
+  uid: string
+): Promise<void> {
+  try {
+    const current = storageBucket.file(storagePath);
+    const [exists] = await current.exists();
+
+    if (!exists) {
+      return;
+    }
+
+    await current.copy(storageBucket.file(getPreviousBackupStoragePath(tenantId, uid)));
+
+    const metadata = await getBackupMetadataRef(tenantId, uid).get();
+
+    if (metadata.exists) {
+      await getPreviousBackupMetadataRef(tenantId, uid).set({
+        ...metadata.data(),
+        backupId: 'previous'
+      });
+    }
+  } catch {
+    // See above: never let this stop a backup from being taken.
+  }
+}
+
+function getPreviousBackupStoragePath(tenantId: string, uid: string): string {
+  return `organizations/${tenantId}/users/${uid}/chat-backups/previous.synzappbackup`;
+}
+
+function getPreviousBackupMetadataRef(tenantId: string, uid: string) {
+  return firestore
+    .collection('organizations')
+    .doc(tenantId)
+    .collection('users')
+    .doc(uid)
+    .collection('chatBackups')
+    .doc('previous');
 }
 
 function getBackupStoragePath(tenantId: string, uid: string): string {

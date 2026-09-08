@@ -3,6 +3,8 @@ import * as Crypto from 'expo-crypto';
 import * as SecureStore from 'expo-secure-store';
 import nacl from 'tweetnacl';
 import { getSynzappApiBaseUrl } from './apiConfig';
+import { toPortableChatMediaUri } from './chatMediaPaths';
+import type { ChatMessage } from './chatApi';
 import { getRegisteredDeviceHeaders } from './deviceIdentity';
 import {
   listCachedChatConversations,
@@ -63,6 +65,9 @@ const chatBackupSecureStoreOptions: SecureStore.SecureStoreOptions = {
   keychainService: 'synzapp.chat.backup.v1'
 };
 
+/** Matches the server's own ceiling, so the failure is explained here. */
+const MAX_BACKUP_CIPHERTEXT_LENGTH = 4_500_000;
+
 export async function createEncryptedChatBackup(input: {
   idToken: string;
   ownerUid: string;
@@ -76,12 +81,25 @@ export async function createEncryptedChatBackup(input: {
   const backupCreatedAt = new Date().toISOString();
   const plaintext: ChatBackupPlaintext = {
     backupCreatedAt,
-    conversations,
+    conversations: conversations.map(toPortableConversationRecord),
     ownerUid: input.ownerUid,
     tenantId: input.tenantId,
     version: 1
   };
   const encryptedPayload = encryptJson(plaintext, recoveryKeyResult.keyBytes);
+
+  console.log(
+    `[SynzappBackup] built conversations=${conversations.length} ciphertextKb=${Math.round(encryptedPayload.ciphertext.length / 1024)}`
+  );
+
+  // Said plainly rather than as a bare upload failure. The server's limit is a
+  // fixed 4.5 MB, so a backup that outgrows it will keep failing every time
+  // until something is removed, and "unable to sync" gives nobody a way to act.
+  if (encryptedPayload.ciphertext.length > MAX_BACKUP_CIPHERTEXT_LENGTH) {
+    throw new Error(
+      `This chat history is too large to back up (${Math.round(encryptedPayload.ciphertext.length / 1024)} KB of a ${Math.round(MAX_BACKUP_CIPHERTEXT_LENGTH / 1024)} KB limit). Clearing older chats will bring it back under.`
+    );
+  }
   const response = await fetch(`${getSynzappApiBaseUrl()}/api/profile/chat/backups/latest`, {
     body: JSON.stringify({
       algorithm: 'nacl-secretbox+synzapp-chat-backup-v1',
@@ -237,6 +255,19 @@ export async function storeChatBackupRecoveryKey(recoveryKey: string): Promise<v
   );
 }
 
+export async function clearStoredChatBackupRecoveryKey(): Promise<void> {
+  const secureStoreAvailable = await SecureStore.isAvailableAsync();
+
+  if (!secureStoreAvailable) {
+    return;
+  }
+
+  await SecureStore.deleteItemAsync(
+    CHAT_BACKUP_RECOVERY_KEY_STORAGE_KEY,
+    chatBackupSecureStoreOptions
+  ).catch(() => undefined);
+}
+
 async function getOrCreateChatBackupRecoveryKey(): Promise<{
   created: boolean;
   keyBytes: Uint8Array;
@@ -345,16 +376,187 @@ function bytesToUtf8(bytes: Uint8Array): string {
   return decodeURIComponent(encodedValue);
 }
 
+/**
+ * What actually went wrong, said out loud.
+ *
+ * This used to answer "Unable to sync encrypted chat backup" to everything,
+ * including a rejection that arrived with a perfectly good explanation
+ * attached. Three separate size limits sit on this upload — the body parser's,
+ * the schema's, and whatever a proxy in front of them thinks — and a generic
+ * message makes it impossible to tell which one was hit, so the failure was
+ * guessed at rather than read.
+ */
 async function getResponseErrorMessage(response: Response): Promise<string> {
+  const raw = await response.text().catch(() => '');
+
   try {
-    const body = await response.json();
+    const body = JSON.parse(raw);
 
     if (typeof body?.error === 'string') {
+      console.log(`[SynzappBackup] rejected status=${response.status} reason=${body.error}`);
+
       return body.error;
     }
   } catch {
-    return 'Unable to sync encrypted chat backup.';
+    // Not JSON at all, which is itself the clue: something in front of the
+    // application refused it before any of our own handlers saw it.
   }
 
-  return 'Unable to sync encrypted chat backup.';
+  console.log(
+    `[SynzappBackup] rejected status=${response.status} nonJsonBody=${raw.slice(0, 180)}`
+  );
+
+  return response.status === 413
+    ? 'This chat history is too large to back up.'
+    : `The backup was refused (${response.status}).`;
+}
+
+
+/**
+ * Strips device-specific media paths out of a backup.
+ *
+ * A backup is meant to be restorable - onto a reinstalled app, or a different
+ * device. An absolute media path is meaningless in both cases: it names a
+ * container that no longer exists, or never existed. Recording the portable
+ * reference instead means a restore points at wherever media lives on the
+ * device doing the restoring.
+ */
+function toPortableConversationRecord<T extends { messages: ChatMessage[] }>(conversation: T): T {
+  return {
+    ...conversation,
+    messages: conversation.messages.map(toPortableMessageMedia)
+  };
+}
+
+function toPortableMessageMedia(message: ChatMessage): ChatMessage {
+  const media = message.media ? toPortableMediaAttachment(message.media) : message.media;
+  const mediaItems = Array.isArray(message.mediaItems)
+    ? message.mediaItems.map(toPortableMediaAttachment)
+    : message.mediaItems;
+  const image = message.image ? toPortableMediaAttachment(message.image) : message.image;
+
+  return {
+    ...message,
+    image,
+    media,
+    mediaItems
+  } as ChatMessage;
+}
+
+/**
+ * One attachment as it goes into a backup: a reference, not a picture.
+ *
+ * The thumbnail is dropped. It is tens of kilobytes of base64 per attachment,
+ * it is carried inside the message, and the server refuses a backup whose
+ * ciphertext passes 4.5 MB — so a chat that accumulated video quietly grew a
+ * backup it could no longer upload. Worse, the automatic backups fail silently,
+ * so the first anybody hears of it is when they press the button by hand.
+ *
+ * What is kept is everything needed to find the media again: its id, its name,
+ * its size, and where it sits locally. A restored bubble shows a placeholder
+ * until its still is fetched, which is a far smaller loss than a backup that
+ * stopped working weeks ago and said nothing.
+ */
+function toPortableMediaAttachment<T extends { localUri?: string; thumbnailDataUrl?: string }>(
+  media: T
+): T {
+  if (!media) {
+    return media;
+  }
+
+  const { thumbnailDataUrl, ...withoutThumbnail } = media;
+
+  return {
+    ...withoutThumbnail,
+    ...(media.localUri ? { localUri: toPortableChatMediaUri(media.localUri) } : {})
+  } as T;
+}
+
+export type ChatBackupRestoreStatus = 'approved' | 'claimed' | 'denied' | 'pending';
+
+export interface ChatBackupRestoreRequest {
+  approvedAtMs: number | null;
+  approvedByName: string | null;
+  claimedAtMs: number | null;
+  deviceId: string;
+  deviceName: string | null;
+  requestedAtMs: number;
+  requestedByName: string;
+  requestId: string;
+  status: ChatBackupRestoreStatus;
+  uid: string;
+}
+
+async function backupFetch(path: string, idToken: string, init: RequestInit = {}) {
+  const response = await fetch(`${getSynzappApiBaseUrl()}${path}`, {
+    ...init,
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${idToken}`,
+      'Content-Type': 'application/json',
+      ...(await getRegisteredDeviceHeaders(idToken)),
+      ...(init.headers || {})
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return response.json();
+}
+
+/**
+ * Puts this device's backup key into the organization's escrow.
+ *
+ * Called straight after a backup. Without it the key exists only on this
+ * device, so reinstalling the app makes every backup it ever made permanently
+ * unreadable — which is what used to happen.
+ *
+ * A failure here is reported by the caller rather than swallowed: a backup
+ * whose key was not escrowed is one nobody will be able to restore, and finding
+ * that out at restore time is far too late.
+ */
+export async function escrowChatBackupKey(input: {
+  deviceId: string;
+  idToken: string;
+  recoveryKey: string;
+}): Promise<void> {
+  await backupFetch('/api/profile/chat/backups/escrow', input.idToken, {
+    body: JSON.stringify({ deviceId: input.deviceId, recoveryKey: input.recoveryKey }),
+    method: 'POST'
+  });
+}
+
+/** Asks an administrator to release this person's backup to this device. */
+export async function requestChatBackupRestore(input: {
+  deviceId: string;
+  deviceName?: string | null;
+  idToken: string;
+}): Promise<ChatBackupRestoreRequest> {
+  const body = await backupFetch('/api/profile/chat/backups/restore-requests', input.idToken, {
+    body: JSON.stringify({ deviceId: input.deviceId, deviceName: input.deviceName || null }),
+    method: 'POST'
+  }) as { request: ChatBackupRestoreRequest };
+
+  return body.request;
+}
+
+/**
+ * Collects the key once an administrator has approved.
+ *
+ * Null while nothing has been approved, which is the ordinary case between
+ * asking and being answered. The approval is spent by this call, so a second
+ * restore needs a second approval.
+ */
+export async function claimChatBackupRestore(input: {
+  deviceId: string;
+  idToken: string;
+}): Promise<string | null> {
+  const body = await backupFetch('/api/profile/chat/backups/restore-requests/claim', input.idToken, {
+    body: JSON.stringify({ deviceId: input.deviceId }),
+    method: 'POST'
+  }) as { recoveryKey: string | null };
+
+  return body.recoveryKey || null;
 }

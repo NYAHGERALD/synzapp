@@ -1,13 +1,36 @@
 import admin from 'firebase-admin';
+import { readFileSync } from 'node:fs';
 import { env } from './env.js';
 
 function getCredential() {
-  if (env.firebaseServiceAccountJson) {
-    const serviceAccount = JSON.parse(env.firebaseServiceAccountJson) as admin.ServiceAccount;
+  const serviceAccount = getServiceAccount();
+
+  if (serviceAccount) {
     return admin.credential.cert(serviceAccount);
   }
 
   return admin.credential.applicationDefault();
+}
+
+function getServiceAccount(): admin.ServiceAccount | null {
+  const rawJson = env.firebaseServiceAccountJson?.trim();
+
+  if (rawJson?.startsWith('{')) {
+    try {
+      return JSON.parse(rawJson) as admin.ServiceAccount;
+    } catch {
+      // Local env files sometimes keep GOOGLE_APPLICATION_CREDENTIALS as the
+      // usable source while FIREBASE_SERVICE_ACCOUNT_JSON is partially filled.
+    }
+  }
+
+  const credentialPath = process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim();
+
+  if (credentialPath) {
+    return JSON.parse(readFileSync(credentialPath, 'utf8')) as admin.ServiceAccount;
+  }
+
+  return null;
 }
 
 const app = admin.apps.length

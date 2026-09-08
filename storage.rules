@@ -39,6 +39,16 @@ service firebase.storage {
       allow read, write: if false;
     }
 
+    // Photos and video on a chat action.
+    //
+    // Both denied to clients. Uploads use a short lived signed link issued by
+    // the backend after it has checked who is asking, and reads use a signed
+    // link too. A client that could write here directly could put a file
+    // under somebody else's name.
+    match /organizations/{tenantId}/actionAttachments/{uid}/{fileId} {
+      allow read, write: if false;
+    }
+
     match /organizations/{tenantId}/rcaIncidents/{incidentId}/evidence/{fileName} {
       allow read: if isActiveTenant(tenantId);
       allow create: if isActiveTenant(tenantId) &&

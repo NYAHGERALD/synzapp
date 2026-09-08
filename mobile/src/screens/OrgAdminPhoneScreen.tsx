@@ -1,10 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  ActionSheetIOS,
   ActivityIndicator,
   Alert,
   Image,
-  Modal,
   Platform,
   Pressable,
   StyleSheet,
@@ -12,59 +10,31 @@ import {
   TextInput,
   View
 } from 'react-native';
+import { KeyboardAvoidingView as KeyboardAwareScreen } from 'react-native-keyboard-controller';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { resolveKeyboardVerticalOffset } from '../services/rootSafeArea';
+import { CountryPickerModal } from '../components/auth/CountryPickerModal';
+import {
+  COUNTRY_DIAL_CODES,
+  flagForCountry,
+  type CountryDialCode
+} from '../services/countryDialCodes';
+import {
+  acceptPhoneNumberInput,
+  toE164,
+  type PhoneNumberEntry
+} from '../services/phoneNumberInput';
 import { DismissibleError } from '../components/DismissibleError';
-import { requestOtpPreflight } from '../services/backendAuth';
+import { AuthRateLimitError, requestOtpPreflight } from '../services/backendAuth';
 import { getUserAuthMessage } from '../services/authErrors';
 import { sendOrgAdminPhoneCode } from '../services/phoneAuth';
 import { FirebasePhoneSession } from '../types/auth';
 import { useAppTheme } from '../theme/AppThemeProvider';
 import type { AppColors } from '../theme/colors';
 
-type CountryCode = 'US' | 'CA' | 'MX' | 'UK';
-
-interface CountryOption {
-  countryCode: CountryCode;
-  countryName: string;
-  dialCode: string;
-  flag: string;
-  maxDigits: number;
-  placeholder: string;
-}
-
-const COUNTRY_OPTIONS: CountryOption[] = [
-  {
-    countryCode: 'US',
-    countryName: 'United States',
-    dialCode: '+1',
-    flag: '🇺🇸',
-    maxDigits: 10,
-    placeholder: '201 555 0123'
-  },
-  {
-    countryCode: 'CA',
-    countryName: 'Canada',
-    dialCode: '+1',
-    flag: '🇨🇦',
-    maxDigits: 10,
-    placeholder: '416 555 0123'
-  },
-  {
-    countryCode: 'MX',
-    countryName: 'Mexico',
-    dialCode: '+52',
-    flag: '🇲🇽',
-    maxDigits: 10,
-    placeholder: '55 1234 5678'
-  },
-  {
-    countryCode: 'UK',
-    countryName: 'United Kingdom',
-    dialCode: '+44',
-    flag: '🇬🇧',
-    maxDigits: 10,
-    placeholder: '7123 456789'
-  }
-];
+/** The country a number is being entered for. Defaults to the United States. */
+const DEFAULT_COUNTRY: CountryDialCode =
+  COUNTRY_DIAL_CODES.find((country) => country.code === 'US') || COUNTRY_DIAL_CODES[0];
 
 const RESEND_COOLDOWN_SECONDS = 45;
 
@@ -75,15 +45,21 @@ interface OrgAdminPhoneScreenProps {
 export function OrgAdminPhoneScreen({ onCodeSent }: OrgAdminPhoneScreenProps) {
   const appTheme = useAppTheme();
   const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
-  const [selectedCountry, setSelectedCountry] = useState<CountryOption>(COUNTRY_OPTIONS[0]);
-  const [phoneNumber, setPhoneNumber] = useState('');
+  const insets = useSafeAreaInsets();
+  const [selectedCountry, setSelectedCountry] = useState<CountryDialCode>(DEFAULT_COUNTRY);
+  const [phoneEntry, setPhoneEntry] = useState<PhoneNumberEntry>(
+    () => acceptPhoneNumberInput({ country: DEFAULT_COUNTRY.code, text: '' })
+  );
   const [isCountryPickerOpen, setIsCountryPickerOpen] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [cooldownUntil, setCooldownUntil] = useState<number | null>(null);
   const [now, setNow] = useState(Date.now());
-  const nationalDigits = getPhoneDigits(phoneNumber);
-  const isPhoneNumberComplete = nationalDigits.length === selectedCountry.maxDigits;
+  // Complete means the reference recognises it as a real number for that
+  // country, not that it reached some length. The length test this replaces
+  // demanded exactly fourteen digits from everybody, so a correct ten digit
+  // American number left the button greyed out and could never be sent.
+  const isPhoneNumberComplete = phoneEntry.isValid;
   const cooldownSeconds = cooldownUntil ? Math.max(0, Math.ceil((cooldownUntil - now) / 1000)) : 0;
 
   useEffect(() => {
@@ -103,44 +79,51 @@ export function OrgAdminPhoneScreen({ onCodeSent }: OrgAdminPhoneScreenProps) {
     return () => clearInterval(interval);
   }, [cooldownUntil]);
 
+  /**
+   * Opens the searchable picker on both platforms.
+   *
+   * It used to be an iOS action sheet and an Android dialog, each listing four
+   * countries inline. Neither can hold two hundred and forty, and an action
+   * sheet has no search at all.
+   */
   function openCountryPicker() {
-    if (Platform.OS === 'ios') {
-      const countryOptions = COUNTRY_OPTIONS.map((country) => (
-        `${country.flag} ${country.countryName} ${country.dialCode}`
-      ));
-      const cancelButtonIndex = countryOptions.length;
-
-      ActionSheetIOS.showActionSheetWithOptions(
-        {
-          cancelButtonIndex,
-          options: [...countryOptions, 'Cancel'],
-          title: 'Country code'
-        },
-        (buttonIndex) => {
-          if (buttonIndex !== cancelButtonIndex) {
-            handleSelectCountry(COUNTRY_OPTIONS[buttonIndex]);
-          }
-        }
-      );
-      return;
-    }
-
     setIsCountryPickerOpen(true);
   }
 
+  /**
+   * Everything the field will accept is decided by the country.
+   *
+   * A digit past that country's longest legal number is simply not taken, so
+   * the number in front of somebody is always one that could exist. Pasting a
+   * full international number moves the picker to match it.
+   */
   function handlePhoneNumberChange(nextPhoneNumber: string) {
-    const parsedPhoneNumber = parsePhoneNumberInput(nextPhoneNumber, selectedCountry);
-
-    setSelectedCountry(parsedPhoneNumber.country);
-    setPhoneNumber(formatPhoneNumber(parsedPhoneNumber.nationalDigits, parsedPhoneNumber.country));
+    applyPhoneEntry(acceptPhoneNumberInput({
+      country: phoneEntry.country,
+      text: nextPhoneNumber
+    }));
   }
 
-  function handleSelectCountry(nextCountry: CountryOption) {
-    const nextDigits = limitPhoneDigits(phoneNumber, nextCountry);
-    setSelectedCountry(nextCountry);
-    setPhoneNumber(formatPhoneNumber(nextDigits, nextCountry));
+  /**
+   * Re-reads the digits already typed against the country just chosen.
+   *
+   * Switching from Germany, which allows fifteen, to France, which allows nine,
+   * has to shorten and regroup what is there. Leaving it would show a number
+   * that country cannot have.
+   */
+  function handleCountrySelected(country: CountryDialCode) {
     setIsCountryPickerOpen(false);
+    applyPhoneEntry(acceptPhoneNumberInput({
+      country: country.code,
+      text: phoneEntry.nationalDigits
+    }));
   }
+
+  function applyPhoneEntry(entry: PhoneNumberEntry) {
+    setPhoneEntry(entry);
+    setSelectedCountry(findCountry(entry.country));
+  }
+
 
   async function handleSendCode() {
     setError(null);
@@ -153,7 +136,12 @@ export function OrgAdminPhoneScreen({ onCodeSent }: OrgAdminPhoneScreenProps) {
     setIsSending(true);
 
     try {
-      const phoneNumberForAuth = `${selectedCountry.dialCode}${nationalDigits}`;
+      const phoneNumberForAuth = toE164(phoneEntry);
+
+      if (!phoneNumberForAuth) {
+        setError('That number does not look right for the country selected.');
+        return;
+      }
 
       await requestOtpPreflight(phoneNumberForAuth);
 
@@ -162,6 +150,11 @@ export function OrgAdminPhoneScreen({ onCodeSent }: OrgAdminPhoneScreenProps) {
       onCodeSent(session);
     } catch (nextError) {
       const nextMessage = getUserAuthMessage(nextError, 'We could not send a code. Check the number and try again.');
+      const retryAfterSeconds = getAuthRetryAfterSeconds(nextError);
+
+      if (retryAfterSeconds) {
+        setCooldownUntil(Date.now() + retryAfterSeconds * 1000);
+      }
 
       if (isNetworkConnectionMessage(nextMessage)) {
         Alert.alert('Connection unavailable', nextMessage);
@@ -174,7 +167,21 @@ export function OrgAdminPhoneScreen({ onCodeSent }: OrgAdminPhoneScreenProps) {
   }
 
   return (
-    <View style={styles.screen}>
+    <KeyboardAwareScreen
+      // The real IME inset, read from the platform. React Native's own
+      // KeyboardAvoidingView cannot work here: Android enforces edge to edge at
+      // this SDK, so the window height never changes when the keyboard opens
+      // and there is nothing for it to measure. Same reason as the chat
+      // composer. See the keyboard section of mobile/CLAUDE.md.
+      behavior="padding"
+      // Puts back the top inset the app root's SafeAreaView applied above this
+      // screen, which onLayout cannot see from in here.
+      keyboardVerticalOffset={resolveKeyboardVerticalOffset({
+        platform: Platform.OS,
+        safeAreaTop: insets.top
+      })}
+      style={styles.screen}
+    >
       <View style={styles.content}>
         <View style={styles.brand}>
           <Image
@@ -192,26 +199,26 @@ export function OrgAdminPhoneScreen({ onCodeSent }: OrgAdminPhoneScreenProps) {
           <View style={styles.phoneBox}>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={`Select country code, current ${selectedCountry.countryName} ${selectedCountry.dialCode}`}
+              accessibilityLabel={`Select country code, current ${selectedCountry.name} ${selectedCountry.dialCode}`}
               onPress={openCountryPicker}
               style={({ pressed }) => [
                 styles.countryPicker,
                 pressed && styles.countryPickerPressed
               ]}
             >
-              <Text style={styles.flagText}>{selectedCountry.flag}</Text>
+              <Text style={styles.flagText}>{flagForCountry(selectedCountry.code)}</Text>
               <Text style={styles.codeText}>{selectedCountry.dialCode}</Text>
             </Pressable>
             <View style={styles.phoneDivider} />
             <TextInput
-              value={phoneNumber}
+              value={phoneEntry.text}
               onChangeText={handlePhoneNumberChange}
               autoComplete="tel"
               autoCorrect={false}
               importantForAutofill="yes"
               keyboardType="phone-pad"
               textContentType="telephoneNumber"
-              placeholder={selectedCountry.placeholder}
+              placeholder={'Phone number'}
               placeholderTextColor={appTheme.colors.muted}
               style={styles.phoneInput}
             />
@@ -245,147 +252,21 @@ export function OrgAdminPhoneScreen({ onCodeSent }: OrgAdminPhoneScreenProps) {
         ) : null}
       </View>
 
-      <Modal
-        animationType="fade"
-        transparent
+      {/* Searchable, because an inline list works for four countries and not
+          for two hundred and forty. */}
+      <CountryPickerModal
+        onClose={() => setIsCountryPickerOpen(false)}
+        onSelect={handleCountrySelected}
+        selectedCode={selectedCountry.code}
         visible={isCountryPickerOpen}
-        onRequestClose={() => setIsCountryPickerOpen(false)}
-      >
-        <View style={styles.modalBackdrop}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Close country code selector"
-            onPress={() => setIsCountryPickerOpen(false)}
-            style={styles.modalDismissArea}
-          />
-          <View style={styles.countryMenu}>
-            <View style={styles.countryMenuHeader}>
-              <Text style={styles.countryMenuTitle}>Country code</Text>
-            </View>
-            {COUNTRY_OPTIONS.map((country) => (
-              <Pressable
-                accessibilityRole="button"
-                key={country.countryCode}
-                onPress={() => handleSelectCountry(country)}
-                style={({ pressed }) => [
-                  styles.countryOption,
-                  country.countryCode === selectedCountry.countryCode && styles.countryOptionSelected,
-                  pressed && styles.countryOptionPressed
-                ]}
-              >
-                <View style={styles.countryOptionIdentity}>
-                  <Text style={styles.countryOptionFlag}>{country.flag}</Text>
-                  <Text style={styles.countryOptionName}>{country.countryName}</Text>
-                </View>
-                <Text style={styles.countryOptionCode}>
-                  {country.countryCode} {country.dialCode}
-                </Text>
-              </Pressable>
-            ))}
-          </View>
-        </View>
-      </Modal>
-    </View>
+      />
+    </KeyboardAwareScreen>
   );
 }
 
-function getPhoneDigits(phoneNumber: string): string {
-  return phoneNumber.replace(/\D/g, '');
-}
-
-function parsePhoneNumberInput(
-  phoneNumber: string,
-  currentCountry: CountryOption
-): { country: CountryOption; nationalDigits: string } {
-  const rawPhoneNumber = phoneNumber.trim();
-  const phoneDigits = getPhoneDigits(phoneNumber);
-  const looksInternational = rawPhoneNumber.startsWith('+') || phoneDigits.length > currentCountry.maxDigits;
-  const internationalDigits = looksInternational && phoneDigits.startsWith('00')
-    ? phoneDigits.slice(2)
-    : phoneDigits;
-  const country = looksInternational ? getCountryFromPhoneDigits(internationalDigits, currentCountry) : currentCountry;
-  const nationalDigits = looksInternational
-    ? stripDialCodeDigits(internationalDigits, country).slice(0, country.maxDigits)
-    : phoneDigits.slice(0, country.maxDigits);
-
-  return {
-    country,
-    nationalDigits
-  };
-}
-
-function getCountryFromPhoneDigits(digits: string, currentCountry: CountryOption): CountryOption {
-  const currentDialCodeDigits = getPhoneDigits(currentCountry.dialCode);
-
-  if (digits.startsWith(currentDialCodeDigits)) {
-    return currentCountry;
-  }
-
-  return COUNTRY_OPTIONS
-    .slice()
-    .sort((firstCountry, secondCountry) => (
-      getPhoneDigits(secondCountry.dialCode).length - getPhoneDigits(firstCountry.dialCode).length
-    ))
-    .find((country) => digits.startsWith(getPhoneDigits(country.dialCode))) || currentCountry;
-}
-
-function stripDialCodeDigits(digits: string, country: CountryOption): string {
-  const dialCodeDigits = getPhoneDigits(country.dialCode);
-
-  if (digits.startsWith(dialCodeDigits)) {
-    return digits.slice(dialCodeDigits.length);
-  }
-
-  return digits;
-}
-
-function limitPhoneDigits(phoneNumber: string, country: CountryOption): string {
-  return getPhoneDigits(phoneNumber).slice(0, country.maxDigits);
-}
-
-function formatPhoneNumber(digits: string, country: CountryOption): string {
-  if (country.countryCode === 'US' || country.countryCode === 'CA') {
-    return formatNorthAmericanNumber(digits);
-  }
-
-  if (country.countryCode === 'MX') {
-    return formatDigitsWithGroups(digits, [2, 4, 4]);
-  }
-
-  if (country.countryCode === 'UK') {
-    return formatDigitsWithGroups(digits, [4, 6]);
-  }
-
-  return formatDigitsWithGroups(digits, [3, 3, 4]);
-}
-
-function formatNorthAmericanNumber(digits: string): string {
-  if (digits.length <= 3) {
-    return digits;
-  }
-
-  if (digits.length <= 6) {
-    return `(${digits.slice(0, 3)}) ${digits.slice(3)}`;
-  }
-
-  return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)} ${digits.slice(6)}`;
-}
-
-function formatDigitsWithGroups(digits: string, groups: number[]): string {
-  const parts: string[] = [];
-  let cursor = 0;
-
-  groups.forEach((groupSize) => {
-    const part = digits.slice(cursor, cursor + groupSize);
-
-    if (part) {
-      parts.push(part);
-    }
-
-    cursor += groupSize;
-  });
-
-  return parts.join(' ');
+/** The picker row for a country, so the flag and code match the number. */
+function findCountry(code: string): CountryDialCode {
+  return COUNTRY_DIAL_CODES.find((country) => country.code === code) || DEFAULT_COUNTRY;
 }
 
 function getSendButtonLabel(isSending: boolean, cooldownSeconds: number): string {
@@ -394,10 +275,35 @@ function getSendButtonLabel(isSending: boolean, cooldownSeconds: number): string
   }
 
   if (cooldownSeconds > 0) {
-    return `Send again in ${cooldownSeconds}s`;
+    return `Try again in ${formatCooldown(cooldownSeconds)}`;
   }
 
   return 'Send code';
+}
+
+function getAuthRetryAfterSeconds(error: unknown): number | null {
+  if (error instanceof AuthRateLimitError && error.retryAfterSeconds) {
+    return error.retryAfterSeconds;
+  }
+
+  const retryAfterSeconds = Number((error as { retryAfterSeconds?: unknown } | null)?.retryAfterSeconds);
+
+  if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
+    return Math.ceil(retryAfterSeconds);
+  }
+
+  return null;
+}
+
+function formatCooldown(seconds: number): string {
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+
+  return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`;
 }
 
 function isNetworkConnectionMessage(message: string): boolean {
@@ -493,16 +399,14 @@ function createStyles(colors: AppColors) {
     alignItems: 'center',
     alignSelf: 'center',
     backgroundColor: colors.blue,
-    borderRadius: 8,
-    elevation: 8,
+    // Fully rounded, and sized to its label rather than stretched wide. A slab
+    // that size reads as part of the page rather than as a control, and the
+    // heavy glow under it was doing the same.
+    borderRadius: 24,
     justifyContent: 'center',
-    minHeight: 54,
-    minWidth: 180,
-    paddingHorizontal: 26,
-    shadowColor: colors.blue,
-    shadowOffset: { height: 10, width: 0 },
-    shadowOpacity: 0.22,
-    shadowRadius: 18
+    minHeight: 48,
+    minWidth: 148,
+    paddingHorizontal: 28
   },
   sendButtonText: {
     color: '#FFFFFF',
@@ -519,72 +423,6 @@ function createStyles(colors: AppColors) {
     alignItems: 'center',
     justifyContent: 'center',
     minHeight: 26
-  },
-  modalBackdrop: {
-    backgroundColor: colors.overlay,
-    flex: 1,
-    justifyContent: 'flex-end',
-    paddingBottom: 28,
-    paddingHorizontal: 16
-  },
-  modalDismissArea: {
-    ...StyleSheet.absoluteFillObject
-  },
-  countryMenu: {
-    backgroundColor: colors.card,
-    borderRadius: 14,
-    overflow: 'hidden',
-    shadowColor: '#000000',
-    shadowOffset: { height: 14, width: 0 },
-    shadowOpacity: 0.2,
-    shadowRadius: 26
-  },
-  countryMenuHeader: {
-    borderBottomColor: colors.divider,
-    borderBottomWidth: 1,
-    paddingHorizontal: 18,
-    paddingVertical: 14
-  },
-  countryMenuTitle: {
-    color: colors.ink,
-    fontSize: 16,
-    fontWeight: '400'
-  },
-  countryOption: {
-    alignItems: 'center',
-    borderBottomColor: colors.divider,
-    borderBottomWidth: 1,
-    flexDirection: 'row',
-    gap: 16,
-    justifyContent: 'space-between',
-    minHeight: 66,
-    paddingHorizontal: 18,
-    paddingVertical: 12
-  },
-  countryOptionSelected: {
-    backgroundColor: colors.primarySoft
-  },
-  countryOptionPressed: {
-    opacity: 0.8
-  },
-  countryOptionIdentity: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: 12
-  },
-  countryOptionFlag: {
-    fontSize: 23,
-    lineHeight: 27
-  },
-  countryOptionName: {
-    color: colors.ink,
-    fontSize: 16,
-    fontWeight: '400'
-  },
-  countryOptionCode: {
-    color: colors.mutedStrong,
-    fontSize: 16,
-    fontWeight: '400'
   }
 });
 }

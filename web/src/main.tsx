@@ -1,22 +1,32 @@
 import React from 'react';
+import { getSynzappApiBaseUrl } from './config';
+import { PRIVACY_POLICY, SUBPROCESSORS, TERMS_OF_SERVICE } from './policyContent';
+import { SUPPORTED_COUNTRIES, formatPostalCode, getCountryFormat } from './addressFormats';
+import {
+  ABOUT_PARAGRAPHS,
+  ABOUT_PRINCIPLES,
+  ASSURANCES,
+  INTERPRETER_LANGUAGE_COUNT,
+  INTERPRETER_SIMULTANEOUS_LANGUAGES,
+  FOOTER_COLUMNS,
+  PRODUCT_GROUPS,
+  type ProductEntry
+} from './marketingContent';
 import { createRoot } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import {
+  ArrowLeft,
+  ArrowRight,
   BadgeCheck,
   BarChart3,
   BriefcaseBusiness,
   Building2,
   ChevronDown,
-  ClipboardCheck,
-  Cpu,
   DatabaseBackup,
   KeyRound,
   LockKeyhole,
   LogOut,
-  Menu,
-  Network,
-  SearchCheck,
   Settings,
   ShieldCheck,
   Smartphone,
@@ -39,36 +49,54 @@ import { ensureSynzappAuthPersistence, getSynzappFirebaseAuth, isFirebaseConfigu
 import { LswPrototype } from './LswPrototype';
 import { RailsWorkspace } from './RailsWorkspace';
 import { RcaWorkspace } from './RcaWorkspace';
+import { SupportWorkspace } from './SupportWorkspace';
+import { RetentionConsole } from './RetentionConsole';
+import { ActionConsole } from './ActionConsole';
+import { AuditConsole } from './AuditConsole';
+import { AnnouncementConsole } from './AnnouncementConsole';
+import { AccountArtwork, SettingsArtwork, SignInArtwork } from './AccountArtwork';
+import { formatPermissionLabel } from './permissionLabel';
+import {
+  CONTACT_STEPS,
+  getContactProgress,
+  validateContactStep,
+  type ContactFormValues
+} from './contactSteps';
+import { Combobox } from './Combobox';
+import { DashboardHome } from './DashboardHome';
+import { SidePanel, type SidePanelGroup, type SidePanelItemId } from './SidePanel';
 import './styles.css';
 
-const features = [
-  {
-    description: 'Standardize routines, boost accountability, and drive sustained improvement through structured daily processes.',
-    icon: ClipboardCheck,
-    title: 'Leaders Standard Work'
-  },
-  {
-    description: 'Identify underlying issues, prevent recurrence, and enhance system reliability with robust RCA tools.',
-    icon: SearchCheck,
-    title: 'Root Cause Analysis'
-  },
-  {
-    description: 'Rapid Action & Improvement Looping System: streamline workflows, automate tracking, and accelerate efficiency across all levels.',
-    icon: Network,
-    title: 'RAILS'
-  }
-] as const;
 
-type DashboardModule = 'lsw' | 'rails' | 'rca';
+type DashboardModule = 'account' | 'actions' | 'announcements' | 'audit' | 'dashboard' | 'lsw' | 'lsw-verification' | 'rails' | 'rca' | 'retention' | 'settings' | 'support';
 type AccountPanelTab = 'account' | 'settings';
 
-const DASHBOARD_MODULES: DashboardModule[] = ['lsw', 'rca', 'rails'];
+const DASHBOARD_MODULES: DashboardModule[] = ['account', 'actions', 'announcements', 'audit', 'dashboard', 'lsw', 'lsw-verification', 'rca', 'rails', 'retention', 'settings', 'support'];
 const DASHBOARD_MODULE_HASHES: Record<DashboardModule, string> = {
+  account: '#account',
+  actions: '#actions',
+  announcements: '#announcements',
+  audit: '#audit',
+  dashboard: '#dashboard',
   lsw: '#lsw',
+  'lsw-verification': '#lsw-verification',
   rails: '#rails',
-  rca: '#rca'
+  rca: '#rca',
+  retention: '#compliance',
+  settings: '#settings',
+  support: '#support'
 };
 const DASHBOARD_MODULE_STORAGE_PREFIX = 'synzapp.dashboard.activeModule';
+const PANEL_COLLAPSED_STORAGE_KEY = 'synzapp.workspace.panelCollapsed';
+
+/**
+ * The sections that take the whole window.
+ *
+ * Each is worked in for an hour at a time rather than glanced at, and every
+ * pixel of navigation is taken from the thing being read. They come back
+ * through one button, always in the same place.
+ */
+const FULL_SCREEN_MODULES: DashboardModule[] = ['lsw', 'lsw-verification', 'rca', 'rails'];
 
 const countries = [
   {
@@ -116,6 +144,27 @@ function App() {
   const [errorMessage, setErrorMessage] = React.useState('');
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [isRestoringSession, setIsRestoringSession] = React.useState(() => isFirebaseConfigured());
+  /**
+   * Sign-in is its own page, addressed by #sign-in so it can be linked to,
+   * bookmarked, and left with the browser's own back button.
+   */
+  const [isSignInRoute, setIsSignInRoute] = React.useState(
+    () => typeof window !== 'undefined' && window.location.hash === '#sign-in'
+  );
+  const [marketingRoute, setMarketingRoute] = React.useState(
+    () => (typeof window !== 'undefined' ? window.location.hash : '')
+  );
+
+  React.useEffect(() => {
+    const syncRoute = () => {
+      setIsSignInRoute(window.location.hash === '#sign-in');
+      setMarketingRoute(window.location.hash);
+    };
+
+    window.addEventListener('hashchange', syncRoute);
+
+    return () => window.removeEventListener('hashchange', syncRoute);
+  }, []);
 
   const selectedCountry = getCountryById(selectedCountryId);
   const formattedPhone = formatPhoneNumber(phoneDigits, selectedCountry);
@@ -271,7 +320,7 @@ function App() {
       setBackendSession(null);
       setCurrentProfile(null);
       setProfilePhotoObjectUrl(null);
-      setErrorMessage(getErrorMessage(error));
+      setErrorMessage(getPhoneLoginErrorMessage(error, selectedCountry));
     } finally {
       setIsSubmitting(false);
     }
@@ -320,56 +369,29 @@ function App() {
   if (isRestoringSession) {
     return (
       <main className="landing-page">
-        <img
-          alt=""
-          aria-hidden="true"
-          className="hero-image"
-          src="/assets/landing-page-background.png"
-        />
         <MarketingHeader />
         <SessionRestoreLoading />
       </main>
     );
   }
 
-  return (
-    <main className="landing-page">
-      <img
-        alt=""
-        aria-hidden="true"
-        className="hero-image"
-        src="/assets/landing-page-background.png"
-      />
-
+  if (isSignInRoute) {
+    return (
+    <div className="signin-shell">
       <MarketingHeader />
+      <main className="signin-main">
+        {/* The half of the screen that was empty now says who this is for and
+            what is about to happen: a code, to a phone, and no password. */}
+        <section className="signin-pitch">
+          <p className="section-eyebrow">Sign in</p>
+          <h1>Your organization's workplace, on your phone number.</h1>
+          <p className="signin-pitch-lead">
+            We text you a one-time code. There is no password to remember, and none to leak.
+          </p>
+          <SignInArtwork />
+        </section>
 
-      <section className="hero-content" aria-label="Synzapp enterprise performance landing page">
-        <div className="hero-copy">
-          <div>
-            <h1>Transforming Enterprise Operations</h1>
-            <p className="hero-subtitle">
-              Unlock productivity with Leaders Standard Work, RCA, and RAILS.
-            </p>
-          </div>
-
-          <div className="feature-grid" aria-label="Synzapp features">
-            {features.map((feature) => {
-              const FeatureIcon = feature.icon;
-
-              return (
-                <article className="feature-card" key={feature.title}>
-                  <div className="feature-icon">
-                    <FeatureIcon aria-hidden="true" size={34} strokeWidth={1.55} />
-                  </div>
-                  <h2>{feature.title}</h2>
-                  <p>{feature.description}</p>
-                </article>
-              );
-            })}
-          </div>
-        </div>
-
-        <aside className="login-card" aria-label="Phone number login">
+        <aside className="login-card" aria-label="Sign in">
           <h2>Log In to Your Portal</h2>
 
           <form className="login-form" onSubmit={(event) => void handleSubmit(event)}>
@@ -440,15 +462,256 @@ function App() {
             ) : null}
           </form>
 
-          <a className="privacy-link" href="/privacy">Privacy Policy</a>
+          <a className="privacy-link" href="#privacy">Privacy</a>
           <div id="synzapp-recaptcha" />
         </aside>
-      </section>
 
-      <footer className="landing-footer">
-        &copy; 2026 Synzapp Inc. All rights reserved.
-      </footer>
+        <a className="signin-back" href="#top">Back to Synzapp</a>
+      </main>
+    </div>
+    );
+  }
+
+  if (marketingRoute === '#privacy') {
+    return <PolicyPage />;
+  }
+
+  if (marketingRoute === '#terms') {
+    return <TermsPage />;
+  }
+
+  return (
+    <div className="marketing-shell">
+    {marketingRoute === '#contact' ? <ContactPage /> : null}
+    <main className="landing-page">
+      <MarketingHeader />
+
+      <section className="hero" aria-label="Synzapp">
+        <div className="hero-inner">
+          <p className="hero-eyebrow">Enterprise Performance Suite</p>
+          <h1>
+            The work your company runs on,
+            <br />
+            and the record of it.
+          </h1>
+          <p className="hero-subtitle">
+            Workplace chat the organization controls, a live interpreter across{' '}
+            {INTERPRETER_LANGUAGE_COUNT} languages, and the operating routines that keep a business
+            improving. Your legal and compliance teams keep control of the records.
+          </p>
+
+          <div className="hero-actions">
+            <a className="button-primary" href="#sign-in">Sign in to your portal</a>
+            <a className="button-secondary" href="#communication">See what it does</a>
+          </div>
+
+          <dl className="hero-facts">
+            <div>
+              <dt>Workplace chat</dt>
+              <dd>Owned by the organization, not a consumer app</dd>
+            </div>
+            <div>
+              <dt>{INTERPRETER_LANGUAGE_COUNT} languages</dt>
+              <dd>Up to {INTERPRETER_SIMULTANEOUS_LANGUAGES} in the same meeting</dd>
+            </div>
+            <div>
+              <dt>Records on request</dt>
+              <dd>Freeze, search and produce what you are asked for</dd>
+            </div>
+          </dl>
+        </div>
+      </section>
     </main>
+
+    <ProductSections />
+    <AssuranceSection />
+    <AboutSection />
+    <MarketingFooter />
+    </div>
+  );
+}
+
+  // Sign-in lives on its own page, reached from the hero. A form competing with
+  // the first sentence makes both worse: the person deciding whether this is
+  // for them is not the person signing in, and the two were fighting for the
+  // same space.
+
+/**
+ * What the product does, grouped the way a buyer thinks about it.
+ *
+ * Three groups rather than one list of seven: an organization evaluating this
+ * arrives with one of these problems, not all three, and a flat grid makes them
+ * read everything to find the one they came for.
+ */
+function ProductSections() {
+  return (
+    <>
+      {PRODUCT_GROUPS.map((group, index) => (
+        <section
+          className={index === 1 ? 'marketing-section is-tinted' : 'marketing-section'}
+          id={group.id}
+          key={group.id}
+        >
+          <div className="marketing-inner">
+            <div className="section-head">
+              <h2 className="section-title">{group.title}</h2>
+              <p className="section-lead">{group.intro}</p>
+            </div>
+
+            <div className={group.products.length > 2 ? 'product-grid is-three' : 'product-grid is-two'}>
+              {group.products.map((product) => (
+                <ProductCard key={product.id} product={product} />
+              ))}
+            </div>
+          </div>
+        </section>
+      ))}
+    </>
+  );
+}
+
+function ProductCard({ product }: { product: ProductEntry }) {
+  return (
+    <article className="product-card" id={product.id}>
+      <h3>{product.name}</h3>
+      <p className="product-description">{product.description}</p>
+      <ul className="product-capabilities">
+        {product.capabilities.map((capability) => (
+          <li key={capability}>{capability}</li>
+        ))}
+      </ul>
+    </article>
+  );
+}
+
+/**
+ * Why an organization can rely on this.
+ *
+ * Commitments rather than technology: the reader here is legal, compliance or
+ * the owner, and what they need is the outcome they can hold us to.
+ */
+function AssuranceSection() {
+  return (
+    <section className="marketing-section is-assurance" id="assurance">
+      <div className="marketing-inner">
+        <div className="section-head">
+          <h2 className="section-title">Why you can rely on it</h2>
+          <p className="section-lead">
+            Six commitments an organization can hold us to. Each is something the product does
+            today, not something planned.
+          </p>
+        </div>
+
+        <div className="assurance-grid">
+          {ASSURANCES.map((assurance, index) => (
+            <article className="assurance-item" key={assurance.title}>
+              <span className="assurance-index">{String(index + 1).padStart(2, '0')}</span>
+              <div>
+                <h3>{assurance.title}</h3>
+                <p>{assurance.detail}</p>
+              </div>
+            </article>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/**
+ * About us.
+ *
+ * A portrait beside the text rather than a stock office photograph, and no
+ * invented company history. The image is decorative here: the section is
+ * readable without it, and it carries no caption claiming who it is.
+ */
+function AboutSection() {
+  return (
+    <section className="marketing-section is-about" id="about">
+      <div className="marketing-inner">
+        <div className="section-head">
+          <h2 className="section-title">About us</h2>
+          <p className="section-lead">
+            Why Synzapp exists, and what we hold ourselves to while building it.
+          </p>
+        </div>
+
+        <div className="about-grid">
+          <div className="about-portrait">
+            <img
+              alt=""
+              aria-hidden="true"
+              height={1065}
+              loading="lazy"
+              sizes="(max-width: 900px) 100vw, 420px"
+              src="/assets/about-portrait.jpg"
+              srcSet="/assets/about-portrait.jpg 760w, /assets/about-portrait@2x.jpg 1520w"
+              width={760}
+            />
+          </div>
+
+          <div className="about-body">
+            {ABOUT_PARAGRAPHS.map((paragraph) => (
+              <p className="about-paragraph" key={paragraph.slice(0, 40)}>{paragraph}</p>
+            ))}
+
+            <div className="about-principles">
+              {ABOUT_PRINCIPLES.map((principle) => (
+                <article className="about-principle" key={principle.title}>
+                  <h3>{principle.title}</h3>
+                  <p>{principle.detail}</p>
+                </article>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function MarketingFooter() {
+  return (
+    <footer className="marketing-footer">
+      <div className="marketing-inner">
+        <div className="footer-top">
+          <div className="footer-brand">
+            <a className="brand-lockup is-footer" href="#top" aria-label="Synzapp home">
+              <img alt="" aria-hidden="true" className="brand-logo" src="/assets/notification.png" />
+              <span className="brand-name">Synzapp</span>
+            </a>
+            <p>
+              Workplace chat the organization controls, a live interpreter across{' '}
+              {INTERPRETER_LANGUAGE_COUNT} languages, and the operating routines that keep a
+              business improving.
+            </p>
+          </div>
+
+          <nav className="footer-nav" aria-label="Footer">
+            {FOOTER_COLUMNS.map((column) => (
+              <div className="footer-column" key={column.title}>
+                <h4>{column.title}</h4>
+                <ul>
+                  {column.links.map((link) => (
+                    <li key={link.href}>
+                      <a href={link.href}>{link.label}</a>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </nav>
+        </div>
+
+        <div className="footer-bottom">
+          <p>&copy; 2026 Synzapp Inc. All rights reserved.</p>
+          <p className="footer-note">
+            Messages are end-to-end encrypted. Where an organization enables a compliance archive,
+            its staff are told.
+          </p>
+        </div>
+      </div>
+    </footer>
   );
 }
 
@@ -465,18 +728,31 @@ function SessionRestoreLoading() {
   return null;
 }
 
+/**
+ * The top bar.
+ *
+ * Section links as plain text with a single button for the one action that
+ * matters. Outlined pills for every link give each the same weight as signing
+ * in, which leaves a reader with no idea what the page wants them to do.
+ */
 function MarketingHeader() {
   return (
     <header className="brand-bar" aria-label="Synzapp navigation">
-      <div className="brand-lockup">
-        <img alt="Synzapp" className="brand-logo" src="/assets/notification.png" />
+      <a className="brand-lockup" href="#top" aria-label="Synzapp home">
+        <img alt="" aria-hidden="true" className="brand-logo" src="/assets/notification.png" />
         <span className="brand-name">Synzapp</span>
         <span className="brand-divider" />
         <span className="brand-suite">Enterprise Performance Suite</span>
-      </div>
+      </a>
+
       <nav className="nav-links" aria-label="Primary navigation">
+        <a href="#communication">Communication</a>
+        <a href="#operations">Operations</a>
+        <a href="#governance">Records</a>
+        <a href="#assurance">Security</a>
+        <span className="nav-rule" aria-hidden="true" />
         <a href="#contact">Contact</a>
-        <a href="#about">About us</a>
+        <a className="nav-cta" href="#sign-in">Sign in</a>
       </nav>
     </header>
   );
@@ -493,19 +769,61 @@ function Dashboard({
   profilePhotoObjectUrl: string | null;
   session: BackendAuthSession;
 }) {
-  const [isMobileNavOpen, setIsMobileNavOpen] = React.useState(false);
   const [isProfileMenuOpen, setIsProfileMenuOpen] = React.useState(false);
-  const [accountPanelTab, setAccountPanelTab] = React.useState<AccountPanelTab>('account');
-  const [isAccountPanelOpen, setIsAccountPanelOpen] = React.useState(false);
   const [activeModule, setActiveModule] = React.useState<DashboardModule>(() => getInitialDashboardModule(session));
+  // Remembered, because somebody who collapsed the panel meant it, and having
+  // to do it again on every visit is how a preference becomes an annoyance.
+  const [isPanelCollapsed, setIsPanelCollapsed] = React.useState<boolean>(() => (
+    window.localStorage.getItem(PANEL_COLLAPSED_STORAGE_KEY) === 'true'
+  ));
   const [rcaEntryKey, setRcaEntryKey] = React.useState(0);
   const profileButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const profileMenuRef = React.useRef<HTMLDivElement | null>(null);
   const displayName = profile?.displayName || session.user.displayName || session.user.phoneMasked;
   const role = profile?.roleName || formatRole(session.user.role);
+  const roleCode = (profile?.role || session.user.role || 'EMPLOYEE').toUpperCase();
   const companyName = profile?.companyName || 'Synzapp workspace';
   const departmentName = profile?.departmentName || 'Enterprise portal';
   const profilePhotoUrl = profilePhotoObjectUrl || session.user.profilePhotoUrl || null;
+  const canViewLswVerification = ['DEPT_ADMIN', 'ORG_ADMIN', 'SYSTEM_ADMIN'].includes(roleCode);
+  // Retention and legal hold are tenant-wide controls, so they stay with the
+  // Org Admin rather than following the LSW verification audience.
+  const canManageRetention = ['ORG_ADMIN', 'SYSTEM_ADMIN'].includes(roleCode);
+  const isFullScreenModule = FULL_SCREEN_MODULES.includes(activeModule);
+
+  /**
+   * What the panel offers, grouped the way somebody thinks about the work.
+   *
+   * Operations is what people do; governance is how it is answered for. A
+   * section this person cannot open is shown locked rather than removed — a
+   * menu that changes shape from person to person cannot be described in a
+   * training note or over the phone.
+   */
+  const sidePanelGroups = React.useMemo((): SidePanelGroup[] => [
+    {
+      items: [
+        { id: 'dashboard', label: 'Dashboard' },
+        { id: 'lsw', label: 'LSW', opensFullScreen: true },
+        { id: 'lsw-verification', label: 'LSW Verification', locked: !canViewLswVerification, opensFullScreen: true },
+        { id: 'rca', label: 'RCA', opensFullScreen: true },
+        { id: 'rails', label: 'RAILS', opensFullScreen: true },
+        { id: 'actions', label: 'Actions' },
+        { id: 'announcements', label: 'Announcements' }
+      ],
+      title: 'OPERATIONS'
+    },
+    {
+      items: [
+        { id: 'audit', label: 'Audit log' },
+        { id: 'retention', label: 'Compliance', locked: !canManageRetention }
+      ],
+      title: 'GOVERNANCE'
+    },
+    {
+      items: [{ id: 'support', label: 'Support' }],
+      title: 'HELP'
+    }
+  ], [canManageRetention, canViewLswVerification]);
   const permissions = React.useMemo(() => {
     return [...new Set([...(session.user.permissions || []), ...((profile as WebCurrentUserProfile & { permissions?: string[] } | null)?.permissions || [])])];
   }, [profile, session.user.permissions]);
@@ -516,12 +834,24 @@ function Dashboard({
 
     setActiveModule(module);
     persistDashboardModule(session, module);
-    setIsMobileNavOpen(false);
+    // The account menu belongs to the panel it hangs off, and going somewhere
+    // else should not leave it open over the new page.
+    setIsProfileMenuOpen(false);
   }, [session]);
 
   React.useEffect(() => {
     persistDashboardModule(session, activeModule);
   }, [activeModule, session]);
+
+  React.useEffect(() => {
+    window.localStorage.setItem(PANEL_COLLAPSED_STORAGE_KEY, String(isPanelCollapsed));
+  }, [isPanelCollapsed]);
+
+  React.useEffect(() => {
+    if (activeModule === 'lsw-verification' && !canViewLswVerification) {
+      setDashboardModule('dashboard');
+    }
+  }, [activeModule, canViewLswVerification, setDashboardModule]);
 
   React.useEffect(() => {
     function handleHashChange() {
@@ -533,7 +863,7 @@ function Dashboard({
 
       setActiveModule(nextModule);
       persistDashboardModule(session, nextModule);
-      setIsMobileNavOpen(false);
+      setIsProfileMenuOpen(false);
     }
 
     window.addEventListener('hashchange', handleHashChange);
@@ -578,188 +908,125 @@ function Dashboard({
     };
   }, [isProfileMenuOpen]);
 
-  React.useEffect(() => {
-    if (!isAccountPanelOpen) {
-      return undefined;
-    }
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') {
-        setIsAccountPanelOpen(false);
-      }
-    }
-
-    window.addEventListener('keydown', handleKeyDown);
-
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isAccountPanelOpen]);
-
   function openAccountPanel(tab: AccountPanelTab) {
-    setAccountPanelTab(tab);
     setIsProfileMenuOpen(false);
-    setIsAccountPanelOpen(true);
+    setDashboardModule(tab === 'settings' ? 'settings' : 'account');
   }
 
-  const renderModuleLinks = () => (
-    <>
-      <button
-        className={activeModule === 'lsw' ? 'is-active' : ''}
-        onClick={() => {
-          setDashboardModule('lsw');
-        }}
-        type="button"
-      >
-        LSW
-      </button>
-      <button
-        className={activeModule === 'rca' ? 'is-active' : ''}
-        onClick={() => {
-          setDashboardModule('rca', { refreshRca: true });
-        }}
-        type="button"
-      >
-        RCA
-      </button>
-      <button
-        className={activeModule === 'rails' ? 'is-active' : ''}
-        onClick={() => {
-          setDashboardModule('rails');
-        }}
-        type="button"
-      >
-        RAILS
-      </button>
-    </>
-  );
-
   return (
-    <main className="dashboard-page">
-      <header className="dashboard-topbar" aria-label="Synzapp dashboard navigation">
-        <div className="brand-lockup">
-          <img alt="Synzapp" className="brand-logo" src="/assets/notification.png" />
-          <div className="dashboard-brand-text">
-            <span className="brand-name">Synzapp</span>
-            <span className="dashboard-company-name">{companyName}</span>
-          </div>
-        </div>
-        <nav className="dashboard-nav" aria-label="Workspace modules">
-          {renderModuleLinks()}
-        </nav>
-        <div className="dashboard-account">
-          <div className="dashboard-user-meta" aria-label="Signed in user role and department">
-            <span>{role}</span>
-            <span>{departmentName}</span>
-          </div>
-          <button
-            aria-controls="dashboard-profile-menu"
-            aria-expanded={isProfileMenuOpen}
-            aria-haspopup="menu"
-            aria-label={`Open employee profile menu for ${displayName}`}
-            className="dashboard-profile-trigger"
-            onClick={() => setIsProfileMenuOpen((isOpen) => !isOpen)}
-            ref={profileButtonRef}
-            type="button"
-          >
-            <Avatar className="dashboard-nav-avatar" name={displayName} photoUrl={profilePhotoUrl} />
-          </button>
-          <button
-            aria-controls="dashboard-module-menu"
-            aria-expanded={isMobileNavOpen}
-            aria-label={isMobileNavOpen ? 'Close workspace module menu' : 'Open workspace module menu'}
-            className="dashboard-menu-button"
-            onClick={() => setIsMobileNavOpen((isOpen) => !isOpen)}
-            type="button"
-          >
-            {isMobileNavOpen ? <X aria-hidden="true" size={22} /> : <Menu aria-hidden="true" size={22} />}
-          </button>
-        </div>
-        {isMobileNavOpen ? createPortal((
-          <nav
-            className="dashboard-mobile-nav is-open"
-            id="dashboard-module-menu"
-            aria-label="Workspace modules"
-          >
-            {renderModuleLinks()}
-          </nav>
-        ), document.body) : null}
-        {isProfileMenuOpen ? createPortal((
-          <div
-            aria-label="Employee profile menu"
-            className="dashboard-profile-menu"
-            id="dashboard-profile-menu"
-            ref={profileMenuRef}
-            role="menu"
-          >
-            <div className="dashboard-profile-menu-card">
-              <Avatar className="dashboard-profile-menu-avatar" name={displayName} photoUrl={profilePhotoUrl} />
-              <div>
-                <span>{displayName}</span>
-                <strong>{role}</strong>
-                <small>{departmentName}</small>
-              </div>
+    <main className={isFullScreenModule ? 'workspace-page is-fullscreen' : 'workspace-page'}>
+      {isFullScreenModule ? (
+        // No panel and no bar: these sections are worked in for an hour at a
+        // time and every pixel of chrome is taken from the thing being read.
+        // One way out, and it is always in the same place.
+        <button
+          aria-label="Back to the dashboard"
+          className="workspace-back"
+          onClick={() => setDashboardModule('dashboard')}
+          type="button"
+        >
+          <ArrowLeft aria-hidden="true" size={18} />
+          <span>Dashboard</span>
+        </button>
+      ) : (
+        <SidePanel
+          activeId={activeModule}
+          avatar={<Avatar className="side-panel-account-avatar" name={displayName} photoUrl={profilePhotoUrl} />}
+          companyName={companyName}
+          departmentName={departmentName}
+          displayName={displayName}
+          groups={sidePanelGroups}
+          isCollapsed={isPanelCollapsed}
+          isSettingsActive={activeModule === 'settings' || activeModule === 'account'}
+          onOpenAccount={() => setIsProfileMenuOpen((isOpen) => !isOpen)}
+          onOpenSettings={() => setDashboardModule('settings')}
+          onSelect={(id: SidePanelItemId) => setDashboardModule(id)}
+          onToggleCollapsed={() => setIsPanelCollapsed((collapsed) => !collapsed)}
+          role={role}
+        />
+      )}
+
+      {isProfileMenuOpen && !isFullScreenModule ? createPortal((
+        <div
+          aria-label="Employee profile menu"
+          className="dashboard-profile-menu side-panel-profile-menu"
+          id="dashboard-profile-menu"
+          ref={profileMenuRef}
+          role="menu"
+        >
+          <div className="dashboard-profile-menu-card">
+            <Avatar className="dashboard-profile-menu-avatar" name={displayName} photoUrl={profilePhotoUrl} />
+            <div>
+              <span>{displayName}</span>
+              <strong>{role}</strong>
+              <small>{departmentName}</small>
             </div>
-            <button
-              onClick={() => openAccountPanel('settings')}
-              role="menuitem"
-              type="button"
-            >
-              <Settings aria-hidden="true" size={16} />
-              Settings
-            </button>
-            <button
-              onClick={() => openAccountPanel('account')}
-              role="menuitem"
-              type="button"
-            >
-              <UserCircle aria-hidden="true" size={16} />
-              Account
-            </button>
-            <button
-              className="is-danger"
-              onClick={() => {
-                setIsProfileMenuOpen(false);
-                onSignOut();
-              }}
-              role="menuitem"
-              type="button"
-            >
-              <LogOut aria-hidden="true" size={16} />
-              Log out
-            </button>
           </div>
-        ), document.body) : null}
-        {isAccountPanelOpen ? createPortal((
-          <AccountPanel
-            activeTab={accountPanelTab}
+          <button onClick={() => openAccountPanel('account')} role="menuitem" type="button">
+            <UserCircle aria-hidden="true" size={16} />
+            My account
+          </button>
+          <button onClick={() => openAccountPanel('settings')} role="menuitem" type="button">
+            <Settings aria-hidden="true" size={16} />
+            Settings
+          </button>
+          <button onClick={onSignOut} role="menuitem" type="button">
+            <LogOut aria-hidden="true" size={16} />
+            Log out
+          </button>
+        </div>
+      ), document.body) : null}
+
+      <section className="workspace-content" aria-label="Synzapp workspace">
+        {activeModule === 'dashboard' ? (
+          <DashboardHome
+            companyName={companyName}
+            displayName={displayName}
+            groups={sidePanelGroups}
+            onOpen={(id: SidePanelItemId) => setDashboardModule(id)}
+          />
+        ) : null}
+        {activeModule === 'account' ? (
+          <AccountPage
             departmentName={departmentName}
             displayName={displayName}
-            onClose={() => setIsAccountPanelOpen(false)}
-            onSignOut={onSignOut}
             permissions={permissions}
             phoneMasked={profile?.phoneFormatted || profile?.phoneMasked || session.user.phoneMasked}
             profilePhotoUrl={profilePhotoUrl}
             role={role}
             roleCode={(profile?.role || session.user.role || 'EMPLOYEE').toUpperCase()}
-            session={session}
-            setActiveTab={setAccountPanelTab}
             status={profile?.status || session.user.status}
             tenantName={companyName}
-            uid={profile?.uid || session.user.uid}
           />
-        ), document.body) : null}
-      </header>
-
-      <section className="dashboard-shell" aria-label="Synzapp dashboard">
+        ) : null}
+        {activeModule === 'settings' ? (
+          <SettingsPage
+            onSignOut={onSignOut}
+            permissions={permissions}
+            roleCode={(profile?.role || session.user.role || 'EMPLOYEE').toUpperCase()}
+            session={session}
+          />
+        ) : null}
+        {activeModule === 'actions' ? <ActionConsole /> : null}
+        {activeModule === 'announcements' ? <AnnouncementConsole /> : null}
+        {activeModule === 'audit' ? <AuditConsole /> : null}
         {activeModule === 'lsw' ? <LswPrototype /> : null}
+        {activeModule === 'lsw-verification' && canViewLswVerification ? <LswPrototype view="verification" /> : null}
         {activeModule === 'rca' ? <RcaWorkspace key={rcaEntryKey} /> : null}
         {activeModule === 'rails' ? <RailsWorkspace /> : null}
+        {activeModule === 'retention' && canManageRetention ? <RetentionConsole adminName={displayName} /> : null}
+        {activeModule === 'support' ? (
+          <SupportWorkspace adminName={displayName} organizationName={companyName} />
+        ) : null}
       </section>
     </main>
   );
 }
 
 function getInitialDashboardModule(session: BackendAuthSession): DashboardModule {
-  return getDashboardModuleFromHash() || getStoredDashboardModule(session) || 'lsw';
+  // Not LSW any more: it is one of the sections that takes the whole window,
+  // so opening there would mean arriving with no navigation in sight.
+  return getDashboardModuleFromHash() || getStoredDashboardModule(session) || 'dashboard';
 }
 
 function getDashboardModuleFromHash(): DashboardModule | null {
@@ -797,42 +1064,131 @@ function isDashboardModule(value: unknown): value is DashboardModule {
   return typeof value === 'string' && DASHBOARD_MODULES.includes(value as DashboardModule);
 }
 
-function AccountPanel({
-  activeTab,
+/**
+ * The account page: who this person is, and what they are allowed to do.
+ *
+ * Laid out as a page rather than a stack of cards. The identity leads, the
+ * facts sit on plain ruled rows, and only the things that genuinely group
+ * together are boxed. Boxing everything flattens the hierarchy until nothing
+ * looks more important than anything else.
+ */
+function AccountPage({
   departmentName,
   displayName,
-  onClose,
-  onSignOut,
   permissions,
   phoneMasked,
   profilePhotoUrl,
   role,
   roleCode,
-  session,
-  setActiveTab,
   status,
-  tenantName,
-  uid
+  tenantName
 }: {
-  activeTab: AccountPanelTab;
   departmentName: string;
   displayName: string;
-  onClose: () => void;
-  onSignOut: () => void;
   permissions: string[];
   phoneMasked: string;
   profilePhotoUrl: string | null;
   role: string;
   roleCode: string;
-  session: BackendAuthSession;
-  setActiveTab: (tab: AccountPanelTab) => void;
   status: string;
   tenantName: string;
-  uid: string;
 }) {
   const isOrgAdmin = roleCode === 'ORG_ADMIN' || roleCode === 'SYSTEM_ADMIN';
   const isDepartmentAdmin = roleCode === 'DEPT_ADMIN';
   const visiblePermissions = permissions.length ? permissions : getDefaultRoleCapabilities(roleCode);
+
+  return (
+    <div className="account-page">
+      <div className="page-inner">
+        <header className="page-hero">
+          <div className="page-hero-text">
+            <span className="page-eyebrow">Employee account</span>
+            <h1>{displayName}</h1>
+            <p className="page-hero-lead">
+              {role} in {departmentName}, at {tenantName}.
+            </p>
+            <div className="page-hero-meta">
+              <span className={`status-pill${status.toUpperCase() === 'ACTIVE' ? ' is-active' : ''}`}>
+                <ShieldCheck aria-hidden="true" size={14} />
+                {formatAccountStatus(status)}
+              </span>
+              <span className="page-hero-note">Signed in with a verified Synzapp profile</span>
+            </div>
+          </div>
+          <AccountArtwork />
+        </header>
+
+        <section className="page-section" aria-labelledby="account-details-title">
+          <div className="page-section-head">
+            <h2 id="account-details-title">Details</h2>
+          </div>
+          <dl className="fact-rows">
+            <FactRow icon={UserCircle} label="Name" value={displayName} />
+            <FactRow icon={BriefcaseBusiness} label="Role" value={role} />
+            <FactRow icon={Building2} label="Department" value={departmentName} />
+            <FactRow icon={KeyRound} label="Phone" value={phoneMasked} />
+            <FactRow icon={Building2} label="Organization" value={tenantName} />
+          </dl>
+        </section>
+
+        <section className="page-section" aria-labelledby="account-access-title">
+          <div className="page-section-head">
+            <h2 id="account-access-title">What you can do</h2>
+            <span className="page-section-note">
+              {visiblePermissions.length} {visiblePermissions.length === 1 ? 'capability' : 'capabilities'}
+            </span>
+          </div>
+          <ul className="capability-chips">
+            {visiblePermissions.map((permission) => (
+              <li key={permission}>{formatPermissionLabel(permission)}</li>
+            ))}
+          </ul>
+        </section>
+
+        <section className="page-section" aria-labelledby="account-controls-title">
+          <div className="page-section-head">
+            <h2 id="account-controls-title">Protections in place</h2>
+            <span className="page-section-note">
+              {isOrgAdmin ? 'Organization scope' : isDepartmentAdmin ? 'Department scope' : 'Employee scope'}
+            </span>
+          </div>
+          <div className="assurance-row">
+            <ProtectionNote
+              icon={Smartphone}
+              label="Registered devices"
+              value="Only devices registered to you can open this account."
+            />
+            <ProtectionNote
+              icon={LockKeyhole}
+              label="Audit trail"
+              value="Searching records, producing them and approving a deletion are each written down."
+            />
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The settings page: what this person can change, and who is allowed to.
+ *
+ * Administration is only listed when the person actually has it, so nobody is
+ * shown a row they cannot use.
+ */
+function SettingsPage({
+  onSignOut,
+  permissions,
+  roleCode,
+  session
+}: {
+  onSignOut: () => void;
+  permissions: string[];
+  roleCode: string;
+  session: BackendAuthSession;
+}) {
+  const isOrgAdmin = roleCode === 'ORG_ADMIN' || roleCode === 'SYSTEM_ADMIN';
+  const isDepartmentAdmin = roleCode === 'DEPT_ADMIN';
   const settingsSections = getAccountSettingsSections({
     isDepartmentAdmin,
     isOrgAdmin,
@@ -840,150 +1196,87 @@ function AccountPanel({
   });
 
   return (
-    <div
-      aria-labelledby="account-panel-title"
-      aria-modal="true"
-      className="account-panel-overlay"
-      onClick={onClose}
-      role="dialog"
-    >
-      <section className="account-panel" onClick={(event) => event.stopPropagation()}>
-        <header className="account-panel-header">
-          <div className="account-panel-profile">
-            <Avatar className="account-panel-avatar" name={displayName} photoUrl={profilePhotoUrl} />
-            <div>
-              <span>Employee account</span>
-              <h2 id="account-panel-title">{displayName}</h2>
-              <p>{role} · {departmentName}</p>
-            </div>
+    <div className="account-page">
+      <div className="page-inner">
+        <header className="page-hero">
+          <div className="page-hero-text">
+            <span className="page-eyebrow">Settings</span>
+            <h1>What you can change</h1>
+            <p className="page-hero-lead">
+              Your own preferences, and the company settings your role lets you reach.
+            </p>
           </div>
-          <button aria-label="Close account" onClick={onClose} type="button">
-            <X aria-hidden="true" size={18} />
-          </button>
+          <SettingsArtwork />
         </header>
 
-        <div className="account-panel-tabs" role="tablist" aria-label="Account sections">
-          <button
-            aria-selected={activeTab === 'account'}
-            className={activeTab === 'account' ? 'is-active' : ''}
-            onClick={() => setActiveTab('account')}
-            role="tab"
-            type="button"
-          >
-            <UserCircle aria-hidden="true" size={16} />
-            Account
+        <section className="page-section" aria-labelledby="settings-personal-title">
+          <div className="page-section-head">
+            <h2 id="settings-personal-title">Yours</h2>
+            <span className="page-section-note">Available to every active user</span>
+          </div>
+          <div className="settings-rows">
+            <SettingsRow
+              icon={UserCircle}
+              status="Active"
+              subtitle="Name, photo, role, department, and phone identity"
+              title="Profile"
+            />
+            <SettingsRow
+              icon={Smartphone}
+              status="Mobile-backed"
+              subtitle="Registered devices for this account"
+              title="My devices"
+            />
+            <SettingsRow
+              icon={DatabaseBackup}
+              status="Policy-backed"
+              subtitle="Encrypted chat history and recovery readiness"
+              title="Chat backup"
+            />
+          </div>
+        </section>
+
+        {settingsSections.length ? (
+          <section className="page-section" aria-labelledby="settings-admin-title">
+            <div className="page-section-head">
+              <h2 id="settings-admin-title">The company's</h2>
+              <span className="page-section-note">{isOrgAdmin ? 'Org Admin' : 'Department Admin'}</span>
+            </div>
+            <div className="settings-rows">
+              {settingsSections.map((section) => (
+                <SettingsRow
+                  icon={section.icon}
+                  key={section.title}
+                  status={section.status}
+                  subtitle={section.subtitle}
+                  title={section.title}
+                />
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        <section className="session-band" aria-labelledby="settings-session-title">
+          <div>
+            <h2 id="settings-session-title">Session</h2>
+            <p>
+              {session.access === 'ACTIVE'
+                ? 'Your web session is active and verified.'
+                : `Session state: ${session.access}`}
+            </p>
+          </div>
+          <button className="session-signout" onClick={onSignOut} type="button">
+            <LogOut aria-hidden="true" size={16} />
+            Log out
           </button>
-          <button
-            aria-selected={activeTab === 'settings'}
-            className={activeTab === 'settings' ? 'is-active' : ''}
-            onClick={() => setActiveTab('settings')}
-            role="tab"
-            type="button"
-          >
-            <Settings aria-hidden="true" size={16} />
-            Settings
-          </button>
-        </div>
-
-        <div className="account-panel-body">
-          {activeTab === 'account' ? (
-            <>
-              <section className="account-hero-card">
-                <div>
-                  <span>{status}</span>
-                  <h3>{tenantName}</h3>
-                  <p>Signed in with a verified Synzapp profile and tenant role assignment.</p>
-                </div>
-                <BadgeCheck aria-hidden="true" size={34} />
-              </section>
-
-              <div className="account-detail-list">
-                <AccountFact icon={UserCircle} label="Name" value={displayName} />
-                <AccountFact icon={BriefcaseBusiness} label="Role" value={role} />
-                <AccountFact icon={Building2} label="Department" value={departmentName} />
-                <AccountFact icon={KeyRound} label="Phone" value={phoneMasked} />
-                <AccountFact icon={ShieldCheck} label="Status" value={formatAccountStatus(status)} />
-              </div>
-
-              <section className="account-section">
-                <div className="account-section-title">
-                  <h3>Access Profile</h3>
-                  <span>{visiblePermissions.length} capability{visiblePermissions.length === 1 ? '' : 'ies'}</span>
-                </div>
-                <div className="account-permission-list">
-                  {visiblePermissions.slice(0, 12).map((permission) => (
-                    <span key={permission}>{formatPermissionLabel(permission)}</span>
-                  ))}
-                </div>
-              </section>
-
-              <section className="account-section">
-                <div className="account-section-title">
-                  <h3>Enterprise Controls</h3>
-                  <span>{isOrgAdmin ? 'Organization scope' : isDepartmentAdmin ? 'Department scope' : 'Employee scope'}</span>
-                </div>
-                <div className="account-control-list">
-                  <AccountControlCard icon={Smartphone} label="Registered devices" value="Protected by device identity" />
-                  <AccountControlCard icon={DatabaseBackup} label="Encrypted backup" value="Tenant policy controlled" />
-                  <AccountControlCard icon={Cpu} label="Synzapp AI" value="Device readiness tracked" />
-                  <AccountControlCard icon={LockKeyhole} label="Audit trail" value="Sensitive actions audited" />
-                </div>
-              </section>
-            </>
-          ) : (
-            <>
-              <section className="account-section">
-                <div className="account-section-title">
-                  <h3>Personal Settings</h3>
-                  <span>Available to every active user</span>
-                </div>
-                <div className="account-settings-list">
-                  <AccountSettingsRow icon={UserCircle} title="Profile" subtitle="Name, photo, role, department, and phone identity" status="Active" />
-                  <AccountSettingsRow icon={Smartphone} title="My devices" subtitle="Registered devices for this account" status="Mobile-backed" />
-                  <AccountSettingsRow icon={DatabaseBackup} title="Chat backup" subtitle="Encrypted chat history and recovery readiness" status="Policy-backed" />
-                  <AccountSettingsRow icon={Cpu} title="Synzapp AI" subtitle="Offline AI status and device readiness" status="Device-backed" />
-                </div>
-              </section>
-
-              {settingsSections.length ? (
-                <section className="account-section">
-                  <div className="account-section-title">
-                    <h3>Administration</h3>
-                    <span>{isOrgAdmin ? 'Org Admin' : 'Department Admin'}</span>
-                  </div>
-                  <div className="account-settings-list">
-                    {settingsSections.map((section) => (
-                      <AccountSettingsRow
-                        icon={section.icon}
-                        key={section.title}
-                        status={section.status}
-                        subtitle={section.subtitle}
-                        title={section.title}
-                      />
-                    ))}
-                  </div>
-                </section>
-              ) : null}
-
-              <section className="account-section account-session-section">
-                <div>
-                  <h3>Session</h3>
-                  <p>{session.access === 'ACTIVE' ? 'Your web session is active and verified.' : `Session state: ${session.access}`}</p>
-                </div>
-                <button onClick={onSignOut} type="button">
-                  <LogOut aria-hidden="true" size={16} />
-                  Log out
-                </button>
-              </section>
-            </>
-          )}
-        </div>
-      </section>
+        </section>
+      </div>
     </div>
   );
 }
 
-function AccountFact({
+/** One ruled row: a label, and the thing itself. No box. */
+function FactRow({
   icon: Icon,
   label,
   value
@@ -993,17 +1286,17 @@ function AccountFact({
   value: string;
 }) {
   return (
-    <article className="account-fact">
-      <Icon aria-hidden={true} size={16} />
-      <div>
-        <span>{label}</span>
-        <strong>{value}</strong>
-      </div>
-    </article>
+    <div className="fact-row">
+      <dt>
+        <Icon aria-hidden={true} size={16} />
+        {label}
+      </dt>
+      <dd>{value}</dd>
+    </div>
   );
 }
 
-function AccountControlCard({
+function ProtectionNote({
   icon: Icon,
   label,
   value
@@ -1013,17 +1306,19 @@ function AccountControlCard({
   value: string;
 }) {
   return (
-    <article className="account-control-card">
-      <Icon aria-hidden={true} size={17} />
+    <article className="assurance-note">
+      <span className="assurance-icon">
+        <Icon aria-hidden={true} size={18} />
+      </span>
       <div>
-        <span>{label}</span>
-        <strong>{value}</strong>
+        <h3>{label}</h3>
+        <p>{value}</p>
       </div>
     </article>
   );
 }
 
-function AccountSettingsRow({
+function SettingsRow({
   icon: Icon,
   status,
   subtitle,
@@ -1035,15 +1330,15 @@ function AccountSettingsRow({
   title: string;
 }) {
   return (
-    <article className="account-settings-row">
-      <span>
-        <Icon aria-hidden={true} size={17} />
+    <article className="settings-row">
+      <span className="settings-row-icon">
+        <Icon aria-hidden={true} size={18} />
       </span>
-      <div>
-        <strong>{title}</strong>
+      <div className="settings-row-text">
+        <h3>{title}</h3>
         <p>{subtitle}</p>
       </div>
-      <em>{status}</em>
+      <span className="settings-row-status">{status}</span>
     </article>
   );
 }
@@ -1091,7 +1386,7 @@ function getAccountSettingsSections({
   }
 
   if (isOrgAdmin || hasPermission('security.manage')) {
-    sections.push({ icon: LockKeyhole, status: 'Restricted', subtitle: 'Tenant devices, revocation, encrypted backup policy, and access controls', title: 'Organization security' });
+    sections.push({ icon: LockKeyhole, status: 'Restricted', subtitle: 'Organization devices, revocation, encrypted backup policy, and access controls', title: 'Organization security' });
   }
 
   return sections;
@@ -1109,12 +1404,6 @@ function getDefaultRoleCapabilities(roleCode: string): string[] {
   return ['profile.view', 'chat.use', 'lsw.use', 'rca.use', 'rails.use'];
 }
 
-function formatPermissionLabel(permission: string): string {
-  return permission
-    .replace(/\./g, ' ')
-    .replace(/_/g, ' ')
-    .replace(/\b\w/g, (character) => character.toUpperCase());
-}
 
 function formatAccountStatus(status: string): string {
   return status
@@ -1266,6 +1555,40 @@ function getErrorMessage(error: unknown): string {
   return 'Something went wrong. Please try again.';
 }
 
+function getPhoneLoginErrorMessage(error: unknown, country: CountryConfig): string {
+  const message = getErrorMessage(error);
+  const code = getErrorCode(error);
+  const normalizedMessage = message.toLowerCase();
+
+  if (
+    code === 'auth/operation-not-allowed' ||
+    normalizedMessage.includes('auth/operation-not-allowed') ||
+    normalizedMessage.includes('sms unable to be sent until this region')
+  ) {
+    return `SMS login is not enabled for ${country.label} (${country.code}) in Firebase Authentication. Choose an enabled country code, or ask an administrator to enable this SMS region in Firebase Console.`;
+  }
+
+  if (code === 'auth/invalid-phone-number' || normalizedMessage.includes('auth/invalid-phone-number')) {
+    return `Enter a valid ${country.label} phone number for ${country.code}.`;
+  }
+
+  if (code === 'auth/too-many-requests' || normalizedMessage.includes('auth/too-many-requests')) {
+    return 'Too many login attempts were made from this device. Please wait a few minutes, then try again.';
+  }
+
+  return message;
+}
+
+function getErrorCode(error: unknown): string {
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    const code = (error as { code?: unknown }).code;
+
+    return typeof code === 'string' ? code : '';
+  }
+
+  return '';
+}
+
 createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
     <AppLoadingProvider>
@@ -1273,3 +1596,475 @@ createRoot(document.getElementById('root') as HTMLElement).render(
     </AppLoadingProvider>
   </React.StrictMode>
 );
+
+/**
+ * The privacy policy, and the list of companies that process data on our behalf.
+ *
+ * Both on one page because they are asked for together: a buyer's security
+ * review wants the policy and the sub-processor list in the same breath, and
+ * splitting them means one of the two is always out of date.
+ */
+function TermsPage() {
+  return (
+    <div className="marketing-shell">
+      <MarketingHeader />
+
+      <article className="policy-page">
+        <div className="policy-inner">
+          <p className="section-eyebrow">Policies</p>
+          <h1>{TERMS_OF_SERVICE.title}</h1>
+          <p className="policy-intro">{TERMS_OF_SERVICE.intro}</p>
+          <p className="policy-updated">Last updated {TERMS_OF_SERVICE.lastUpdated}</p>
+
+          {TERMS_OF_SERVICE.sections.map((section) => (
+            <section className="policy-section" key={section.heading}>
+              <h2>{section.heading}</h2>
+              {section.body.map((paragraph) => (
+                <p key={paragraph}>{paragraph}</p>
+              ))}
+            </section>
+          ))}
+
+          <p className="policy-updated">
+            The Privacy Policy forms part of these terms. <a href="#privacy">Read it here</a>.
+          </p>
+
+          <a className="policy-back" href="#top">Back to Synzapp</a>
+        </div>
+      </article>
+
+      <MarketingFooter />
+    </div>
+  );
+}
+
+function PolicyPage() {
+  return (
+    <div className="marketing-shell">
+      <MarketingHeader />
+
+      <article className="policy-page">
+        <div className="policy-inner">
+          <p className="section-eyebrow">Policies</p>
+          <h1>{PRIVACY_POLICY.title}</h1>
+          <p className="policy-intro">{PRIVACY_POLICY.intro}</p>
+          <p className="policy-updated">Last updated {PRIVACY_POLICY.lastUpdated}</p>
+
+          {PRIVACY_POLICY.sections.map((section) => (
+            <section className="policy-section" key={section.heading}>
+              <h2>{section.heading}</h2>
+              {section.body.map((paragraph) => (
+                <p key={paragraph}>{paragraph}</p>
+              ))}
+            </section>
+          ))}
+
+          <section className="policy-section" id="subprocessors">
+            <h2>Companies that process data for us</h2>
+            <p>
+              These are the only companies that handle information on our behalf. If this list
+              changes, we update it here and tell affected organizations.
+            </p>
+
+            <div className="policy-table-wrap">
+              <table className="policy-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Company</th>
+                    <th scope="col">What they do</th>
+                    <th scope="col">Where</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {SUBPROCESSORS.map((entry) => (
+                    <tr key={entry.name}>
+                      <td className="policy-cell-strong">{entry.name}</td>
+                      <td>{entry.purpose}</td>
+                      <td>{entry.location}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <a className="signin-back" href="#top">Back to Synzapp</a>
+        </div>
+      </article>
+
+      <MarketingFooter />
+    </div>
+  );
+}
+
+/**
+ * How somebody outside the product reaches us.
+ *
+ * Deliberately plain. A contact page that asks for a job title, a company size
+ * and a budget before it will accept a sentence is a lead-capture form wearing
+ * a contact page's clothes, and people with a real question give up on it.
+ *//**
+ * How somebody outside the product reaches us.
+ *
+ * Laid out in rows so the whole form — including the Send button — fits on one
+ * screen. A contact form that has to be scrolled to find its own button loses
+ * people who were ready to write.
+ */
+function ContactPage() {
+  const [step, setStep] = React.useState(0);
+  const [name, setName] = React.useState('');
+  const [email, setEmail] = React.useState('');
+  const [organizationName, setOrganizationName] = React.useState('');
+  const [phone, setPhone] = React.useState('');
+  const [countryCode, setCountryCode] = React.useState('US');
+  const [addressLine1, setAddressLine1] = React.useState('');
+  const [addressLine2, setAddressLine2] = React.useState('');
+  const [city, setCity] = React.useState('');
+  const [region, setRegion] = React.useState('');
+  const [postalCode, setPostalCode] = React.useState('');
+  const [subject, setSubject] = React.useState('');
+  const [message, setMessage] = React.useState('');
+  const [isSending, setIsSending] = React.useState(false);
+  const [sent, setSent] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const firstFieldRef = React.useRef<HTMLInputElement | null>(null);
+
+  const country = getCountryFormat(countryCode);
+  const currentStep = CONTACT_STEPS[step];
+  const values: ContactFormValues = {
+    addressLine1,
+    addressLine2,
+    city,
+    countryCode,
+    email,
+    message,
+    name,
+    organizationName,
+    phone,
+    postalCode,
+    region,
+    subject
+  };
+
+  // Each step puts the cursor in its first field, so somebody filling this in
+  // from the keyboard never has to reach for the mouse between questions.
+  React.useEffect(() => {
+    firstFieldRef.current?.focus();
+  }, [step]);
+
+  /**
+   * Clears the region and postal code when the country changes.
+   *
+   * A US state left behind after switching to Canada would be submitted as a
+   * Canadian province, and a ZIP code would fail a postcode check with no
+   * obvious reason why.
+   */
+  function handleCountryChange(nextCode: string) {
+    setCountryCode(nextCode);
+    setRegion('');
+    setPostalCode('');
+  }
+
+  function handleBack() {
+    setError(null);
+    setStep((current) => Math.max(current - 1, 0));
+  }
+
+  async function handleSubmit(event: React.FormEvent) {
+    event.preventDefault();
+
+    const stepError = validateContactStep(step, values);
+
+    if (stepError) {
+      setError(stepError);
+
+      return;
+    }
+
+    setError(null);
+
+    if (step < CONTACT_STEPS.length - 1) {
+      setStep(step + 1);
+
+      return;
+    }
+
+    setIsSending(true);
+
+    try {
+      const response = await fetch(`${getSynzappApiBaseUrl()}/api/contact/enquiries`, {
+        body: JSON.stringify({
+          address: {
+            city,
+            countryCode,
+            line1: addressLine1,
+            line2: addressLine2,
+            postalCode: postalCode.trim() ? formatPostalCode(countryCode, postalCode) : '',
+            region
+          },
+          email,
+          message,
+          name,
+          organizationName,
+          phone: phone.trim() ? `${country.dialCode} ${phone.trim()}` : '',
+          subject
+        }),
+        headers: { 'Content-Type': 'application/json' },
+        method: 'POST'
+      });
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+
+        throw new Error((payload as { message?: string }).message || 'Your message could not be sent.');
+      }
+
+      setSent(true);
+    } catch (sendError) {
+      setError(sendError instanceof Error ? sendError.message : 'Your message could not be sent.');
+    } finally {
+      setIsSending(false);
+    }
+  }
+
+  return (
+    <div className="contact-overlay" role="dialog" aria-modal="true" aria-label="Contact Synzapp">
+      {/* The page carries on behind the blur. Closing puts you back exactly
+          where you were, rather than on a page you have to navigate out of. */}
+      <a
+        aria-label="Close"
+        className="contact-overlay-close"
+        href="#top"
+      >
+        <X aria-hidden="true" size={20} />
+      </a>
+
+      <div className="contact-overlay-inner">
+          <p className="section-eyebrow">Contact</p>
+          <h1>Talk to us</h1>
+
+          {sent ? (
+            <div className="retention-note is-signal" role="status">
+              <ShieldCheck aria-hidden size={17} />
+              <div>
+                <p className="retention-note-title">Thank you. Your message has reached us.</p>
+                <p>We reply to the address you gave. If this was urgent, say so in a follow-up.</p>
+              </div>
+            </div>
+          ) : (
+            <>
+              <p className="contact-lead">
+                Questions about whether Synzapp fits your organization, or anything else. If you
+                already use Synzapp, raise it from inside your console instead. It reaches us with
+                your organization attached.
+              </p>
+
+              <div className="contact-wizard">
+                <div
+                  aria-hidden="true"
+                  className="contact-progress"
+                  style={{ '--contact-progress': `${getContactProgress(step) * 100}%` } as React.CSSProperties}
+                />
+
+                <form className="contact-step" onSubmit={(event) => void handleSubmit(event)}>
+                  <div className="contact-step-head">
+                    {step > 0 ? (
+                      <button
+                        aria-label="Back to the previous question"
+                        className="contact-back"
+                        onClick={handleBack}
+                        type="button"
+                      >
+                        <ArrowLeft aria-hidden="true" size={18} />
+                      </button>
+                    ) : null}
+                    <h2>{currentStep.title}</h2>
+                    <span className="contact-step-count">
+                      Step {step + 1} of {CONTACT_STEPS.length}
+                    </span>
+                  </div>
+
+                  {/* Announced when it changes, so somebody using a screen
+                      reader is told they have moved on rather than finding
+                      different fields under the same heading. */}
+                  <div aria-live="polite" className="contact-step-body">
+                    {currentStep.key === 'email' ? (
+                      <label className="form-field">
+                        <span>Work email</span>
+                        <input
+                          autoComplete="email"
+                          onChange={(event) => setEmail(event.target.value)}
+                          placeholder="you@yourcompany.com"
+                          ref={firstFieldRef}
+                          type="email"
+                          value={email}
+                        />
+                      </label>
+                    ) : null}
+
+                    {currentStep.key === 'about' ? (
+                      <>
+                        <div className="contact-row">
+                          <label className="form-field">
+                            <span>Your name</span>
+                            <input
+                              autoComplete="name"
+                              onChange={(event) => setName(event.target.value)}
+                              ref={firstFieldRef}
+                              type="text"
+                              value={name}
+                            />
+                          </label>
+                          <label className="form-field">
+                            <span>Organization (optional)</span>
+                            <input
+                              autoComplete="organization"
+                              onChange={(event) => setOrganizationName(event.target.value)}
+                              type="text"
+                              value={organizationName}
+                            />
+                          </label>
+                        </div>
+                        <div className="contact-row">
+                          <div className="form-field">
+                            <span id="contact-country-label">Country</span>
+                            <Combobox
+                              id="contact-country"
+                              labelledBy="contact-country-label"
+                              onChange={(label) => {
+                                const match = SUPPORTED_COUNTRIES.find((option) => option.label === label);
+                                handleCountryChange(match ? match.code : countryCode);
+                              }}
+                              options={SUPPORTED_COUNTRIES.map((option) => option.label)}
+                              value={country.label}
+                            />
+                          </div>
+                          <label className="form-field">
+                            <span>Phone (optional)</span>
+                            <div className="contact-phone">
+                              <span className="contact-dial">{country.dialCode}</span>
+                              <input
+                                autoComplete="tel"
+                                onChange={(event) => setPhone(event.target.value)}
+                                type="tel"
+                                value={phone}
+                              />
+                            </div>
+                          </label>
+                        </div>
+                      </>
+                    ) : null}
+
+                    {currentStep.key === 'address' ? (
+                      <>
+                        <div className="contact-row">
+                          <label className="form-field">
+                            <span>Street address</span>
+                            <input
+                              autoComplete="address-line1"
+                              onChange={(event) => setAddressLine1(event.target.value)}
+                              ref={firstFieldRef}
+                              type="text"
+                              value={addressLine1}
+                            />
+                          </label>
+                          <label className="form-field">
+                            <span>Suite or floor (optional)</span>
+                            <input
+                              autoComplete="address-line2"
+                              onChange={(event) => setAddressLine2(event.target.value)}
+                              type="text"
+                              value={addressLine2}
+                            />
+                          </label>
+                        </div>
+                        <div className="contact-row">
+                          <label className="form-field">
+                            <span>City</span>
+                            <input
+                              autoComplete="address-level2"
+                              onChange={(event) => setCity(event.target.value)}
+                              type="text"
+                              value={city}
+                            />
+                          </label>
+                          <div className="form-field">
+                            <span id="contact-region-label">{country.regionLabel}</span>
+                            {country.regionOptions.length ? (
+                              <Combobox
+                                id="contact-region"
+                                labelledBy="contact-region-label"
+                                onChange={setRegion}
+                                options={country.regionOptions}
+                                value={region}
+                              />
+                            ) : (
+                              <input
+                                aria-labelledby="contact-region-label"
+                                onChange={(event) => setRegion(event.target.value)}
+                                type="text"
+                                value={region}
+                              />
+                            )}
+                          </div>
+                          <label className="form-field">
+                            <span>{country.postalLabel}</span>
+                            <input
+                              autoComplete="postal-code"
+                              onChange={(event) => setPostalCode(event.target.value)}
+                              placeholder={country.postalPlaceholder}
+                              type="text"
+                              value={postalCode}
+                            />
+                          </label>
+                        </div>
+                        <p className="contact-step-note">
+                          All optional. It helps us route you to the right team.
+                        </p>
+                      </>
+                    ) : null}
+
+                    {currentStep.key === 'message' ? (
+                      <>
+                        <label className="form-field">
+                          <span>Subject</span>
+                          <input
+                            onChange={(event) => setSubject(event.target.value)}
+                            placeholder="A short summary"
+                            ref={firstFieldRef}
+                            type="text"
+                            value={subject}
+                          />
+                        </label>
+                        <label className="form-field">
+                          <span>Message</span>
+                          <textarea
+                            onChange={(event) => setMessage(event.target.value)}
+                            placeholder="Tell us what you need. If it is urgent, say so."
+                            rows={5}
+                            value={message}
+                          />
+                        </label>
+                      </>
+                    ) : null}
+                  </div>
+
+                  {error ? (
+                    <p className="contact-error" role="alert">{error}</p>
+                  ) : null}
+
+                  <div className="contact-step-actions">
+                    <button className="button-primary" disabled={isSending} type="submit">
+                      {isSending ? 'Sending…' : currentStep.nextLabel}
+                      {step < CONTACT_STEPS.length - 1 ? <ArrowRight aria-hidden="true" size={16} /> : null}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </>
+          )}
+
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSUserActivityTypes</key>
+	<array>
+		<string>INSendMessageIntent</string>
+	</array>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Synzapp</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>synzapp</string>
+				<string>com.synzapp.mobile</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>exp+synzapp-mobile</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>app-1-291906951893-ios-0ae719a9ba686c8676a05c</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>4</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>LSMinimumSystemVersion</key>
+	<string>12.0</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Synzapp uses Bluetooth when you choose a headset for secure workplace calls.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_expo._tcp</string>
+		<string>_react-native-packager._tcp</string>
+		<string>_http._tcp</string>
+	</array>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Synzapp uses calendar access when you choose to add scheduled workplace calls to your device calendar.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>Synzapp uses calendar access when you choose to add scheduled workplace calls to your device calendar.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Synzapp uses the camera when you choose to take a profile photo or send a chat photo.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>Synzapp uses contacts you select to invite approved employees to your company workspace.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Allow $(PRODUCT_NAME) to access your Face ID biometric data.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Synzapp connects to your local development server while testing local builds on your network.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Synzapp uses the microphone when you choose to record a voice note or join a secure workplace call.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Synzapp uses photos and videos you choose for your profile photo or chat messages.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>Allow $(PRODUCT_NAME) to access your reminders</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>Allow $(PRODUCT_NAME) to access your reminders</string>
+	<key>RCTNewArchEnabled</key>
+	<true/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+		<string>fetch</string>
+		<string>remote-notification</string>
+		<string>voip</string>
+	</array>
+	<key>UILaunchStoryboardName</key>
+	<string>SplashScreen</string>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+	</array>
+	<key>UIRequiresFullScreen</key>
+	<false/>
+	<key>UIStatusBarStyle</key>
+	<string>UIStatusBarStyleDefault</string>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UIUserInterfaceStyle</key>
+	<string>Automatic</string>
+	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<false/>
+</dict>
+</plist>

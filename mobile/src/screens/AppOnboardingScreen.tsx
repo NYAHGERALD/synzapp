@@ -4,10 +4,12 @@ import {
   Animated,
   Easing,
   Image,
-  Pressable,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
   SafeAreaView,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View
 } from 'react-native';
 import { useAppTheme } from '../theme/AppThemeProvider';
@@ -18,65 +20,48 @@ interface AppOnboardingScreenProps {
 }
 
 interface OnboardingPage {
-  accent: string;
+  /** Key into AppColors, so each page stays legible in both themes. */
+  accentKey: 'primary' | 'blue' | 'amber' | 'success';
   body: string;
-  eyebrow: string;
+  highlights: string[];
   icon: keyof typeof Ionicons.glyphMap;
-  metrics: Array<{
-    label: string;
-    value: string;
-  }>;
+  /** Two supporting icons that orbit the main one. */
+  satelliteIcons: [keyof typeof Ionicons.glyphMap, keyof typeof Ionicons.glyphMap];
   title: string;
 }
 
 const onboardingPages: OnboardingPage[] = [
   {
-    accent: '#0F766E',
-    body: 'Synzapp opens a secure company workspace where leaders, managers, and employees work from one verified operating system.',
-    eyebrow: 'Secure Workspace',
-    icon: 'shield-checkmark-outline',
-    metrics: [
-      { label: 'Tenant identity', value: 'Verified' },
-      { label: 'Access model', value: 'Role-based' },
-      { label: 'Workspace', value: 'Cloud-ready' }
-    ],
-    title: 'Start with trust before work begins'
+    accentKey: 'primary',
+    body: 'Message anyone at work, one to one or in a group. Send photos, videos, documents and voice notes, and switch to a voice or video call when talking is faster than typing.',
+    highlights: ['Direct and group chats', 'Photos, files and voice notes', 'Voice and video calls'],
+    icon: 'chatbubbles-outline',
+    satelliteIcons: ['videocam-outline', 'mic-outline'],
+    title: 'Your whole team, in one place'
   },
   {
-    accent: '#2563EB',
-    body: 'LSW captures the operating signal, RCA turns it into learning, and RAILS drives accountable action to closure.',
-    eyebrow: 'Connected Flow',
-    icon: 'git-network-outline',
-    metrics: [
-      { label: 'LSW', value: 'Observe' },
-      { label: 'RCA', value: 'Analyze' },
-      { label: 'RAILS', value: 'Control' }
-    ],
-    title: 'Move from signal to verified action'
+    accentKey: 'blue',
+    body: 'The Interpreter listens while you speak and translates as you go, so a conversation between two languages still feels like one conversation. The written version is yours to keep afterwards.',
+    highlights: ['Live interpretation', 'Speak your own language', 'Transcript and summary'],
+    icon: 'language-outline',
+    satelliteIcons: ['ear-outline', 'document-text-outline'],
+    title: 'Everyone speaks their own language'
   },
   {
-    accent: '#7C3AED',
-    body: 'Evidence, approvals, audit history, and controlled call events are kept together so managers know what changed and why.',
-    eyebrow: 'Governed Evidence',
-    icon: 'folder-open-outline',
-    metrics: [
-      { label: 'Evidence', value: 'Centralized' },
-      { label: 'History', value: 'Audited' },
-      { label: 'Calls', value: 'Native' }
-    ],
-    title: 'Protect every decision with context'
+    accentKey: 'amber',
+    body: 'Record a meeting and get it back as a written record with a short summary. Whatever you share in chats and meetings goes to your company Library, so you can find it again months later.',
+    highlights: ['Meeting recordings', 'Written summaries', 'Shared company Library'],
+    icon: 'albums-outline',
+    satelliteIcons: ['recording-outline', 'search-outline'],
+    title: 'Every meeting, on the record'
   },
   {
-    accent: '#EA580C',
-    body: 'This installed build talks directly to Synzapp cloud services. No QR code or local development server is required.',
-    eyebrow: 'Production Path',
-    icon: 'cloud-done-outline',
-    metrics: [
-      { label: 'API', value: 'Render' },
-      { label: 'Push', value: 'Native' },
-      { label: 'Login', value: 'Verified' }
-    ],
-    title: 'Ready to enter the real app'
+    accentKey: 'success',
+    body: 'Leaders Standard Work holds the routine you run each day and week. RAILS follows the actions that come out of it and shows you what is still open, who owns it, and when it is due.',
+    highlights: ['Daily and weekly routine', 'Actions with clear owners', 'See what is still open'],
+    icon: 'checkmark-done-outline',
+    satelliteIcons: ['calendar-outline', 'trending-up-outline'],
+    title: 'Nothing falls through'
   }
 ];
 
@@ -87,20 +72,32 @@ const preparationStages = [
   'Opening verified sign in'
 ];
 
+/**
+ * Swipe-through introduction shown once, on first install.
+ *
+ * There are no navigation buttons by design - the pages are moved by swiping,
+ * and swiping past the last page enters the app. A short trailing spacer after
+ * the final page gives that last swipe somewhere to travel on both platforms,
+ * so the gesture does not depend on iOS bounce behaviour.
+ */
 export function AppOnboardingScreen({ onComplete }: AppOnboardingScreenProps) {
   const theme = useAppTheme();
+  const { width } = useWindowDimensions();
   const styles = useMemo(() => createStyles(theme.colors), [theme.colors]);
-  const [pageIndex, setPageIndex] = useState(0);
-  const transition = useRef(new Animated.Value(1)).current;
-  const motion = useRef(new Animated.Value(0)).current;
-  const page = onboardingPages[pageIndex];
-  const isLastPage = pageIndex === onboardingPages.length - 1;
+  const scrollX = useRef(new Animated.Value(0)).current;
+  const drift = useRef(new Animated.Value(0)).current;
+  const hasCompletedRef = useRef(false);
+  const [activeIndex, setActiveIndex] = useState(0);
+
+  const lastPageOffset = width * (onboardingPages.length - 1);
+  const exitThreshold = lastPageOffset + Math.max(width * 0.12, 52);
 
   useEffect(() => {
     const loop = Animated.loop(
-      Animated.timing(motion, {
+      Animated.timing(drift, {
         duration: 5200,
         easing: Easing.inOut(Easing.sin),
+        isInteraction: false,
         toValue: 1,
         useNativeDriver: true
       })
@@ -109,146 +106,297 @@ export function AppOnboardingScreen({ onComplete }: AppOnboardingScreenProps) {
     loop.start();
 
     return () => loop.stop();
-  }, [motion]);
+  }, [drift]);
 
-  function changePage(nextPageIndex: number) {
-    Animated.timing(transition, {
-      duration: 180,
-      easing: Easing.out(Easing.cubic),
-      toValue: 0,
-      useNativeDriver: true
-    }).start(() => {
-      setPageIndex(nextPageIndex);
-      Animated.spring(transition, {
-        damping: 16,
-        mass: 0.8,
-        stiffness: 140,
-        toValue: 1,
-        useNativeDriver: true
-      }).start();
+  useEffect(() => {
+    const subscription = scrollX.addListener(({ value }) => {
+      const nextIndex = Math.round(value / Math.max(width, 1));
+
+      setActiveIndex((currentIndex) =>
+        nextIndex !== currentIndex && nextIndex >= 0 && nextIndex < onboardingPages.length
+          ? nextIndex
+          : currentIndex
+      );
+
+      // Pulled past the last page - that gesture is how the intro is finished.
+      if (value >= exitThreshold && !hasCompletedRef.current) {
+        hasCompletedRef.current = true;
+        onComplete();
+      }
     });
-  }
 
-  function goNext() {
-    if (isLastPage) {
+    return () => scrollX.removeListener(subscription);
+  }, [exitThreshold, onComplete, scrollX, width]);
+
+  // Plain JS scroll callbacks, which always fire. The animated listener above
+  // drives the same logic during the gesture; this is what guarantees a fast
+  // flick still lands, and keeps the page indicator honest even if the animated
+  // value is being driven entirely on the UI thread.
+  function handleScrollSettled(event: NativeSyntheticEvent<NativeScrollEvent>) {
+    const offsetX = event.nativeEvent.contentOffset.x;
+    const settledIndex = Math.round(offsetX / Math.max(width, 1));
+
+    if (settledIndex >= 0 && settledIndex < onboardingPages.length) {
+      setActiveIndex(settledIndex);
+    }
+
+    if (offsetX >= exitThreshold && !hasCompletedRef.current) {
+      hasCompletedRef.current = true;
       onComplete();
-      return;
-    }
-
-    changePage(pageIndex + 1);
-  }
-
-  function goBack() {
-    if (pageIndex > 0) {
-      changePage(pageIndex - 1);
     }
   }
 
-  const animatedContentStyle = {
-    opacity: transition,
+  return (
+    <SafeAreaView style={styles.screen}>
+      <View style={styles.brandBar}>
+        <Image
+          resizeMode="contain"
+          source={require('../../assets/Synzapp-Nav.png')}
+          style={styles.brandLogo}
+        />
+        <Text style={styles.brandName}>Synzapp</Text>
+      </View>
+
+      <Animated.ScrollView
+        contentContainerStyle={{ width: width * onboardingPages.length + width * 0.35 }}
+        horizontal
+        onMomentumScrollEnd={handleScrollSettled}
+        onScroll={Animated.event(
+          [{ nativeEvent: { contentOffset: { x: scrollX } } }],
+          { useNativeDriver: true }
+        )}
+        onScrollEndDrag={handleScrollSettled}
+        pagingEnabled
+        scrollEventThrottle={16}
+        showsHorizontalScrollIndicator={false}
+        style={styles.pager}
+      >
+        {onboardingPages.map((page, index) => (
+          <OnboardingSlide
+            drift={drift}
+            index={index}
+            key={page.title}
+            page={page}
+            scrollX={scrollX}
+            width={width}
+          />
+        ))}
+      </Animated.ScrollView>
+
+      <View style={styles.footer}>
+        <View style={styles.dots}>
+          {onboardingPages.map((page, index) => (
+            <ProgressDot
+              index={index}
+              key={page.title}
+              scrollX={scrollX}
+              width={width}
+            />
+          ))}
+        </View>
+
+        <SwipeHint
+          drift={drift}
+          isLastPage={activeIndex === onboardingPages.length - 1}
+        />
+      </View>
+    </SafeAreaView>
+  );
+}
+
+function OnboardingSlide({
+  drift,
+  index,
+  page,
+  scrollX,
+  width
+}: {
+  drift: Animated.Value;
+  index: number;
+  page: OnboardingPage;
+  scrollX: Animated.Value;
+  width: number;
+}) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme.colors), [theme.colors]);
+  const accent = theme.colors[page.accentKey];
+  const inputRange = [(index - 1) * width, index * width, (index + 1) * width];
+
+  // The artwork trails the swipe and the words lead it. That small difference in
+  // speed is what gives the pages depth instead of a flat slide.
+  const artStyle = {
+    opacity: scrollX.interpolate({
+      inputRange,
+      outputRange: [0, 1, 0],
+      extrapolate: 'clamp'
+    }),
     transform: [
       {
-        translateY: transition.interpolate({
-          inputRange: [0, 1],
-          outputRange: [24, 0]
+        scale: scrollX.interpolate({
+          inputRange,
+          outputRange: [0.82, 1, 0.82],
+          extrapolate: 'clamp'
         })
       },
       {
-        scale: transition.interpolate({
-          inputRange: [0, 1],
-          outputRange: [0.97, 1]
+        translateX: scrollX.interpolate({
+          inputRange,
+          outputRange: [width * 0.22, 0, -width * 0.22],
+          extrapolate: 'clamp'
+        })
+      }
+    ]
+  };
+  const copyStyle = {
+    opacity: scrollX.interpolate({
+      inputRange,
+      outputRange: [0, 1, 0],
+      extrapolate: 'clamp'
+    }),
+    transform: [
+      {
+        translateX: scrollX.interpolate({
+          inputRange,
+          outputRange: [width * 0.42, 0, -width * 0.42],
+          extrapolate: 'clamp'
         })
       }
     ]
   };
 
   return (
-    <SafeAreaView style={styles.screen}>
-      <View style={styles.topBar}>
-        <View style={styles.brand}>
-          <Image
-            resizeMode="contain"
-            source={require('../../assets/Synzapp-Nav.png')}
-            style={styles.logo}
-          />
-          <View style={styles.brandCopy}>
-            <Text style={styles.brandTitle}>Synzapp</Text>
-            <Text style={styles.brandSubtitle}>Enterprise performance suite</Text>
-          </View>
-        </View>
+    <View style={[styles.slide, { width }]}>
+      <Animated.View style={[styles.artWrap, artStyle]}>
+        <SlideArtwork accent={accent} drift={drift} page={page} />
+      </Animated.View>
 
-        <Pressable
-          accessibilityRole="button"
-          onPress={onComplete}
-          style={({ pressed }) => [styles.textButton, pressed && styles.pressed]}
-        >
-          <Text style={styles.textButtonLabel}>Skip</Text>
-        </Pressable>
-      </View>
+      <Animated.View style={[styles.copyWrap, copyStyle]}>
+        <Text style={styles.slideTitle}>{page.title}</Text>
+        <Text style={styles.slideBody}>{page.body}</Text>
 
-      <View style={styles.body}>
-        <Animated.View style={[styles.stage, animatedContentStyle]}>
-          <EnterpriseMotionStage accent={page.accent} motion={motion} page={page} />
-        </Animated.View>
-
-        <Animated.View style={[styles.copy, animatedContentStyle]}>
-          <Text style={[styles.eyebrow, { color: page.accent }]}>{page.eyebrow}</Text>
-          <Text style={styles.title}>{page.title}</Text>
-          <Text style={styles.description}>{page.body}</Text>
-        </Animated.View>
-
-        <Animated.View style={[styles.metrics, animatedContentStyle]}>
-          {page.metrics.map((metric) => (
-            <View key={metric.label} style={styles.metricItem}>
-              <Text style={styles.metricValue}>{metric.value}</Text>
-              <Text style={styles.metricLabel}>{metric.label}</Text>
+        <View style={styles.highlights}>
+          {page.highlights.map((highlight) => (
+            <View key={highlight} style={styles.highlightRow}>
+              <View style={[styles.highlightDot, { backgroundColor: accent }]} />
+              <Text style={styles.highlightText}>{highlight}</Text>
             </View>
           ))}
-        </Animated.View>
-      </View>
-
-      <View style={styles.footer}>
-        <View style={styles.progressTrack}>
-          {onboardingPages.map((item, index) => (
-            <View
-              key={item.title}
-              style={[
-                styles.progressSegment,
-                index <= pageIndex && { backgroundColor: page.accent }
-              ]}
-            />
-          ))}
         </View>
+      </Animated.View>
+    </View>
+  );
+}
 
-        <View style={styles.actions}>
-          <Pressable
-            accessibilityRole="button"
-            disabled={pageIndex === 0}
-            onPress={goBack}
-            style={({ pressed }) => [
-              styles.iconButton,
-              pageIndex === 0 && styles.disabled,
-              pressed && pageIndex !== 0 && styles.pressed
-            ]}
-          >
-            <Ionicons color={theme.colors.mutedStrong} name="chevron-back" size={22} />
-          </Pressable>
+function SlideArtwork({
+  accent,
+  drift,
+  page
+}: {
+  accent: string;
+  drift: Animated.Value;
+  page: OnboardingPage;
+}) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme.colors), [theme.colors]);
+  const floatStyle = (distance: number, delay: number) => ({
+    transform: [
+      {
+        translateY: drift.interpolate({
+          inputRange: [0, 0.25 + delay, 0.5 + delay, 0.75 + delay, 1],
+          outputRange: [0, -distance, 0, distance, 0],
+          extrapolate: 'clamp'
+        })
+      }
+    ]
+  });
 
-          <Pressable
-            accessibilityRole="button"
-            onPress={goNext}
-            style={({ pressed }) => [
-              styles.primaryButton,
-              { backgroundColor: page.accent },
-              pressed && styles.pressed
-            ]}
-          >
-            <Text style={styles.primaryButtonLabel}>{isLastPage ? 'Start secure sign in' : 'Continue'}</Text>
-            <Ionicons color="#FFFFFF" name="arrow-forward" size={19} />
-          </Pressable>
-        </View>
-      </View>
-    </SafeAreaView>
+  return (
+    <View style={styles.art}>
+      <Animated.View style={[styles.artHalo, { borderColor: accent }, floatStyle(6, 0)]} />
+      <Animated.View style={[styles.artCore, { backgroundColor: accent }, floatStyle(10, 0)]}>
+        <Ionicons color={theme.colors.screen} name={page.icon} size={48} />
+      </Animated.View>
+
+      <Animated.View style={[styles.artChip, styles.artChipLeft, floatStyle(8, 0.12)]}>
+        <Ionicons color={accent} name={page.satelliteIcons[0]} size={20} />
+      </Animated.View>
+      <Animated.View style={[styles.artChip, styles.artChipRight, floatStyle(7, 0.24)]}>
+        <Ionicons color={accent} name={page.satelliteIcons[1]} size={20} />
+      </Animated.View>
+    </View>
+  );
+}
+
+function ProgressDot({
+  index,
+  scrollX,
+  width
+}: {
+  index: number;
+  scrollX: Animated.Value;
+  width: number;
+}) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme.colors), [theme.colors]);
+  const inputRange = [(index - 1) * width, index * width, (index + 1) * width];
+
+  // Width is a layout property and cannot be driven natively, so the active dot
+  // stretches with scaleX instead. The scroll position drives this value on the
+  // UI thread; interpolating it into `width` would throw at runtime.
+  return (
+    <View style={styles.dotSlot}>
+      <Animated.View
+        style={[
+          styles.dot,
+          {
+            opacity: scrollX.interpolate({
+              inputRange,
+              outputRange: [0.28, 1, 0.28],
+              extrapolate: 'clamp'
+            }),
+            transform: [
+              {
+                scaleX: scrollX.interpolate({
+                  inputRange,
+                  outputRange: [0.27, 1, 0.27],
+                  extrapolate: 'clamp'
+                })
+              }
+            ]
+          }
+        ]}
+      />
+    </View>
+  );
+}
+
+function SwipeHint({
+  drift,
+  isLastPage
+}: {
+  drift: Animated.Value;
+  isLastPage: boolean;
+}) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme.colors), [theme.colors]);
+  const nudgeStyle = {
+    transform: [
+      {
+        translateX: drift.interpolate({
+          inputRange: [0, 0.25, 0.5, 0.75, 1],
+          outputRange: [0, 5, 0, 5, 0]
+        })
+      }
+    ]
+  };
+
+  return (
+    <Animated.View style={[styles.swipeHint, nudgeStyle]}>
+      <Text style={styles.swipeHintText}>
+        {isLastPage ? 'Swipe to get started' : 'Swipe to continue'}
+      </Text>
+      <Ionicons color={theme.colors.muted} name="chevron-forward" size={15} />
+    </Animated.View>
   );
 }
 
@@ -263,6 +411,7 @@ export function SecureLoginPreparationScreen() {
       Animated.timing(pulse, {
         duration: 2600,
         easing: Easing.inOut(Easing.sin),
+        isInteraction: false,
         toValue: 1,
         useNativeDriver: true
       })
@@ -360,338 +509,191 @@ export function SecureLoginPreparationScreen() {
   );
 }
 
-function EnterpriseMotionStage({
-  accent,
-  motion,
-  page
-}: {
-  accent: string;
-  motion: Animated.Value;
-  page: OnboardingPage;
-}) {
-  const theme = useAppTheme();
-  const styles = useMemo(() => createStyles(theme.colors), [theme.colors]);
-  const scanStyle = {
-    opacity: motion.interpolate({
-      inputRange: [0, 0.5, 1],
-      outputRange: [0.28, 0.82, 0.28]
-    }),
-    transform: [
-      {
-        translateX: motion.interpolate({
-          inputRange: [0, 1],
-          outputRange: [-140, 140]
-        })
-      }
-    ]
-  };
-  const deckStyle = {
-    transform: [
-      { perspective: 900 },
-      {
-        rotateY: motion.interpolate({
-          inputRange: [0, 0.5, 1],
-          outputRange: ['-5deg', '5deg', '-5deg']
-        })
-      },
-      {
-        rotateX: motion.interpolate({
-          inputRange: [0, 0.5, 1],
-          outputRange: ['4deg', '-3deg', '4deg']
-        })
-      }
-    ]
-  };
-
-  return (
-    <Animated.View style={[styles.motionDeck, deckStyle]}>
-      <View style={styles.motionHeader}>
-        <Image
-          resizeMode="contain"
-          source={require('../../assets/Synzapp-Nav.png')}
-          style={styles.motionLogo}
-        />
-        <View style={styles.motionTitleGroup}>
-          <Text style={styles.motionTitle}>Synzapp command layer</Text>
-          <Text style={styles.motionMeta}>Live enterprise readiness</Text>
-        </View>
-        <View style={[styles.motionStatus, { backgroundColor: `${accent}18` }]}>
-          <Ionicons color={accent} name={page.icon} size={17} />
-        </View>
-      </View>
-
-      <View style={styles.pipeline}>
-        {['LSW', 'RCA', 'RAILS'].map((item, index) => (
-          <React.Fragment key={item}>
-            <View style={[styles.pipelineNode, index === page.metrics.length - 1 && { borderColor: accent }]}>
-              <Text style={styles.pipelineText}>{item}</Text>
-            </View>
-            {index < 2 ? <View style={[styles.pipelineLine, { backgroundColor: accent }]} /> : null}
-          </React.Fragment>
-        ))}
-      </View>
-
-      <View style={styles.readinessPanel}>
-        {page.metrics.map((metric, index) => (
-          <View key={metric.label} style={styles.readinessRow}>
-            <View style={[styles.readinessMarker, { backgroundColor: index === 0 ? accent : theme.colors.border }]} />
-            <View style={styles.readinessCopy}>
-              <Text style={styles.readinessValue}>{metric.value}</Text>
-              <Text style={styles.readinessLabel}>{metric.label}</Text>
-            </View>
-          </View>
-        ))}
-      </View>
-
-      <Animated.View style={[styles.scanLine, { backgroundColor: accent }, scanStyle]} />
-    </Animated.View>
-  );
-}
-
 function createStyles(colors: AppColors) {
   return StyleSheet.create({
-    actions: {
+    art: {
       alignItems: 'center',
-      flexDirection: 'row',
-      gap: 12
-    },
-    body: {
-      flex: 1,
+      height: 210,
       justifyContent: 'center',
-      paddingHorizontal: 22,
-      paddingVertical: 18
+      width: 210
     },
-    brand: {
+    artChip: {
+      alignItems: 'center',
+      backgroundColor: colors.surfaceElevated,
+      borderColor: colors.border,
+      borderRadius: 18,
+      borderWidth: StyleSheet.hairlineWidth,
+      height: 52,
+      justifyContent: 'center',
+      position: 'absolute',
+      width: 52
+    },
+    artChipLeft: {
+      bottom: 24,
+      left: 2
+    },
+    artChipRight: {
+      right: 4,
+      top: 26
+    },
+    artCore: {
+      alignItems: 'center',
+      borderRadius: 42,
+      height: 124,
+      justifyContent: 'center',
+      width: 124
+    },
+    artHalo: {
+      borderRadius: 88,
+      borderWidth: StyleSheet.hairlineWidth,
+      height: 176,
+      opacity: 0.34,
+      position: 'absolute',
+      width: 176
+    },
+    artWrap: {
+      alignItems: 'center',
+      justifyContent: 'center'
+    },
+    brandBar: {
       alignItems: 'center',
       flexDirection: 'row',
-      flexShrink: 1,
-      gap: 12
+      gap: 9,
+      paddingHorizontal: 28,
+      paddingTop: 14
     },
-    brandCopy: {
-      flexShrink: 1
+    brandLogo: {
+      height: 26,
+      width: 26
     },
-    brandSubtitle: {
-      color: colors.muted,
-      fontSize: 12,
-      letterSpacing: 0,
-      textTransform: 'uppercase'
-    },
-    brandTitle: {
+    brandName: {
       color: colors.ink,
-      fontSize: 20,
-      fontWeight: '400'
-    },
-    copy: {
-      gap: 10,
-      marginTop: 26
-    },
-    description: {
-      color: colors.mutedStrong,
       fontSize: 17,
-      lineHeight: 25
+      fontWeight: '700',
+      letterSpacing: 0.2
     },
-    disabled: {
-      opacity: 0.34
+    copyWrap: {
+      gap: 12,
+      width: '100%'
     },
-    eyebrow: {
-      fontSize: 12,
-      letterSpacing: 4,
-      textTransform: 'uppercase'
+    dot: {
+      backgroundColor: colors.primary,
+      borderRadius: 4,
+      height: 7,
+      width: 26
+    },
+    dotSlot: {
+      alignItems: 'center',
+      justifyContent: 'center',
+      width: 26
+    },
+    dots: {
+      alignItems: 'center',
+      flexDirection: 'row',
+      gap: 7,
+      justifyContent: 'center'
     },
     footer: {
-      backgroundColor: colors.background,
-      borderTopColor: colors.divider,
-      borderTopWidth: 1,
-      gap: 16,
-      paddingHorizontal: 22,
-      paddingVertical: 16
-    },
-    iconButton: {
       alignItems: 'center',
-      backgroundColor: colors.card,
-      borderColor: colors.border,
-      borderRadius: 18,
-      borderWidth: 1,
-      height: 54,
-      justifyContent: 'center',
-      width: 58
+      gap: 18,
+      paddingBottom: 26,
+      paddingTop: 6
     },
-    logo: {
-      height: 42,
-      width: 42
+    highlightDot: {
+      borderRadius: 3,
+      height: 6,
+      width: 6
     },
-    metricItem: {
+    highlightRow: {
+      alignItems: 'center',
+      flexDirection: 'row',
+      gap: 11
+    },
+    highlightText: {
+      color: colors.mutedStrong,
       flex: 1,
-      gap: 4,
-      minWidth: 0
+      fontSize: 14.5,
+      fontWeight: '500'
     },
-    metricLabel: {
-      color: colors.muted,
-      fontSize: 12,
-      lineHeight: 16
+    highlights: {
+      gap: 11,
+      paddingTop: 6
     },
-    metricValue: {
-      color: colors.ink,
-      fontSize: 15,
-      fontWeight: '400',
-      lineHeight: 20
-    },
-    metrics: {
-      backgroundColor: colors.card,
-      borderColor: colors.border,
-      borderRadius: 24,
-      borderWidth: 1,
-      flexDirection: 'row',
-      gap: 14,
-      marginTop: 22,
-      padding: 16,
-      shadowColor: '#0F172A',
-      shadowOffset: { height: 16, width: 0 },
-      shadowOpacity: 0.08,
-      shadowRadius: 28
-    },
-    motionDeck: {
-      backgroundColor: colors.card,
-      borderColor: colors.border,
-      borderRadius: 34,
-      borderWidth: 1,
-      minHeight: 292,
-      overflow: 'hidden',
-      padding: 18,
-      shadowColor: '#0F172A',
-      shadowOffset: { height: 26, width: 0 },
-      shadowOpacity: 0.14,
-      shadowRadius: 36
-    },
-    motionHeader: {
-      alignItems: 'center',
-      flexDirection: 'row',
-      gap: 12
-    },
-    motionLogo: {
-      height: 42,
-      width: 42
-    },
-    motionMeta: {
-      color: colors.muted,
-      fontSize: 12,
-      lineHeight: 16
-    },
-    motionStatus: {
-      alignItems: 'center',
-      borderRadius: 16,
-      height: 38,
-      justifyContent: 'center',
-      width: 38
-    },
-    motionTitle: {
-      color: colors.ink,
-      fontSize: 15,
-      fontWeight: '400',
-      lineHeight: 20
-    },
-    motionTitleGroup: {
+    pager: {
       flex: 1
     },
-    pipeline: {
-      alignItems: 'center',
-      flexDirection: 'row',
-      justifyContent: 'center',
-      marginTop: 28
-    },
-    pipelineLine: {
-      height: 2,
-      opacity: 0.7,
-      width: 28
-    },
-    pipelineNode: {
-      alignItems: 'center',
-      backgroundColor: colors.input,
-      borderColor: colors.border,
-      borderRadius: 18,
-      borderWidth: 1,
-      height: 44,
-      justifyContent: 'center',
-      paddingHorizontal: 18
-    },
-    pipelineText: {
-      color: colors.ink,
-      fontSize: 13,
-      letterSpacing: 1.5
-    },
     prepContent: {
+      alignItems: 'center',
       flex: 1,
+      gap: 12,
       justifyContent: 'center',
-      paddingHorizontal: 24
+      paddingHorizontal: 30
     },
     prepDeck: {
-      alignSelf: 'center',
-      height: 186,
-      marginBottom: 34,
-      width: 250
+      alignItems: 'center',
+      height: 168,
+      justifyContent: 'center',
+      marginBottom: 18,
+      width: 232
     },
     prepDescription: {
-      color: colors.mutedStrong,
-      fontSize: 16,
-      lineHeight: 24,
-      marginTop: 10,
+      color: colors.muted,
+      fontSize: 14.5,
+      lineHeight: 21,
+      paddingHorizontal: 6,
       textAlign: 'center'
     },
     prepEyebrow: {
       color: colors.primary,
-      fontSize: 12,
-      letterSpacing: 4,
-      textAlign: 'center',
+      fontSize: 11.5,
+      fontWeight: '700',
+      letterSpacing: 1.4,
       textTransform: 'uppercase'
     },
     prepLayerBack: {
-      backgroundColor: colors.blueSoft,
+      backgroundColor: colors.surface,
       borderColor: colors.border,
-      borderRadius: 32,
-      borderWidth: 1,
-      bottom: 10,
-      left: 38,
+      borderRadius: 26,
+      borderWidth: StyleSheet.hairlineWidth,
+      height: 132,
       position: 'absolute',
-      right: 8,
-      top: 34,
-      transform: [{ rotate: '5deg' }]
+      top: 0,
+      transform: [{ scale: 0.86 }],
+      width: 208
     },
     prepLayerFront: {
       alignItems: 'center',
-      backgroundColor: colors.card,
+      backgroundColor: colors.surfaceElevated,
       borderColor: colors.border,
-      borderRadius: 34,
-      borderWidth: 1,
-      bottom: 22,
+      borderRadius: 26,
+      borderWidth: StyleSheet.hairlineWidth,
+      height: 132,
       justifyContent: 'center',
-      left: 20,
       overflow: 'hidden',
-      position: 'absolute',
-      right: 20,
-      top: 12
+      width: 208
     },
     prepLayerMiddle: {
-      backgroundColor: colors.primarySoft,
+      backgroundColor: colors.card,
       borderColor: colors.border,
-      borderRadius: 32,
-      borderWidth: 1,
-      bottom: 24,
-      left: 10,
+      borderRadius: 26,
+      borderWidth: StyleSheet.hairlineWidth,
+      height: 132,
       position: 'absolute',
-      right: 28,
-      top: 24,
-      transform: [{ rotate: '-6deg' }]
+      top: 8,
+      transform: [{ scale: 0.93 }],
+      width: 208
     },
     prepLogo: {
-      height: 78,
-      width: 128
+      height: 56,
+      width: 56
     },
     prepScanner: {
+      backgroundColor: colors.primary,
       bottom: 0,
-      opacity: 0.46,
+      opacity: 0.24,
       position: 'absolute',
       top: 0,
-      width: 34
+      width: 46
     },
     prepScreen: {
       backgroundColor: colors.background,
@@ -699,156 +701,77 @@ function createStyles(colors: AppColors) {
     },
     prepStageIcon: {
       alignItems: 'center',
-      backgroundColor: colors.input,
+      backgroundColor: colors.surface,
       borderColor: colors.border,
-      borderRadius: 13,
-      borderWidth: 1,
-      height: 26,
+      borderRadius: 12,
+      borderWidth: StyleSheet.hairlineWidth,
+      height: 24,
       justifyContent: 'center',
-      width: 26
+      width: 24
     },
     prepStageIconActive: {
-      backgroundColor: colors.primarySoft,
       borderColor: colors.primary
     },
     prepStageIconComplete: {
-      backgroundColor: colors.success,
-      borderColor: colors.success
+      backgroundColor: colors.primary,
+      borderColor: colors.primary
     },
     prepStageRow: {
       alignItems: 'center',
       flexDirection: 'row',
-      gap: 12
+      gap: 11
     },
     prepStageText: {
-      color: colors.mutedStrong,
-      flex: 1,
-      fontSize: 14,
-      lineHeight: 20
+      color: colors.muted,
+      fontSize: 13.5
     },
     prepStageTextActive: {
-      color: colors.ink
+      color: colors.ink,
+      fontWeight: '600'
     },
     prepStages: {
       alignSelf: 'stretch',
-      backgroundColor: colors.card,
-      borderColor: colors.border,
-      borderRadius: 24,
-      borderWidth: 1,
-      gap: 14,
-      marginTop: 28,
-      padding: 18
+      gap: 12,
+      paddingTop: 22
     },
     prepTitle: {
       color: colors.ink,
-      fontSize: 30,
-      fontWeight: '400',
-      letterSpacing: 0,
-      lineHeight: 36,
-      marginTop: 8,
+      fontSize: 22,
+      fontWeight: '700',
       textAlign: 'center'
-    },
-    pressed: {
-      opacity: 0.78
-    },
-    primaryButton: {
-      alignItems: 'center',
-      borderRadius: 18,
-      flex: 1,
-      flexDirection: 'row',
-      gap: 10,
-      height: 54,
-      justifyContent: 'center',
-      paddingHorizontal: 18
-    },
-    primaryButtonLabel: {
-      color: '#FFFFFF',
-      fontSize: 16,
-      fontWeight: '400'
-    },
-    progressSegment: {
-      backgroundColor: colors.border,
-      borderRadius: 4,
-      flex: 1,
-      height: 7
-    },
-    progressTrack: {
-      flexDirection: 'row',
-      gap: 7
-    },
-    readinessCopy: {
-      flex: 1
-    },
-    readinessLabel: {
-      color: colors.muted,
-      fontSize: 12,
-      lineHeight: 16
-    },
-    readinessMarker: {
-      borderRadius: 5,
-      height: 10,
-      marginTop: 5,
-      width: 10
-    },
-    readinessPanel: {
-      backgroundColor: colors.input,
-      borderColor: colors.border,
-      borderRadius: 22,
-      borderWidth: 1,
-      gap: 12,
-      marginTop: 26,
-      padding: 16
-    },
-    readinessRow: {
-      flexDirection: 'row',
-      gap: 10
-    },
-    readinessValue: {
-      color: colors.ink,
-      fontSize: 14,
-      lineHeight: 19
-    },
-    scanLine: {
-      bottom: 0,
-      opacity: 0.5,
-      position: 'absolute',
-      top: 0,
-      width: 28
     },
     screen: {
       backgroundColor: colors.background,
       flex: 1
     },
-    stage: {
-      minHeight: 292
-    },
-    textButton: {
-      backgroundColor: colors.card,
-      borderColor: colors.border,
-      borderRadius: 16,
-      borderWidth: 1,
-      paddingHorizontal: 16,
-      paddingVertical: 9
-    },
-    textButtonLabel: {
-      color: colors.mutedStrong,
-      fontSize: 14
-    },
-    title: {
-      color: colors.ink,
-      fontSize: 34,
-      fontWeight: '400',
-      letterSpacing: 0,
-      lineHeight: 40
-    },
-    topBar: {
+    slide: {
       alignItems: 'center',
-      borderBottomColor: colors.divider,
-      borderBottomWidth: 1,
+      gap: 34,
+      height: '100%',
+      justifyContent: 'center',
+      paddingHorizontal: 30
+    },
+    slideBody: {
+      color: colors.muted,
+      fontSize: 15.5,
+      lineHeight: 24
+    },
+    slideTitle: {
+      color: colors.ink,
+      fontSize: 27,
+      fontWeight: '700',
+      letterSpacing: -0.4,
+      lineHeight: 34
+    },
+    swipeHint: {
+      alignItems: 'center',
       flexDirection: 'row',
-      justifyContent: 'space-between',
-      paddingHorizontal: 20,
-      paddingVertical: 14
+      gap: 5
+    },
+    swipeHintText: {
+      color: colors.muted,
+      fontSize: 13,
+      fontWeight: '500'
     }
   });
 }

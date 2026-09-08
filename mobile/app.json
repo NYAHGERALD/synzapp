@@ -19,7 +19,8 @@
         "keychain-access-groups": [
           "$(AppIdentifierPrefix)com.synzapp.mobile",
           "$(AppIdentifierPrefix)com.synzapp.mobile.shared"
-        ]
+        ],
+        "com.apple.developer.usernotifications.communication": true
       },
       "infoPlist": {
         "NSCameraUsageDescription": "Synzapp uses the camera when you choose to take a profile photo or send a chat photo.",
@@ -39,7 +40,10 @@
           "remote-notification",
           "voip"
         ],
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSUserActivityTypes": [
+          "INSendMessageIntent"
+        ]
       }
     },
     "android": {
@@ -49,7 +53,7 @@
       "icon": "./assets/icon.png",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#E20603"
+        "backgroundColor": "#E50101"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,

@@ -1,0 +1,131 @@
+# Synzapp CI
+#
+# Phase 1 of SYNZAPP_ENTERPRISE_PARITY_AND_HARDENING_PLAN.md.
+#
+# Before this existed, tests were written but nothing ran them — every defect
+# was found by a person opening the app on a device. This is the detector that
+# runs on every push instead.
+#
+# Kept deliberately under ten minutes. A pipeline people wait on is a pipeline
+# people route around.
+
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+# A newer push to the same branch makes the older run irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  mobile:
+    name: Mobile — typecheck, unit, native preflight
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      # Catches native files that were added to the workspace but never wired
+      # into the iOS or Android build — a failure that otherwise only appears
+      # at build time, long after the change.
+      - name: Native build preflight
+        run: npm run build:preflight
+
+  backend:
+    name: Backend — typecheck, unit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+  backend-rules:
+    name: Backend — Firestore rules (emulators)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      # The emulators the rules tests run against need a JVM.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install
+        run: npm ci
+
+      - name: Security rules
+        run: npm run emulators:rules
+
+  web:
+    name: Web — typecheck, build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build

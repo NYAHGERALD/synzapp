@@ -1,0 +1,17 @@
+{
+  "projects": {
+    "default": "synzapp-a7ee3"
+  },
+  "targets": {
+    "synzapp-a7ee3": {
+      "hosting": {
+        "web": [
+          "synzapp-a7ee3"
+        ],
+        "admin": [
+          "synzapp-admin"
+        ]
+      }
+    }
+  }
+}

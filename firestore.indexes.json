@@ -1,0 +1,130 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "tenantAiUsageEvents",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "tenantId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAtIso",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "actions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "responsibleGroupId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAtMs",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "actions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "sourceChatId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAtMs",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "actions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "responsiblePersonUid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "dueAtMs",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "actions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "responsibleGroupId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAtMs",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "actions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "departmentIds",
+          "arrayConfig": "CONTAINS"
+        },
+        {
+          "fieldPath": "createdAtMs",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "actions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "createdByUid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAtMs",
+          "order": "DESCENDING"
+        }
+      ]
+    }
+  ],
+  "fieldOverrides": [
+    {
+      "collectionGroup": "scheduledMessages",
+      "fieldPath": "pendingReleaseAtMs",
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "DESCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION_GROUP"
+        }
+      ]
+    }
+  ]
+}

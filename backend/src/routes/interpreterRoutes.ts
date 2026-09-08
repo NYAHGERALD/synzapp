@@ -14,13 +14,17 @@ import {
   createInterpreterTranslationReplayAudio,
   createInterpreterVoicePreviewAudio,
   deleteInterpreterMeeting,
+  deleteInterpreterTranscriptSegments,
   endInterpreterMeeting,
   getInterpreterMeeting,
+  lookupInterpreterApprovedKnowledge,
   listInterpreterMeetings,
   listInterpreterParticipants,
   listInterpreterSummaries,
+  listInterpreterTranscriptLibrary,
   listInterpreterSupportedLanguages,
   listInterpreterVoiceProfiles,
+  prepareInterpreterTranscriptAudio,
   runInterpreterRealtimeProviderDiagnostic,
   startInterpreterMeeting,
   updateInterpreterMeetingInvitations,
@@ -49,6 +53,7 @@ const createMeetingBodySchema = z.object({
 });
 
 const realtimeSessionBodySchema = z.object({
+  sessionMode: z.enum(['controlled_voice', 'translation', 'voice_agent']).optional(),
   targetLanguageCode: languageCodeSchema.nullable().optional()
 });
 
@@ -58,19 +63,38 @@ const realtimeDiagnosticBodySchema = z.object({
 
 const realtimeSdpAnswerBodySchema = z.object({
   offerSdp: z.string().min(20).max(200_000),
+  sessionMode: z.enum(['controlled_voice', 'translation', 'voice_agent']).optional(),
   targetLanguageCode: languageCodeSchema
 });
 
+const approvedKnowledgeBodySchema = z.object({
+  query: z.string().trim().min(2).max(500),
+  targetLanguageCode: languageCodeSchema.nullable().optional()
+});
+
 const realtimeSdpAnswerQuerySchema = z.object({
+  sessionMode: z.enum(['controlled_voice', 'translation', 'voice_agent']).optional(),
   targetLanguageCode: languageCodeSchema
 });
 
 const transcriptBodySchema = z.object({
+  cleanedText: z.string().trim().min(1).max(120_000).nullable().optional(),
   confidence: z.number().min(0).max(1).nullable().optional(),
   detectedLanguageCode: languageCodeSchema.nullable().optional(),
   durationMs: z.number().int().min(0).max(30 * 60_000).nullable().optional(),
+  preferredAudioLanguageCode: languageCodeSchema.nullable().optional(),
   sourceLanguageCode: languageCodeSchema.nullable().optional(),
-  text: z.string().trim().min(1).max(8_000)
+  text: z.string().trim().min(1).max(120_000),
+  versionId: z.string().trim().min(3).max(120).nullable().optional()
+});
+
+const transcriptAudioBodySchema = z.object({
+  languageCode: languageCodeSchema,
+  voiceId: interpreterVoiceIdSchema.nullable().optional()
+});
+
+const deleteTranscriptsBodySchema = z.object({
+  segmentIds: z.array(meetingIdSchema).min(1).max(50)
 });
 
 const translationBodySchema = z.object({
@@ -81,16 +105,21 @@ const translationBodySchema = z.object({
 });
 
 const segmentAudioBodySchema = z.object({
+  includeIntro: z.boolean().optional(),
   sourceSegmentId: z.string().trim().max(128).nullable().optional(),
   sourceText: z.string().trim().min(1).max(8_000),
   targetLanguageCode: languageCodeSchema,
   translatedText: z.string().trim().min(1).max(8_000).nullable().optional(),
+  versionId: z.string().trim().max(128).nullable().optional(),
+  versionSequence: z.number().int().positive().max(10_000).nullable().optional(),
   voiceId: interpreterVoiceIdSchema.nullable().optional()
 });
 
 const summaryBodySchema = z.object({
   languageCodes: z.array(languageCodeSchema).min(1).max(10),
-  transcriptText: z.string().trim().min(1).max(24_000).nullable().optional()
+  transcriptText: z.string().trim().min(1).max(120_000).nullable().optional(),
+  versionId: z.string().trim().max(128).nullable().optional(),
+  versionSequence: z.number().int().positive().max(10_000).nullable().optional()
 });
 
 const summaryAudioBodySchema = z.object({
@@ -276,7 +305,12 @@ interpreterRouter.post('/meetings/:meetingId/realtime-client-secret', verifyAppC
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
     const meetingId = meetingIdSchema.parse(req.params.meetingId);
     const body = realtimeSessionBodySchema.parse(req.body);
-    const result = await createInterpreterRealtimeClientSecret(decodedToken, meetingId, body.targetLanguageCode);
+    const result = await createInterpreterRealtimeClientSecret(
+      decodedToken,
+      meetingId,
+      body.targetLanguageCode,
+      body.sessionMode
+    );
 
     res.json(result);
   } catch (error) {
@@ -300,13 +334,31 @@ interpreterRouter.post('/meetings/:meetingId/realtime-sdp-answer', verifyAppChec
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
     const meetingId = meetingIdSchema.parse(req.params.meetingId);
+    const query = realtimeSdpAnswerQuerySchema.parse(req.query);
     const body = typeof req.body === 'string'
       ? realtimeSdpAnswerBodySchema.parse({
           offerSdp: req.body,
-          targetLanguageCode: realtimeSdpAnswerQuerySchema.parse(req.query).targetLanguageCode
+          sessionMode: query.sessionMode,
+          targetLanguageCode: query.targetLanguageCode
         })
       : realtimeSdpAnswerBodySchema.parse(req.body);
     const result = await createInterpreterRealtimeSdpAnswer(decodedToken, meetingId, body);
+
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+interpreterRouter.post('/meetings/:meetingId/approved-knowledge', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const meetingId = meetingIdSchema.parse(req.params.meetingId);
+    const body = approvedKnowledgeBodySchema.parse(req.body);
+    const result = await lookupInterpreterApprovedKnowledge(decodedToken, meetingId, {
+      query: body.query,
+      targetLanguageCode: body.targetLanguageCode || null
+    });
 
     res.json(result);
   } catch (error) {
@@ -320,6 +372,48 @@ interpreterRouter.post('/meetings/:meetingId/transcripts', verifyAppCheck, async
     const meetingId = meetingIdSchema.parse(req.params.meetingId);
     const body = transcriptBodySchema.parse(req.body);
     const result = await addInterpreterTranscriptSegment(decodedToken, meetingId, body);
+
+    res.status(201).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+interpreterRouter.get('/meetings/:meetingId/transcript-library', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const meetingId = meetingIdSchema.parse(req.params.meetingId);
+    const result = await listInterpreterTranscriptLibrary(decodedToken, meetingId);
+
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+interpreterRouter.delete('/meetings/:meetingId/transcripts', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const meetingId = meetingIdSchema.parse(req.params.meetingId);
+    const body = deleteTranscriptsBodySchema.parse(req.body || {});
+    const result = await deleteInterpreterTranscriptSegments(decodedToken, meetingId, body);
+
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+interpreterRouter.post('/meetings/:meetingId/transcripts/:segmentId/audio-artifacts', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const meetingId = meetingIdSchema.parse(req.params.meetingId);
+    const segmentId = meetingIdSchema.parse(req.params.segmentId);
+    const body = transcriptAudioBodySchema.parse(req.body || {});
+    const result = await prepareInterpreterTranscriptAudio(decodedToken, meetingId, segmentId, {
+      languageCode: body.languageCode,
+      voiceId: body.voiceId || null
+    });
 
     res.status(201).json(result);
   } catch (error) {
@@ -391,7 +485,9 @@ interpreterRouter.post('/meetings/:meetingId/summaries', verifyAppCheck, async (
     const result = await createInterpreterSummary(decodedToken, {
       languageCodes: body.languageCodes,
       meetingId,
-      transcriptText: body.transcriptText || null
+      transcriptText: body.transcriptText || null,
+      versionId: body.versionId || null,
+      versionSequence: body.versionSequence || null
     });
 
     res.status(201).json(result);

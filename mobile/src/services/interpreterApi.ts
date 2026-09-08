@@ -45,11 +45,14 @@ export interface InterpreterParticipant {
 }
 
 export interface InterpreterSegment {
+  cleanedText?: string | null;
   createdAtIso: string;
   detectedLanguageCode?: string | null;
   segmentId?: string;
   sourceLanguageCode?: string | null;
   text: string;
+  updatedAtIso?: string | null;
+  versionId?: string | null;
 }
 
 export interface InterpreterTranslationSegment {
@@ -59,6 +62,8 @@ export interface InterpreterTranslationSegment {
   targetLanguageCode: string;
   translatedText: string;
   translationId?: string;
+  versionId?: string | null;
+  versionSequence?: number | null;
 }
 
 export interface InterpreterSummary {
@@ -66,6 +71,8 @@ export interface InterpreterSummary {
   languageCodes: string[];
   summaryId: string;
   summaryTextByLanguage: Record<string, string>;
+  versionId?: string | null;
+  versionSequence?: number | null;
 }
 
 export interface InterpreterSummaryAudio {
@@ -79,15 +86,51 @@ export interface InterpreterSummaryAudio {
 
 export interface InterpreterSegmentAudio extends InterpreterSummaryAudio {
   introText?: string;
+  localUri?: string;
   sourceText: string;
   translatedText: string;
   translationId: string;
   translationModel: string;
+  versionId?: string | null;
+  versionSequence?: number | null;
 }
 
 export interface InterpreterVoicePreviewAudio extends InterpreterSummaryAudio {
   previewText: string;
   voiceProfile: InterpreterVoiceProfile;
+}
+
+export type InterpreterTranscriptAudioStatus = 'failed' | 'processing' | 'queued' | 'ready';
+
+export interface InterpreterTranscriptAudioArtifact {
+  artifactId: string;
+  audioStoragePath?: string | null;
+  contentType?: string | null;
+  createdAtIso: string;
+  downloadUrl?: string | null;
+  downloadUrlExpiresAtIso?: string | null;
+  errorMessage?: string | null;
+  format: 'mp3';
+  languageCode: string;
+  languageLabel: string;
+  meetingId: string;
+  model?: string | null;
+  partCount?: number | null;
+  segmentId: string;
+  sourceText: string;
+  spokenText?: string | null;
+  status: InterpreterTranscriptAudioStatus;
+  tenantId: string;
+  textFingerprint: string;
+  translationModel?: string | null;
+  updatedAtIso: string;
+  voice: string;
+}
+
+export interface InterpreterTranscriptLibraryItem extends InterpreterSegment {
+  audioArtifacts: InterpreterTranscriptAudioArtifact[];
+  meetingId: string;
+  tenantId: string;
 }
 
 export interface InterpreterMeetingDetails {
@@ -102,12 +145,14 @@ export interface InterpreterRealtimeClientSecretResponse {
   clientSecret: string;
   expiresWithSession: boolean;
   model: string;
+  sessionMode?: 'controlled_voice' | 'translation' | 'voice_agent';
   targetLanguage: InterpreterLanguage;
 }
 
 export interface InterpreterRealtimeSdpAnswerResponse {
   answerSdp: string;
   model: string;
+  sessionMode?: 'controlled_voice' | 'translation' | 'voice_agent';
   targetLanguage: InterpreterLanguage;
 }
 
@@ -122,6 +167,15 @@ export interface InterpreterRealtimeProviderDiagnosticResponse {
   targetLanguage: InterpreterLanguage;
 }
 
+export interface InterpreterApprovedKnowledgeResponse {
+  answer: string;
+  answeredAtIso: string;
+  confidence: 'approved' | 'not_available';
+  facts: string[];
+  policy: string;
+  targetLanguage?: InterpreterLanguage;
+}
+
 export interface CreateInterpreterMeetingInput {
   autoDetectSourceLanguage: boolean;
   interpreterVoiceId?: string | null;
@@ -134,6 +188,8 @@ export interface CreateInterpreterMeetingInput {
   scheduledAtIso: string | null;
   sourceLanguageCode: string | null;
 }
+
+const INTERPRETER_DEVICE_HEADER_TIMEOUT_MS = 2500;
 
 export async function listInterpreterMeetings(idToken: string) {
   const response = await interpreterFetch(idToken, '/meetings');
@@ -244,10 +300,11 @@ export async function updateInterpreterMeetingVoice(
 export async function createInterpreterRealtimeClientSecret(
   idToken: string,
   meetingId: string,
-  targetLanguageCode?: string | null
+  targetLanguageCode?: string | null,
+  sessionMode: 'controlled_voice' | 'translation' | 'voice_agent' = 'controlled_voice'
 ) {
   const response = await interpreterFetch(idToken, `/meetings/${encodeURIComponent(meetingId)}/realtime-client-secret`, {
-    body: JSON.stringify({ targetLanguageCode: targetLanguageCode || null }),
+    body: JSON.stringify({ sessionMode, targetLanguageCode: targetLanguageCode || null }),
     method: 'POST'
   });
 
@@ -257,12 +314,17 @@ export async function createInterpreterRealtimeClientSecret(
 export async function createInterpreterRealtimeSdpAnswer(
   idToken: string,
   meetingId: string,
-  input: { offerSdp: string; targetLanguageCode: string }
+  input: {
+    offerSdp: string;
+    sessionMode?: 'controlled_voice' | 'translation' | 'voice_agent';
+    targetLanguageCode: string;
+  }
 ) {
   const targetLanguageCode = encodeURIComponent(input.targetLanguageCode);
+  const sessionMode = encodeURIComponent(input.sessionMode || 'controlled_voice');
   const response = await interpreterFetch(
     idToken,
-    `/meetings/${encodeURIComponent(meetingId)}/realtime-sdp-answer?targetLanguageCode=${targetLanguageCode}`,
+    `/meetings/${encodeURIComponent(meetingId)}/realtime-sdp-answer?targetLanguageCode=${targetLanguageCode}&sessionMode=${sessionMode}`,
     {
       body: input.offerSdp,
       headers: {
@@ -275,11 +337,34 @@ export async function createInterpreterRealtimeSdpAnswer(
   return response.json() as Promise<InterpreterRealtimeSdpAnswerResponse>;
 }
 
+export async function lookupInterpreterApprovedKnowledge(
+  idToken: string,
+  meetingId: string,
+  input: {
+    query: string;
+    targetLanguageCode?: string | null;
+  }
+) {
+  const response = await interpreterFetch(idToken, `/meetings/${encodeURIComponent(meetingId)}/approved-knowledge`, {
+    body: JSON.stringify({
+      query: input.query,
+      targetLanguageCode: input.targetLanguageCode || null
+    }),
+    method: 'POST'
+  });
+
+  return response.json() as Promise<InterpreterApprovedKnowledgeResponse>;
+}
+
 export async function exchangeInterpreterRealtimeSdpWithClientSecret(
   clientSecret: string,
-  offerSdp: string
+  offerSdp: string,
+  sessionMode: 'controlled_voice' | 'translation' | 'voice_agent' = 'controlled_voice'
 ): Promise<string> {
-  const response = await fetch('https://api.openai.com/v1/realtime/translations/calls', {
+  const realtimeUrl = sessionMode === 'translation'
+    ? 'https://api.openai.com/v1/realtime/translations/calls'
+    : 'https://api.openai.com/v1/realtime/calls';
+  const response = await fetch(realtimeUrl, {
     body: offerSdp,
     headers: {
       Authorization: `Bearer ${clientSecret}`,
@@ -316,14 +401,83 @@ export async function addInterpreterTranscriptSegment(
   idToken: string,
   meetingId: string,
   text: string,
-  detectedLanguageCode?: string | null
+  detectedLanguageCode?: string | null,
+  cleanedText?: string | null,
+  versionId?: string | null,
+  preferredAudioLanguageCode?: string | null
 ) {
   const response = await interpreterFetch(idToken, `/meetings/${encodeURIComponent(meetingId)}/transcripts`, {
-    body: JSON.stringify({ detectedLanguageCode: detectedLanguageCode || null, text }),
+    body: JSON.stringify({
+      cleanedText: cleanedText?.trim() || null,
+      detectedLanguageCode: detectedLanguageCode || null,
+      preferredAudioLanguageCode: preferredAudioLanguageCode || null,
+      text,
+      versionId: versionId?.trim() || null
+    }),
     method: 'POST'
   });
 
-  return response.json() as Promise<{ segment: InterpreterSegment }>;
+  return response.json() as Promise<{
+    audioArtifact?: InterpreterTranscriptAudioArtifact | null;
+    segment: InterpreterSegment;
+  }>;
+}
+
+export async function listInterpreterTranscriptLibrary(
+  idToken: string,
+  meetingId: string
+) {
+  const response = await interpreterFetch(
+    idToken,
+    `/meetings/${encodeURIComponent(meetingId)}/transcript-library`
+  );
+
+  return response.json() as Promise<{ transcripts: InterpreterTranscriptLibraryItem[] }>;
+}
+
+export async function prepareInterpreterTranscriptAudio(
+  idToken: string,
+  meetingId: string,
+  segmentId: string,
+  input: {
+    languageCode: string;
+    voiceId?: string | null;
+  }
+) {
+  const response = await interpreterFetch(
+    idToken,
+    `/meetings/${encodeURIComponent(meetingId)}/transcripts/${encodeURIComponent(segmentId)}/audio-artifacts`,
+    {
+      body: JSON.stringify({
+        languageCode: input.languageCode,
+        voiceId: input.voiceId || null
+      }),
+      method: 'POST'
+    }
+  );
+
+  return response.json() as Promise<{ audioArtifact: InterpreterTranscriptAudioArtifact }>;
+}
+
+export async function deleteInterpreterTranscriptSegments(
+  idToken: string,
+  meetingId: string,
+  segmentIds: string[]
+) {
+  const response = await interpreterFetch(
+    idToken,
+    `/meetings/${encodeURIComponent(meetingId)}/transcripts`,
+    {
+      body: JSON.stringify({ segmentIds }),
+      method: 'DELETE'
+    }
+  );
+
+  return response.json() as Promise<{
+    deletedAudioArtifactCount: number;
+    deletedSegmentIds: string[];
+    deletedTranscriptCount: number;
+  }>;
 }
 
 export async function addInterpreterTranslationSegment(
@@ -348,10 +502,13 @@ export async function createInterpreterInterpretationAudio(
   idToken: string,
   meetingId: string,
   input: {
+    includeIntro?: boolean;
     sourceSegmentId?: string | null;
     sourceText: string;
     targetLanguageCode: string;
     translatedText?: string | null;
+    versionId?: string | null;
+    versionSequence?: number | null;
     voiceId?: string | null;
   }
 ) {
@@ -403,10 +560,19 @@ export async function createInterpreterSummary(
   idToken: string,
   meetingId: string,
   languageCodes: string[],
-  transcriptText?: string | null
+  transcriptText?: string | null,
+  version?: {
+    versionId?: string | null;
+    versionSequence?: number | null;
+  }
 ) {
   const response = await interpreterFetch(idToken, `/meetings/${encodeURIComponent(meetingId)}/summaries`, {
-    body: JSON.stringify({ languageCodes, transcriptText: transcriptText?.trim() || null }),
+    body: JSON.stringify({
+      languageCodes,
+      transcriptText: transcriptText?.trim() || null,
+      versionId: version?.versionId || null,
+      versionSequence: version?.versionSequence || null
+    }),
     method: 'POST'
   });
 
@@ -440,7 +606,7 @@ async function interpreterFetch(
   path: string,
   options: RequestInit = {}
 ): Promise<Response> {
-  const deviceHeaders = await getRegisteredDeviceHeaders(idToken).catch(() => ({}));
+  const deviceHeaders = await getInterpreterDeviceHeaders(idToken);
   const response = await fetch(`${getSynzappApiBaseUrl()}/api/interpreter${path}`, {
     ...options,
     headers: {
@@ -457,6 +623,27 @@ async function interpreterFetch(
   }
 
   return response;
+}
+
+async function getInterpreterDeviceHeaders(idToken: string): Promise<Record<string, string>> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+  try {
+    return await Promise.race([
+      getRegisteredDeviceHeaders(idToken),
+      new Promise<Record<string, string>>((resolve) => {
+        timeoutId = setTimeout(() => resolve({}), INTERPRETER_DEVICE_HEADER_TIMEOUT_MS);
+      })
+    ]);
+  } catch {
+    // Device identity improves audit traceability, but a cold registration must not block
+    // authenticated interpreter actions such as first-tap session creation.
+    return {};
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
 }
 
 async function getResponseErrorMessage(response: Response): Promise<string> {

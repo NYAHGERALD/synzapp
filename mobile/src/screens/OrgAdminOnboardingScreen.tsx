@@ -1,7 +1,9 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
+  Easing,
   Image,
   Modal,
   Platform,
@@ -23,6 +25,14 @@ import { pickNativeProfilePhoto } from '../services/profilePhotoPicker';
 import { signOutOrgAdmin } from '../services/phoneAuth';
 import { BackendAuthSession, OrgAdminDraft, VerifiedOrgAdmin } from '../types/auth';
 import { useAppTheme } from '../theme/AppThemeProvider';
+import { formatPostalCode, getCountryFormat } from '../services/addressFormats';
+import { ALL_COUNTRIES } from '../services/countries';
+import {
+  EMPTY_ORG_ONBOARDING_DRAFT,
+  ORG_ONBOARDING_STEPS,
+  composeCompanyAddress,
+  validateOrgOnboardingStep
+} from '../services/orgOnboardingSteps';
 import type { AppColors } from '../theme/colors';
 import {
   calendarYearMaximumDate,
@@ -41,13 +51,7 @@ interface OrgAdminOnboardingScreenProps {
   onSignOut: () => void;
 }
 
-const initialDraft: OrgAdminDraft = {
-  companyName: '',
-  companyAddress: '',
-  adminFirstName: '',
-  adminLastName: '',
-  calendarYearStartDate: null
-};
+const initialDraft = EMPTY_ORG_ONBOARDING_DRAFT;
 
 export function OrgAdminOnboardingScreen({
   verifiedAdmin,
@@ -58,6 +62,11 @@ export function OrgAdminOnboardingScreen({
   const appTheme = useAppTheme();
   const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
   const [draft, setDraft] = useState(initialDraft);
+  const [step, setStep] = useState(0);
+  const [isCountryPickerOpen, setIsCountryPickerOpen] = useState(false);
+  const [countrySearch, setCountrySearch] = useState('');
+  const stepShift = useRef(new Animated.Value(0)).current;
+  const stepFade = useRef(new Animated.Value(1)).current;
   const [profilePhotoUri, setProfilePhotoUri] = useState<string | null>(null);
   const [profilePhotoDataUrl, setProfilePhotoDataUrl] = useState<string | undefined>();
   const [isCreatingProfile, setIsCreatingProfile] = useState(false);
@@ -69,12 +78,82 @@ export function OrgAdminOnboardingScreen({
   const [error, setError] = useState<string | null>(null);
   const maskedPhoneNumber = verifiedAdmin.session.user.phoneMasked || maskPhoneNumber(verifiedAdmin.phoneNumber);
 
-  const canContinue =
-    draft.companyName.trim().length > 1 &&
-    draft.companyAddress.trim().length > 4 &&
-    draft.adminFirstName.trim().length > 1 &&
-    draft.adminLastName.trim().length > 1 &&
-    isValidCalendarYearStartDate(draft.calendarYearStartDate);
+  const currentStep = ORG_ONBOARDING_STEPS[step];
+  const isLastStep = step === ORG_ONBOARDING_STEPS.length - 1;
+  const country = getCountryFormat(draft.countryCode);
+  const canContinue = validateOrgOnboardingStep(step, draft) === null &&
+    (!isLastStep || isValidCalendarYearStartDate(draft.calendarYearStartDate));
+
+  // Each step slides in from the right and settles. It is the same movement a
+  // person expects from a form that is going somewhere, and it makes the change
+  // of question obvious without a banner announcing it.
+  useEffect(() => {
+    stepShift.setValue(18);
+    stepFade.setValue(0);
+
+    Animated.parallel([
+      Animated.timing(stepShift, {
+        duration: 260,
+        easing: Easing.out(Easing.cubic),
+        toValue: 0,
+        useNativeDriver: true
+      }),
+      Animated.timing(stepFade, {
+        duration: 220,
+        easing: Easing.out(Easing.quad),
+        toValue: 1,
+        useNativeDriver: true
+      })
+    ]).start();
+  }, [step, stepFade, stepShift]);
+
+  function handleNext() {
+    const stepError = validateOrgOnboardingStep(step, draft);
+
+    if (stepError) {
+      setError(stepError);
+
+      return;
+    }
+
+    setError(null);
+
+    if (isLastStep) {
+      void handleCreateProfile();
+
+      return;
+    }
+
+    setStep(step + 1);
+  }
+
+  function handleStepBack() {
+    setError(null);
+
+    if (step === 0) {
+      onBack();
+
+      return;
+    }
+
+    setStep(step - 1);
+  }
+
+  /**
+   * Clears the state and postal code when the country changes.
+   *
+   * A Texas left behind after switching to Canada would be saved as a Canadian
+   * province, and a ZIP code would fail a postcode check for no visible reason.
+   */
+  const visibleCountries = countrySearch.trim()
+    ? ALL_COUNTRIES.filter((option) =>
+        option.label.toLowerCase().includes(countrySearch.trim().toLowerCase())
+      )
+    : ALL_COUNTRIES;
+
+  function handleCountryChange(nextCode: string) {
+    setDraft({ ...draft, countryCode: nextCode, postalCode: '', region: '' });
+  }
 
   async function handleSignOut() {
     await signOutOrgAdmin();
@@ -104,7 +183,22 @@ export function OrgAdminOnboardingScreen({
 
     try {
       const result = await createOrgAdminProfile({
-        ...draft,
+        adminFirstName: draft.adminFirstName,
+        adminLastName: draft.adminLastName,
+        calendarYearStartDate: draft.calendarYearStartDate,
+        // The written-out line for everything that already reads it, and the
+        // parts for anything that needs to act on the address later.
+        companyAddress: composeCompanyAddress(draft),
+        companyAddressParts: {
+          city: draft.city,
+          countryCode: draft.countryCode,
+          line1: draft.addressLine1,
+          line2: draft.addressLine2,
+          postalCode: formatPostalCode(draft.countryCode, draft.postalCode),
+          region: draft.region
+        },
+        companyEmail: draft.companyEmail,
+        companyName: draft.companyName,
         idToken: verifiedAdmin.idToken,
         profilePhotoDataUrl
       });
@@ -195,79 +289,141 @@ export function OrgAdminOnboardingScreen({
 
         <View style={styles.header}>
           <Text style={styles.status}>Phone verified {maskedPhoneNumber}</Text>
-          <Text style={styles.title}>Create your company profile</Text>
+          <Text style={styles.stepCount}>
+            Step {step + 1} of {ORG_ONBOARDING_STEPS.length}
+          </Text>
+          <Text style={styles.title}>{currentStep.title}</Text>
+          <Text style={styles.stepSubtitle}>{currentStep.subtitle}</Text>
         </View>
 
-        <Pressable
-          accessibilityRole="button"
-          onPress={handlePickProfilePhoto}
-          style={({ pressed }) => [
-            styles.photoPicker,
-            pressed && styles.pressed
-          ]}
+        <View style={styles.progressTrack}>
+          <View
+            style={[
+              styles.progressFill,
+              { width: `${((step + 1) / ORG_ONBOARDING_STEPS.length) * 100}%` }
+            ]}
+          />
+        </View>
+
+        <Animated.View
+          style={{ opacity: stepFade, transform: [{ translateX: stepShift }] }}
         >
-          <View style={styles.photoPreview}>
-            {profilePhotoUri ? (
-              <Image source={{ uri: profilePhotoUri }} style={styles.photoImage} />
-            ) : (
-              <Text style={styles.photoInitials}>+</Text>
-            )}
-          </View>
-          <View style={styles.photoText}>
-            <Text style={styles.photoTitle}>
-              {profilePhotoUri ? 'Change profile photo' : 'Add profile photo'}
-            </Text>
-            <Text style={styles.photoSubtitle}>Optional</Text>
-          </View>
-        </Pressable>
+          {currentStep.key === 'you' ? (
+            <>
+              <Pressable
+                accessibilityRole="button"
+                onPress={handlePickProfilePhoto}
+                style={({ pressed }) => [styles.photoPicker, pressed && styles.pressed]}
+              >
+                <View style={styles.photoPreview}>
+                  {profilePhotoUri ? (
+                    <Image source={{ uri: profilePhotoUri }} style={styles.photoImage} />
+                  ) : (
+                    <Text style={styles.photoInitials}>+</Text>
+                  )}
+                </View>
+                <View style={styles.photoText}>
+                  <Text style={styles.photoTitle}>
+                    {profilePhotoUri ? 'Change your photo' : 'Add your photo'}
+                  </Text>
+                  <Text style={styles.photoSubtitle}>You can skip this</Text>
+                </View>
+              </Pressable>
 
-        <View style={styles.form}>
-          <ProfileInput
-            value={draft.companyName}
-            onChangeText={(companyName) => setDraft({ ...draft, companyName })}
-            placeholder="Company name"
-          />
-          <ProfileInput
-            value={draft.companyAddress}
-            onChangeText={(companyAddress) => setDraft({ ...draft, companyAddress })}
-            placeholder="Company address"
-          />
-          <View style={styles.nameRow}>
-            <View style={styles.nameField}>
+              <View style={styles.form}>
+                <View style={styles.nameRow}>
+                  <View style={styles.nameField}>
+                    <ProfileInput
+                      value={draft.adminFirstName}
+                      onChangeText={(adminFirstName) => setDraft({ ...draft, adminFirstName })}
+                      placeholder="First name"
+                    />
+                  </View>
+                  <View style={styles.nameField}>
+                    <ProfileInput
+                      value={draft.adminLastName}
+                      onChangeText={(adminLastName) => setDraft({ ...draft, adminLastName })}
+                      placeholder="Last name"
+                    />
+                  </View>
+                </View>
+              </View>
+            </>
+          ) : null}
+
+          {currentStep.key === 'company' ? (
+            <View style={styles.form}>
               <ProfileInput
-                value={draft.adminFirstName}
-                onChangeText={(adminFirstName) => setDraft({ ...draft, adminFirstName })}
-                placeholder="First name"
+                value={draft.companyName}
+                onChangeText={(companyName) => setDraft({ ...draft, companyName })}
+                placeholder="Company name"
+              />
+              <ProfileInput
+                value={draft.companyEmail}
+                onChangeText={(companyEmail) => setDraft({ ...draft, companyEmail })}
+                placeholder="Company email address"
               />
             </View>
-            <View style={styles.nameField}>
+          ) : null}
+
+          {currentStep.key === 'address' ? (
+            <View style={styles.form}>
+              <Text style={styles.fieldLabel}>Country</Text>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => {
+                  setCountrySearch('');
+                  setIsCountryPickerOpen(true);
+                }}
+                style={({ pressed }) => [styles.countryButton, pressed && styles.pressed]}
+              >
+                <Text style={styles.countryButtonText}>{country.label}</Text>
+                <Text style={styles.countryButtonHint}>Tap to change</Text>
+              </Pressable>
+
               <ProfileInput
-                value={draft.adminLastName}
-                onChangeText={(adminLastName) => setDraft({ ...draft, adminLastName })}
-                placeholder="Last name"
+                value={draft.addressLine1}
+                onChangeText={(addressLine1) => setDraft({ ...draft, addressLine1 })}
+                placeholder="Street address"
+              />
+              <ProfileInput
+                value={draft.addressLine2}
+                onChangeText={(addressLine2) => setDraft({ ...draft, addressLine2 })}
+                placeholder="Suite, floor or building (you can skip this)"
+              />
+              <ProfileInput
+                value={draft.city}
+                onChangeText={(city) => setDraft({ ...draft, city })}
+                placeholder="City"
+              />
+              <ProfileInput
+                value={draft.region}
+                onChangeText={(region) => setDraft({ ...draft, region })}
+                placeholder={country.regionLabel}
+              />
+              <ProfileInput
+                value={draft.postalCode}
+                onChangeText={(postalCode) => setDraft({ ...draft, postalCode })}
+                placeholder={`${country.postalLabel}, for example ${country.postalPlaceholder}`}
               />
             </View>
-          </View>
-          <View style={styles.calendarYearSection}>
-            <Text style={styles.calendarYearTitle}>Calendar year starts</Text>
-            <Text style={styles.calendarYearSubtitle}>
-              LSW week numbers use this tenant setting. Week 1 starts on this date for your company.
-            </Text>
-            <Pressable
-              accessibilityRole="button"
-              onPress={handleOpenCalendarPicker}
-              style={({ pressed }) => [
-                styles.calendarDateButton,
-                pressed && styles.pressed
-              ]}
-            >
-              <Text style={styles.calendarDateButtonText}>
-                {getCalendarYearStartDateLabel(draft.calendarYearStartDate)}
-              </Text>
-              <Text style={styles.calendarDateButtonHint}>Tap to choose date</Text>
-            </Pressable>
-          </View>
-        </View>
+          ) : null}
+
+          {currentStep.key === 'year' ? (
+            <View style={styles.form}>
+              <Pressable
+                accessibilityRole="button"
+                onPress={handleOpenCalendarPicker}
+                style={({ pressed }) => [styles.calendarDateButton, pressed && styles.pressed]}
+              >
+                <Text style={styles.calendarDateButtonText}>
+                  {getCalendarYearStartDateLabel(draft.calendarYearStartDate)}
+                </Text>
+                <Text style={styles.calendarDateButtonHint}>Tap to choose the date</Text>
+              </Pressable>
+            </View>
+          ) : null}
+        </Animated.View>
 
         {error ? (
           <DismissibleError message={error} onDismiss={() => setError(null)} />
@@ -276,7 +432,7 @@ export function OrgAdminOnboardingScreen({
         <Pressable
           accessibilityRole="button"
           disabled={!canContinue || isCreatingProfile || isProfileCreated}
-          onPress={handleCreateProfile}
+          onPress={handleNext}
           style={({ pressed }) => [
             styles.primaryButton,
             pressed && canContinue && !isCreatingProfile && styles.pressed,
@@ -284,7 +440,9 @@ export function OrgAdminOnboardingScreen({
           ]}
         >
           <Text style={styles.primaryButtonText}>
-            {getPrimaryButtonLabel(isCreatingProfile, isProfileCreated)}
+            {isLastStep
+              ? getPrimaryButtonLabel(isCreatingProfile, isProfileCreated)
+              : 'Next'}
           </Text>
         </Pressable>
 
@@ -295,14 +453,71 @@ export function OrgAdminOnboardingScreen({
         ) : null}
 
         <View style={styles.secondaryActions}>
-          <Pressable accessibilityRole="button" onPress={onBack} style={styles.secondaryButton}>
-            <Text style={styles.secondaryButtonText}>Change role</Text>
+          <Pressable accessibilityRole="button" onPress={handleStepBack} style={styles.secondaryButton}>
+            <Text style={styles.secondaryButtonText}>{step === 0 ? 'Change role' : 'Back'}</Text>
           </Pressable>
           <Pressable accessibilityRole="button" onPress={handleSignOut} style={styles.secondaryButton}>
             <Text style={styles.secondaryButtonText}>Sign out</Text>
           </Pressable>
         </View>
       </ScrollView>
+
+      <Modal
+        animationType="slide"
+        onRequestClose={() => setIsCountryPickerOpen(false)}
+        transparent
+        visible={isCountryPickerOpen}
+      >
+        <View style={styles.calendarModalOverlay}>
+          <Pressable
+            accessibilityLabel="Close country list"
+            accessibilityRole="button"
+            onPress={() => setIsCountryPickerOpen(false)}
+            style={styles.calendarModalBackdrop}
+          />
+          <View style={styles.countryModalCard}>
+            <Text style={styles.calendarModalTitle}>Choose your country</Text>
+            {/* 251 countries is too many to scroll past. Typing narrows it. */}
+            <TextInput
+              autoCapitalize="none"
+              autoCorrect={false}
+              onChangeText={setCountrySearch}
+              placeholder="Type to find your country"
+              placeholderTextColor={appTheme.colors.muted}
+              style={styles.countrySearchInput}
+              value={countrySearch}
+            />
+            <ScrollView
+              keyboardShouldPersistTaps="handled"
+              style={styles.countryList}
+            >
+              {visibleCountries.length ? (
+                visibleCountries.map((option) => (
+                  <Pressable
+                    accessibilityRole="button"
+                    key={option.code}
+                    onPress={() => {
+                      handleCountryChange(option.code);
+                      setIsCountryPickerOpen(false);
+                    }}
+                    style={({ pressed }) => [
+                      styles.countryListRow,
+                      draft.countryCode === option.code && styles.countryListRowActive,
+                      pressed && styles.pressed
+                    ]}
+                  >
+                    <Text style={styles.countryListText}>{option.label}</Text>
+                  </Pressable>
+                ))
+              ) : (
+                <Text style={styles.countryListEmpty}>
+                  No country matches “{countrySearch}”.
+                </Text>
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
 
       {Platform.OS === 'ios' ? (
         <Modal
@@ -422,8 +637,8 @@ function createStyles(colors: AppColors) {
     marginBottom: 34
   },
   splashLogo: {
-    height: 76,
-    width: 230
+    height: 58,
+    width: 178
   },
   header: {
     gap: 8
@@ -440,6 +655,98 @@ function createStyles(colors: AppColors) {
     fontWeight: '400',
     letterSpacing: 0,
     lineHeight: 32
+  },
+  stepCount: {
+    color: colors.muted,
+    fontSize: 13,
+    fontWeight: '600',
+    letterSpacing: 0.4,
+    marginTop: 6,
+    textTransform: 'uppercase'
+  },
+  stepSubtitle: {
+    color: colors.muted,
+    fontSize: 15,
+    lineHeight: 21,
+    marginTop: 8
+  },
+  progressTrack: {
+    backgroundColor: colors.divider,
+    borderRadius: 999,
+    height: 4,
+    marginTop: 18,
+    overflow: 'hidden'
+  },
+  progressFill: {
+    backgroundColor: colors.primary,
+    borderRadius: 999,
+    height: 4
+  },
+  fieldLabel: {
+    color: colors.muted,
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: -4
+  },
+  countryButton: {
+    backgroundColor: colors.surface,
+    borderColor: colors.divider,
+    borderRadius: 12,
+    borderWidth: 1,
+    paddingHorizontal: 16,
+    paddingVertical: 12
+  },
+  countryButtonText: {
+    color: colors.ink,
+    fontSize: 16,
+    fontWeight: '500'
+  },
+  countryButtonHint: {
+    color: colors.muted,
+    fontSize: 13,
+    marginTop: 2
+  },
+  countryModalCard: {
+    backgroundColor: colors.card,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    maxHeight: '78%',
+    paddingBottom: 24,
+    paddingHorizontal: 20,
+    paddingTop: 20
+  },
+  countrySearchInput: {
+    backgroundColor: colors.surface,
+    borderColor: colors.divider,
+    borderRadius: 12,
+    borderWidth: 1,
+    color: colors.ink,
+    fontSize: 16,
+    marginTop: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12
+  },
+  countryList: {
+    marginTop: 12
+  },
+  countryListRow: {
+    borderBottomColor: colors.divider,
+    borderBottomWidth: 1,
+    paddingHorizontal: 4,
+    paddingVertical: 14
+  },
+  countryListRowActive: {
+    backgroundColor: colors.primarySoft
+  },
+  countryListText: {
+    color: colors.ink,
+    fontSize: 16
+  },
+  countryListEmpty: {
+    color: colors.muted,
+    fontSize: 15,
+    paddingVertical: 24,
+    textAlign: 'center'
   },
   form: {
     gap: 14,

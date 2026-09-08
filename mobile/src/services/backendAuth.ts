@@ -10,10 +10,27 @@ export class AccessDeniedError extends Error {
   }
 }
 
+export class AuthRateLimitError extends Error {
+  retryAfterSeconds: number | null;
+
+  constructor(retryAfterSeconds?: number | null) {
+    super(getAuthRateLimitMessage(retryAfterSeconds));
+    this.name = 'AuthRateLimitError';
+    this.retryAfterSeconds = retryAfterSeconds && retryAfterSeconds > 0
+      ? Math.ceil(retryAfterSeconds)
+      : null;
+  }
+}
+
 interface OtpPreflightResponse {
   ok: boolean;
   phoneMasked: string;
   retryAfterSeconds: number;
+}
+
+interface BackendErrorResponse {
+  error?: unknown;
+  retryAfterSeconds?: unknown;
 }
 
 export async function requestOtpPreflight(phoneNumber: string): Promise<OtpPreflightResponse> {
@@ -27,7 +44,7 @@ export async function requestOtpPreflight(phoneNumber: string): Promise<OtpPrefl
   });
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response, 'We could not send a code right now.'));
+    throw await getBackendAuthError(response, 'We could not send a code right now.');
   }
 
   return response.json() as Promise<OtpPreflightResponse>;
@@ -60,7 +77,7 @@ export async function verifyBackendAuthSession(
       }
     }
 
-    throw new Error(await getResponseErrorMessage(response, 'Your secure session could not be verified.'));
+    throw await getBackendAuthError(response, 'Your secure session could not be verified.');
   }
 
   return response.json() as Promise<BackendAuthSession>;
@@ -76,13 +93,18 @@ export async function auditBackendLogout(idToken: string): Promise<void> {
   });
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response, 'Logout audit could not be recorded.'));
+    throw await getBackendAuthError(response, 'Logout audit could not be recorded.');
   }
 }
 
 export function isAccessDeniedError(error: unknown): boolean {
   return error instanceof AccessDeniedError ||
     (error instanceof Error && error.name === 'AccessDeniedError');
+}
+
+export function isAuthRateLimitError(error: unknown): boolean {
+  return error instanceof AuthRateLimitError ||
+    (error instanceof Error && error.name === 'AuthRateLimitError');
 }
 
 async function readJsonSafely(response: Response): Promise<unknown | null> {
@@ -93,16 +115,55 @@ async function readJsonSafely(response: Response): Promise<unknown | null> {
   }
 }
 
-async function getResponseErrorMessage(response: Response, fallback: string): Promise<string> {
-  try {
-    const body = await response.json();
+async function getBackendAuthError(response: Response, fallback: string): Promise<Error> {
+  const body = await readJsonSafely(response) as BackendErrorResponse | null;
+  const retryAfterSeconds = getRetryAfterSeconds(response, body);
 
-    if (typeof body?.error === 'string') {
-      return body.error;
-    }
-  } catch {
-    return fallback;
+  if (response.status === 429 || retryAfterSeconds) {
+    return new AuthRateLimitError(retryAfterSeconds);
   }
 
-  return fallback;
+  const message = typeof body?.error === 'string' && body.error.trim()
+    ? body.error.trim()
+    : fallback;
+
+  return new Error(message);
+}
+
+function getRetryAfterSeconds(response: Response, body: BackendErrorResponse | null): number | null {
+  const bodyRetryAfterSeconds = Number(body?.retryAfterSeconds);
+
+  if (Number.isFinite(bodyRetryAfterSeconds) && bodyRetryAfterSeconds > 0) {
+    return Math.ceil(bodyRetryAfterSeconds);
+  }
+
+  const headerRetryAfterSeconds = Number(response.headers.get('Retry-After'));
+
+  if (Number.isFinite(headerRetryAfterSeconds) && headerRetryAfterSeconds > 0) {
+    return Math.ceil(headerRetryAfterSeconds);
+  }
+
+  return null;
+}
+
+function getAuthRateLimitMessage(retryAfterSeconds?: number | null): string {
+  const waitTime = formatRetryAfter(retryAfterSeconds);
+
+  return waitTime
+    ? `Sorry, phone sign-in is temporarily paused after too many attempts. Please wait ${waitTime} and try again.`
+    : 'Sorry, phone sign-in is temporarily paused after too many attempts. Please wait a few minutes and try again.';
+}
+
+function formatRetryAfter(retryAfterSeconds?: number | null): string | null {
+  if (!retryAfterSeconds || retryAfterSeconds <= 0) {
+    return null;
+  }
+
+  if (retryAfterSeconds < 60) {
+    return `${Math.ceil(retryAfterSeconds)} seconds`;
+  }
+
+  const minutes = Math.ceil(retryAfterSeconds / 60);
+
+  return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`;
 }

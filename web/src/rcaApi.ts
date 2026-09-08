@@ -7,7 +7,7 @@ import {
 export type RcaIncidentStatus = 'OPEN' | 'INVESTIGATING' | 'CLOSED';
 export type RcaSessionStatus = 'ACTIVE' | 'FREEZE' | 'COMPLETED' | 'CLOSED';
 export type RcaMethodology = '5_WHYS' | 'ISHIKAWA' | 'FAULT_TREE';
-export type RcaNodeType = 'WHY' | 'ISHIKAWA_CATEGORY' | 'CAUSE' | 'SUB_CAUSE' | 'FAULT_GATE' | 'STICKY_NOTE';
+export type RcaNodeType = 'WHY' | 'ISHIKAWA_CATEGORY' | 'CAUSE' | 'SUB_CAUSE' | 'FAULT_GATE' | 'STICKY_NOTE' | 'COMMENT';
 export type RcaFiveWhysNodeRole =
   | 'INCIDENT'
   | 'INCIDENT_DETAILS'
@@ -100,6 +100,7 @@ export interface RcaUiCoordinates {
 }
 
 export interface RcaAttachedEvidence {
+  contentType?: string | null;
   fileHash: string;
   fileName: string;
   fileUrl: string;
@@ -147,6 +148,7 @@ export interface RcaNode {
   isSuspectedCause: boolean;
   fiveWhysRole?: RcaFiveWhysNodeRole | null;
   label: string;
+  linkedNodeIds?: string[];
   lockedAtIso: string | null;
   lockedBy: string | null;
   nodeType: RcaNodeType;
@@ -201,6 +203,9 @@ export interface RcaIncidentInput {
 }
 
 export interface RcaIncidentUpdateInput {
+  assetId?: string;
+  riskFactors?: Partial<RcaRiskFactors>;
+  status?: RcaIncidentStatus;
   title?: string;
 }
 
@@ -220,6 +225,7 @@ export interface RcaNodeInput {
   isSuspectedCause?: boolean;
   fiveWhysRole?: RcaFiveWhysNodeRole | null;
   label?: string;
+  linkedNodeIds?: string[];
   lockForEditing?: boolean;
   nodeType?: RcaNodeType;
   parentNodeId?: string | null;
@@ -239,6 +245,17 @@ export interface RcaWorkspaceResponse {
     closedInvestigations: number;
     criticalIncidents: number;
   };
+}
+
+export interface RcaOccurrenceSuggestion {
+  confidence: 'LOW' | 'MEDIUM' | 'HIGH';
+  currentOccurrence: number;
+  evidence: string[];
+  recommendedOccurrence: number;
+  reason: string;
+  similarIncidentCount: number;
+  source: 'RCA_HISTORY';
+  windowDays: number;
 }
 
 export interface RcaKnowledgeAskInput {
@@ -310,6 +327,18 @@ export async function updateRcaIncident(
   }
 
   return body.incident;
+}
+
+export async function getRcaOccurrenceSuggestion(incidentId: string): Promise<RcaOccurrenceSuggestion> {
+  const body = await requestRcaJson<{ suggestion?: RcaOccurrenceSuggestion }>(
+    `/api/rca/incidents/${encodeURIComponent(incidentId)}/risk/occurrence-suggestion`
+  );
+
+  if (!body.suggestion) {
+    throw new Error('Occurrence recommendation could not be loaded.');
+  }
+
+  return body.suggestion;
 }
 
 export async function listRcaCollaboratorCandidates(incidentId: string): Promise<{ users: RcaUserSummary[] }> {

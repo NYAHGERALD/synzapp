@@ -1,0 +1,6 @@
+# The public site is open to search engines. The staff console is a separate
+# site and carries its own noindex, so nothing here needs to hide it.
+User-agent: *
+Allow: /
+
+Sitemap: https://synzapp.com/sitemap.xml

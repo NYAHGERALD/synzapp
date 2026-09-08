@@ -4,6 +4,8 @@ import type { DocumentReference } from 'firebase-admin/firestore';
 import { fieldValue, firestore, storageBucket } from '../config/firebaseAdmin.js';
 import { SynzappRole } from '../types/auth.js';
 import { buildAuthSession } from './authSessionService.js';
+import type { DeviceActivityTimestamp } from './deviceDormancy.js';
+import { selectDevicesForDelivery } from './deviceIdentityService.js';
 import {
   EncryptedNotificationPreviewRecord,
   EncryptionDevicePublicKey,
@@ -35,6 +37,7 @@ import type {
 } from './userProfileService.js';
 
 const GROUP_HIDDEN_MESSAGE_LIMIT = 5000;
+const GROUP_CONTACT_VISIBLE_ENVELOPE_SCAN_LIMIT = 250;
 const GROUP_HISTORY_KEY_GRANT_DEVICE_LIMIT = 100;
 const GROUP_HISTORY_KEY_GRANT_ENVELOPE_LIMIT = 100;
 const GROUP_PHOTO_STORAGE_SAVE_MAX_ATTEMPTS = 3;
@@ -222,7 +225,13 @@ interface TenantGroupRecord {
   status?: string;
   systemManaged?: boolean;
   tenantId?: string;
+  lastReadAtByUser?: Record<string, FirebaseFirestore.Timestamp | number | null | undefined>;
   unreadCounts?: Record<string, number>;
+}
+
+interface GroupChatDeviceVisibility {
+  lastMessageSentAtMs: number | null;
+  unreadCount: number;
 }
 
 interface TenantUserRecord {
@@ -257,10 +266,12 @@ interface GroupMemberRecord {
 }
 
 interface DeviceKeyRecord {
+  createdAt?: DeviceActivityTimestamp | null;
   deviceId?: string;
   identityPublicKey?: string;
   keyAgreementPublicKey?: string;
   keyVersion?: number;
+  lastSeenAt?: DeviceActivityTimestamp | null;
   platform?: string;
   signingPublicKey?: string;
   status?: string;
@@ -318,6 +329,8 @@ interface GroupChatMessageMetadataRecord {
 }
 
 interface ListEncryptedGroupEnvelopeOptions {
+  afterSentAtMs?: number | null;
+  beforeSentAtMs?: number | null;
   limit?: number;
   markAsDelivered?: boolean;
   markAsRead?: boolean;
@@ -433,7 +446,8 @@ export async function createGroupChat(
 }
 
 export async function listCurrentUserGroupChatContacts(
-  decodedToken: DecodedIdToken
+  decodedToken: DecodedIdToken,
+  currentDeviceId?: string
 ): Promise<GroupChatContact[]> {
   const context = await getActiveUserContext(decodedToken);
   const organizationRef = firestore.collection('organizations').doc(context.tenantId);
@@ -471,7 +485,9 @@ export async function listCurrentUserGroupChatContacts(
       memberIds,
       await countActiveRecipientDevices(context.tenantId, memberIds, decodedToken.uid),
       preferences.get(buildChatPreferenceKey('GROUP', doc.id)),
-      archiveSettings
+      archiveSettings,
+      currentDeviceId,
+      doc.ref
     ));
   }
 
@@ -727,6 +743,29 @@ export async function getGroupEncryptionContext(
   };
 }
 
+/**
+ * Records that one device now holds a group's messages.
+ *
+ * The twin of the direct-chat helper, so both kinds of conversation are
+ * acknowledged the same way and a receipt does not have to know which service
+ * it is talking to.
+ *
+ * **Delivered, never read.** A receipt says the phone has the message. It says
+ * nothing about anybody having looked at it, and marking it read here would
+ * clear the recipient's unread badge for a chat they never opened.
+ */
+export async function markEncryptedGroupEnvelopesDeliveredForDevice(
+  decodedToken: DecodedIdToken,
+  groupId: string,
+  deviceId: string
+): Promise<EncryptedGroupEnvelopeForDevice[]> {
+  return listEncryptedGroupEnvelopesForDevice(decodedToken, groupId, deviceId, {
+    limit: 50,
+    markAsDelivered: true,
+    markAsRead: false
+  });
+}
+
 export async function listEncryptedGroupEnvelopesForDevice(
   decodedToken: DecodedIdToken,
   groupId: string,
@@ -766,11 +805,22 @@ export async function listEncryptedGroupEnvelopesForDevice(
     envelopesQuery = envelopesQuery.where('sentAtMs', '>', preference.clearedAtMs);
   }
 
+  const afterSentAtMs = normalizeEnvelopeCursorMs(options.afterSentAtMs);
+  const beforeSentAtMs = normalizeEnvelopeCursorMs(options.beforeSentAtMs);
+
+  if (afterSentAtMs !== null) {
+    envelopesQuery = envelopesQuery.where('sentAtMs', '>', afterSentAtMs);
+  }
+
+  if (beforeSentAtMs !== null) {
+    envelopesQuery = envelopesQuery.where('sentAtMs', '<', beforeSentAtMs);
+  }
+
   envelopesQuery = envelopesQuery.orderBy('sentAtMs', 'asc');
 
   const [envelopesSnapshot, hiddenMessageIds, activeGroupDevices] = await Promise.all([
     envelopesQuery
-      .limit(options.limit || 500)
+      .limit(normalizeEnvelopePageLimit(options.limit, 500))
       .get(),
     getHiddenGroupMessageIds(context.groupRef, context.tenantId, decodedToken.uid),
     listActiveDevicesForGroupMembers(context.tenantId, context.memberIds, '')
@@ -865,6 +915,22 @@ export async function listEncryptedGroupEnvelopesForDevice(
   }
 
   return envelopes;
+}
+
+function normalizeEnvelopeCursorMs(value: number | null | undefined): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+
+  return Math.max(0, Math.floor(value));
+}
+
+function normalizeEnvelopePageLimit(value: number | undefined, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return fallback;
+  }
+
+  return Math.max(1, Math.min(Math.floor(value), 500));
 }
 
 export async function grantGroupChatHistoryKeys(
@@ -1234,7 +1300,8 @@ function buildClientMessageMetadataId(senderUid: string, clientMessageId: string
 
 export async function getGroupChatContact(
   decodedToken: DecodedIdToken,
-  groupId: string
+  groupId: string,
+  currentDeviceId?: string
 ): Promise<GroupChatContact> {
   const context = await getGroupChatContext(decodedToken, groupId);
   const [activeRecipientDeviceCount, preference, archiveSettings] = await Promise.all([
@@ -1255,7 +1322,9 @@ export async function getGroupChatContact(
     context.memberIds,
     activeRecipientDeviceCount,
     preference,
-    archiveSettings
+    archiveSettings,
+    currentDeviceId,
+    context.groupRef
   );
 }
 
@@ -1781,24 +1850,43 @@ async function getVisibleGroupAddMember(
   };
 }
 
-function canAddMemberToGroup(
+/**
+ * Who may add somebody to a group.
+ *
+ * **Nobody may be added to a department's group.** Its membership is the
+ * department: a person joins by being given a role in that department when they
+ * are invited, and leaves by being moved out of it. Anyone added by hand is
+ * someone the department roster does not know about, sitting in a conversation
+ * scoped to a department they are not in.
+ *
+ * That was possible until now, and not by a loophole in an edge case: the first
+ * thing this function used to check was whether the caller was a member, and
+ * being a member was enough to add anybody to anything. So an employee could —
+ * and did — add an organization admin from another department into their
+ * department's chat. The department checks below it were only ever reached by
+ * people who were not members at all.
+ *
+ * An organization admin who needs oversight of a department's work has the
+ * console and the audit log for it; sitting inside the conversation is a
+ * different thing, and not one an employee should be able to arrange.
+ */
+export function canAddMemberToGroup(
   context: Awaited<ReturnType<typeof getActiveUserContext>>,
   group: TenantGroupRecord,
   memberIds: string[]
 ): boolean {
+  // Checked before anything else, because the membership of these groups is
+  // derived and there is no one for whom hand-editing it is correct.
+  if (isDepartmentManagedGroup(group)) {
+    return false;
+  }
+
   if (memberIds.includes(context.uid)) {
     return true;
   }
 
   if (context.role !== 'ORG_ADMIN') {
     return false;
-  }
-
-  if (
-    group.isDepartmentDefault === true &&
-    group.memberPolicy === 'DEPARTMENT_PLUS_EXPLICIT'
-  ) {
-    return context.user.departmentId === group.autoMembershipDepartmentId;
   }
 
   return group.createdBy === context.uid;
@@ -1970,7 +2058,7 @@ async function listActiveDevicesForGroupMembers(
       .get()
   ));
 
-  return deviceSnapshots
+  const registeredDevices = deviceSnapshots
     .flatMap((snapshot) => snapshot.docs)
     .map((doc) => ({ ...(doc.data() as DeviceKeyRecord), deviceId: (doc.data() as DeviceKeyRecord).deviceId || doc.id }))
     .filter((device) => (
@@ -1979,6 +2067,10 @@ async function listActiveDevicesForGroupMembers(
       Boolean(device.keyAgreementPublicKey) &&
       device.deviceId !== excludedDeviceId
     ));
+
+  // Judged per member, not across the group: one colleague opening the app
+  // this morning must not vouch for another who has been away since spring.
+  return selectDevicesForDelivery(tenantId, registeredDevices);
 }
 
 async function countActiveRecipientDevices(
@@ -2062,9 +2154,24 @@ async function buildHydratedGroupChatContact(
   memberIds: string[],
   activeRecipientDeviceCount: number,
   preference?: ChatUserPreference,
-  archiveSettings?: ChatArchiveSettings
+  archiveSettings?: ChatArchiveSettings,
+  currentDeviceId?: string,
+  groupRef?: DocumentReference
 ): Promise<GroupChatContact> {
-  const members = await listGroupChatMemberProfiles(tenantId, groupId, memberIds);
+  const [members, deviceVisibility] = await Promise.all([
+    listGroupChatMemberProfiles(tenantId, groupId, memberIds),
+    currentDeviceId && groupRef && group.lastMessageSentAtMs
+      ? getGroupChatDeviceVisibility({
+          currentDeviceId,
+          currentUid,
+          group,
+          groupId,
+          groupRef,
+          preference,
+          tenantId
+        })
+      : Promise.resolve<GroupChatDeviceVisibility | undefined>(undefined)
+  ]);
 
   return buildGroupChatContact(
     currentUid,
@@ -2074,8 +2181,105 @@ async function buildHydratedGroupChatContact(
     members,
     activeRecipientDeviceCount,
     preference,
-    archiveSettings
+    archiveSettings,
+    deviceVisibility
   );
+}
+
+async function getGroupChatDeviceVisibility(input: {
+  currentDeviceId: string;
+  currentUid: string;
+  group: TenantGroupRecord;
+  groupId: string;
+  groupRef: DocumentReference;
+  preference?: ChatUserPreference;
+  tenantId: string;
+}): Promise<GroupChatDeviceVisibility> {
+  const effectivePreference = input.preference || getDefaultChatUserPreference(
+    input.tenantId,
+    input.currentUid,
+    'GROUP',
+    input.groupId
+  );
+  const groupLastMessageSentAtMs = normalizeTimestampMs(input.group.lastMessageSentAtMs);
+
+  if (!groupLastMessageSentAtMs) {
+    return {
+      lastMessageSentAtMs: null,
+      unreadCount: 0
+    };
+  }
+
+  if (effectivePreference.clearedAtMs && groupLastMessageSentAtMs <= effectivePreference.clearedAtMs) {
+    return {
+      lastMessageSentAtMs: null,
+      unreadCount: 0
+    };
+  }
+
+  const [snapshot, hiddenMessageIds] = await Promise.all([
+    input.groupRef
+      .collection('encryptedEnvelopes')
+      .orderBy('sentAtMs', 'desc')
+      .limit(GROUP_CONTACT_VISIBLE_ENVELOPE_SCAN_LIMIT)
+      .get(),
+    getHiddenGroupMessageIds(input.groupRef, input.tenantId, input.currentUid)
+  ]);
+  const lastReadAtMs = normalizeTimestampMs(input.group.lastReadAtByUser?.[input.currentUid]);
+  let lastMessageSentAtMs: number | null = null;
+  let unreadCount = 0;
+
+  for (const doc of snapshot.docs) {
+    const record = doc.data() as EncryptedGroupEnvelopeRecord;
+    const sentAtMs = normalizeTimestampMs(record.sentAtMs);
+
+    if (!sentAtMs) {
+      continue;
+    }
+
+    if (effectivePreference.clearedAtMs && sentAtMs <= effectivePreference.clearedAtMs) {
+      break;
+    }
+
+    if (hiddenMessageIds.has(record.envelopeId || doc.id)) {
+      continue;
+    }
+
+    if (!record.encryptedKeysByDevice?.[input.currentDeviceId]) {
+      continue;
+    }
+
+    if (!lastMessageSentAtMs) {
+      lastMessageSentAtMs = sentAtMs;
+    }
+
+    if (
+      record.senderUid !== input.currentUid &&
+      !record.readAtMsByDevice?.[input.currentDeviceId] &&
+      (!lastReadAtMs || sentAtMs > lastReadAtMs)
+    ) {
+      unreadCount += 1;
+    }
+  }
+
+  return {
+    lastMessageSentAtMs,
+    unreadCount
+  };
+}
+
+function normalizeTimestampMs(value: FirebaseFirestore.Timestamp | number | null | undefined): number | null {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+
+  if (value && typeof value === 'object' && typeof value.toMillis === 'function') {
+    const timestampMs = value.toMillis();
+
+    return Number.isFinite(timestampMs) && timestampMs > 0 ? timestampMs : null;
+  }
+
+  return null;
 }
 
 async function listGroupChatMemberProfiles(
@@ -2138,10 +2342,14 @@ function buildGroupChatContact(
   members: GroupChatMember[],
   activeRecipientDeviceCount: number,
   preference?: ChatUserPreference,
-  archiveSettings?: ChatArchiveSettings
+  archiveSettings?: ChatArchiveSettings,
+  deviceVisibility?: GroupChatDeviceVisibility
 ): GroupChatContact {
   const name = group.name || 'Group chat';
-  const lastMessageSentAtMs = group.lastMessageSentAtMs || null;
+  const hasDeviceVisibility = typeof deviceVisibility !== 'undefined';
+  const lastMessageSentAtMs = hasDeviceVisibility
+    ? deviceVisibility.lastMessageSentAtMs
+    : group.lastMessageSentAtMs || null;
   const effectivePreference = preference || getDefaultChatUserPreference('', currentUid, 'GROUP', groupId);
   const isCleared = Boolean(
     lastMessageSentAtMs &&
@@ -2182,7 +2390,11 @@ function buildGroupChatContact(
     status: group.status || 'ACTIVE',
     tenantId: group.tenantId || '',
     trashSegments: mapTrashSegments(effectivePreference.trashSegments),
-    unreadCount: isCleared ? 0 : group.unreadCounts?.[currentUid] || 0
+    unreadCount: isCleared
+      ? 0
+      : hasDeviceVisibility
+        ? deviceVisibility.unreadCount
+        : group.unreadCounts?.[currentUid] || 0
   };
 }
 

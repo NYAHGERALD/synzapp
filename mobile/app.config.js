@@ -9,6 +9,7 @@ module.exports = ({ config }) => {
       ...(config.plugins ?? []),
       'expo-sqlite',
       'expo-video',
+      './plugins/withSynzappAndroidMediaBackupRules',
     ],
     ios: {
       ...config.ios,

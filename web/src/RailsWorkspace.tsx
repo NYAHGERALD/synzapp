@@ -35,6 +35,7 @@ import {
   List,
   Maximize2,
   MessageSquareText,
+  Minimize2,
   Minus,
   Move,
   Network,
@@ -66,11 +67,13 @@ import {
   addRailsCollaborator,
   addRailsComment,
   addRailsEvidence,
+  addRailsEvidenceLibrary,
   askRailsKnowledge,
   bulkUpdateRailsItems,
   createRailsItem,
   deleteRailsAction,
   deleteRailsEvidence,
+  deleteRailsEvidenceLibrary,
   downloadRailsEvidenceBlob,
   exportRailsCsv,
   exportRailsJson,
@@ -80,6 +83,7 @@ import {
   getRailsItemActivity,
   getRailsReport,
   getRailsWorkspace,
+  listRailsEvidenceLibrary,
   listRailsLswCandidates,
   listRailsRcaCandidates,
   removeRailsCollaborator,
@@ -88,10 +92,13 @@ import {
   updateRailsRcaTriageRequest,
   convertRailsRcaTriageToIncident,
   updateRailsAction,
+  updateRailsEvidenceLibrary,
   updateRailsItem,
   type RailsAction,
   type RailsAuditActivity,
   type RailsCategory,
+  type RailsEvidence,
+  type RailsEvidenceInput,
   type RailsItem,
   type RailsKnowledgeAnswer,
   type RailsLswSourceCandidate,
@@ -129,6 +136,7 @@ type RailsLeftPanelMode = 'controls' | 'filters' | 'assistant';
 type RailsPanelKind = 'left' | 'right';
 type RailsPanelResizeEdge = 'bottom' | 'left' | 'right';
 type RailsWorkspaceView = 'board' | 'report' | 'history';
+type RailsBoardSearchScope = RailsStatus | 'board';
 interface RailsDetailReadinessTask {
   complete: boolean;
   key: string;
@@ -171,9 +179,11 @@ interface RailsEvidenceHintState {
 }
 const RAILS_LEFT_PANEL_DEFAULT_WIDTH = 280;
 const RAILS_RIGHT_PANEL_DEFAULT_WIDTH = 520;
+const RAILS_LEFT_PANEL_DEFAULT_HEIGHT = 620;
+const RAILS_RIGHT_PANEL_DEFAULT_HEIGHT = 720;
 const RAILS_PANEL_TOP_LIMIT = 60;
 const RAILS_PANEL_VIEWPORT_MARGIN = 8;
-const RAILS_PANEL_MIN_HEIGHT = 260;
+const RAILS_PANEL_ABSOLUTE_MIN_HEIGHT = 260;
 const railsDetailPages: Array<{
   key: RailsDetailPage;
   label: string;
@@ -188,6 +198,7 @@ const railsDetailPages: Array<{
 interface RailsPanelState {
   detached: boolean;
   height: number;
+  maximized: boolean;
   open: boolean;
   width: number;
   x: number;
@@ -217,6 +228,10 @@ export function RailsWorkspace() {
   const [boardDateFilter, setBoardDateFilter] = React.useState('');
   const [boardPriorityFilter, setBoardPriorityFilter] = React.useState<RailsPriority | 'All'>('All');
   const [boardStatusFilter, setBoardStatusFilter] = React.useState<RailsStatus | 'All'>('All');
+  const [floatingBoardSearch, setFloatingBoardSearch] = React.useState<{
+    query: string;
+    scope: RailsBoardSearchScope;
+  } | null>(null);
   const [workspaceView, setWorkspaceView] = React.useState<RailsWorkspaceView>('board');
   const [railsReport, setRailsReport] = React.useState<RailsReportResponse | null>(null);
   const [historyItems, setHistoryItems] = React.useState<RailsItem[]>([]);
@@ -242,6 +257,7 @@ export function RailsWorkspace() {
   const [draftEvidenceFiles, setDraftEvidenceFiles] = React.useState<File[]>([]);
   const [evidenceViewStyle, setEvidenceViewStyle] = React.useState<'list' | 'grid'>('grid');
   const [evidenceSearch, setEvidenceSearch] = React.useState('');
+  const [evidenceLibrary, setEvidenceLibrary] = React.useState<RailsEvidence[]>([]);
   const [expandedRequiredEvidenceIds, setExpandedRequiredEvidenceIds] = React.useState<Set<string>>(() => new Set());
   const [isEvidenceUploadModalOpen, setIsEvidenceUploadModalOpen] = React.useState(false);
   const [isEvidenceUploading, setIsEvidenceUploading] = React.useState(false);
@@ -283,7 +299,7 @@ export function RailsWorkspace() {
   const [assistantMessages, setAssistantMessages] = React.useState<RailsAssistantMessage[]>(() => [
     {
       answerSource: 'SYSTEM_GUIDE',
-      body: 'Ask me anything about this RAILS workspace. I can explain the current stage, what is blocking the next step, how to link LSW or RCA, what evidence belongs where, and how to move a loop cleanly to closure.',
+      body: 'Ask me anything about this RAILS workspace. I can explain the full RAILS flow, stage gates, LSW and RCA linkage, evidence library, actions, standardization, closure, audit history, and the floating scoped search. Use the search icons on the board or stage headers to find loops by date, owner, text, RCA, LSW, evidence, or action content.',
       createdAtIso: new Date().toISOString(),
       id: 'assistant-welcome',
       role: 'assistant'
@@ -304,7 +320,8 @@ export function RailsWorkspace() {
   const [errorMessage, setErrorMessage] = React.useState('');
   const [leftPanel, setLeftPanel] = React.useState<RailsPanelState>({
     detached: false,
-    height: 620,
+    height: RAILS_LEFT_PANEL_DEFAULT_HEIGHT,
+    maximized: false,
     open: false,
     width: RAILS_LEFT_PANEL_DEFAULT_WIDTH,
     x: 18,
@@ -312,7 +329,8 @@ export function RailsWorkspace() {
   });
   const [rightPanel, setRightPanel] = React.useState<RailsPanelState>({
     detached: false,
-    height: 720,
+    height: RAILS_RIGHT_PANEL_DEFAULT_HEIGHT,
+    maximized: false,
     open: false,
     width: getPanelMinWidth('right'),
     x: Math.max(18, window.innerWidth - getPanelMinWidth('right') - 28),
@@ -321,6 +339,7 @@ export function RailsWorkspace() {
   const [evidenceThumbUrls, setEvidenceThumbUrls] = React.useState<Record<string, string>>({});
   const requestIdRef = React.useRef(0);
   const columnScrollbarTimeoutRef = React.useRef<number | null>(null);
+  const floatingBoardSearchInputRef = React.useRef<HTMLInputElement | null>(null);
   const boardCollaboratorsMenuRef = React.useRef<HTMLDivElement | null>(null);
   const boardHintMenuRef = React.useRef<HTMLDivElement | null>(null);
   const collaboratorMenuRef = React.useRef<HTMLDivElement | null>(null);
@@ -344,10 +363,25 @@ export function RailsWorkspace() {
     startX: number;
     startY: number;
   } | null>(null);
+  const panelRestoreRef = React.useRef<Record<RailsPanelKind, Pick<RailsPanelState, 'height' | 'width' | 'x' | 'y'> | null>>({
+    left: null,
+    right: null
+  });
 
   React.useEffect(() => {
     void loadWorkspace();
   }, []);
+
+  React.useEffect(() => {
+    if (!floatingBoardSearch) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      floatingBoardSearchInputRef.current?.focus();
+      floatingBoardSearchInputRef.current?.select();
+    });
+  }, [floatingBoardSearch?.scope]);
 
   React.useEffect(() => {
     return () => {
@@ -625,10 +659,13 @@ export function RailsWorkspace() {
     const nextThumbUrls: Record<string, string> = {};
     let isActive = true;
 
-    void Promise.all(items.flatMap((item) => item.evidence
+    void Promise.all(mergeRailsEvidenceForClient(
+      evidenceLibrary.filter((evidence) => evidence.status === 'Attached'),
+      items.flatMap((item) => item.evidence.filter((evidence) => evidence.status === 'Attached'))
+    )
       .filter((evidence) => evidence.fileUrl && evidence.contentType?.startsWith('image/'))
       .map(async (evidence) => {
-        const key = `${item.id}:${evidence.evidenceId}`;
+        const key = evidence.evidenceId;
 
         try {
           const blob = await downloadRailsEvidenceBlob(evidence.fileUrl || '');
@@ -642,7 +679,7 @@ export function RailsWorkspace() {
         } catch {
           // Thumbnail loading should not block the manager workflow.
         }
-      }))).then(() => {
+      })).then(() => {
         if (isActive) {
           setEvidenceThumbUrls((currentUrls) => {
             Object.entries(currentUrls).forEach(([key, objectUrl]) => {
@@ -660,7 +697,7 @@ export function RailsWorkspace() {
       isActive = false;
       Object.values(nextThumbUrls).forEach((objectUrl) => URL.revokeObjectURL(objectUrl));
     };
-  }, [items]);
+  }, [evidenceLibrary, items]);
 
   React.useEffect(() => {
     function handlePointerMove(event: PointerEvent) {
@@ -669,12 +706,18 @@ export function RailsWorkspace() {
         const nextX = drag.x + event.clientX - drag.startX;
         const nextY = drag.y + event.clientY - drag.startY;
 
-        updatePanel(drag.kind, (panel) => ({
-          ...panel,
-          height: clamp(panel.height, RAILS_PANEL_MIN_HEIGHT, getPanelMaxHeight(nextY)),
-          x: clamp(nextX, RAILS_PANEL_VIEWPORT_MARGIN, window.innerWidth - panel.width - RAILS_PANEL_VIEWPORT_MARGIN),
-          y: clamp(nextY, RAILS_PANEL_TOP_LIMIT, getPanelMaxY(panel.height))
-        }));
+        updatePanel(drag.kind, (panel) => {
+          const normalizedY = clamp(nextY, RAILS_PANEL_TOP_LIMIT, getPanelMaxY(panel.height));
+          const normalizedHeight = clamp(panel.height, getPanelMinHeight(drag.kind, normalizedY), getPanelMaxHeight(normalizedY));
+
+          return {
+            ...panel,
+            height: normalizedHeight,
+            maximized: false,
+            x: clamp(nextX, RAILS_PANEL_VIEWPORT_MARGIN, window.innerWidth - panel.width - RAILS_PANEL_VIEWPORT_MARGIN),
+            y: normalizedY
+          };
+        });
       }
 
       if (resizeRef.current) {
@@ -686,25 +729,37 @@ export function RailsWorkspace() {
           if (resize.edge === 'bottom') {
             return {
               ...panel,
-              height: clamp(resize.startHeight + deltaY, RAILS_PANEL_MIN_HEIGHT, getPanelMaxHeight(panel.y))
+              height: clamp(resize.startHeight + deltaY, getPanelMinHeight(resize.kind, panel.y), getPanelMaxHeight(panel.y)),
+              maximized: false
             };
           }
 
           if (resize.edge === 'right') {
+            const maxWidth = panel.detached
+              ? Math.max(getPanelMinWidth(resize.kind), window.innerWidth - panel.x - RAILS_PANEL_VIEWPORT_MARGIN)
+              : getPanelMaxWidth(false);
+
             return {
               ...panel,
-              width: clamp(resize.startWidth + deltaX, getPanelMinWidth(resize.kind), getPanelMaxWidth())
+              maximized: false,
+              width: clamp(resize.startWidth + deltaX, getPanelMinWidth(resize.kind), maxWidth)
             };
           }
 
-          const nextWidth = clamp(resize.startWidth - deltaX, getPanelMinWidth(resize.kind), getPanelMaxWidth());
+          const minWidth = getPanelMinWidth(resize.kind);
+          const rightBoundary = resize.startPanelX + resize.startWidth;
+          const maxWidth = panel.detached
+            ? Math.max(minWidth, Math.min(getPanelMaxWidth(true), rightBoundary - RAILS_PANEL_VIEWPORT_MARGIN))
+            : getPanelMaxWidth(false);
+          const nextWidth = clamp(resize.startWidth - deltaX, minWidth, maxWidth);
           const widthDelta = resize.startWidth - nextWidth;
 
           return {
             ...panel,
+            maximized: false,
             width: nextWidth,
             x: panel.detached
-              ? clamp(resize.startPanelX + widthDelta, 8, window.innerWidth - nextWidth - 8)
+              ? clamp(resize.startPanelX + widthDelta, RAILS_PANEL_VIEWPORT_MARGIN, window.innerWidth - nextWidth - RAILS_PANEL_VIEWPORT_MARGIN)
               : panel.x
           };
         });
@@ -725,6 +780,22 @@ export function RailsWorkspace() {
       window.removeEventListener('pointerup', handlePointerUp);
     };
   }, []);
+
+  React.useEffect(() => {
+    function handleWindowResize() {
+      setLeftPanel((panel) => normalizePanelForViewport('left', panel));
+      setRightPanel((panel) => normalizePanelForViewport('right', panel));
+    }
+
+    window.addEventListener('resize', handleWindowResize);
+
+    return () => {
+      window.removeEventListener('resize', handleWindowResize);
+    };
+  }, []);
+
+  const normalizedFloatingBoardSearchQuery = floatingBoardSearch?.query.trim().toLowerCase() || '';
+  const boardScopedSearchQuery = floatingBoardSearch?.scope === 'board' ? normalizedFloatingBoardSearchQuery : '';
 
   const filteredItems = React.useMemo(() => {
     const normalizedNameFilter = boardNameFilter.trim().toLowerCase();
@@ -761,6 +832,10 @@ export function RailsWorkspace() {
         }
       }
 
+      if (boardScopedSearchQuery && !doesRailsItemMatchBoardSearch(item, boardScopedSearchQuery)) {
+        return false;
+      }
+
       if (activeFilter === 'All') {
         return true;
       }
@@ -771,7 +846,7 @@ export function RailsWorkspace() {
 
       return item.priority === activeFilter;
     });
-  }, [activeFilter, activeStageFilter, boardDateFilter, boardNameFilter, boardPriorityFilter, boardStatusFilter, items]);
+  }, [activeFilter, activeStageFilter, boardDateFilter, boardNameFilter, boardPriorityFilter, boardScopedSearchQuery, boardStatusFilter, items]);
 
   const stageScopedItems = React.useMemo(() => {
     const scopedStatusFilter = activeStageFilter !== 'All' ? activeStageFilter : boardStatusFilter;
@@ -806,19 +881,20 @@ export function RailsWorkspace() {
   const canVerifyStandardizationPlan = activeItem !== null
     && activeItem.standardizationStatus !== 'Verified'
     && incompleteStandardizationPreVerificationRequirements.length === 0;
-  const attachedEvidenceCount = activeItem?.evidence.filter((evidence) => evidence.status === 'Attached').length || 0;
+  const sharedAttachedEvidence = evidenceLibrary.filter((evidence) => evidence.status === 'Attached');
   const visibleAttachedEvidenceForActiveItem = activeItem
-    ? activeItem.evidence.filter((evidence) => evidence.status === 'Attached' && isRailsEvidenceLinkVisibleForItem(activeItem, evidence))
+    ? mergeRailsEvidenceForClient(
+        sharedAttachedEvidence,
+        activeItem.evidence.filter((evidence) => evidence.status === 'Attached' && isRailsEvidenceLinkVisibleForItem(activeItem, evidence))
+      )
     : [];
+  const attachedEvidenceCount = visibleAttachedEvidenceForActiveItem.length;
   const requiredVerificationEvidence = activeItem?.evidence.filter((evidence) => evidence.status === 'Required') || [];
   const allRequiredVerificationEvidenceLinked = activeItem
     ? requiredVerificationEvidence.length > 0
       && requiredVerificationEvidence.every((requirement) => isRequiredRailsEvidenceSatisfied(activeItem, requirement, visibleAttachedEvidenceForActiveItem))
     : false;
-  const governedActionRequirements = activeItem?.actions.flatMap((action) => {
-    const attachedEvidence = activeItem.evidence.filter((evidence) => evidence.status === 'Attached');
-    return getActionRequirementState(action, attachedEvidence);
-  }) || [];
+  const governedActionRequirements = activeItem?.actions.flatMap((action) => getActionRequirementState(action, visibleAttachedEvidenceForActiveItem)) || [];
   const incompleteGovernedActionRequirements = governedActionRequirements.filter((requirement) => !requirement.complete);
   const activeDetailPageIndex = railsDetailPages.findIndex((page) => page.key === activeDetailPage);
   const currentDetailPage = railsDetailPages[Math.max(0, activeDetailPageIndex)] || railsDetailPages[0];
@@ -838,7 +914,7 @@ export function RailsWorkspace() {
     }
 
     const actions = activeItem.actions;
-    const attachedEvidence = activeItem.evidence.filter((evidence) => evidence.status === 'Attached' && isRailsEvidenceLinkVisibleForItem(activeItem, evidence));
+    const attachedEvidence = visibleAttachedEvidenceForActiveItem;
     const requiredEvidence = activeItem.evidence.filter((evidence) => evidence.status === 'Required');
     const allRequiredEvidenceAttached = requiredEvidence.every((evidence) => isRequiredRailsEvidenceSatisfied(activeItem, evidence, attachedEvidence));
     const allActionsReadyForVerification = actions.length > 0
@@ -962,7 +1038,8 @@ export function RailsWorkspace() {
     actionProgressDrafts,
     attachedEvidenceCount,
     governedActionRequirements,
-    standardizationRequirements
+    standardizationRequirements,
+    visibleAttachedEvidenceForActiveItem
   ]);
   const activeDetailReadinessTasks = detailReadinessByPage[activeDetailPage] || [];
   const activeDetailPendingCount = activeDetailReadinessTasks.filter((task) => !task.complete).length;
@@ -1021,6 +1098,19 @@ export function RailsWorkspace() {
     setLeftPanelMode('controls');
   }
 
+  function openFloatingBoardSearch(scope: RailsBoardSearchScope) {
+    setBoardCollaboratorsPopover(null);
+    setBoardHintPopover(null);
+    setFloatingBoardSearch((currentSearch) => ({
+      query: currentSearch?.scope === scope ? currentSearch.query : '',
+      scope
+    }));
+  }
+
+  function closeFloatingBoardSearch() {
+    setFloatingBoardSearch(null);
+  }
+
   React.useEffect(() => {
     if (!activeItem) {
       setStandardizationDraft({ target: '', verification: '' });
@@ -1060,13 +1150,17 @@ export function RailsWorkspace() {
     setErrorMessage('');
 
     try {
-      const workspace = await getRailsWorkspace();
+      const [workspace, sharedEvidence] = await Promise.all([
+        getRailsWorkspace(),
+        listRailsEvidenceLibrary()
+      ]);
 
       if (requestIdRef.current !== requestId) {
         return;
       }
 
       setItems(workspace.items);
+      setEvidenceLibrary(sharedEvidence);
       setCandidates(workspace.candidates);
       setRcaCandidates(workspace.rcaCandidates || []);
       setLswCandidates(workspace.lswCandidates || []);
@@ -1669,7 +1763,6 @@ export function RailsWorkspace() {
     }
 
     try {
-      let latestItem = item;
       setIsSaving(true);
       setIsEvidenceUploading(true);
       setEvidenceUploadProgress(0);
@@ -1677,7 +1770,7 @@ export function RailsWorkspace() {
 
       for (const [index, file] of draftEvidenceFiles.entries()) {
         setEvidenceUploadProgress(Math.round((index / draftEvidenceFiles.length) * 100));
-        latestItem = await addRailsEvidence(item.id, {
+        await addRailsEvidenceLibrary({
           dataUrl: await fileToDataUrl(file),
           fileName: file.name,
           label: draftEvidenceLabel.trim() && draftEvidenceFiles.length === 1 ? draftEvidenceLabel.trim() : file.name,
@@ -1686,7 +1779,7 @@ export function RailsWorkspace() {
         setEvidenceUploadProgress(Math.round(((index + 1) / draftEvidenceFiles.length) * 100));
       }
 
-      replaceItem(latestItem);
+      await refreshEvidenceLibrary();
       setDraftEvidenceLabel('');
       setDraftEvidenceFiles([]);
       setIsEvidenceUploadModalOpen(false);
@@ -1730,7 +1823,7 @@ export function RailsWorkspace() {
     });
   }
 
-  async function handleSetRequiredEvidenceLink(item: RailsItem, requirementId: string, sourceEvidenceId: string | null) {
+  async function handleSetRequiredEvidenceLink(item: RailsItem, requirementId: string, sourceEvidenceId: string, shouldLink: boolean) {
     if (isSaving) {
       return;
     }
@@ -1738,9 +1831,18 @@ export function RailsWorkspace() {
     try {
       setIsSaving(true);
       setErrorMessage('');
+      const requirement = item.evidence.find((entry) => entry.evidenceId === requirementId);
+      const nextSourceEvidenceIds = new Set(getRequiredRailsEvidenceSourceIds(requirement));
+      if (shouldLink) {
+        nextSourceEvidenceIds.add(sourceEvidenceId);
+      } else {
+        nextSourceEvidenceIds.delete(sourceEvidenceId);
+      }
+      const linkedEvidenceIds = Array.from(nextSourceEvidenceIds);
       const updatedItem = await addRailsEvidence(item.id, {
         evidenceId: requirementId,
-        sourceEvidenceId,
+        sourceEvidenceId: linkedEvidenceIds[0] || null,
+        sourceEvidenceIds: linkedEvidenceIds,
         status: 'Required'
       });
       replaceItem(updatedItem);
@@ -1764,7 +1866,8 @@ export function RailsWorkspace() {
       return;
     }
 
-    const evidence = item.evidence.find((entry) => entry.evidenceId === evidenceId);
+    const evidence = evidenceLibrary.find((entry) => entry.evidenceId === evidenceId)
+      || item.evidence.find((entry) => entry.evidenceId === evidenceId);
     if (!evidence) {
       return;
     }
@@ -1772,15 +1875,25 @@ export function RailsWorkspace() {
     try {
       setIsSaving(true);
       setErrorMessage('');
-      const updatedItem = await addRailsEvidence(item.id, {
+      const nextEvidenceInput: RailsEvidenceInput = {
         evidenceId,
         label: patch.label ?? evidence.label,
         note: patch.note ?? evidence.note,
         purpose: evidence.purpose,
         status: evidence.status,
         visibility: patch.visibility ?? evidence.visibility ?? 'public'
-      });
-      replaceItem(updatedItem);
+      };
+      if (evidenceLibrary.some((entry) => entry.evidenceId === evidenceId)) {
+        const updatedEvidence = await updateRailsEvidenceLibrary(evidenceId, nextEvidenceInput);
+        setEvidenceLibrary((currentEvidence) => mergeRailsEvidenceForClient(
+          [updatedEvidence],
+          currentEvidence.filter((entry) => entry.evidenceId !== evidenceId)
+        ));
+        void refreshWorkspaceSnapshot();
+      } else {
+        const updatedItem = await addRailsEvidence(item.id, nextEvidenceInput);
+        replaceItem(updatedItem);
+      }
     } catch (error) {
       setErrorMessage(getErrorMessage(error));
       void refreshWorkspaceSnapshot();
@@ -1820,7 +1933,7 @@ export function RailsWorkspace() {
       return false;
     }
 
-    const evidence = item.evidence.find((entry) => entry.evidenceId === evidenceId);
+    const evidence = visibleAttachedEvidenceForActiveItem.find((entry) => entry.evidenceId === evidenceId);
     if (!evidence) {
       return false;
     }
@@ -1833,7 +1946,8 @@ export function RailsWorkspace() {
       return;
     }
 
-    const evidence = item.evidence.find((entry) => entry.evidenceId === evidenceId);
+    const evidence = evidenceLibrary.find((entry) => entry.evidenceId === evidenceId)
+      || item.evidence.find((entry) => entry.evidenceId === evidenceId);
     if (!evidence) {
       return;
     }
@@ -1841,7 +1955,7 @@ export function RailsWorkspace() {
     try {
       setIsSaving(true);
       setErrorMessage('');
-      const updatedItem = await addRailsEvidence(item.id, {
+      const nextEvidenceInput: RailsEvidenceInput = {
         dataUrl,
         evidenceId,
         fileName: evidence.fileName || `${evidence.label}.png`,
@@ -1850,8 +1964,18 @@ export function RailsWorkspace() {
         purpose: evidence.purpose,
         status: 'Attached',
         visibility: evidence.visibility || 'public'
-      });
-      replaceItem(updatedItem);
+      };
+      if (evidenceLibrary.some((entry) => entry.evidenceId === evidenceId)) {
+        const updatedEvidence = await updateRailsEvidenceLibrary(evidenceId, nextEvidenceInput);
+        setEvidenceLibrary((currentEvidence) => mergeRailsEvidenceForClient(
+          [updatedEvidence],
+          currentEvidence.filter((entry) => entry.evidenceId !== evidenceId)
+        ));
+        void refreshWorkspaceSnapshot();
+      } else {
+        const updatedItem = await addRailsEvidence(item.id, nextEvidenceInput);
+        replaceItem(updatedItem);
+      }
       setEvidenceEditorId('');
     } catch (error) {
       setErrorMessage(getErrorMessage(error));
@@ -1869,13 +1993,19 @@ export function RailsWorkspace() {
     try {
       setIsSaving(true);
       setErrorMessage('');
-      const updatedItem = await deleteRailsEvidence(item.id, evidenceId);
-      replaceItem(updatedItem);
+      if (evidenceLibrary.some((entry) => entry.evidenceId === evidenceId)) {
+        await deleteRailsEvidenceLibrary(evidenceId);
+        setEvidenceLibrary((currentEvidence) => currentEvidence.filter((entry) => entry.evidenceId !== evidenceId));
+        void refreshWorkspaceSnapshot();
+      } else {
+        const updatedItem = await deleteRailsEvidence(item.id, evidenceId);
+        replaceItem(updatedItem);
+      }
       setEvidencePendingDeleteId('');
       setEvidenceContextMenu(null);
       setEvidenceHint((currentHint) => currentHint?.evidenceId === evidenceId ? null : currentHint);
       setEvidenceEditorId((currentEvidenceId) => currentEvidenceId === evidenceId ? '' : currentEvidenceId);
-      setEvidencePreview((currentPreview) => currentPreview?.label === item.evidence.find((entry) => entry.evidenceId === evidenceId)?.label ? null : currentPreview);
+      setEvidencePreview((currentPreview) => currentPreview?.label === evidenceLibrary.find((entry) => entry.evidenceId === evidenceId)?.label ? null : currentPreview);
     } catch (error) {
       setErrorMessage(getErrorMessage(error));
       void refreshWorkspaceSnapshot();
@@ -2093,6 +2223,11 @@ export function RailsWorkspace() {
     setActiveItemId(updatedItem.id);
   }
 
+  async function refreshEvidenceLibrary() {
+    const sharedEvidence = await listRailsEvidenceLibrary();
+    setEvidenceLibrary(sharedEvidence);
+  }
+
   async function refreshWorkspaceSnapshot() {
     const endLoading = appLoading.beginLoading({
       detail: 'Reconciling the latest loop status and backend gate decisions',
@@ -2101,8 +2236,12 @@ export function RailsWorkspace() {
       title: 'Syncing RAILS'
     });
     try {
-      const workspace = await getRailsWorkspace();
+      const [workspace, sharedEvidence] = await Promise.all([
+        getRailsWorkspace(),
+        listRailsEvidenceLibrary()
+      ]);
       setItems(workspace.items);
+      setEvidenceLibrary(sharedEvidence);
       setCandidates(workspace.candidates);
       setRcaCandidates(workspace.rcaCandidates || []);
       setLswCandidates(workspace.lswCandidates || []);
@@ -2138,6 +2277,56 @@ export function RailsWorkspace() {
   function updatePanel(kind: RailsPanelKind, updater: (panel: RailsPanelState) => RailsPanelState) {
     const setter = kind === 'left' ? setLeftPanel : setRightPanel;
     setter((panel) => updater(panel));
+  }
+
+  function handlePanelDetachToggle(kind: RailsPanelKind) {
+    updatePanel(kind, (panel) => {
+      if (panel.detached) {
+        panelRestoreRef.current[kind] = null;
+        return {
+          ...panel,
+          detached: false,
+          maximized: false
+        };
+      }
+
+      return normalizePanelForViewport(kind, {
+        ...panel,
+        detached: true,
+        maximized: false
+      });
+    });
+  }
+
+  function handlePanelFullscreenToggle(kind: RailsPanelKind) {
+    updatePanel(kind, (panel) => {
+      if (!panel.detached) {
+        return panel;
+      }
+
+      if (panel.maximized) {
+        const restoredPanel = panelRestoreRef.current[kind];
+        panelRestoreRef.current[kind] = null;
+        return normalizePanelForViewport(kind, {
+          ...panel,
+          ...(restoredPanel || {}),
+          maximized: false
+        });
+      }
+
+      panelRestoreRef.current[kind] = {
+        height: panel.height,
+        width: panel.width,
+        x: panel.x,
+        y: panel.y
+      };
+
+      return {
+        ...panel,
+        ...getPanelFullscreenRect(),
+        maximized: true
+      };
+    });
   }
 
   function handleCardSelect(itemId: string) {
@@ -2222,6 +2411,7 @@ export function RailsWorkspace() {
       return;
     }
 
+    panelRestoreRef.current[kind] = null;
     event.currentTarget.setPointerCapture(event.pointerId);
     dragRef.current = {
       kind,
@@ -2243,6 +2433,7 @@ export function RailsWorkspace() {
       return;
     }
 
+    panelRestoreRef.current[kind] = null;
     event.currentTarget.setPointerCapture(event.pointerId);
     setIsPanelResizing(true);
     resizeRef.current = {
@@ -2279,26 +2470,24 @@ export function RailsWorkspace() {
     ? activeItem.actions.find((action) => action.actionId === actionPendingDeleteId) || null
     : null;
   const pendingDeleteEvidence = activeItem && actionPendingDelete
-    ? activeItem.evidence.filter((evidence) => actionPendingDelete.evidenceIds.includes(evidence.evidenceId))
+    ? visibleAttachedEvidenceForActiveItem.filter((evidence) => actionPendingDelete.evidenceIds.includes(evidence.evidenceId))
     : [];
   const evidenceLinkWarningAction = activeItem && evidenceLinkWarning
     ? activeItem.actions.find((action) => action.actionId === evidenceLinkWarning.actionId) || null
     : null;
   const evidenceLinkWarningEvidence = activeItem && evidenceLinkWarning
-    ? activeItem.evidence.find((evidence) => evidence.evidenceId === evidenceLinkWarning.evidenceId) || null
+    ? visibleAttachedEvidenceForActiveItem.find((evidence) => evidence.evidenceId === evidenceLinkWarning.evidenceId) || null
     : null;
-  const evidenceHintItem = activeItem && evidenceHint
-    ? activeItem.evidence.find((evidence) => evidence.evidenceId === evidenceHint.evidenceId) || null
+  const evidenceHintItem = evidenceHint
+    ? visibleAttachedEvidenceForActiveItem.find((evidence) => evidence.evidenceId === evidenceHint.evidenceId) || null
     : null;
-  const evidenceHintUploader = evidenceHintItem
+  const evidenceHintUploader = evidenceHintItem && activeItem
     ? getRailsUserByUid(activeItem, candidates, evidenceHintItem.uploadedByUid)
     : null;
-  const evidenceContextMenuItem = activeItem && evidenceContextMenu
-    ? activeItem.evidence.find((evidence) => evidence.evidenceId === evidenceContextMenu.evidenceId) || null
+  const evidenceContextMenuItem = evidenceContextMenu
+    ? visibleAttachedEvidenceForActiveItem.find((evidence) => evidence.evidenceId === evidenceContextMenu.evidenceId) || null
     : null;
-  const visibleEvidence = activeItem
-    ? activeItem.evidence.filter((evidence) => evidence.status !== 'Required')
-    : [];
+  const visibleEvidence = activeItem ? visibleAttachedEvidenceForActiveItem : [];
   const evidenceSearchTerm = evidenceSearch.trim().toLowerCase();
   const filteredEvidence = evidenceSearchTerm
     ? visibleEvidence.filter((evidence) => getEvidenceSearchText(evidence).includes(evidenceSearchTerm))
@@ -2308,7 +2497,7 @@ export function RailsWorkspace() {
       <div className="rails-evidence-library-head">
         <div>
           <h3><Paperclip aria-hidden="true" size={16} /> Evidence Library</h3>
-          <p className="rails-evidence-guidance">Upload evidence once. RAILS action, verification, standardization, and closure steps can link or unlink visible evidence with checkboxes.</p>
+          <p className="rails-evidence-guidance">Upload evidence once. RCA and RAILS workflows can link or unlink visible evidence with checkboxes.</p>
         </div>
         <div className="rails-evidence-view-toggle" aria-label="Evidence view style">
           <button
@@ -2350,7 +2539,7 @@ export function RailsWorkspace() {
       </label>
       <div className={`rails-evidence-list is-${evidenceViewStyle}`}>
         {filteredEvidence.length ? filteredEvidence.map((evidence) => {
-          const imageEvidenceThumbUrl = evidenceThumbUrls[`${activeItem.id}:${evidence.evidenceId}`];
+          const imageEvidenceThumbUrl = evidenceThumbUrls[evidence.evidenceId];
           const evidenceThumbUrl = getEvidenceThumbnailUrl(evidence, imageEvidenceThumbUrl);
           const isImageEvidence = Boolean(imageEvidenceThumbUrl && evidence.contentType?.startsWith('image/'));
           const visibility = evidence.visibility === 'private' ? 'private' : 'public';
@@ -2863,8 +3052,9 @@ export function RailsWorkspace() {
 
               updatePanel('left', (panel) => ({ ...panel, open: false }));
             }}
-            onDetachToggle={() => updatePanel('left', (panel) => ({ ...panel, detached: !panel.detached }))}
+            onDetachToggle={handlePanelDetachToggle}
             onDragStart={handlePanelDragStart}
+            onFullscreenToggle={handlePanelFullscreenToggle}
             onResizeStart={handlePanelResizeStart}
             panel={leftPanel}
             headerActions={(
@@ -3056,7 +3246,43 @@ export function RailsWorkspace() {
                   <h2>Improvement Board</h2>
                   <p>{isLoading ? 'Loading live company loops...' : `${filteredItems.length} loops visible across enterprise workflow stages`}</p>
                 </div>
+                {floatingBoardSearch ? (
+                  <div className="rails-floating-board-search" role="search" aria-label={`${getRailsBoardSearchScopeLabel(floatingBoardSearch.scope)} scoped RAILS search`}>
+                    <div className="rails-floating-board-search-shell">
+                      <Search aria-hidden="true" size={17} />
+                      <span>{getRailsBoardSearchScopeLabel(floatingBoardSearch.scope)}</span>
+                      <input
+                        aria-label={`Search ${getRailsBoardSearchScopeLabel(floatingBoardSearch.scope)}`}
+                        onChange={(event) => setFloatingBoardSearch((currentSearch) => currentSearch ? {
+                          ...currentSearch,
+                          query: event.target.value
+                        } : currentSearch)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Escape') {
+                            closeFloatingBoardSearch();
+                          }
+                        }}
+                        placeholder="Search date, name, owner, RCA, LSW, evidence, actions"
+                        ref={floatingBoardSearchInputRef}
+                        type="search"
+                        value={floatingBoardSearch.query}
+                      />
+                      <button aria-label="Close scoped search" onClick={closeFloatingBoardSearch} type="button">
+                        <X aria-hidden="true" size={16} />
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
                 <div className="rails-filter-group" aria-label="Board filters">
+                  <button
+                    aria-label="Search the improvement board"
+                    aria-pressed={floatingBoardSearch?.scope === 'board'}
+                    className={`rails-filter-toggle rails-board-search-toggle ${floatingBoardSearch?.scope === 'board' ? 'is-active' : ''}`}
+                    onClick={() => openFloatingBoardSearch('board')}
+                    type="button"
+                  >
+                    <Search aria-hidden="true" size={15} />
+                  </button>
                   <button
                     aria-label={isStageFilterPanelActive ? 'Hide stage filters' : 'Show stage filters'}
                     aria-pressed={isStageFilterPanelActive}
@@ -3096,14 +3322,26 @@ export function RailsWorkspace() {
               ) : items.length ? (
                 <div className="rails-board">
                   {railsStatuses.map((status) => {
+                    const stageSearchQuery = floatingBoardSearch?.scope === status ? floatingBoardSearch.query.trim().toLowerCase() : '';
                     const statusItems = filteredItems
-                      .filter((item) => item.status === status)
+                      .filter((item) => item.status === status && (!stageSearchQuery || doesRailsItemMatchBoardSearch(item, stageSearchQuery)))
                       .sort((left, right) => priorityRank[right.priority] - priorityRank[left.priority]);
 
                     return (
                       <section className={`rails-column is-${getRailsStatusToneClass(status)}`} key={status} aria-label={`${status} RAILS loops`}>
                         <div className="rails-column-header">
-                          <span>{status}</span>
+                          <div className="rails-column-header-title">
+                            <button
+                              aria-label={`Search ${status} loops`}
+                              aria-pressed={floatingBoardSearch?.scope === status}
+                              className={`rails-column-search-button ${floatingBoardSearch?.scope === status ? 'is-active' : ''}`}
+                              onClick={() => openFloatingBoardSearch(status)}
+                              type="button"
+                            >
+                              <Search aria-hidden="true" size={12} />
+                            </button>
+                            <span>{status}</span>
+                          </div>
                           <strong>{statusItems.length}</strong>
                         </div>
 
@@ -3453,8 +3691,9 @@ export function RailsWorkspace() {
           <RailsPanelShell
             kind="right"
             onClose={() => updatePanel('right', (panel) => ({ ...panel, open: false }))}
-            onDetachToggle={() => updatePanel('right', (panel) => ({ ...panel, detached: !panel.detached }))}
+            onDetachToggle={handlePanelDetachToggle}
             onDragStart={handlePanelDragStart}
+            onFullscreenToggle={handlePanelFullscreenToggle}
             onResizeStart={handlePanelResizeStart}
             panel={rightPanel}
             headerActions={(
@@ -3604,7 +3843,7 @@ export function RailsWorkspace() {
             title="Loop Detail"
           >
           <aside className="rails-detail-panel" aria-label="Selected RAILS loop details">
-            {detailPanelTab !== 'evidence' ? (
+            {detailPanelTab === 'details' ? (
               <>
                 <div className="rails-detail-header">
                   <h2>{activeItem.title}</h2>
@@ -3874,7 +4113,7 @@ export function RailsWorkspace() {
                     {activeItem.actions.map((action) => {
                       const actionKind = getRailsActionKind(action);
                       const isGovernedAction = true;
-                      const attachedEvidence = activeItem.evidence.filter((evidence) => evidence.status === 'Attached' && isRailsEvidenceLinkVisibleForItem(activeItem, evidence));
+                      const attachedEvidence = visibleAttachedEvidenceForActiveItem;
                       const linkedEvidenceIds = new Set(action.evidenceIds || []);
                       const actionRequirements = isGovernedAction ? getActionRequirementState(action, attachedEvidence) : [];
                       const canCompleteAction = !actionRequirements.some((requirement) => !requirement.complete);
@@ -4145,7 +4384,7 @@ export function RailsWorkspace() {
                                 {attachedEvidence.length ? (
                                   <div className="rails-containment-evidence-scroll">
                                     {attachedEvidence.map((evidence) => {
-                                      const imageEvidenceThumbUrl = evidenceThumbUrls[`${activeItem.id}:${evidence.evidenceId}`];
+                                      const imageEvidenceThumbUrl = evidenceThumbUrls[evidence.evidenceId];
                                       const evidenceThumbUrl = getEvidenceThumbnailUrl(evidence, imageEvidenceThumbUrl);
                                       const isImageEvidence = Boolean(imageEvidenceThumbUrl && evidence.contentType?.startsWith('image/'));
 
@@ -4274,7 +4513,9 @@ export function RailsWorkspace() {
                         <small>Link existing records from the centralized Evidence Library before verification can clear.</small>
                       </div>
                       {requiredVerificationEvidence.map((requirement) => {
-                        const linkedSourceEvidence = visibleAttachedEvidenceForActiveItem.find((evidence) => evidence.evidenceId === requirement.sourceEvidenceId) || null;
+                        const linkedSourceEvidenceIds = getRequiredRailsEvidenceSourceIds(requirement);
+                        const linkedSourceEvidenceIdSet = new Set(linkedSourceEvidenceIds);
+                        const linkedSourceEvidenceItems = visibleAttachedEvidenceForActiveItem.filter((evidence) => linkedSourceEvidenceIdSet.has(evidence.evidenceId));
                         const isRequirementExpanded = expandedRequiredEvidenceIds.has(requirement.evidenceId);
 
                         return (
@@ -4288,20 +4529,20 @@ export function RailsWorkspace() {
                               <div>
                                 <span>Required record</span>
                                 <p>{requirement.label}</p>
-                                <small>{linkedSourceEvidence ? `Linked to ${linkedSourceEvidence.label}` : 'No Evidence Library item linked yet'}</small>
+                                <small>{linkedSourceEvidenceItems.length ? `Linked to ${formatLinkedEvidenceSummary(linkedSourceEvidenceItems)}` : 'No Evidence Library item linked yet'}</small>
                               </div>
                               <span>
-                                <strong className={linkedSourceEvidence ? 'is-linked' : ''}>{linkedSourceEvidence ? 'Linked' : 'Required'}</strong>
+                                <strong className={linkedSourceEvidenceItems.length ? 'is-linked' : ''}>{linkedSourceEvidenceItems.length ? 'Linked' : 'Required'}</strong>
                                 <ChevronRight aria-hidden="true" size={15} />
                               </span>
                             </button>
                             {isRequirementExpanded && visibleAttachedEvidenceForActiveItem.length ? (
                               <div className="rails-containment-evidence-scroll rails-required-evidence-picker">
                                 {visibleAttachedEvidenceForActiveItem.map((evidence) => {
-                                  const imageEvidenceThumbUrl = evidenceThumbUrls[`${activeItem.id}:${evidence.evidenceId}`];
+                                  const imageEvidenceThumbUrl = evidenceThumbUrls[evidence.evidenceId];
                                   const evidenceThumbUrl = getEvidenceThumbnailUrl(evidence, imageEvidenceThumbUrl);
                                   const isImageEvidence = Boolean(imageEvidenceThumbUrl && evidence.contentType?.startsWith('image/'));
-                                  const isLinked = requirement.sourceEvidenceId === evidence.evidenceId;
+                                  const isLinked = linkedSourceEvidenceIdSet.has(evidence.evidenceId);
 
                                   return (
                                     <div className={`rails-containment-evidence-row ${isLinked ? 'is-linked' : ''}`} key={evidence.evidenceId}>
@@ -4309,7 +4550,7 @@ export function RailsWorkspace() {
                                         <input
                                           checked={isLinked}
                                           disabled={isSaving}
-                                          onChange={(event) => void handleSetRequiredEvidenceLink(activeItem, requirement.evidenceId, event.target.checked ? evidence.evidenceId : null)}
+                                          onChange={(event) => void handleSetRequiredEvidenceLink(activeItem, requirement.evidenceId, evidence.evidenceId, event.target.checked)}
                                           type="checkbox"
                                         />
                                       </label>
@@ -4683,8 +4924,8 @@ export function RailsWorkspace() {
       ) : null}
 
       {activeItem && evidenceEditorId ? (() => {
-        const evidence = activeItem.evidence.find((entry) => entry.evidenceId === evidenceEditorId);
-        const imageUrl = evidence ? evidenceThumbUrls[`${activeItem.id}:${evidence.evidenceId}`] : '';
+        const evidence = visibleAttachedEvidenceForActiveItem.find((entry) => entry.evidenceId === evidenceEditorId);
+        const imageUrl = evidence ? evidenceThumbUrls[evidence.evidenceId] : '';
 
         return evidence && imageUrl ? (
           <ImageEvidenceEditor
@@ -4717,7 +4958,7 @@ export function RailsWorkspace() {
               <div>
                 <span>Evidence Library</span>
                 <h2 id="rails-evidence-upload-title">Upload evidence</h2>
-                <p>Add photos, screenshots, PDFs, or documents. Uploaded evidence becomes available for linking across this RAILS loop.</p>
+                <p>Add photos, screenshots, PDFs, or documents. Uploaded evidence becomes available for linking across RCA and RAILS.</p>
               </div>
               <button
                 aria-label="Close evidence upload"
@@ -4862,6 +5103,7 @@ function RailsPanelShell({
   onClose,
   onDetachToggle,
   onDragStart,
+  onFullscreenToggle,
   onResizeStart,
   panel,
   tabs,
@@ -4871,8 +5113,9 @@ function RailsPanelShell({
   headerActions?: React.ReactNode;
   kind: RailsPanelKind;
   onClose: () => void;
-  onDetachToggle: () => void;
+  onDetachToggle: (kind: RailsPanelKind) => void;
   onDragStart: (kind: RailsPanelKind, event: React.PointerEvent<HTMLElement>) => void;
+  onFullscreenToggle: (kind: RailsPanelKind) => void;
   onResizeStart: (kind: RailsPanelKind, edge: RailsPanelResizeEdge, event: React.PointerEvent<HTMLElement>) => void;
   panel: RailsPanelState;
   tabs?: React.ReactNode;
@@ -4891,9 +5134,10 @@ function RailsPanelShell({
 
   return (
     <div
-      className={`rails-panel-shell is-${kind} ${panel.detached ? 'is-detached' : 'is-docked'}`}
+      className={`rails-panel-shell is-${kind} ${panel.detached ? 'is-detached' : 'is-docked'} ${panel.maximized ? 'is-maximized' : ''}`}
       style={{
         ...style,
+        minHeight: panel.detached ? getPanelMinHeight(kind, panel.y) : undefined,
         minWidth: getPanelMinWidth(kind)
       }}
     >
@@ -4911,7 +5155,16 @@ function RailsPanelShell({
         {tabs}
         {headerActions}
         <div className="rails-panel-toolbar-actions">
-          <button aria-label={panel.detached ? 'Dock panel' : 'Detach panel'} onClick={onDetachToggle} type="button">
+          {panel.detached ? (
+            <button
+              aria-label={panel.maximized ? 'Restore panel size' : 'Maximize panel below navigation'}
+              onClick={() => onFullscreenToggle(kind)}
+              type="button"
+            >
+              {panel.maximized ? <Minimize2 aria-hidden="true" size={14} /> : <Maximize2 aria-hidden="true" size={14} />}
+            </button>
+          ) : null}
+          <button aria-label={panel.detached ? 'Dock panel' : 'Detach panel'} onClick={() => onDetachToggle(kind)} type="button">
             {panel.detached ? <Pin aria-hidden="true" size={14} /> : <Maximize2 aria-hidden="true" size={14} />}
           </button>
           <button aria-label="Hide panel" onClick={onClose} type="button">
@@ -4969,12 +5222,14 @@ function RailsAssistantPanel({
     ? [
       'What is blocking this loop from moving forward?',
       `Guide me through ${activeItem.status} stage.`,
-      'What evidence should I attach next?'
+      'What evidence should I attach next?',
+      'How do I search this stage or loop evidence?'
     ]
     : [
       'How do I start a RAILS loop correctly?',
       'Explain the RAILS flow from New to Closed.',
-      'When should I link LSW or RCA?'
+      'When should I link LSW or RCA?',
+      'How do I use scoped board search?'
     ];
   const lastMessage = messages[messages.length - 1] || null;
 
@@ -5094,7 +5349,7 @@ function RailsAssistantPanel({
         <textarea
           aria-label="Ask the RAILS AI guide"
           onChange={(event) => setQuestion(event.target.value)}
-          placeholder="Ask about the RAILS flow, gates, evidence, actions, LSW, RCA, or closure..."
+          placeholder="Ask about the RAILS flow, gates, search, evidence, actions, LSW, RCA, or closure..."
           rows={3}
           value={question}
         />
@@ -5171,7 +5426,7 @@ function DetailFact({ label, value }: { label: string; value: string }) {
   );
 }
 
-function ImageEvidenceEditor({
+export function ImageEvidenceEditor({
   disabled,
   evidence,
   imageUrl,
@@ -5189,9 +5444,12 @@ function ImageEvidenceEditor({
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const imageRef = React.useRef<HTMLImageElement | null>(null);
   const interactionRef = React.useRef<RailsImageEditorInteraction | null>(null);
+  const stageRef = React.useRef<HTMLDivElement | null>(null);
   const [editorState, setEditorState] = React.useState<RailsImageEditorState>(() => createInitialImageEditorState());
   const [eraserPointer, setEraserPointer] = React.useState<{ size: number; x: number; y: number } | null>(null);
   const [isImageReady, setIsImageReady] = React.useState(false);
+  const [isFullscreen, setIsFullscreen] = React.useState(true);
+  const [canvasDisplaySize, setCanvasDisplaySize] = React.useState<{ height: number; width: number } | null>(null);
   const [isRenaming, setIsRenaming] = React.useState(false);
   const [renameDraft, setRenameDraft] = React.useState(() => getEvidenceEditableBaseName(evidence));
 
@@ -5210,6 +5468,55 @@ function ImageEvidenceEditor({
     setIsRenaming(false);
     setRenameDraft(getEvidenceEditableBaseName(evidence));
   }, [evidence.evidenceId, evidence.label, evidence.fileName]);
+
+  React.useEffect(() => {
+    const stage = stageRef.current;
+    const image = imageRef.current;
+
+    if (!stage || !image || !isFullscreen || !isImageReady) {
+      setCanvasDisplaySize(null);
+      return;
+    }
+
+    const stageElement = stage;
+    const imageElement = image;
+
+    function updateCanvasDisplaySize() {
+      const stageStyles = window.getComputedStyle(stageElement);
+      const horizontalPadding = Number.parseFloat(stageStyles.paddingLeft) + Number.parseFloat(stageStyles.paddingRight);
+      const verticalPadding = Number.parseFloat(stageStyles.paddingTop) + Number.parseFloat(stageStyles.paddingBottom);
+      const availableWidth = Math.max(1, stageElement.clientWidth - horizontalPadding);
+      const availableHeight = Math.max(1, stageElement.clientHeight - verticalPadding);
+      const aspectRatio = imageElement.naturalWidth && imageElement.naturalHeight ? imageElement.naturalWidth / imageElement.naturalHeight : 1;
+
+      let width = availableWidth;
+      let height = width / aspectRatio;
+
+      if (height > availableHeight) {
+        height = availableHeight;
+        width = height * aspectRatio;
+      }
+
+      setCanvasDisplaySize({
+        height: Math.max(1, Math.round(height)),
+        width: Math.max(1, Math.round(width))
+      });
+    }
+
+    updateCanvasDisplaySize();
+
+    const resizeObserver = typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver(updateCanvasDisplaySize)
+      : null;
+
+    resizeObserver?.observe(stageElement);
+    window.addEventListener('resize', updateCanvasDisplaySize);
+
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', updateCanvasDisplaySize);
+    };
+  }, [imageUrl, isFullscreen, isImageReady]);
 
   React.useEffect(() => {
     const image = imageRef.current;
@@ -5567,8 +5874,8 @@ function ImageEvidenceEditor({
   }
 
   return createPortal(
-    <div className="rails-evidence-editor-modal" role="dialog" aria-modal="true" aria-label={`Edit ${evidence.label}`}>
-      <div className="rails-evidence-editor-card">
+    <div className={`rails-evidence-editor-modal ${isFullscreen ? 'is-fullscreen' : ''}`} role="dialog" aria-modal="true" aria-label={`Edit ${evidence.label}`}>
+      <div className={`rails-evidence-editor-card ${isFullscreen ? 'is-fullscreen' : ''}`}>
         <header>
           <div>
             <span>Photo evidence editor</span>
@@ -5614,9 +5921,20 @@ function ImageEvidenceEditor({
             </div>
             <p>Crop and mark the image, then save the edited evidence record.</p>
           </div>
-          <button aria-label="Close editor" disabled={disabled} onClick={onClose} type="button">
-            <X aria-hidden="true" size={18} />
-          </button>
+          <div className="rails-evidence-editor-header-actions">
+            <button
+              aria-label={isFullscreen ? 'Restore editor size' : 'Open editor fullscreen'}
+              disabled={disabled}
+              onClick={() => setIsFullscreen((value) => !value)}
+              title={isFullscreen ? 'Restore editor size' : 'Open editor fullscreen'}
+              type="button"
+            >
+              {isFullscreen ? <Minimize2 aria-hidden="true" size={18} /> : <Maximize2 aria-hidden="true" size={18} />}
+            </button>
+            <button aria-label="Close editor" disabled={disabled} onClick={onClose} type="button">
+              <X aria-hidden="true" size={18} />
+            </button>
+          </div>
         </header>
         <div className="rails-evidence-editor-shell">
           <aside className="rails-evidence-editor-tools" aria-label="Photo editing tools">
@@ -5713,10 +6031,14 @@ function ImageEvidenceEditor({
               Undo
             </button>
           </aside>
-          <div className="rails-evidence-editor-stage">
+          <div className="rails-evidence-editor-stage" ref={stageRef}>
             <canvas
               className={editorState.tool === 'eraser' ? 'is-eraser-active' : ''}
               ref={canvasRef}
+              style={canvasDisplaySize ? {
+                height: canvasDisplaySize.height,
+                width: canvasDisplaySize.width
+              } : undefined}
               onDoubleClick={editTextAnnotation}
               onPointerCancel={() => {
                 setEraserPointer(null);
@@ -7346,6 +7668,160 @@ function formatDateTimeStamp(dateIso: string): string {
   }).format(date);
 }
 
+function getRailsBoardSearchScopeLabel(scope: RailsBoardSearchScope): string {
+  return scope === 'board' ? 'Board search' : `${scope} search`;
+}
+
+function doesRailsItemMatchBoardSearch(item: RailsItem, normalizedQuery: string): boolean {
+  if (!normalizedQuery) {
+    return true;
+  }
+
+  return getRailsBoardSearchText(item).includes(normalizedQuery);
+}
+
+function getRailsBoardSearchText(item: RailsItem): string {
+  const dateTokens = [
+    item.dueDate,
+    formatDateLabel(item.dueDate),
+    item.createdAtIso,
+    formatDateTimeStamp(item.createdAtIso),
+    item.updatedAtIso,
+    formatDateTimeStamp(item.updatedAtIso),
+    item.reopenedAtIso || '',
+    item.reopenedAtIso ? formatDateTimeStamp(item.reopenedAtIso) : '',
+    item.archivedAtIso || '',
+    item.archivedAtIso ? formatDateTimeStamp(item.archivedAtIso) : '',
+    item.cancelledAtIso || '',
+    item.cancelledAtIso ? formatDateTimeStamp(item.cancelledAtIso) : ''
+  ];
+  const userTokens = [
+    item.owner.displayName,
+    item.owner.roleName,
+    item.owner.departmentName || '',
+    item.approver?.displayName || '',
+    item.approver?.roleName || '',
+    item.archivedBy?.displayName || '',
+    item.cancelledBy?.displayName || '',
+    item.reopenedBy?.displayName || '',
+    item.standardizationOwner?.displayName || '',
+    item.standardizationVerifiedBy?.displayName || '',
+    ...item.contributors.flatMap((contributor) => [
+      contributor.displayName,
+      contributor.roleName,
+      contributor.departmentName || ''
+    ])
+  ];
+  const lswTokens = item.linkedLswSource ? [
+    item.linkedLswSource.title,
+    item.linkedLswSource.sourceTypeLabel,
+    item.linkedLswSource.status,
+    item.linkedLswSource.weekKey || '',
+    item.linkedLswSource.departmentName || '',
+    formatDateTimeStamp(item.linkedLswSource.linkedAtIso)
+  ] : [];
+  const rcaTokens = [
+    item.linkedRca,
+    item.linkedRcaId || '',
+    item.linkedRcaDecision?.status || '',
+    item.linkedRcaDecision?.reason || '',
+    item.linkedRcaDecision?.decidedAtIso ? formatDateTimeStamp(item.linkedRcaDecision.decidedAtIso) : '',
+    item.rcaTriageRequest?.status || '',
+    item.rcaTriageRequest?.reason || '',
+    item.rcaTriageRequest?.reviewNote || '',
+    item.rcaTriageRequest?.convertedRcaDisplayId || '',
+    item.rcaTriageRequest?.dueDate || '',
+    item.rcaTriageRequest?.dueDate ? formatDateLabel(item.rcaTriageRequest.dueDate) : ''
+  ];
+  const actionTokens = item.actions.flatMap((action) => [
+    action.title,
+    action.status,
+    action.dueDate,
+    formatDateLabel(action.dueDate),
+    `${action.progressPercent}%`,
+    action.owner?.displayName || '',
+    action.owner?.roleName || '',
+    action.implementationNote,
+    action.containmentNote,
+    action.riskControlled,
+    action.verificationNote,
+    action.effectivenessCriteria,
+    action.effectivenessResult,
+    action.standardizationNote,
+    action.startedAtIso || '',
+    action.startedAtIso ? formatDateTimeStamp(action.startedAtIso) : '',
+    action.completedAtIso || '',
+    action.completedAtIso ? formatDateTimeStamp(action.completedAtIso) : '',
+    action.completedBy?.displayName || '',
+    action.completedByExternalName,
+    action.verifiedBy?.displayName || ''
+  ]);
+  const evidenceTokens = item.evidence.flatMap((evidence) => [
+    evidence.label,
+    evidence.fileName || '',
+    evidence.contentType || '',
+    evidence.status,
+    evidence.visibility || 'public',
+    evidence.note || '',
+    evidence.purpose || '',
+    inferEvidenceTypeLabel(evidence.fileName),
+    evidence.uploadedAtIso || '',
+    evidence.uploadedAtIso ? formatDateTimeStamp(evidence.uploadedAtIso) : '',
+    evidence.uploadedAtIso ? new Date(evidence.uploadedAtIso).toLocaleDateString() : '',
+    evidence.uploadedAtIso ? new Date(evidence.uploadedAtIso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : ''
+  ]);
+  const commentTokens = item.comments.flatMap((comment) => [
+    comment.body,
+    comment.createdAtIso,
+    formatDateTimeStamp(comment.createdAtIso)
+  ]);
+  const standardizationTokens = [
+    item.standardization,
+    item.standardizationVerification,
+    item.standardizationStatus,
+    item.standardizationType || '',
+    item.standardizationDueDate,
+    item.standardizationDueDate ? formatDateLabel(item.standardizationDueDate) : '',
+    item.standardizationVerifiedAtIso || '',
+    item.standardizationVerifiedAtIso ? formatDateTimeStamp(item.standardizationVerifiedAtIso) : '',
+    ...item.standardizationDocumentVersions.flatMap((version) => [
+      version.fileName,
+      version.contentType || '',
+      version.uploaderName || '',
+      formatDateTimeStamp(version.uploadedAtIso),
+      `version ${version.versionNumber}`
+    ])
+  ];
+
+  return [
+    item.title,
+    item.problem,
+    item.displayId,
+    item.id,
+    item.status,
+    item.priority,
+    item.category,
+    item.departmentName || '',
+    item.source,
+    item.verification,
+    item.linkedLsw,
+    item.workflowGate.nextStatus || '',
+    ...item.workflowGate.blockers,
+    ...item.escalation.reasons,
+    ...dateTokens,
+    ...userTokens,
+    ...lswTokens,
+    ...rcaTokens,
+    ...actionTokens,
+    ...evidenceTokens,
+    ...commentTokens,
+    ...standardizationTokens
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+}
+
 function formatFileSize(sizeBytes?: number | null): string {
   if (!sizeBytes || sizeBytes <= 0) {
     return 'Size unavailable';
@@ -7432,17 +7908,53 @@ function isRailsEvidenceLinkVisibleForItem(item: RailsItem, evidence: RailsItem[
   return (evidence.visibility || 'public') === 'public' || evidence.uploadedByUid === item.owner.uid;
 }
 
+function mergeRailsEvidenceForClient(primaryEvidence: RailsEvidence[], secondaryEvidence: RailsEvidence[]): RailsEvidence[] {
+  const evidenceById = new Map<string, RailsEvidence>();
+
+  [...primaryEvidence, ...secondaryEvidence].forEach((evidence) => {
+    if (!evidenceById.has(evidence.evidenceId)) {
+      evidenceById.set(evidence.evidenceId, evidence);
+    }
+  });
+
+  return Array.from(evidenceById.values()).sort((leftEvidence, rightEvidence) => (
+    new Date(rightEvidence.uploadedAtIso || 0).getTime() - new Date(leftEvidence.uploadedAtIso || 0).getTime()
+  ));
+}
+
+function getRequiredRailsEvidenceSourceIds(requirement: RailsItem['evidence'][number] | undefined): string[] {
+  if (!requirement) {
+    return [];
+  }
+
+  return Array.from(new Set([
+    ...(Array.isArray(requirement.sourceEvidenceIds) ? requirement.sourceEvidenceIds : []),
+    ...(requirement.sourceEvidenceId ? [requirement.sourceEvidenceId] : [])
+  ].filter(Boolean)));
+}
+
+function formatLinkedEvidenceSummary(evidence: RailsItem['evidence']): string {
+  const labels = evidence.map((entry) => entry.label || entry.fileName || 'Evidence item');
+
+  if (labels.length <= 2) {
+    return labels.join(', ');
+  }
+
+  return `${labels.slice(0, 2).join(', ')} +${labels.length - 2} more`;
+}
+
 function isRequiredRailsEvidenceSatisfied(
   item: RailsItem,
   requirement: RailsItem['evidence'][number],
   visibleAttachedEvidence: RailsItem['evidence']
 ): boolean {
-  if (!requirement.sourceEvidenceId) {
+  const linkedEvidenceIds = getRequiredRailsEvidenceSourceIds(requirement);
+  if (!linkedEvidenceIds.length) {
     return false;
   }
 
   return visibleAttachedEvidence.some((evidence) => (
-    evidence.evidenceId === requirement.sourceEvidenceId
+    linkedEvidenceIds.includes(evidence.evidenceId)
     && evidence.status === 'Attached'
     && Boolean(evidence.fileName && evidence.fileUrl)
     && isRailsEvidenceLinkVisibleForItem(item, evidence)
@@ -7695,15 +8207,68 @@ function getPanelMinWidth(kind: RailsPanelKind): number {
     return defaultWidth;
   }
 
-  return Math.min(defaultWidth, getPanelMaxWidth());
+  return Math.min(defaultWidth, getPanelMaxWidth(true));
 }
 
-function getPanelMaxWidth(): number {
+function getPanelMaxWidth(detached: boolean): number {
   if (typeof window === 'undefined') {
     return 720;
   }
 
+  if (detached) {
+    return Math.max(240, window.innerWidth - (RAILS_PANEL_VIEWPORT_MARGIN * 2));
+  }
+
   return Math.max(240, Math.min(720, window.innerWidth - 32));
+}
+
+function getPanelDefaultHeight(kind: RailsPanelKind): number {
+  return kind === 'left' ? RAILS_LEFT_PANEL_DEFAULT_HEIGHT : RAILS_RIGHT_PANEL_DEFAULT_HEIGHT;
+}
+
+function getPanelMinHeight(kind: RailsPanelKind, panelY: number): number {
+  return Math.min(getPanelDefaultHeight(kind), getPanelMaxHeight(panelY));
+}
+
+function getPanelFullscreenRect(): Pick<RailsPanelState, 'height' | 'width' | 'x' | 'y'> {
+  const y = RAILS_PANEL_TOP_LIMIT;
+
+  return {
+    height: getPanelMaxHeight(y),
+    width: getPanelMaxWidth(true),
+    x: RAILS_PANEL_VIEWPORT_MARGIN,
+    y
+  };
+}
+
+function normalizePanelForViewport(kind: RailsPanelKind, panel: RailsPanelState): RailsPanelState {
+  if (!panel.detached) {
+    return {
+      ...panel,
+      maximized: false
+    };
+  }
+
+  if (panel.maximized) {
+    return {
+      ...panel,
+      ...getPanelFullscreenRect()
+    };
+  }
+
+  const width = clamp(panel.width, getPanelMinWidth(kind), getPanelMaxWidth(true));
+  const y = clamp(panel.y, RAILS_PANEL_TOP_LIMIT, getPanelMaxY(panel.height));
+  const height = clamp(panel.height, getPanelMinHeight(kind, y), getPanelMaxHeight(y));
+  const normalizedY = clamp(y, RAILS_PANEL_TOP_LIMIT, getPanelMaxY(height));
+  const normalizedHeight = clamp(height, getPanelMinHeight(kind, normalizedY), getPanelMaxHeight(normalizedY));
+
+  return {
+    ...panel,
+    height: normalizedHeight,
+    width,
+    x: clamp(panel.x, RAILS_PANEL_VIEWPORT_MARGIN, window.innerWidth - width - RAILS_PANEL_VIEWPORT_MARGIN),
+    y: normalizedY
+  };
 }
 
 function getPanelMaxHeight(panelY: number): number {
@@ -7711,7 +8276,7 @@ function getPanelMaxHeight(panelY: number): number {
     return 760;
   }
 
-  return Math.max(RAILS_PANEL_MIN_HEIGHT, window.innerHeight - panelY - RAILS_PANEL_VIEWPORT_MARGIN);
+  return Math.max(RAILS_PANEL_ABSOLUTE_MIN_HEIGHT, window.innerHeight - panelY - RAILS_PANEL_VIEWPORT_MARGIN);
 }
 
 function getPanelMaxY(panelHeight: number): number {

@@ -25,9 +25,12 @@ export function createRateLimiter(options: RateLimitOptions) {
     res.setHeader('RateLimit-Reset', String(Math.ceil(result.resetAt / 1000)));
 
     if (!result.allowed) {
+      const retryAfterSeconds = Math.ceil((result.resetAt - Date.now()) / 1000);
+
+      res.setHeader('Retry-After', String(retryAfterSeconds));
       res.status(429).json({
         error: options.message,
-        retryAfterSeconds: Math.ceil((result.resetAt - Date.now()) / 1000)
+        retryAfterSeconds
       });
       return;
     }
@@ -43,6 +46,7 @@ export function assertRateLimit(key: string, windowMs: number, max: number) {
     const retryAfterSeconds = Math.ceil((result.resetAt - Date.now()) / 1000);
     const error = new Error(`Too many attempts. Try again in ${retryAfterSeconds} seconds.`);
     error.name = 'RateLimitError';
+    (error as Error & { retryAfterSeconds?: number }).retryAfterSeconds = retryAfterSeconds;
     throw error;
   }
 

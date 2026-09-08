@@ -1,6 +1,13 @@
 import { Request, Router } from 'express';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import { z } from 'zod';
+import {
+  cancelScheduledMessage,
+  dismissScheduledMessage,
+  listMyScheduledMessages,
+  scheduleDirectMessage,
+  sendScheduledMessageNow
+} from '../services/scheduledMessageService.js';
 import { verifyAppCheck } from '../middleware/appCheck.js';
 import { createOrgAdminProfile } from '../services/orgAdminProfileService.js';
 import {
@@ -35,6 +42,7 @@ import type {
 import {
   getDirectEncryptionContext,
   listEncryptedDirectEnvelopesForDevice,
+  markEncryptedDirectEnvelopesDeliveredForDevice,
   sendEncryptedDirectEnvelope
 } from '../services/encryptedMessageEnvelopeService.js';
 import {
@@ -51,6 +59,7 @@ import {
   hideGroupChatMessageForCurrentUser,
   listCurrentUserGroupChatContacts,
   listEncryptedGroupEnvelopesForDevice,
+  markEncryptedGroupEnvelopesDeliveredForDevice,
   sendEncryptedGroupEnvelope,
   updateGroupChatPhoto,
   updateGroupChatPreferenceForCurrentUser,
@@ -66,6 +75,11 @@ import {
   markEncryptedChatMediaUploaded
 } from '../services/chatMediaService.js';
 import { getChatBackupPolicyForCurrentUser } from '../services/chatBackupPolicyService.js';
+import {
+  claimRestoreForCurrentUser,
+  escrowBackupKeyForCurrentUser,
+  requestRestoreForCurrentUser
+} from '../services/chatBackupRestoreService.js';
 import { listCurrentUserGroups } from '../services/groupService.js';
 import {
   deactivateCurrentUserPushToken,
@@ -88,15 +102,46 @@ import {
   getChatArchiveSettings,
   updateChatArchiveSettings
 } from '../services/chatArchiveSettingsService.js';
+import {
+  completeDeviceWipeCommand,
+  listPendingDeviceWipeCommands
+} from '../services/companyDataWipeService.js';
 import { writeAuditEvent } from '../services/auditService.js';
 
 const profileRouter = Router();
+
+/**
+ * The address, kept in its parts as well as written out.
+ *
+ * The written-out line is what people read, and it stays the field everything
+ * already uses. The parts are what a system can act on: a country to bill in,
+ * a state for a records request, a postal code to check. Storing only the
+ * sentence would mean parsing it back out later, which never survives contact
+ * with real addresses.
+ */
+const deliveryReceiptSchema = z.object({
+  chatType: z.enum(['DIRECT', 'GROUP']).default('DIRECT'),
+  /** The group for a group message, the sender for a direct one. */
+  contactId: z.string().trim().min(1).max(200)
+});
+
+const companyAddressPartsSchema = z.object({
+  city: z.string().trim().max(120).optional(),
+  countryCode: z.enum(['US', 'CA', 'MX', 'GB']).optional(),
+  line1: z.string().trim().max(200).optional(),
+  line2: z.string().trim().max(200).optional(),
+  postalCode: z.string().trim().max(20).optional(),
+  region: z.string().trim().max(120).optional()
+});
 
 const orgAdminProfileBodySchema = z.object({
   adminFirstName: z.string().trim().min(2).max(80),
   adminLastName: z.string().trim().min(2).max(80),
   calendarYearStartDate: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/),
   companyAddress: z.string().trim().min(5).max(240),
+  // Optional so that a phone running the previous build still succeeds.
+  companyAddressParts: companyAddressPartsSchema.optional(),
+  companyEmail: z.string().trim().max(320).optional(),
   companyName: z.string().trim().min(2).max(120),
   profilePhotoDataUrl: z.string().max(1_500_000).optional()
 });
@@ -113,10 +158,13 @@ const profilePhotoBodySchema = z.object({
 
 const safeDeviceIdSchema = z.string().trim().regex(/^[A-Za-z0-9_-]{16,128}$/);
 
+const safeCommandIdSchema = z.string().trim().regex(/^[A-Za-z0-9_-]{8,160}$/);
+
 const devicePlatformSchema = z.enum(['android', 'ios', 'unknown', 'web']);
 
 const deviceIdentityBodySchema = z.object({
   appInstallationId: z.string().trim().min(12).max(128),
+  deviceTimeZone: z.string().trim().min(1).max(64).optional(),
   cryptoProvider: z.string().trim().min(2).max(40),
   deviceId: safeDeviceIdSchema,
   identityPublicKey: z.string().trim().min(32).max(256),
@@ -159,6 +207,9 @@ const encryptedEnvelopeBodySchema = z.object({
     z.string().trim().min(16).max(4000)
   ),
   keyVersion: z.number().int().min(1).max(50),
+  // The media this message uses. Sent alongside because the ids live inside the
+  // encrypted payload, which the server cannot read.
+  mediaIds: z.array(z.string().trim().min(1).max(160)).max(20).optional(),
   nonce: z.string().trim().min(8).max(256),
   notificationPreviewByDevice: z.record(
     safeDeviceIdSchema,
@@ -166,6 +217,19 @@ const encryptedEnvelopeBodySchema = z.object({
   ).optional(),
   recipientDeviceIds: z.array(safeDeviceIdSchema).min(1).max(50),
   senderDeviceId: safeDeviceIdSchema
+});
+
+/**
+ * A message written now and sent later.
+ *
+ * The ordinary envelope, sealed on the phone exactly as it would be for an
+ * immediate send, plus when it should go and the zone its author chose in. The
+ * moment itself is absolute — the zone is kept for display and for the audit
+ * trail, never to recompute the time.
+ */
+const scheduledEnvelopeBodySchema = encryptedEnvelopeBodySchema.extend({
+  releaseAtMs: z.number().int().min(0),
+  timeZone: z.string().trim().min(1).max(64)
 });
 
 const groupHistoryKeyGrantBodySchema = z.object({
@@ -192,10 +256,10 @@ const encryptedMediaUploadBodySchema = z.object({
   chunkCount: z.number().int().min(2).max(320).optional(),
   chunkSizeBytes: z.number().int().min(512 * 1024).max(8 * 1024 * 1024).optional(),
   contentType: z.string().trim().min(3).max(120),
-  encryptedSizeBytes: z.number().int().min(1).max(260 * 1024 * 1024),
+  encryptedSizeBytes: z.number().int().min(1).max(1100 * 1024 * 1024),
   fileName: z.string().trim().min(1).max(180),
   kind: z.enum(['audio', 'file', 'image', 'video']),
-  originalSizeBytes: z.number().int().min(0).max(250 * 1024 * 1024).optional()
+  originalSizeBytes: z.number().int().min(0).max(1024 * 1024 * 1024).optional()
 });
 
 const chatMessageReactionBodySchema = z.object({
@@ -312,6 +376,70 @@ const encryptedChatBackupBodySchema = z.object({
   keyFingerprint: z.string().trim().min(16).max(128),
   messageCount: z.number().int().min(0).max(2_000_000),
   nonce: z.string().trim().min(8).max(256)
+});
+
+profileRouter.get('/me/company-data-wipe-commands', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    const commands = await listPendingDeviceWipeCommands({
+      deviceId: activeDevice.deviceId,
+      tenantId: getTenantIdClaim(decodedToken),
+      uid: decodedToken.uid
+    });
+
+    res.json({ commands });
+  } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.post('/me/company-data-wipe-commands/:commandId/complete', verifyAppCheck, async (req, res, next) => {
+  let decodedToken: DecodedIdToken | null = null;
+  let deviceId: string | null = null;
+
+  try {
+    decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    deviceId = activeDevice.deviceId;
+    const commandId = safeCommandIdSchema.parse(req.params.commandId);
+    const tenantId = getTenantIdClaim(decodedToken);
+
+    await completeDeviceWipeCommand({
+      commandId,
+      deviceId,
+      tenantId,
+      uid: decodedToken.uid
+    });
+
+    await writeAuditEvent({
+      action: 'COMPANY_DATA_WIPE_COMMAND_COMPLETED',
+      metadata: {
+        commandId,
+        deviceId
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: tenantId || undefined,
+      uid: decodedToken.uid
+    });
+
+    res.json({ completed: true });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'COMPANY_DATA_WIPE_COMMAND_COMPLETED',
+      metadata: {
+        deviceId
+      },
+      reason: error instanceof Error ? error.message : 'Company data wipe command completion failed',
+      req,
+      status: 'FAILED',
+      tenantId: decodedToken ? getTenantIdClaim(decodedToken) || undefined : undefined,
+      uid: decodedToken?.uid
+    }).catch(() => undefined);
+
+    next(error);
+  }
 });
 
 profileRouter.get('/me', verifyAppCheck, async (req, res, next) => {
@@ -514,7 +642,14 @@ profileRouter.get('/chat/contacts', verifyAppCheck, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
     await requireActiveRegisteredDevice(req, decodedToken);
-    const contacts = await listCurrentUserChatContacts(decodedToken);
+    // With includeDirectory the response also carries colleagues this user has
+    // never messaged, so "New chat" can list the organization without needing
+    // the admin-only employee directory. Role visibility is unchanged - the
+    // service still decides who this user is allowed to see.
+    const includeDirectory = req.query.includeDirectory === 'true';
+    const contacts = await listCurrentUserChatContacts(decodedToken, {
+      includeDirectoryContacts: includeDirectory
+    });
 
     res.json({ contacts });
   } catch (error) {
@@ -525,8 +660,8 @@ profileRouter.get('/chat/contacts', verifyAppCheck, async (req, res, next) => {
 profileRouter.get('/chat/groups', verifyAppCheck, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
-    await requireActiveRegisteredDevice(req, decodedToken);
-    const contacts = await listCurrentUserGroupChatContacts(decodedToken);
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    const contacts = await listCurrentUserGroupChatContacts(decodedToken, activeDevice.deviceId);
 
     res.json({ contacts });
   } catch (error) {
@@ -867,18 +1002,33 @@ profileRouter.get('/chat/groups/:groupId/encrypted-messages', verifyAppCheck, as
       ? req.params.groupId[0] || ''
       : req.params.groupId || '';
     const trashSegmentId = getOptionalQueryString(req.query.trashSegmentId);
+    const syncQuery = getEncryptedMessageSyncQuery(req);
+    // Same rule as direct chats: a background fetch must not count as the user
+    // having read the group.
+    const shouldMarkRead = req.query.markRead !== 'false';
     const envelopes = await listEncryptedGroupEnvelopesForDevice(
       decodedToken,
       groupId,
       activeDevice.deviceId,
-      { trashSegmentId }
+      {
+        afterSentAtMs: syncQuery.afterSentAtMs,
+        beforeSentAtMs: syncQuery.beforeSentAtMs,
+        limit: syncQuery.limit,
+        markAsRead: shouldMarkRead,
+        trashSegmentId
+      }
     );
     const [contact, messageReactions] = await Promise.all([
-      getGroupChatContact(decodedToken, groupId),
+      getGroupChatContact(decodedToken, groupId, activeDevice.deviceId),
       getGroupChatMessageReactions(decodedToken, groupId)
     ]);
 
-    res.json({ contact, envelopes, messageReactions });
+    res.json({
+      contact,
+      envelopes,
+      messageReactions,
+      sync: buildEncryptedMessageSyncResponse(envelopes, syncQuery.limit)
+    });
   } catch (error) {
     next(error);
   }
@@ -1061,7 +1211,7 @@ profileRouter.post('/chat/groups/:groupId/encrypted-messages', verifyAppCheck, a
     }
 
     const envelope = await sendEncryptedGroupEnvelope(decodedToken, groupId, body);
-    const contact = await getGroupChatContact(decodedToken, groupId);
+    const contact = await getGroupChatContact(decodedToken, groupId, activeDevice.deviceId);
 
     await writeAuditEvent({
       action: 'ENCRYPTED_GROUP_CHAT_ENVELOPE_SENT',
@@ -1488,6 +1638,58 @@ profileRouter.post('/chat/groups/:groupId/messages/:messageId/translate', verify
   }
 });
 
+/**
+ * One device saying it now holds a conversation's messages.
+ *
+ * This is what turns a single tick into a double tick, and it exists because
+ * every other way of learning it needed the recipient's app to be **running**.
+ * Delivery used to be recorded in exactly two places: opening a thread, and the
+ * live socket updating the chat list. Both require an open app, so a message to
+ * somebody whose app was shut stayed on "Sent" no matter what the push did.
+ *
+ * **The receipt comes from the phone, never from the push result.** Handing a
+ * message to Google's push service only tells us Google accepted it, not that
+ * any handset received it; its real delivery reports arrive in bulk hours later
+ * and are meant for statistics. A tick driven off the send result would show
+ * two ticks for a phone that is switched off, and a tick that lies is worse
+ * than a tick that is late.
+ *
+ * So the worst a failed push can do is make the tick **late**: the receipt is
+ * sent again the next time the device reaches us. That is what WhatsApp does
+ * when a phone is off — one tick, then two the moment it comes back.
+ *
+ * Idempotent: the marker is only written where one is not already set, so a
+ * phone may send this as often as it likes.
+ */
+profileRouter.post('/chat/delivery-receipts', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    const body = deliveryReceiptSchema.parse(req.body);
+
+    // The id a push carries: the group for a group message, the sender for a
+    // direct one. Whichever it is, it names a conversation this caller must
+    // already be a party to — both services check that before writing.
+    if (body.chatType === 'GROUP') {
+      await markEncryptedGroupEnvelopesDeliveredForDevice(
+        decodedToken,
+        body.contactId,
+        activeDevice.deviceId
+      );
+    } else {
+      await markEncryptedDirectEnvelopesDeliveredForDevice(
+        decodedToken,
+        body.contactId,
+        activeDevice.deviceId
+      );
+    }
+
+    res.json({ recorded: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
 profileRouter.get('/chat/conversations/:contactId/encrypted-messages', verifyAppCheck, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
@@ -1496,18 +1698,35 @@ profileRouter.get('/chat/conversations/:contactId/encrypted-messages', verifyApp
       ? req.params.contactId[0] || ''
       : req.params.contactId || '';
     const trashSegmentId = getOptionalQueryString(req.query.trashSegmentId);
+    const syncQuery = getEncryptedMessageSyncQuery(req);
+    // Reading a conversation is something the user does, not something a fetch
+    // does. Background sync passes markRead=false so warming the offline cache
+    // after a push cannot silently clear the unread badge for a chat the user
+    // never opened. Default stays true so existing clients are unaffected.
+    const shouldMarkRead = req.query.markRead !== 'false';
     const envelopes = await listEncryptedDirectEnvelopesForDevice(
       decodedToken,
       contactId,
       activeDevice.deviceId,
-      { trashSegmentId }
+      {
+        afterSentAtMs: syncQuery.afterSentAtMs,
+        beforeSentAtMs: syncQuery.beforeSentAtMs,
+        limit: syncQuery.limit,
+        markAsRead: shouldMarkRead,
+        trashSegmentId
+      }
     );
     const [contact, messageReactions] = await Promise.all([
       getDirectChatContact(decodedToken, contactId),
       getDirectChatMessageReactions(decodedToken, contactId)
     ]);
 
-    res.json({ contact, envelopes, messageReactions });
+    res.json({
+      contact,
+      envelopes,
+      messageReactions,
+      sync: buildEncryptedMessageSyncResponse(envelopes, syncQuery.limit)
+    });
   } catch (error) {
     next(error);
   }
@@ -1569,6 +1788,119 @@ profileRouter.post('/chat/conversations/:contactId/encrypted-messages', verifyAp
       status: 'FAILED'
     }).catch(() => undefined);
 
+    next(error);
+  }
+});
+
+profileRouter.post('/chat/conversations/:contactId/scheduled-messages', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    const contactId = Array.isArray(req.params.contactId)
+      ? req.params.contactId[0] || ''
+      : req.params.contactId || '';
+    const body = scheduledEnvelopeBodySchema.parse(req.body);
+
+    if (body.senderDeviceId !== activeDevice.deviceId) {
+      throw authorizationError('This device is not authorized to send that message.');
+    }
+
+    const scheduledMessage = await scheduleDirectMessage(decodedToken, contactId, body);
+
+    await writeAuditEvent({
+      action: 'CHAT_MESSAGE_SCHEDULED',
+      metadata: {
+        conversationId: scheduledMessage.conversationId,
+        recipientUid: scheduledMessage.contactId,
+        releaseAtMs: scheduledMessage.releaseAtMs,
+        scheduledMessageId: scheduledMessage.scheduledMessageId,
+        timeZone: scheduledMessage.timeZone
+      },
+      req,
+      status: 'SUCCESS',
+      uid: decodedToken.uid
+    });
+
+    res.status(201).json({ scheduledMessage });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'CHAT_MESSAGE_SCHEDULED',
+      reason: error instanceof Error ? error.message : 'Scheduling failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
+profileRouter.get('/chat/scheduled-messages', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const contactId = typeof req.query.contactId === 'string' ? req.query.contactId : undefined;
+    const scheduledMessages = await listMyScheduledMessages(decodedToken, { contactId });
+
+    res.json({ scheduledMessages });
+  } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.post('/chat/scheduled-messages/:scheduledMessageId/cancel', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const scheduledMessageId = Array.isArray(req.params.scheduledMessageId)
+      ? req.params.scheduledMessageId[0] || ''
+      : req.params.scheduledMessageId || '';
+    const scheduledMessage = await cancelScheduledMessage(decodedToken, scheduledMessageId);
+
+    await writeAuditEvent({
+      action: 'CHAT_MESSAGE_SCHEDULE_CANCELLED',
+      metadata: {
+        byOrgAdmin: false,
+        conversationId: scheduledMessage.conversationId,
+        scheduledMessageId: scheduledMessage.scheduledMessageId
+      },
+      req,
+      status: 'SUCCESS',
+      uid: decodedToken.uid
+    });
+
+    res.json({ scheduledMessage });
+  } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.post('/chat/scheduled-messages/:scheduledMessageId/dismiss', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const scheduledMessageId = Array.isArray(req.params.scheduledMessageId)
+      ? req.params.scheduledMessageId[0] || ''
+      : req.params.scheduledMessageId || '';
+
+    await dismissScheduledMessage(decodedToken, scheduledMessageId);
+
+    res.json({ dismissed: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+profileRouter.post('/chat/scheduled-messages/:scheduledMessageId/send-now', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const scheduledMessageId = Array.isArray(req.params.scheduledMessageId)
+      ? req.params.scheduledMessageId[0] || ''
+      : req.params.scheduledMessageId || '';
+    const scheduledMessage = await sendScheduledMessageNow(decodedToken, scheduledMessageId, req);
+
+    res.json({ scheduledMessage });
+  } catch (error) {
     next(error);
   }
 });
@@ -1652,6 +1984,91 @@ profileRouter.put('/chat/conversations/:contactId/messages/:messageId/reaction',
       status: 'FAILED'
     }).catch(() => undefined);
 
+    next(error);
+  }
+});
+
+/** A device id is how a restore is scoped; a key is what is being protected. */
+const chatBackupEscrowSchema = z.object({
+  deviceId: z.string().trim().min(1).max(200),
+  recoveryKey: z.string().trim().min(16).max(512)
+});
+const chatBackupRestoreRequestSchema = z.object({
+  deviceId: z.string().trim().min(1).max(200),
+  deviceName: z.string().trim().max(120).nullish()
+});
+const chatBackupRestoreClaimSchema = z.object({
+  deviceId: z.string().trim().min(1).max(200)
+});
+
+/**
+ * Backup key escrow, from the device that made the backup.
+ *
+ * The key is wrapped by Cloud KMS before it is stored, so what lands in the
+ * database is useless on its own. This is the copy that survives the device:
+ * without it, reinstalling the app leaves every backup permanently unreadable.
+ */
+profileRouter.post('/chat/backups/escrow', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const body = chatBackupEscrowSchema.parse(req.body);
+
+    await escrowBackupKeyForCurrentUser(decodedToken, body);
+
+    res.json({ escrowed: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/** A device with no key asking to be let back in. */
+profileRouter.post('/chat/backups/restore-requests', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const body = chatBackupRestoreRequestSchema.parse(req.body);
+    const request = await requestRestoreForCurrentUser(decodedToken, body);
+
+    res.json({ request });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Collecting the key after an approval.
+ *
+ * Answers with null while nothing has been approved, which is the ordinary case
+ * between asking and being answered, rather than treating it as an error. The
+ * approval is spent here, so restoring again needs approving again.
+ */
+profileRouter.post('/chat/backups/restore-requests/claim', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    await requireActiveRegisteredDevice(req, decodedToken);
+    const body = chatBackupRestoreClaimSchema.parse(req.body);
+    const claimed = await claimRestoreForCurrentUser(decodedToken, body);
+
+    // Written whichever way the key came back. An automatic release has no
+    // approver to point at afterwards, so the record of it is the only thing
+    // that shows a history was handed to a device — and that is exactly what an
+    // auditor asks about first.
+    if (claimed) {
+      await writeAuditEvent({
+        action: claimed.automatic
+          ? 'chat.backup.restore.released'
+          : 'chat.backup.restore.claimed',
+        metadata: { automatic: claimed.automatic, deviceId: body.deviceId },
+        req,
+        status: 'SUCCESS',
+        tenantId: (decodedToken as { tenantId?: string }).tenantId,
+        uid: decodedToken.uid
+      }).catch(() => undefined);
+    }
+
+    res.json({ recoveryKey: claimed?.recoveryKey || null });
+  } catch (error) {
     next(error);
   }
 });
@@ -1946,12 +2363,90 @@ function getDeviceIdFromHeader(req: Request): string {
   return parsedDeviceId.data;
 }
 
+function getTenantIdClaim(decodedToken: DecodedIdToken): string | null {
+  const value = (decodedToken as Record<string, unknown>).tenantId;
+
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
 function getOptionalQueryString(value: unknown): string | null {
   const rawValue = Array.isArray(value) ? value[0] : value;
 
   return typeof rawValue === 'string' && rawValue.trim()
     ? rawValue.trim().slice(0, 160)
     : null;
+}
+
+function getEncryptedMessageSyncQuery(req: Request): {
+  afterSentAtMs: number | null;
+  beforeSentAtMs: number | null;
+  limit: number;
+} {
+  return {
+    afterSentAtMs: getOptionalPositiveIntegerQuery(req.query.afterSentAtMs),
+    beforeSentAtMs: getOptionalPositiveIntegerQuery(req.query.beforeSentAtMs),
+    limit: getOptionalBoundedIntegerQuery(req.query.limit, 100, 1, 500)
+  };
+}
+
+function getOptionalPositiveIntegerQuery(value: unknown): number | null {
+  const rawValue = Array.isArray(value) ? value[0] : value;
+
+  if (typeof rawValue !== 'string' || !rawValue.trim()) {
+    return null;
+  }
+
+  const parsedValue = Number.parseInt(rawValue, 10);
+
+  return Number.isFinite(parsedValue) && parsedValue >= 0 ? parsedValue : null;
+}
+
+function getOptionalBoundedIntegerQuery(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number
+): number {
+  const rawValue = Array.isArray(value) ? value[0] : value;
+
+  if (typeof rawValue !== 'string' || !rawValue.trim()) {
+    return fallback;
+  }
+
+  const parsedValue = Number.parseInt(rawValue, 10);
+
+  if (!Number.isFinite(parsedValue)) {
+    return fallback;
+  }
+
+  return Math.max(min, Math.min(Math.floor(parsedValue), max));
+}
+
+function buildEncryptedMessageSyncResponse(
+  envelopes: Array<{ envelopeId: string; sentAt: string }>,
+  requestedLimit: number
+): {
+  hasMore: boolean;
+  latestSentAtMs: number | null;
+  oldestSentAtMs: number | null;
+} {
+  const sentAtValues = envelopes
+    .map((envelope) => Date.parse(envelope.sentAt))
+    .filter((sentAtMs) => Number.isFinite(sentAtMs));
+
+  if (!sentAtValues.length) {
+    return {
+      hasMore: false,
+      latestSentAtMs: null,
+      oldestSentAtMs: null
+    };
+  }
+
+  return {
+    hasMore: envelopes.length >= requestedLimit,
+    latestSentAtMs: Math.max(...sentAtValues),
+    oldestSentAtMs: Math.min(...sentAtValues)
+  };
 }
 
 function authorizationError(message: string): Error {

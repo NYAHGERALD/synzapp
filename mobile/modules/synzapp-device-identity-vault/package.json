@@ -1,0 +1,13 @@
+{
+  "name": "synzapp-device-identity-vault",
+  "version": "0.1.0",
+  "description": "Keeps this device's chat identity across an app reinstall",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "license": "MIT",
+  "private": true,
+  "peerDependencies": {
+    "expo": "*",
+    "react-native": "*"
+  }
+}

@@ -6,9 +6,11 @@ import { fileURLToPath } from 'node:url';
 
 const testDir = dirname(fileURLToPath(import.meta.url));
 const backendRoot = resolve(testDir, '..');
+const mobileRoot = resolve(backendRoot, '..', 'mobile');
 const interpreterRoutes = readFileSync(resolve(backendRoot, 'src', 'routes', 'interpreterRoutes.ts'), 'utf8');
 const interpreterService = readFileSync(resolve(backendRoot, 'src', 'services', 'interpreterService.ts'), 'utf8');
 const server = readFileSync(resolve(backendRoot, 'src', 'server.ts'), 'utf8');
+const mobilePushNotifications = readFileSync(resolve(mobileRoot, 'src', 'services', 'pushNotifications.ts'), 'utf8');
 
 describe('interpreter enterprise controls', () => {
   it('keeps every interpreter route behind App Check and Firebase session verification', () => {
@@ -83,6 +85,39 @@ describe('interpreter enterprise controls', () => {
     assert.match(interpreterService, /A reminder requires a scheduled meeting date and time\./);
   });
 
+  it('keeps newly created interpreter meetings out of live mode until the room starts', () => {
+    assert.match(
+      interpreterService,
+      /export async function createInterpreterMeeting[\s\S]*status: 'SCHEDULED'/,
+      'Creating an interpreter meeting must not immediately start the live GPT session.'
+    );
+    assert.match(
+      interpreterService,
+      /export async function startInterpreterMeeting[\s\S]*status: 'LIVE'/,
+      'The existing start endpoint must remain responsible for promoting a session to live.'
+    );
+    assert.doesNotMatch(
+      interpreterService,
+      /status: scheduledAtIso \? 'SCHEDULED' : 'LIVE'/,
+      'Unscheduled sessions must not be auto-created as live sessions.'
+    );
+  });
+
+  it('does not block interpreter meeting creation on lifecycle side effects', () => {
+    assert.match(interpreterService, /runInterpreterAuditSideEffect\('meeting created'/);
+    assert.match(interpreterService, /runInterpreterNotificationSideEffect\('scheduled meeting'/);
+    assert.match(
+      interpreterService,
+      /function runInterpreterAuditSideEffect[\s\S]*must not leave the[\s\S]*create sheet spinning/,
+      'Meeting creation audit writes should be documented as non-blocking lifecycle side effects.'
+    );
+    assert.doesNotMatch(
+      interpreterService,
+      /await writeInterpreterAuditEvent\(\{\s*context,\s*meetingId,[\s\S]{0,700}INTERPRETER_MEETING_CREATED/,
+      'Create endpoint should not wait on audit writes after the meeting record is saved.'
+    );
+  });
+
   it('runs interpreter reminder dispatch from the backend, not the mobile client', () => {
     assert.match(server, /startInterpreterReminderWorker\(\)/);
     assert.match(interpreterService, /runInterpreterReminderDispatchCycle/);
@@ -92,6 +127,38 @@ describe('interpreter enterprise controls', () => {
     assert.match(interpreterService, /reminderNextAtIso/);
     assert.match(interpreterService, /listScheduledInterpreterReminderMeetingDocs/);
     assert.doesNotMatch(interpreterService, /collectionGroup\(INTERPRETER_MEETINGS_COLLECTION\)/);
+  });
+
+  it('defaults scheduled interpreter sessions to a backend five-minute reminder', () => {
+    assert.match(interpreterService, /getInterpreterReminderFrequencyForCreate/);
+    assert.match(interpreterService, /getInterpreterReminderLeadMinutesForCreate/);
+    assert.match(interpreterService, /return typeof input\.reminderLeadMinutes === 'number' \? input\.reminderLeadMinutes : 5/);
+    assert.match(interpreterService, /INTERPRETER_SESSION_SCHEDULED/);
+  });
+
+  it('sends interpreter push notifications only from backend lifecycle events', () => {
+    assert.match(interpreterService, /sendInterpreterMeetingScheduledNotification/);
+    assert.match(interpreterService, /sendInterpreterMeetingEndedNotification/);
+    assert.match(interpreterService, /sendInterpreterTranscriptAudioReadyNotification/);
+    assert.match(interpreterService, /sendInterpreterSummaryAudioReadyNotifications/);
+    assert.match(interpreterService, /sendInterpreterPushNotificationOnce/);
+    assert.match(interpreterService, /runInterpreterNotificationSideEffect/);
+    assert.doesNotMatch(interpreterService, /await sendInterpreterMeetingScheduledNotification/);
+    assert.match(interpreterService, /INTERPRETER_TRANSCRIPT_AUDIO_READY/);
+    assert.match(interpreterService, /INTERPRETER_SUMMARY_AUDIO_READY/);
+    assert.match(interpreterService, /INTERPRETER_SESSION_ENDED/);
+    assert.doesNotMatch(interpreterService, /audioBase64[^;]+sendInterpreterPushNotification/s);
+  });
+
+  it('registers a mobile interpreter push channel and parses interpreter payloads without touching live room state', () => {
+    assert.match(mobilePushNotifications, /const INTERPRETER_CHANNEL_ID = 'interpreter-reminders'/);
+    assert.match(mobilePushNotifications, /ensureInterpreterNotificationChannel/);
+    assert.match(mobilePushNotifications, /InterpreterPushNotificationData/);
+    assert.match(mobilePushNotifications, /INTERPRETER_TRANSCRIPT_AUDIO_READY/);
+    assert.match(mobilePushNotifications, /INTERPRETER_SUMMARY_AUDIO_READY/);
+    assert.match(mobilePushNotifications, /INTERPRETER_SESSION_SCHEDULED/);
+    assert.match(mobilePushNotifications, /INTERPRETER_SESSION_ENDED/);
+    assert.doesNotMatch(mobilePushNotifications, /createInterpreterRealtime|realtime-client-secret/);
   });
 
   it('audits meeting memory writes without duplicating sensitive transcript text in audit metadata', () => {

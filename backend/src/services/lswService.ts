@@ -27,6 +27,10 @@ interface TenantUserRecord {
   displayName?: string;
   firstName?: string;
   lastName?: string;
+  profilePhotoCacheKey?: string | null;
+  profilePhotoStoragePath?: string | null;
+  profilePhotoUrl?: string | null;
+  profilePhotoVersion?: number | string | null;
   role?: SynzappRole;
   roleName?: string;
   status?: string;
@@ -40,15 +44,56 @@ interface TenantDepartmentRecord {
   tenantId?: string;
 }
 
+interface RcaAdminIncidentRecord {
+  companyId?: string;
+  createdByUid?: string;
+  departmentId?: string | null;
+  departmentName?: string | null;
+  participantUids?: string[];
+  status?: 'OPEN' | 'INVESTIGATING' | 'CLOSED' | 'DELETED';
+  tenantId?: string;
+}
+
+interface RailsAdminItemRecord {
+  departmentId?: string | null;
+  departmentName?: string | null;
+  dueDate?: string;
+  ownerDisplayName?: string;
+  ownerUid?: string;
+  status?: string;
+  tenantId?: string;
+}
+
 interface LswProfileRecord {
   companyId?: string;
   departmentId?: string | null;
   departmentName?: string | null;
   lswId?: string;
+  observationAvailability?: LswObservationAvailability;
+  observationAvailabilityEndDate?: string;
+  observationAvailabilityNote?: string;
+  observationAvailabilityStartDate?: string;
   ownerUid?: string;
   status?: string;
   tenantId?: string;
   workDaysPerWeek?: number;
+}
+
+interface LswObservationAvailabilityLogRecord {
+  availability?: LswObservationAvailability;
+  availabilityLabel?: string;
+  changedAt?: FirebaseFirestore.Timestamp;
+  changedAtIso?: string;
+  changedByDepartmentName?: string | null;
+  changedByDisplayName?: string;
+  changedByRoleName?: string;
+  changedByUid?: string;
+  endDate?: string | null;
+  note?: string;
+  startDate?: string | null;
+  status?: string;
+  tenantId?: string;
+  weekKeys?: string[];
 }
 
 interface LswDailyTaskRecord {
@@ -227,6 +272,7 @@ interface CalendarYearSettings {
 }
 
 interface LswContextInput {
+  observeUserId?: string;
   timeZone?: string;
   week?: number;
   year?: number;
@@ -236,6 +282,7 @@ export type DayKey = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun';
 export type LswDayStatus = 'not_completed' | 'completed_on_time' | 'completed_late' | 'completed_early';
 export type LswDayCompletionTiming = 'not_completed' | 'within_window' | 'late' | 'early';
 export type LswScheduledTaskFrequency = 'BI_WEEKLY' | 'MONTHLY' | 'QUARTERLY' | 'ANNUALLY';
+export type LswObservationAvailability = 'ACTIVE' | 'ON_LEAVE' | 'TEMPORARILY_UNAVAILABLE';
 
 export interface LswContextResponse {
   calendar: {
@@ -262,6 +309,22 @@ export interface LswContextResponse {
   };
   settings: {
     workDaysPerWeek: number;
+  };
+  observation: {
+    canObserve: boolean;
+    isObserving: boolean;
+    observedUser: {
+      availability: LswObservationAvailability;
+      availabilityLabel: string;
+      departmentId: string | null;
+      departmentName: string;
+      displayName: string;
+      profilePhotoCacheKey: string | null;
+      profilePhotoUrl: string | null;
+      role: SynzappRole;
+      roleName: string;
+      uid: string;
+    } | null;
   };
   user: {
     displayName: string;
@@ -495,6 +558,311 @@ export interface LswScheduledTasksResponse {
   tasks: LswScheduledTask[];
 }
 
+export type LswVerificationSectionKey =
+  | 'daily_weekly_standard_tasks'
+  | 'plant_specific_cause_rca_triggers'
+  | 'to_do_today_this_week'
+  | 'level_1_2_3_meeting_rails'
+  | 'improvement_projects_updates'
+  | 'follow_ups'
+  | 'scheduled_tasks_meetings'
+  | 'personal_objectives_goals';
+
+export interface LswVerificationSectionSummary {
+  completedCount: number;
+  completionRate: number;
+  expectedCount: number;
+  lateCount: number;
+  missingCount: number;
+  needsReviewCount: number;
+  sectionKey: LswVerificationSectionKey;
+  targetCompletionRate: number;
+  title: string;
+}
+
+export interface LswVerificationDayMetric {
+  completedCount: number;
+  completionRate: number;
+  dayKey: DayKey;
+  dayLabel: string;
+  dateLabel: string;
+  dueState: 'complete' | 'late' | 'no_work' | 'not_due' | 'overdue' | 'partial';
+  expectedCount: number;
+  isoDate: string;
+  lateCount: number;
+  lastCheckoffIso?: string | null;
+  missingCount: number;
+  onTimeCount?: number;
+}
+
+export type LswVerificationDailyMetrics = Partial<Record<
+  Extract<
+    LswVerificationSectionKey,
+    'daily_weekly_standard_tasks' | 'level_1_2_3_meeting_rails' | 'to_do_today_this_week'
+  >,
+  LswVerificationDayMetric[]
+>>;
+
+export interface LswVerificationUserSummary {
+  completedCount: number;
+  completionRate: number;
+  dailyMetrics: LswVerificationDailyMetrics;
+  departmentId: string | null;
+  departmentName: string;
+  displayName: string;
+  expectedCount: number;
+  lateCount: number;
+  missingCount: number;
+  needsReviewCount: number;
+  role: SynzappRole;
+  roleName: string;
+  sections: LswVerificationSectionSummary[];
+  status: 'COMPLETE' | 'IN_PROGRESS' | 'NOT_STARTED';
+  uid: string;
+}
+
+export interface LswVerificationDepartmentSummary {
+  completedCount: number;
+  completionRate: number;
+  departmentId: string | null;
+  departmentName: string;
+  expectedCount: number;
+  lateCount: number;
+  missingCount: number;
+  needsReviewCount: number;
+  userCount: number;
+}
+
+export interface LswVerificationTotalsSummary {
+  attentionCount: number;
+  averageDepartmentCompletion: number;
+  completedCount: number;
+  completedUsers: number;
+  completionRate: number;
+  expectedCount: number;
+  inProgressUsers: number;
+  lateCount: number;
+  missingCount: number;
+  needsReviewCount: number;
+  notStartedUsers: number;
+  userCount: number;
+}
+
+export interface LswVerificationPeopleSummary {
+  attentionUsers: LswVerificationUserSummary[];
+  departments: LswVerificationDepartmentSummary[];
+  statusMix: {
+    complete: number;
+    inProgress: number;
+    notStarted: number;
+  };
+  verificationUsers: LswVerificationUserSummary[];
+}
+
+export interface LswVerificationSidebarSummary {
+  periodLabel: string;
+  scopeLabel: string;
+  scopeName: string;
+  scopeSubtitle: string;
+  workstreams: Array<{
+    completionRate: number;
+    key: 'LSW' | 'RAILS' | 'RCA';
+    label: string;
+  }>;
+}
+
+export interface LswVerificationTrendPoint {
+  attentionCount: number;
+  completedCount: number;
+  completionRate: number;
+  departments: LswVerificationDepartmentSummary[];
+  expectedCount: number;
+  sections: LswVerificationSectionSummary[];
+  weekBeginningLabel: string;
+  weekEndingLabel: string;
+  weekKey: string;
+}
+
+export interface LswAdminDashboardOverview {
+  lsw: {
+    standardWork: {
+      activeUserCount: number;
+      completedCount: number;
+      completionRate: number;
+      dayMetrics: Array<{
+        completedCount: number;
+        completionRate: number;
+        dateLabel: string;
+        dayLabel: string;
+        dueState: LswVerificationDayMetric['dueState'];
+        expectedCount: number;
+        isoDate: string;
+        lateCount: number;
+        missingCount: number;
+        onTimeCount: number;
+      }>;
+      expectedCount: number;
+      lateCount: number;
+      completedLateCount: number;
+      missedCount: number;
+      missingCount: number;
+      onTimeCount: number;
+      onTimeRate: number;
+      openTodayCount: number;
+      userMetrics: Array<{
+        completedCount: number;
+        completedLateCount: number;
+        completionRate: number;
+        departmentName: string;
+        displayName: string;
+        expectedCount: number;
+        lateCount: number;
+        lastCheckoffIso: string | null;
+        missedCount: number;
+        missingCount: number;
+        onTimeCount: number;
+        onTimeRate: number;
+        openTodayCount: number;
+        uid: string;
+      }>;
+      usersWithActivityCount: number;
+      weekToDateDayCount: number;
+    };
+    upcomingPersonalTasks: Array<{
+      dateLabel: string;
+      section: string;
+      status: 'Due this week' | 'Past due';
+      title: string;
+    }>;
+  };
+  rails: {
+    byDepartment: Array<{ label: string; value: number }>;
+    byResponsibleParty: Array<{ label: string; value: number }>;
+    closedCount: number;
+    inProgressCount: number;
+    openCount: number;
+    pastDueCount: number;
+    totalCount: number;
+  };
+  rca: {
+    closedCount: number;
+    createdByMeCount: number;
+    createdByTeamCount: number;
+    openCount: number;
+    sharedCount: number;
+    totalCount: number;
+  };
+}
+
+export interface LswVerificationSummaryResponse {
+  dashboard: LswAdminDashboardOverview;
+  departments: LswVerificationDepartmentSummary[];
+  generatedAtIso: string;
+  people: LswVerificationPeopleSummary;
+  sidebar: LswVerificationSidebarSummary;
+  scope: {
+    departmentId: string | null;
+    departmentName: string;
+    role: SynzappRole;
+    scopeType: 'DEPARTMENT' | 'ORGANIZATION';
+    tenantId: string;
+  };
+  sections: LswVerificationSectionSummary[];
+  totals: LswVerificationTotalsSummary;
+  trends: LswVerificationTrendPoint[];
+  users: LswVerificationUserSummary[];
+  week: LswContextResponse['week'] & {
+    weekKey: string;
+  };
+}
+
+export interface LswObservationCandidate {
+  availability: LswObservationAvailability;
+  availabilityLabel: string;
+  departmentId: string | null;
+  departmentName: string;
+  displayName: string;
+  profilePhotoCacheKey: string | null;
+  profilePhotoUrl: string | null;
+  role: SynzappRole;
+  roleName: string;
+  uid: string;
+}
+
+export interface LswObservationStatusResponse {
+  availability: LswObservationAvailability;
+  availabilityEndDate: string | null;
+  availabilityHistory: LswObservationAvailabilityHistorySummary[];
+  availabilityLabel: string;
+  availabilityNote: string;
+  availabilityStartDate: string | null;
+  lastObservedAtIso: string | null;
+  noteCount: number;
+  recentVisitors: LswObservationVisitorSummary[];
+  viewedBy: LswObservationVisitorSummary[];
+  weekKey: string;
+}
+
+export interface LswObservationAvailabilityHistorySummary {
+  availability: LswObservationAvailability;
+  availabilityLabel: string;
+  changedAtIso: string | null;
+  changedBy: {
+    departmentName: string;
+    displayName: string;
+    roleName: string;
+    uid: string;
+  };
+  endDate: string | null;
+  note: string;
+  startDate: string | null;
+}
+
+export interface LswObservationVisitorSummary {
+  departmentName: string;
+  displayName: string;
+  lastViewedAtIso: string | null;
+  profilePhotoCacheKey: string | null;
+  profilePhotoUrl: string | null;
+  roleName: string;
+  uid: string;
+  viewCount: number;
+}
+
+export interface LswObservationNote {
+  author: {
+    departmentName: string;
+    displayName: string;
+    profilePhotoCacheKey: string | null;
+    profilePhotoUrl: string | null;
+    roleName: string;
+    uid: string;
+  };
+  body: string;
+  canWithdraw: boolean;
+  createdAtIso: string | null;
+  noteId: string;
+  sectionKey: LswVerificationSectionKey;
+  sectionTitle: string;
+  weekKey: string;
+}
+
+export interface LswObservationNoteInput {
+  body: string;
+  observeUserId?: string;
+  sectionKey: LswVerificationSectionKey;
+  timeZone?: string;
+  week?: number;
+  year?: number;
+}
+
+export interface LswObservationAvailabilityInput {
+  availability: LswObservationAvailability;
+  endDate?: string;
+  note?: string;
+  startDate?: string;
+}
+
 export interface LswScheduledTaskInput {
   dueDate?: string;
   frequency?: LswScheduledTaskFrequency;
@@ -534,7 +902,10 @@ export interface LswSettingsInput {
 }
 
 interface AuthorizedLswContext {
+  actorRole: SynzappRole;
+  actorUid: string;
   department: LswContextResponse['department'];
+  isObservation: boolean;
   lswProfile: LswProfileRecord & {
     lswId: string;
     ownerUid: string;
@@ -561,6 +932,11 @@ const LSW_FOLLOW_UPS_COLLECTION = 'followUps';
 const LSW_RCA_TRIGGERS_COLLECTION = 'rcaTriggers';
 const LSW_IMPROVEMENT_PROJECTS_COLLECTION = 'improvementProjects';
 const LSW_SCHEDULED_TASKS_COLLECTION = 'scheduledTasksMeetings';
+const LSW_OBSERVATION_AVAILABILITY_HISTORY_COLLECTION = 'observationAvailabilityHistory';
+const LSW_OBSERVATION_NOTES_COLLECTION = 'observationNotes';
+const LSW_OBSERVATION_VIEWS_COLLECTION = 'observationViews';
+const RCA_INCIDENTS_COLLECTION = 'rcaIncidents';
+const RAILS_ITEMS_COLLECTION = 'railsItems';
 const DAILY_TASK_SECTION_KEY = 'daily_weekly_standard_tasks';
 const TODO_TASK_SECTION_KEY = 'to_do_today_this_week';
 const MEETING_RAIL_SECTION_KEY = 'level_1_2_3_meeting_rails';
@@ -569,6 +945,31 @@ const FOLLOW_UP_SECTION_KEY = 'follow_ups';
 const RCA_TRIGGER_SECTION_KEY = 'plant_specific_cause_rca_triggers';
 const IMPROVEMENT_PROJECT_SECTION_KEY = 'improvement_projects_updates';
 const SCHEDULED_TASK_SECTION_KEY = 'scheduled_tasks_meetings';
+const LSW_OBSERVATION_AVAILABILITY_LABELS: Record<LswObservationAvailability, string> = {
+  ACTIVE: 'Active',
+  ON_LEAVE: 'On leave',
+  TEMPORARILY_UNAVAILABLE: 'Temporarily unavailable'
+};
+const LSW_VERIFICATION_SECTION_TITLES: Record<LswVerificationSectionKey, string> = {
+  daily_weekly_standard_tasks: 'Daily & Weekly Standard Tasks/Meetings',
+  follow_ups: 'Follow Ups',
+  improvement_projects_updates: 'Improvement Projects and Updates',
+  level_1_2_3_meeting_rails: 'Level 1, 2 & 3 Meeting Rails',
+  personal_objectives_goals: 'Personal Objectives/Goals',
+  plant_specific_cause_rca_triggers: 'Plant Specific Cause RCA Triggers',
+  scheduled_tasks_meetings: 'Scheduled Tasks/Meetings',
+  to_do_today_this_week: 'To Do Today & This Week'
+};
+const LSW_VERIFICATION_SECTION_TARGETS: Record<LswVerificationSectionKey, number> = {
+  daily_weekly_standard_tasks: 95,
+  follow_ups: 95,
+  improvement_projects_updates: 95,
+  level_1_2_3_meeting_rails: 95,
+  personal_objectives_goals: 95,
+  plant_specific_cause_rca_triggers: 90,
+  scheduled_tasks_meetings: 95,
+  to_do_today_this_week: 95
+};
 const DEFAULT_WORK_DAYS_PER_WEEK = 5;
 const COMPLETION_WINDOW_HOURS = 24;
 const COMPLETION_WINDOW_MS = COMPLETION_WINDOW_HOURS * 60 * 60 * 1000;
@@ -605,7 +1006,7 @@ export async function getLswContext(
   decodedToken: DecodedIdToken,
   input: LswContextInput = {}
 ): Promise<LswContextResponse> {
-  const context = await getAuthorizedLswContext(decodedToken);
+  const context = await getAuthorizedLswContext(decodedToken, input);
   const calendar = mapCalendarYearSettings(context.organization);
   const week = calculateCalendarWeekContext(calendar, input);
 
@@ -631,11 +1032,18 @@ export async function getLswContext(
     settings: {
       workDaysPerWeek: context.lswProfile.workDaysPerWeek
     },
+    observation: {
+      canObserve: canObserveLswProfiles(context.actorRole),
+      isObserving: context.isObservation,
+      observedUser: context.isObservation
+        ? buildLswObservationCandidate(context.uid, context.user, context.department, context.lswProfile)
+        : null
+    },
     user: {
       displayName: getDisplayName(context.user),
       role: context.role,
       roleName: formatRoleName(context.user.roleName, context.role),
-      uid: decodedToken.uid
+      uid: context.uid
     },
     week
   };
@@ -645,7 +1053,7 @@ export async function listLswDailyTasks(
   decodedToken: DecodedIdToken,
   input: LswContextInput = {}
 ): Promise<LswDailyTasksResponse> {
-  const context = await getAuthorizedLswContext(decodedToken);
+  const context = await getAuthorizedLswContext(decodedToken, input);
   const calendar = mapCalendarYearSettings(context.organization);
   const week = calculateCalendarWeekContext(calendar, input);
   const weekKey = formatWeekKey(week.selectedYear, week.selectedWeek);
@@ -822,7 +1230,7 @@ export async function listLswTodoTasks(
   decodedToken: DecodedIdToken,
   weekInput: LswContextInput = {}
 ): Promise<LswTodoTasksResponse> {
-  const context = await getAuthorizedLswContext(decodedToken);
+  const context = await getAuthorizedLswContext(decodedToken, weekInput);
   const weekKey = resolveWeekKey(context, weekInput);
   const currentWeekKey = resolveWeekKey(context);
   const snapshot = await context.lswProfileRef
@@ -966,7 +1374,7 @@ export async function listLswMeetingRails(
   decodedToken: DecodedIdToken,
   weekInput: LswContextInput = {}
 ): Promise<LswMeetingRailsResponse> {
-  const context = await getAuthorizedLswContext(decodedToken);
+  const context = await getAuthorizedLswContext(decodedToken, weekInput);
   const weekKey = resolveWeekKey(context, weekInput);
   const currentWeekKey = resolveWeekKey(context);
   const snapshot = await context.lswProfileRef
@@ -1091,8 +1499,8 @@ export async function deleteLswMeetingRail(
   }, { merge: true });
 }
 
-export async function listLswPersonalGoals(decodedToken: DecodedIdToken): Promise<LswPersonalGoalsResponse> {
-  const context = await getAuthorizedLswContext(decodedToken);
+export async function listLswPersonalGoals(decodedToken: DecodedIdToken, input: LswContextInput = {}): Promise<LswPersonalGoalsResponse> {
+  const context = await getAuthorizedLswContext(decodedToken, input);
   const snapshot = await context.lswProfileRef
     .collection(LSW_PERSONAL_GOALS_COLLECTION)
     .orderBy('sortOrder', 'asc')
@@ -1229,8 +1637,8 @@ export async function deleteLswPersonalGoal(
   }, { merge: true });
 }
 
-export async function listLswFollowUps(decodedToken: DecodedIdToken): Promise<LswFollowUpsResponse> {
-  const context = await getAuthorizedLswContext(decodedToken);
+export async function listLswFollowUps(decodedToken: DecodedIdToken, input: LswContextInput = {}): Promise<LswFollowUpsResponse> {
+  const context = await getAuthorizedLswContext(decodedToken, input);
   const snapshot = await context.lswProfileRef
     .collection(LSW_FOLLOW_UPS_COLLECTION)
     .orderBy('sortOrder', 'asc')
@@ -1350,8 +1758,8 @@ export async function deleteLswFollowUp(
   }, { merge: true });
 }
 
-export async function listLswRcaTriggers(decodedToken: DecodedIdToken): Promise<LswRcaTriggersResponse> {
-  const context = await getAuthorizedLswContext(decodedToken);
+export async function listLswRcaTriggers(decodedToken: DecodedIdToken, input: LswContextInput = {}): Promise<LswRcaTriggersResponse> {
+  const context = await getAuthorizedLswContext(decodedToken, input);
   const snapshot = await context.lswProfileRef
     .collection(LSW_RCA_TRIGGERS_COLLECTION)
     .orderBy('sortOrder', 'asc')
@@ -1466,8 +1874,8 @@ export async function deleteLswRcaTrigger(
   }, { merge: true });
 }
 
-export async function listLswImprovementProjects(decodedToken: DecodedIdToken): Promise<LswImprovementProjectsResponse> {
-  const context = await getAuthorizedLswContext(decodedToken);
+export async function listLswImprovementProjects(decodedToken: DecodedIdToken, input: LswContextInput = {}): Promise<LswImprovementProjectsResponse> {
+  const context = await getAuthorizedLswContext(decodedToken, input);
   const snapshot = await context.lswProfileRef
     .collection(LSW_IMPROVEMENT_PROJECTS_COLLECTION)
     .orderBy('sortOrder', 'asc')
@@ -1571,8 +1979,8 @@ export async function deleteLswImprovementProject(
   }, { merge: true });
 }
 
-export async function listLswScheduledTasks(decodedToken: DecodedIdToken): Promise<LswScheduledTasksResponse> {
-  const context = await getAuthorizedLswContext(decodedToken);
+export async function listLswScheduledTasks(decodedToken: DecodedIdToken, input: LswContextInput = {}): Promise<LswScheduledTasksResponse> {
+  const context = await getAuthorizedLswContext(decodedToken, input);
   const snapshot = await context.lswProfileRef
     .collection(LSW_SCHEDULED_TASKS_COLLECTION)
     .orderBy('sortOrder', 'asc')
@@ -1707,6 +2115,413 @@ export async function updateLswSettings(
   return { workDaysPerWeek };
 }
 
+export async function getLswWeeklyVerificationSummary(
+  decodedToken: DecodedIdToken,
+  input: LswContextInput = {}
+): Promise<LswVerificationSummaryResponse> {
+  const context = await getAuthorizedLswContext(decodedToken);
+
+  if (context.role !== 'ORG_ADMIN' && context.role !== 'DEPT_ADMIN' && context.role !== 'SYSTEM_ADMIN') {
+    throw authorizationError('You do not have permission to verify LSW completion.');
+  }
+
+  const usersSnapshot = await context.organizationRef
+    .collection('users')
+    .where('status', '==', 'ACTIVE')
+    .get();
+  const usersInScope = usersSnapshot.docs
+    .map((doc) => ({
+      uid: doc.id,
+      user: doc.data() as TenantUserRecord
+    }))
+    .filter(({ user }) => user.tenantId === context.tenantId || !user.tenantId)
+    .filter(({ user }) => isLswVerificationRoleVisible(context, user))
+    .sort((left, right) => getDisplayName(left.user).localeCompare(getDisplayName(right.user)));
+
+  const calendar = mapCalendarYearSettings(context.organization);
+  const selectedWeek = calculateCalendarWeekContext(calendar, input);
+  const selectedSummary = await buildLswVerificationWeekSummary(context, usersInScope, calendar, {
+    week: selectedWeek.selectedWeek,
+    year: selectedWeek.selectedYear
+  });
+  const trends = await buildLswVerificationTrends(context, usersInScope, calendar, selectedWeek.selectedYear, selectedWeek.selectedWeek);
+  const totals = buildLswVerificationTotals(selectedSummary.sections, selectedSummary.users, selectedSummary.departments);
+  const people = buildLswVerificationPeopleSummary(selectedSummary.users, selectedSummary.departments);
+  const sidebar = buildLswVerificationSidebarSummary(context, selectedSummary.week, selectedSummary.sections);
+  const dashboard = await buildLswAdminDashboardOverview(context, selectedSummary.weekRange, selectedSummary.users);
+
+  return {
+    dashboard,
+    departments: selectedSummary.departments,
+    generatedAtIso: new Date().toISOString(),
+    people,
+    sidebar,
+    scope: {
+      departmentId: context.role === 'ORG_ADMIN' || context.role === 'SYSTEM_ADMIN'
+        ? null
+        : context.department.departmentId,
+      departmentName: context.role === 'ORG_ADMIN' || context.role === 'SYSTEM_ADMIN'
+        ? context.organization.companyName || 'Organization'
+        : context.department.name,
+      role: context.role,
+      scopeType: context.role === 'ORG_ADMIN' || context.role === 'SYSTEM_ADMIN' ? 'ORGANIZATION' : 'DEPARTMENT',
+      tenantId: context.tenantId
+    },
+    sections: selectedSummary.sections,
+    totals,
+    trends,
+    users: selectedSummary.users,
+    week: {
+      ...selectedSummary.week,
+      weekKey: selectedSummary.weekKey
+    }
+  };
+}
+
+export async function listLswObservationCandidates(decodedToken: DecodedIdToken): Promise<LswObservationCandidate[]> {
+  const context = await getAuthorizedLswContext(decodedToken);
+
+  if (!canObserveLswProfiles(context.actorRole)) {
+    throw authorizationError('You do not have permission to observe Standard Work.');
+  }
+
+  const usersSnapshot = await context.organizationRef
+    .collection('users')
+    .where('status', '==', 'ACTIVE')
+    .get();
+
+  const candidateUsers = usersSnapshot.docs
+    .map((doc) => ({
+      uid: doc.id,
+      user: doc.data() as TenantUserRecord
+    }))
+    .filter(({ uid, user }) => uid !== context.actorUid && (user.tenantId === context.tenantId || !user.tenantId))
+    .filter(({ user }) => canActorObserveLswUser(context, user));
+
+  const candidates = await Promise.all(candidateUsers.map(async ({ uid, user }) => {
+    const profileSnapshot = await context.organizationRef.collection(LSW_PROFILE_COLLECTION).doc(uid).get();
+    const profile = profileSnapshot.exists ? (profileSnapshot.data() as LswProfileRecord) : undefined;
+
+    return buildLswObservationCandidate(uid, user, undefined, profile);
+  }));
+
+  return candidates.sort((left, right) => left.displayName.localeCompare(right.displayName));
+}
+
+export async function getLswObservationStatus(
+  decodedToken: DecodedIdToken,
+  input: LswContextInput = {}
+): Promise<LswObservationStatusResponse> {
+  const context = await getAuthorizedLswContext(decodedToken, input);
+  const calendar = mapCalendarYearSettings(context.organization);
+  const week = calculateCalendarWeekContext(calendar, input);
+  const weekKey = formatWeekKey(week.selectedYear, week.selectedWeek);
+  const [viewedBy, noteCount, availabilityHistory] = await Promise.all([
+    listObservationVisitors(context, weekKey),
+    countActiveObservationNotes(context, weekKey),
+    listObservationAvailabilityHistory(context, weekKey)
+  ]);
+  const recentVisitors = viewedBy
+    .slice()
+    .sort((left, right) => timestampSortValue(right.lastViewedAtIso) - timestampSortValue(left.lastViewedAtIso))
+    .slice(0, 6);
+  const effectiveAvailability = await resolveEffectiveObservationAvailability(context, input);
+
+  return {
+    availability: effectiveAvailability.availability,
+    availabilityEndDate: effectiveAvailability.endDate,
+    availabilityHistory,
+    availabilityLabel: formatObservationAvailability(effectiveAvailability.availability),
+    availabilityNote: normalizeObservationAvailabilityNote(context.lswProfile.observationAvailabilityNote),
+    availabilityStartDate: effectiveAvailability.startDate,
+    lastObservedAtIso: recentVisitors[0]?.lastViewedAtIso || null,
+    noteCount,
+    recentVisitors,
+    viewedBy,
+    weekKey
+  };
+}
+
+export async function updateLswObservationAvailability(
+  decodedToken: DecodedIdToken,
+  input: LswObservationAvailabilityInput
+): Promise<LswObservationStatusResponse> {
+  const context = await getAuthorizedLswContext(decodedToken);
+  const calendar = mapCalendarYearSettings(context.organization);
+  const availability = normalizeObservationAvailability(input.availability);
+  const availabilityNote = normalizeObservationAvailabilityNote(input.note);
+  const availabilityWindow = normalizeObservationAvailabilityWindow(availability, input);
+  const weekKeys = buildObservationAvailabilityWeekKeys(
+    calendar,
+    availabilityWindow.startDate,
+    availabilityWindow.endDate
+  );
+
+  await context.lswProfileRef.set({
+    observationAvailability: availability,
+    observationAvailabilityEndDate: availabilityWindow.endDate,
+    observationAvailabilityNote: availabilityNote,
+    observationAvailabilityStartDate: availabilityWindow.startDate,
+    observationAvailabilityUpdatedAt: fieldValue.serverTimestamp(),
+    observationAvailabilityUpdatedByUid: decodedToken.uid,
+    updatedAt: fieldValue.serverTimestamp()
+  }, { merge: true });
+
+  if (availability !== 'ACTIVE') {
+    const changedAt = new Date();
+    const logRef = context.lswProfileRef
+      .collection(LSW_OBSERVATION_AVAILABILITY_HISTORY_COLLECTION)
+      .doc(randomUUID());
+
+    await logRef.set({
+      availability,
+      availabilityLabel: formatObservationAvailability(availability),
+      changedAt: fieldValue.serverTimestamp(),
+      changedAtIso: changedAt.toISOString(),
+      changedByDepartmentName: context.user.departmentName || context.department.name,
+      changedByDisplayName: getDisplayName(context.user),
+      changedByRoleName: formatRoleName(context.user.roleName, context.role),
+      changedByUid: decodedToken.uid,
+      endDate: availabilityWindow.endDate,
+      note: availabilityNote,
+      startDate: availabilityWindow.startDate,
+      status: 'ACTIVE',
+      tenantId: context.tenantId,
+      weekKeys
+    });
+  }
+
+  context.lswProfile.observationAvailability = availability;
+  context.lswProfile.observationAvailabilityEndDate = availabilityWindow.endDate || undefined;
+  context.lswProfile.observationAvailabilityNote = availabilityNote;
+  context.lswProfile.observationAvailabilityStartDate = availabilityWindow.startDate || undefined;
+
+  return getLswObservationStatus(decodedToken);
+}
+
+export async function recordLswObservationView(
+  decodedToken: DecodedIdToken,
+  input: LswContextInput = {}
+): Promise<LswObservationStatusResponse> {
+  const context = await getAuthorizedLswContext(decodedToken, input);
+
+  if (!context.isObservation) {
+    throw authorizationError('Select an employee before recording an observation.');
+  }
+
+  const calendar = mapCalendarYearSettings(context.organization);
+  const week = calculateCalendarWeekContext(calendar, input);
+  const weekKey = formatWeekKey(week.selectedYear, week.selectedWeek);
+  const viewRef = context.lswProfileRef
+    .collection(LSW_OBSERVATION_VIEWS_COLLECTION)
+    .doc(`${weekKey}_${context.actorUid}`);
+  const nowIso = new Date().toISOString();
+  const actorSnapshot = await context.organizationRef.collection('users').doc(context.actorUid).get();
+  const actorUser = actorSnapshot.exists ? (actorSnapshot.data() as TenantUserRecord) : context.user;
+  const actorDepartment = await resolveUserDepartment(context.tenantId, actorUser, context.actorRole);
+  const actorPhoto = buildLswUserProfilePhotoSummary(context.actorUid, actorUser);
+  const observedDateKey = formatLocalDateOnly(new Date());
+
+  await firestore.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(viewRef);
+    const existingRecord = snapshot.exists ? (snapshot.data() as Record<string, unknown>) : {};
+    const existingDateKeys = Array.isArray(existingRecord.viewDateKeys)
+      ? existingRecord.viewDateKeys.filter((value): value is string => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value))
+      : [];
+    const nextDateKeys = Array.from(new Set([...existingDateKeys, observedDateKey])).sort();
+
+    transaction.set(viewRef, {
+      actorDepartmentId: actorDepartment.departmentId,
+      actorDepartmentName: actorDepartment.name,
+      actorDisplayName: getDisplayName(actorUser),
+      actorProfilePhotoCacheKey: actorPhoto.profilePhotoCacheKey,
+      actorProfilePhotoUrl: actorPhoto.profilePhotoUrl,
+      actorRole: context.actorRole,
+      actorRoleName: formatRoleName(actorUser.roleName, context.actorRole),
+      actorUid: context.actorUid,
+      companyId: context.tenantId,
+      firstViewedAtIso: snapshot.exists ? safeNullableString(existingRecord.firstViewedAtIso) || nowIso : nowIso,
+      lastViewedAtIso: nowIso,
+      lastViewedAt: fieldValue.serverTimestamp(),
+      lswId: context.lswProfile.lswId,
+      ownerUid: context.uid,
+      tenantId: context.tenantId,
+      updatedAt: fieldValue.serverTimestamp(),
+      viewCount: nextDateKeys.length,
+      viewDateKeys: nextDateKeys,
+      weekKey
+    }, { merge: true });
+  });
+
+  return getLswObservationStatus(decodedToken, input);
+}
+
+export async function listLswObservationNotes(
+  decodedToken: DecodedIdToken,
+  input: LswContextInput = {}
+): Promise<LswObservationNote[]> {
+  const context = await getAuthorizedLswContext(decodedToken, input);
+  const calendar = mapCalendarYearSettings(context.organization);
+  const week = calculateCalendarWeekContext(calendar, input);
+  const weekKey = formatWeekKey(week.selectedYear, week.selectedWeek);
+  const snapshot = await context.lswProfileRef
+    .collection(LSW_OBSERVATION_NOTES_COLLECTION)
+    .where('weekKey', '==', weekKey)
+    .where('status', '==', 'ACTIVE')
+    .get();
+
+  return snapshot.docs
+    .map((doc) => mapObservationNote(doc.id, doc.data(), context.actorUid, context.actorRole))
+    .sort((left, right) => timestampSortValue(right.createdAtIso) - timestampSortValue(left.createdAtIso));
+}
+
+export async function createLswObservationNote(
+  decodedToken: DecodedIdToken,
+  input: LswObservationNoteInput
+): Promise<LswObservationNote> {
+  const context = await getAuthorizedLswContext(decodedToken, input);
+
+  if (!context.isObservation) {
+    throw authorizationError('Select an employee before adding an observation note.');
+  }
+
+  const body = normalizeObservationNoteBody(input.body);
+  const sectionKey = normalizeObservationSectionKey(input.sectionKey);
+  const calendar = mapCalendarYearSettings(context.organization);
+  const week = calculateCalendarWeekContext(calendar, input);
+  const weekKey = formatWeekKey(week.selectedYear, week.selectedWeek);
+  const actorSnapshot = await context.organizationRef.collection('users').doc(context.actorUid).get();
+  const actorUser = actorSnapshot.exists ? (actorSnapshot.data() as TenantUserRecord) : context.user;
+  const actorDepartment = await resolveUserDepartment(context.tenantId, actorUser, context.actorRole);
+  const actorPhoto = buildLswUserProfilePhotoSummary(context.actorUid, actorUser);
+  const noteRef = context.lswProfileRef.collection(LSW_OBSERVATION_NOTES_COLLECTION).doc();
+  const nowIso = new Date().toISOString();
+  const noteRecord = {
+    actorDepartmentId: actorDepartment.departmentId,
+    actorDepartmentName: actorDepartment.name,
+    actorDisplayName: getDisplayName(actorUser),
+    actorProfilePhotoCacheKey: actorPhoto.profilePhotoCacheKey,
+    actorProfilePhotoUrl: actorPhoto.profilePhotoUrl,
+    actorRole: context.actorRole,
+    actorRoleName: formatRoleName(actorUser.roleName, context.actorRole),
+    actorUid: context.actorUid,
+    body,
+    companyId: context.tenantId,
+    createdAt: fieldValue.serverTimestamp(),
+    createdAtIso: nowIso,
+    lswId: context.lswProfile.lswId,
+    ownerUid: context.uid,
+    sectionKey,
+    status: 'ACTIVE',
+    tenantId: context.tenantId,
+    updatedAt: fieldValue.serverTimestamp(),
+    weekKey
+  };
+
+  await noteRef.set(noteRecord);
+
+  return mapObservationNote(noteRef.id, noteRecord, context.actorUid, context.actorRole);
+}
+
+export async function withdrawLswObservationNote(
+  decodedToken: DecodedIdToken,
+  noteId: string,
+  input: LswContextInput = {}
+): Promise<void> {
+  const context = await getAuthorizedLswContext(decodedToken, input);
+  const safeNoteId = normalizeDocumentId(noteId);
+  const noteRef = context.lswProfileRef.collection(LSW_OBSERVATION_NOTES_COLLECTION).doc(safeNoteId);
+  const snapshot = await noteRef.get();
+
+  if (!snapshot.exists) {
+    throw notFoundError('The observation note was not found.');
+  }
+
+  const note = snapshot.data() as Record<string, unknown>;
+
+  assertObservationNoteBelongsToContext(note, context);
+
+  const actorUid = typeof note.actorUid === 'string' ? note.actorUid : '';
+  const canWithdraw = actorUid === context.actorUid || context.actorRole === 'ORG_ADMIN' || context.actorRole === 'SYSTEM_ADMIN';
+
+  if (!canWithdraw) {
+    throw authorizationError('You do not have permission to withdraw this observation note.');
+  }
+
+  await noteRef.set({
+    status: 'WITHDRAWN',
+    updatedAt: fieldValue.serverTimestamp(),
+    withdrawnAt: fieldValue.serverTimestamp(),
+    withdrawnByUid: context.actorUid
+  }, { merge: true });
+}
+
+async function buildLswVerificationWeekSummary(
+  context: AuthorizedLswContext,
+  usersInScope: Array<{ uid: string; user: TenantUserRecord }>,
+  calendar: CalendarYearSettings,
+  input: LswContextInput
+): Promise<{
+  departments: LswVerificationDepartmentSummary[];
+  sections: LswVerificationSectionSummary[];
+  users: LswVerificationUserSummary[];
+  week: LswContextResponse['week'];
+  weekKey: string;
+  weekRange: { end: Date; start: Date };
+}> {
+  const week = calculateCalendarWeekContext(calendar, input);
+  const weekKey = formatWeekKey(week.selectedYear, week.selectedWeek);
+  const weekRange = getWeekRange(calendar, week.selectedYear, week.selectedWeek);
+  const users = await Promise.all(usersInScope.map(({ uid, user }) => (
+    buildLswVerificationUserSummary(context, uid, user, weekKey, weekRange)
+  )));
+  const sections = aggregateVerificationSections(users.flatMap((user) => user.sections));
+  const departments = aggregateVerificationDepartments(users);
+
+  return {
+    departments,
+    sections,
+    users,
+    week,
+    weekKey,
+    weekRange
+  };
+}
+
+async function buildLswVerificationTrends(
+  context: AuthorizedLswContext,
+  usersInScope: Array<{ uid: string; user: TenantUserRecord }>,
+  calendar: CalendarYearSettings,
+  selectedYear: number,
+  selectedWeek: number
+): Promise<LswVerificationTrendPoint[]> {
+  const weekOffsets = [-5, -4, -3, -2, -1, 0];
+  const summaries = await Promise.all(weekOffsets.map((offset) => (
+    buildLswVerificationWeekSummary(context, usersInScope, calendar, {
+      week: selectedWeek + offset,
+      year: selectedYear
+    })
+  )));
+
+  return summaries.map((summary) => {
+    const totals = aggregateVerificationTotals(summary.sections);
+
+    return {
+      attentionCount: totals.missingCount + totals.needsReviewCount + totals.lateCount,
+      completedCount: totals.completedCount,
+      completionRate: totals.expectedCount > 0
+        ? Math.round((totals.completedCount / totals.expectedCount) * 100)
+        : 0,
+      departments: summary.departments,
+      expectedCount: totals.expectedCount,
+      sections: summary.sections,
+      weekBeginningLabel: summary.week.weekBeginningLabel,
+      weekEndingLabel: summary.week.weekEndingLabel,
+      weekKey: summary.weekKey
+    };
+  });
+}
+
 export function calculateCalendarWeekContext(
   calendar: CalendarYearSettings,
   input: LswContextInput = {},
@@ -1771,7 +2586,1115 @@ function isWeekScopedRecordVisible(
     : requestedWeekKey === currentWeekKey;
 }
 
-async function getAuthorizedLswContext(decodedToken: DecodedIdToken): Promise<AuthorizedLswContext> {
+function isLswVerificationRoleVisible(context: AuthorizedLswContext, user: TenantUserRecord): boolean {
+  if (user.status && user.status !== 'ACTIVE') {
+    return false;
+  }
+
+  if (context.role === 'ORG_ADMIN' || context.role === 'SYSTEM_ADMIN') {
+    return user.role === 'ORG_ADMIN' || user.role === 'DEPT_ADMIN' || user.role === 'EMPLOYEE';
+  }
+
+  return (
+    context.role === 'DEPT_ADMIN' &&
+    user.departmentId === context.department.departmentId &&
+    (user.role === 'DEPT_ADMIN' || user.role === 'EMPLOYEE')
+  );
+}
+
+async function buildLswVerificationUserSummary(
+  context: AuthorizedLswContext,
+  uid: string,
+  user: TenantUserRecord,
+  weekKey: string,
+  weekRange: { end: Date; start: Date }
+): Promise<LswVerificationUserSummary> {
+  const lswProfileRef = context.organizationRef.collection(LSW_PROFILE_COLLECTION).doc(uid);
+  const profileSnapshot = await lswProfileRef.get();
+  const profile = profileSnapshot.exists
+    ? profileSnapshot.data() as LswProfileRecord
+    : null;
+  const userDepartment = {
+    departmentId: user.departmentId || profile?.departmentId || null,
+    name: user.departmentName || profile?.departmentName || 'Unassigned department',
+    status: 'ACTIVE'
+  };
+  const lswId = profile?.lswId || uid;
+  const profileContext: AuthorizedLswContext = {
+    ...context,
+    department: userDepartment,
+    lswProfile: {
+      ...profile,
+      lswId,
+      ownerUid: uid,
+      status: 'ACTIVE',
+      tenantId: context.tenantId,
+      workDaysPerWeek: normalizeWorkDaysPerWeek(profile?.workDaysPerWeek || DEFAULT_WORK_DAYS_PER_WEEK)
+    },
+    lswProfileRef,
+    uid,
+    user
+  };
+  const sections = profileSnapshot.exists
+    ? await buildLswVerificationSections(profileContext, weekKey, weekRange)
+    : getEmptyVerificationSections();
+  const dailyMetrics = profileSnapshot.exists
+    ? await buildLswVerificationDailyMetrics(profileContext, weekKey, weekRange)
+    : {};
+  const totals = aggregateVerificationTotals(sections);
+
+  return {
+    ...totals,
+    completionRate: calculateCompletionRate(totals.completedCount, totals.expectedCount),
+    dailyMetrics,
+    departmentId: userDepartment.departmentId,
+    departmentName: userDepartment.name,
+    displayName: getDisplayName(user),
+    role: user.role || 'EMPLOYEE',
+    roleName: formatRoleName(user.roleName, user.role || 'EMPLOYEE'),
+    sections,
+    status: totals.expectedCount === 0 || totals.completedCount === 0
+      ? 'NOT_STARTED'
+      : totals.missingCount === 0 && totals.needsReviewCount === 0
+        ? 'COMPLETE'
+        : 'IN_PROGRESS',
+    uid
+  };
+}
+
+async function buildLswVerificationDailyMetrics(
+  context: AuthorizedLswContext,
+  weekKey: string,
+  weekRange: { end: Date; start: Date }
+): Promise<LswVerificationDailyMetrics> {
+  const currentWeekKey = resolveWeekKey(context);
+  const [dailyStandardWork, meetingRails, todos] = await Promise.all([
+    buildDailyStandardWorkMetrics(context, weekKey, weekRange),
+    buildDueDateCompletionMetrics(context, LSW_MEETING_RAILS_COLLECTION, weekKey, currentWeekKey, weekRange, (record) => (record as LswMeetingRailRecord).completed === true),
+    buildDueDateCompletionMetrics(context, LSW_TODO_TASKS_COLLECTION, weekKey, currentWeekKey, weekRange, (record) => {
+      const todo = record as LswTodoTaskRecord;
+
+      return todo.completed === true || Boolean(getNonEmptyString(todo.completedAtIso));
+    })
+  ]);
+
+  return {
+    daily_weekly_standard_tasks: dailyStandardWork,
+    level_1_2_3_meeting_rails: meetingRails,
+    to_do_today_this_week: todos
+  };
+}
+
+async function buildLswVerificationSections(
+  context: AuthorizedLswContext,
+  weekKey: string,
+  weekRange: { end: Date; start: Date }
+): Promise<LswVerificationSectionSummary[]> {
+  const [
+    daily,
+    todo,
+    meetingRails,
+    rcaTriggers,
+    improvements,
+    followUps,
+    scheduled,
+    goals
+  ] = await Promise.all([
+    summarizeDailyWeeklyTasks(context, weekKey),
+    summarizeTodoTasks(context, weekKey, weekRange),
+    summarizeMeetingRails(context, weekKey, weekRange),
+    summarizeRcaTriggers(context, weekRange),
+    summarizeImprovementProjects(context),
+    summarizeFollowUps(context, weekRange),
+    summarizeScheduledTasks(context, weekRange),
+    summarizePersonalGoals(context, weekRange)
+  ]);
+
+  return [
+    daily,
+    rcaTriggers,
+    todo,
+    meetingRails,
+    improvements,
+    followUps,
+    scheduled,
+    goals
+  ];
+}
+
+async function summarizeDailyWeeklyTasks(context: AuthorizedLswContext, weekKey: string): Promise<LswVerificationSectionSummary> {
+  const snapshot = await context.lswProfileRef
+    .collection(LSW_DAILY_TASKS_COLLECTION)
+    .orderBy('sortOrder', 'asc')
+    .get();
+  const activeTaskDocs = snapshot.docs
+    .map((doc) => ({ record: doc.data() as LswDailyTaskRecord, ref: doc.ref, taskId: doc.id }))
+    .filter(({ record }) => isActiveTenantLswRecord(record, context));
+  const weeklyStatuses = await getDailyTaskWeekStatuses(context, activeTaskDocs, weekKey);
+  const workDays = ALL_DAY_KEYS.slice(0, normalizeWorkDaysPerWeek(context.lswProfile.workDaysPerWeek));
+  let completedCount = 0;
+  let lateCount = 0;
+  let missingCount = 0;
+
+  activeTaskDocs.forEach(({ taskId }) => {
+    const details = normalizeDayStatusDetails(weeklyStatuses.get(taskId)?.dayStatuses, weeklyStatuses.get(taskId)?.days);
+
+    workDays.forEach((dayKey) => {
+      const status = details[dayKey].status;
+
+      if (status === 'not_completed') {
+        missingCount += 1;
+        return;
+      }
+
+      completedCount += 1;
+
+      if (status === 'completed_late') {
+        lateCount += 1;
+      }
+    });
+  });
+
+  return buildVerificationSectionSummary('daily_weekly_standard_tasks', {
+    completedCount,
+    expectedCount: activeTaskDocs.length * workDays.length,
+    lateCount,
+    missingCount
+  });
+}
+
+async function buildDailyStandardWorkMetrics(
+  context: AuthorizedLswContext,
+  weekKey: string,
+  weekRange: { end: Date; start: Date }
+): Promise<LswVerificationDayMetric[]> {
+  const snapshot = await context.lswProfileRef
+    .collection(LSW_DAILY_TASKS_COLLECTION)
+    .orderBy('sortOrder', 'asc')
+    .get();
+  const activeTaskDocs = snapshot.docs
+    .map((doc) => ({ record: doc.data() as LswDailyTaskRecord, ref: doc.ref, taskId: doc.id }))
+    .filter(({ record }) => isActiveTenantLswRecord(record, context));
+  const weeklyStatuses = await getDailyTaskWeekStatuses(context, activeTaskDocs, weekKey);
+  const workDayCount = normalizeWorkDaysPerWeek(context.lswProfile.workDaysPerWeek);
+  const today = dateOnlyFromDateInTimeZone(new Date());
+
+  return buildWeekDayMetricShell(weekRange, workDayCount).map((metric) => {
+    let completedCount = 0;
+    let lateCount = 0;
+    let lastCheckoffIso: string | null = null;
+    let missingCount = 0;
+    let onTimeCount = 0;
+    const metricDate = parseDateOnly(metric.isoDate);
+    const isNotDueYet = metricDate.getTime() > today.getTime();
+
+    if (isNotDueYet) {
+      return buildVerificationDayMetric(metric, {
+        dueState: 'not_due'
+      });
+    }
+
+    activeTaskDocs.forEach(({ taskId }) => {
+      const details = normalizeDayStatusDetails(weeklyStatuses.get(taskId)?.dayStatuses, weeklyStatuses.get(taskId)?.days);
+      const detail = details[metric.dayKey];
+      const status = detail.status;
+
+      if (status === 'not_completed') {
+        missingCount += 1;
+        return;
+      }
+
+      completedCount += 1;
+
+      if (status === 'completed_late') {
+        lateCount += 1;
+      } else {
+        onTimeCount += 1;
+      }
+
+      if (detail.completedAtIso && (!lastCheckoffIso || detail.completedAtIso > lastCheckoffIso)) {
+        lastCheckoffIso = detail.completedAtIso;
+      }
+    });
+
+    return buildVerificationDayMetric(metric, {
+      completedCount,
+      expectedCount: activeTaskDocs.length,
+      lateCount,
+      lastCheckoffIso,
+      missingCount,
+      onTimeCount
+    });
+  });
+}
+
+async function buildDueDateCompletionMetrics<T extends {
+  companyId?: string;
+  dueDate?: string;
+  dueTime?: string;
+  lswId?: string;
+  ownerUid?: string;
+  status?: string;
+  tenantId?: string;
+  timeZone?: string;
+  weekKey?: string;
+}>(
+  context: AuthorizedLswContext,
+  collectionName: string,
+  weekKey: string,
+  currentWeekKey: string,
+  weekRange: { end: Date; start: Date },
+  isComplete: (record: T) => boolean
+): Promise<LswVerificationDayMetric[]> {
+  const snapshot = await context.lswProfileRef.collection(collectionName).get();
+  const records = snapshot.docs
+    .map((doc) => doc.data() as T)
+    .filter((record) => isActiveTenantLswRecord(record, context) && isWeekScopedRecordVisible(record.weekKey, weekKey, currentWeekKey));
+  const workDayCount = normalizeWorkDaysPerWeek(context.lswProfile.workDaysPerWeek);
+  const now = new Date();
+  const today = dateOnlyFromDateInTimeZone(now);
+
+  return buildWeekDayMetricShell(weekRange, workDayCount).map((metric) => {
+    const metricDate = parseDateOnly(metric.isoDate);
+    const isNotDueYet = metricDate.getTime() > today.getTime();
+    const dueRecords = records.filter((record) => getVerificationMetricIsoDate(record, weekRange) === metric.isoDate);
+
+    if (isNotDueYet) {
+      return buildVerificationDayMetric(metric, {
+        dueState: dueRecords.length > 0 ? 'not_due' : 'no_work'
+      });
+    }
+
+    const completedCount = dueRecords.filter(isComplete).length;
+    const lateCount = dueRecords.filter((record) => !isComplete(record) && isDueDateRecordPastDue(record, now)).length;
+    const expectedCount = dueRecords.length;
+    const weightedCompletedCount = completedCount + (lateCount * 0.5);
+    const missingCount = Math.max(0, expectedCount - completedCount);
+
+    return buildVerificationDayMetric(metric, {
+      completedCount,
+      completionRate: expectedCount > 0
+        ? Math.round((weightedCompletedCount / expectedCount) * 100)
+        : 0,
+      dueState: inferLswVerificationDayState({
+        completedCount,
+        expectedCount,
+        lateCount,
+        missingCount
+      }),
+      expectedCount,
+      lateCount,
+      missingCount
+    });
+  });
+}
+
+function getVerificationMetricIsoDate(
+  record: { dueDate?: string },
+  weekRange: { end: Date; start: Date }
+): string | null {
+  const dueDate = record.dueDate ? tryParseDateOnly(record.dueDate) : null;
+
+  if (!dueDate || dueDate.getTime() < weekRange.start.getTime() || dueDate.getTime() > weekRange.end.getTime()) {
+    return null;
+  }
+
+  return formatIsoDate(dueDate);
+}
+
+async function summarizeTodoTasks(
+  context: AuthorizedLswContext,
+  weekKey: string,
+  weekRange: { end: Date; start: Date }
+): Promise<LswVerificationSectionSummary> {
+  const currentWeekKey = resolveWeekKey(context);
+  const snapshot = await context.lswProfileRef.collection(LSW_TODO_TASKS_COLLECTION).get();
+  const records = snapshot.docs
+    .map((doc) => doc.data() as LswTodoTaskRecord)
+    .filter((record) => (
+      isActiveTenantLswRecord(record, context) &&
+      isWeekScopedRecordVisible(record.weekKey, weekKey, currentWeekKey) &&
+      Boolean(getVerificationMetricIsoDate(record, weekRange))
+    ));
+
+  return buildVerificationSectionSummary('to_do_today_this_week', summarizeBooleanCompletion(records, (record) => record.completed === true));
+}
+
+async function summarizeMeetingRails(
+  context: AuthorizedLswContext,
+  weekKey: string,
+  weekRange: { end: Date; start: Date }
+): Promise<LswVerificationSectionSummary> {
+  const currentWeekKey = resolveWeekKey(context);
+  const snapshot = await context.lswProfileRef.collection(LSW_MEETING_RAILS_COLLECTION).get();
+  const records = snapshot.docs
+    .map((doc) => doc.data() as LswMeetingRailRecord)
+    .filter((record) => (
+      isActiveTenantLswRecord(record, context) &&
+      isWeekScopedRecordVisible(record.weekKey, weekKey, currentWeekKey) &&
+      Boolean(getVerificationMetricIsoDate(record, weekRange))
+    ));
+
+  return buildVerificationSectionSummary('level_1_2_3_meeting_rails', summarizeBooleanCompletion(records, (record) => record.completed === true));
+}
+
+async function summarizeRcaTriggers(context: AuthorizedLswContext, weekRange: { end: Date; start: Date }): Promise<LswVerificationSectionSummary> {
+  const snapshot = await context.lswProfileRef.collection(LSW_RCA_TRIGGERS_COLLECTION).get();
+  const records = snapshot.docs
+    .map((doc) => doc.data() as LswRcaTriggerRecord)
+    .filter((record) => isActiveTenantLswRecord(record, context) && isDateOnlyInRange(record.eventDate, weekRange));
+
+  return buildVerificationSectionSummary('plant_specific_cause_rca_triggers', summarizeDataReadiness(records, (record) => (
+    Boolean(getNonEmptyString(record.trigger)) && Boolean(getNonEmptyString(record.comments))
+  )));
+}
+
+async function summarizeImprovementProjects(context: AuthorizedLswContext): Promise<LswVerificationSectionSummary> {
+  const snapshot = await context.lswProfileRef.collection(LSW_IMPROVEMENT_PROJECTS_COLLECTION).get();
+  const records = snapshot.docs
+    .map((doc) => doc.data() as LswImprovementProjectRecord)
+    .filter((record) => isActiveTenantLswRecord(record, context));
+
+  return buildVerificationSectionSummary('improvement_projects_updates', summarizeDataReadiness(records, (record) => (
+    Boolean(getNonEmptyString(record.project)) &&
+    normalizeImprovementProjectUpdates(record.updates).some((update) => Boolean(getNonEmptyString(update.text)))
+  )));
+}
+
+async function summarizeFollowUps(context: AuthorizedLswContext, weekRange: { end: Date; start: Date }): Promise<LswVerificationSectionSummary> {
+  const snapshot = await context.lswProfileRef.collection(LSW_FOLLOW_UPS_COLLECTION).get();
+  const records = snapshot.docs
+    .map((doc) => doc.data() as LswFollowUpRecord)
+    .filter((record) => isActiveTenantLswRecord(record, context) && isDateOnlyDueByRangeEnd(record.dueDate, weekRange));
+
+  return buildVerificationSectionSummary('follow_ups', summarizeDataReadiness(records, (record) => (
+    Boolean(getNonEmptyString(record.followUp)) &&
+    Boolean(getNonEmptyString(record.responsible)) &&
+    Boolean(getNonEmptyString(record.comments))
+  )));
+}
+
+async function summarizeScheduledTasks(context: AuthorizedLswContext, weekRange: { end: Date; start: Date }): Promise<LswVerificationSectionSummary> {
+  const snapshot = await context.lswProfileRef.collection(LSW_SCHEDULED_TASKS_COLLECTION).get();
+  const records = snapshot.docs
+    .map((doc) => doc.data() as LswScheduledTaskRecord)
+    .filter((record) => isActiveTenantLswRecord(record, context) && isScheduledTaskInWeek(record, weekRange));
+
+  return buildVerificationSectionSummary('scheduled_tasks_meetings', summarizeDataReadiness(records, (record) => (
+    Boolean(getNonEmptyString(record.task)) &&
+    Boolean(getNonEmptyString(record.dueDate)) &&
+    Boolean(getNonEmptyString(record.frequency)) &&
+    normalizeMinutes(record.minutes ?? 0) > 0
+  )));
+}
+
+async function summarizePersonalGoals(context: AuthorizedLswContext, weekRange: { end: Date; start: Date }): Promise<LswVerificationSectionSummary> {
+  const snapshot = await context.lswProfileRef.collection(LSW_PERSONAL_GOALS_COLLECTION).get();
+  const records = snapshot.docs
+    .map((doc) => doc.data() as LswPersonalGoalRecord)
+    .filter((record) => isActiveTenantLswRecord(record, context) && isDateOnlyDueByRangeEnd(record.dueDate, weekRange));
+
+  return buildVerificationSectionSummary('personal_objectives_goals', summarizeDataReadiness(records, (record) => (
+    Boolean(getNonEmptyString(record.objective)) && normalizeProgress(record.progress ?? 0) > 0
+  )));
+}
+
+function summarizeBooleanCompletion<T>(records: T[], isComplete: (record: T) => boolean): Pick<LswVerificationSectionSummary, 'completedCount' | 'expectedCount' | 'missingCount' | 'needsReviewCount'> {
+  const completedCount = records.filter(isComplete).length;
+  const expectedCount = records.length;
+
+  return {
+    completedCount,
+    expectedCount,
+    missingCount: expectedCount - completedCount,
+    needsReviewCount: 0
+  };
+}
+
+function summarizeDataReadiness<T>(records: T[], isReady: (record: T) => boolean): Pick<LswVerificationSectionSummary, 'completedCount' | 'expectedCount' | 'missingCount' | 'needsReviewCount'> {
+  const completedCount = records.filter(isReady).length;
+  const expectedCount = records.length;
+  const needsReviewCount = expectedCount - completedCount;
+
+  return {
+    completedCount,
+    expectedCount,
+    missingCount: 0,
+    needsReviewCount
+  };
+}
+
+function buildVerificationSectionSummary(
+  sectionKey: LswVerificationSectionKey,
+  input: Partial<Pick<LswVerificationSectionSummary, 'completedCount' | 'expectedCount' | 'lateCount' | 'missingCount' | 'needsReviewCount'>>
+): LswVerificationSectionSummary {
+  const expectedCount = Math.max(0, Math.round(input.expectedCount || 0));
+  const completedCount = Math.max(0, Math.min(expectedCount, Math.round(input.completedCount || 0)));
+
+  return {
+    completedCount,
+    completionRate: calculateCompletionRate(completedCount, expectedCount),
+    expectedCount,
+    lateCount: Math.max(0, Math.round(input.lateCount || 0)),
+    missingCount: Math.max(0, Math.round(input.missingCount || 0)),
+    needsReviewCount: Math.max(0, Math.round(input.needsReviewCount || 0)),
+    sectionKey,
+    targetCompletionRate: LSW_VERIFICATION_SECTION_TARGETS[sectionKey],
+    title: LSW_VERIFICATION_SECTION_TITLES[sectionKey]
+  };
+}
+
+function getEmptyVerificationSections(): LswVerificationSectionSummary[] {
+  return (Object.keys(LSW_VERIFICATION_SECTION_TITLES) as LswVerificationSectionKey[]).map((sectionKey) => (
+    buildVerificationSectionSummary(sectionKey, {})
+  ));
+}
+
+function aggregateVerificationSections(sections: LswVerificationSectionSummary[]): LswVerificationSectionSummary[] {
+  return (Object.keys(LSW_VERIFICATION_SECTION_TITLES) as LswVerificationSectionKey[]).map((sectionKey) => {
+    const matchingSections = sections.filter((section) => section.sectionKey === sectionKey);
+
+    return buildVerificationSectionSummary(sectionKey, aggregateVerificationTotals(matchingSections));
+  });
+}
+
+function buildWeekDayMetricShell(
+  weekRange: { start: Date },
+  workDayCount: number
+): Array<Pick<LswVerificationDayMetric, 'dayKey' | 'dayLabel' | 'dateLabel' | 'isoDate'>> {
+  const normalizedWorkDayCount = Math.min(ALL_DAY_KEYS.length, Math.max(1, workDayCount));
+
+  return ALL_DAY_KEYS.slice(0, normalizedWorkDayCount).map((dayKey, index) => {
+    const date = new Date(weekRange.start);
+    date.setUTCDate(date.getUTCDate() + index);
+
+    return {
+      dayKey,
+      dayLabel: formatDayKeyLabel(dayKey),
+      dateLabel: formatShortDate(date),
+      isoDate: formatIsoDate(date)
+    };
+  });
+}
+
+function buildVerificationDayMetric(
+  metric: Pick<LswVerificationDayMetric, 'dayKey' | 'dayLabel' | 'dateLabel' | 'isoDate'>,
+  totals: Partial<Pick<LswVerificationDayMetric, 'completedCount' | 'completionRate' | 'dueState' | 'expectedCount' | 'lateCount' | 'lastCheckoffIso' | 'missingCount' | 'onTimeCount'>>
+): LswVerificationDayMetric {
+  const completedCount = totals.completedCount || 0;
+  const expectedCount = totals.expectedCount || 0;
+  const lateCount = totals.lateCount || 0;
+  const missingCount = totals.missingCount || 0;
+
+  return {
+    ...metric,
+    completedCount,
+    completionRate: typeof totals.completionRate === 'number'
+      ? Math.max(0, Math.min(100, Math.round(totals.completionRate)))
+      : calculateCompletionRate(completedCount, expectedCount),
+    dueState: totals.dueState || inferLswVerificationDayState({
+      completedCount,
+      expectedCount,
+      lateCount,
+      missingCount
+    }),
+    expectedCount,
+    lateCount,
+    lastCheckoffIso: totals.lastCheckoffIso || null,
+    missingCount,
+    onTimeCount: totals.onTimeCount ?? Math.max(0, completedCount - lateCount)
+  };
+}
+
+function inferLswVerificationDayState(input: {
+  completedCount: number;
+  expectedCount: number;
+  lateCount: number;
+  missingCount: number;
+}): LswVerificationDayMetric['dueState'] {
+  if (input.expectedCount <= 0) {
+    return 'no_work';
+  }
+
+  if (input.missingCount > 0 && input.completedCount === 0) {
+    return 'overdue';
+  }
+
+  if (input.lateCount > 0) {
+    return 'late';
+  }
+
+  if (input.completedCount >= input.expectedCount) {
+    return 'complete';
+  }
+
+  return 'partial';
+}
+
+function formatDayKeyLabel(dayKey: DayKey): string {
+  const labels: Record<DayKey, string> = {
+    fri: 'Fri',
+    mon: 'Mon',
+    sat: 'Sat',
+    sun: 'Sun',
+    thu: 'Thu',
+    tue: 'Tue',
+    wed: 'Wed'
+  };
+
+  return labels[dayKey];
+}
+
+function isDueDateRecordPastDue(
+  record: { dueDate?: string; dueTime?: string; timeZone?: string },
+  now: Date
+): boolean {
+  if (!record.dueDate || !isValidDateOnly(record.dueDate)) {
+    return false;
+  }
+
+  const dueTime = isValidTaskTime(record.dueTime) ? record.dueTime || '23:59' : '23:59';
+  const timeZone = normalizeTimeZone(record.timeZone);
+  const todayIso = formatIsoDate(dateOnlyFromDateInTimeZone(now, timeZone));
+
+  if (record.dueDate < todayIso) {
+    return true;
+  }
+
+  if (record.dueDate > todayIso) {
+    return false;
+  }
+
+  return dueTime < formatTimeInTimeZone(now, timeZone);
+}
+
+function formatTimeInTimeZone(date: Date, timeZone: string): string {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      hour: '2-digit',
+      hour12: false,
+      minute: '2-digit',
+      timeZone
+    }).formatToParts(date);
+    const values = new Map(parts.map((part) => [part.type, part.value]));
+    const hour = values.get('hour') || '00';
+    const minute = values.get('minute') || '00';
+
+    return `${hour.padStart(2, '0')}:${minute.padStart(2, '0')}`;
+  } catch {
+    return formatTimeInTimeZone(date, 'UTC');
+  }
+}
+
+function aggregateVerificationDepartments(users: LswVerificationUserSummary[]): LswVerificationDepartmentSummary[] {
+  const departments = new Map<string, LswVerificationDepartmentSummary>();
+
+  users.forEach((user) => {
+    const departmentKey = user.departmentId || 'unassigned';
+    const existingDepartment = departments.get(departmentKey) || {
+      completedCount: 0,
+      completionRate: 0,
+      departmentId: user.departmentId,
+      departmentName: user.departmentName,
+      expectedCount: 0,
+      lateCount: 0,
+      missingCount: 0,
+      needsReviewCount: 0,
+      userCount: 0
+    };
+
+    existingDepartment.completedCount += user.completedCount;
+    existingDepartment.expectedCount += user.expectedCount;
+    existingDepartment.lateCount += user.lateCount;
+    existingDepartment.missingCount += user.missingCount;
+    existingDepartment.needsReviewCount += user.needsReviewCount;
+    existingDepartment.userCount += 1;
+    existingDepartment.completionRate = calculateCompletionRate(existingDepartment.completedCount, existingDepartment.expectedCount);
+    departments.set(departmentKey, existingDepartment);
+  });
+
+  return [...departments.values()].sort((left, right) => right.completionRate - left.completionRate || left.departmentName.localeCompare(right.departmentName));
+}
+
+function buildLswVerificationTotals(
+  sections: LswVerificationSectionSummary[],
+  users: LswVerificationUserSummary[],
+  departments: LswVerificationDepartmentSummary[]
+): LswVerificationTotalsSummary {
+  const totals = aggregateVerificationTotals(sections);
+  const completedUsers = users.filter((user) => user.status === 'COMPLETE').length;
+  const inProgressUsers = users.filter((user) => user.status === 'IN_PROGRESS').length;
+  const notStartedUsers = users.filter((user) => user.status === 'NOT_STARTED').length;
+
+  return {
+    attentionCount: totals.missingCount + totals.needsReviewCount + totals.lateCount,
+    averageDepartmentCompletion: departments.length
+      ? Math.round(departments.reduce((total, department) => total + department.completionRate, 0) / departments.length)
+      : calculateCompletionRate(totals.completedCount, totals.expectedCount),
+    completedCount: totals.completedCount,
+    completedUsers,
+    completionRate: calculateCompletionRate(totals.completedCount, totals.expectedCount),
+    expectedCount: totals.expectedCount,
+    inProgressUsers,
+    lateCount: totals.lateCount,
+    missingCount: totals.missingCount,
+    needsReviewCount: totals.needsReviewCount,
+    notStartedUsers,
+    userCount: users.length
+  };
+}
+
+function buildLswVerificationPeopleSummary(
+  users: LswVerificationUserSummary[],
+  departments: LswVerificationDepartmentSummary[]
+): LswVerificationPeopleSummary {
+  const attentionUsers = users
+    .slice()
+    .sort((left, right) => {
+      const rightRisk = right.missingCount + right.needsReviewCount + right.lateCount;
+      const leftRisk = left.missingCount + left.needsReviewCount + left.lateCount;
+
+      return rightRisk - leftRisk || left.completionRate - right.completionRate || left.displayName.localeCompare(right.displayName);
+    });
+  const verificationUsers = users
+    .slice()
+    .sort((left, right) => {
+      const attentionDifference = (right.missingCount + right.needsReviewCount + right.lateCount) - (left.missingCount + left.needsReviewCount + left.lateCount);
+
+      return attentionDifference || left.completionRate - right.completionRate || left.displayName.localeCompare(right.displayName);
+    });
+
+  return {
+    attentionUsers,
+    departments,
+    statusMix: {
+      complete: users.filter((user) => user.status === 'COMPLETE').length,
+      inProgress: users.filter((user) => user.status === 'IN_PROGRESS').length,
+      notStarted: users.filter((user) => user.status === 'NOT_STARTED').length
+    },
+    verificationUsers
+  };
+}
+
+async function buildLswAdminDashboardOverview(
+  context: AuthorizedLswContext,
+  weekRange: { end: Date; start: Date },
+  users: LswVerificationUserSummary[]
+): Promise<LswAdminDashboardOverview> {
+  const [rca, rails, lsw] = await Promise.all([
+    buildLswAdminRcaOverview(context),
+    buildLswAdminRailsOverview(context),
+    buildLswAdminPersonalLswOverview(context, weekRange, users)
+  ]);
+
+  return { lsw, rails, rca };
+}
+
+async function buildLswAdminRcaOverview(context: AuthorizedLswContext): Promise<LswAdminDashboardOverview['rca']> {
+  const snapshot = await context.organizationRef
+    .collection(RCA_INCIDENTS_COLLECTION)
+    .where('tenantId', '==', context.tenantId)
+    .get();
+  const incidents = snapshot.docs
+    .map((doc) => doc.data() as RcaAdminIncidentRecord)
+    .filter((record) => (
+      record.status !== 'DELETED' &&
+      (record.companyId === context.tenantId || !record.companyId) &&
+      isAdminRecordInScope(context, record.departmentId)
+    ));
+  const openCount = incidents.filter((incident) => incident.status !== 'CLOSED').length;
+  const closedCount = incidents.filter((incident) => incident.status === 'CLOSED').length;
+  const createdByMeCount = incidents.filter((incident) => incident.createdByUid === context.uid).length;
+  const sharedCount = incidents.filter((incident) => Array.isArray(incident.participantUids) && incident.participantUids.length > 0).length;
+
+  return {
+    closedCount,
+    createdByMeCount,
+    createdByTeamCount: Math.max(0, incidents.length - createdByMeCount),
+    openCount,
+    sharedCount,
+    totalCount: incidents.length
+  };
+}
+
+async function buildLswAdminRailsOverview(context: AuthorizedLswContext): Promise<LswAdminDashboardOverview['rails']> {
+  const snapshot = await context.organizationRef
+    .collection(RAILS_ITEMS_COLLECTION)
+    .where('tenantId', '==', context.tenantId)
+    .get();
+  const records = snapshot.docs
+    .map((doc) => doc.data() as RailsAdminItemRecord)
+    .filter((record) => (
+      record.status !== 'Deleted' &&
+      record.status !== 'Cancelled' &&
+      record.status !== 'Archived' &&
+      isAdminRecordInScope(context, record.departmentId)
+    ));
+  const userNamesByUid = await getLswAdminUserNamesByUid(context, records.map((record) => record.ownerUid || '').filter(Boolean));
+  const today = parseDateOnly(formatLocalDateOnly(new Date()));
+
+  return {
+    byDepartment: buildLswAdminBreakdown(records, (record) => record.departmentName || 'Unassigned department'),
+    byResponsibleParty: buildLswAdminBreakdown(records, (record) => (
+      record.ownerDisplayName ||
+      userNamesByUid.get(record.ownerUid || '') ||
+      'Unassigned owner'
+    )),
+    closedCount: records.filter((record) => record.status === 'Closed').length,
+    inProgressCount: records.filter((record) => record.status === 'In Progress' || record.status === 'Verification' || record.status === 'Approved').length,
+    openCount: records.filter((record) => record.status !== 'Closed').length,
+    pastDueCount: records.filter((record) => {
+      const dueDate = record.dueDate ? tryParseDateOnly(record.dueDate) : null;
+
+      return Boolean(dueDate && dueDate.getTime() < today.getTime() && record.status !== 'Closed');
+    }).length,
+    totalCount: records.length
+  };
+}
+
+async function buildLswAdminPersonalLswOverview(
+  context: AuthorizedLswContext,
+  weekRange: { end: Date; start: Date },
+  users: LswVerificationUserSummary[]
+): Promise<LswAdminDashboardOverview['lsw']> {
+  const [todoSnapshot, railSnapshot, followUpSnapshot, scheduledSnapshot] = await Promise.all([
+    context.lswProfileRef.collection(LSW_TODO_TASKS_COLLECTION).get(),
+    context.lswProfileRef.collection(LSW_MEETING_RAILS_COLLECTION).get(),
+    context.lswProfileRef.collection(LSW_FOLLOW_UPS_COLLECTION).get(),
+    context.lswProfileRef.collection(LSW_SCHEDULED_TASKS_COLLECTION).get()
+  ]);
+  const tasks = [
+    ...todoSnapshot.docs.map((doc) => {
+      const record = doc.data() as LswTodoTaskRecord;
+
+      return buildPersonalLswUpcomingTask(context, record, record.task || 'To do task', 'To Do', record.dueDate, record.completed === true, weekRange);
+    }),
+    ...railSnapshot.docs.map((doc) => {
+      const record = doc.data() as LswMeetingRailRecord;
+
+      return buildPersonalLswUpcomingTask(context, record, record.rail || 'Meeting rail', 'RAILS', record.dueDate, record.completed === true, weekRange);
+    }),
+    ...followUpSnapshot.docs.map((doc) => {
+      const record = doc.data() as LswFollowUpRecord;
+
+      return buildPersonalLswUpcomingTask(context, record, record.followUp || 'Follow up', 'Follow Up', record.dueDate, false, weekRange);
+    }),
+    ...scheduledSnapshot.docs.map((doc) => {
+      const record = doc.data() as LswScheduledTaskRecord;
+
+      return buildPersonalLswUpcomingTask(context, record, record.task || 'Scheduled task', 'Scheduled', record.dueDate, false, weekRange);
+    })
+  ]
+    .filter((task): task is NonNullable<typeof task> => Boolean(task))
+    .sort((left, right) => {
+      const leftDate = tryParseDateOnly(left.dateLabel) || new Date(0);
+      const rightDate = tryParseDateOnly(right.dateLabel) || new Date(0);
+
+      return leftDate.getTime() - rightDate.getTime() || left.title.localeCompare(right.title);
+    })
+    .slice(0, 6)
+    .map((task) => ({
+      ...task,
+      dateLabel: formatShortDate(parseDateOnly(task.dateLabel))
+    }));
+
+  return {
+    standardWork: buildLswAdminStandardWorkOverview(users, weekRange),
+    upcomingPersonalTasks: tasks
+  };
+}
+
+function buildLswAdminStandardWorkOverview(
+  users: LswVerificationUserSummary[],
+  weekRange: { end: Date; start: Date }
+): LswAdminDashboardOverview['lsw']['standardWork'] {
+  const today = dateOnlyFromDateInTimeZone(new Date());
+  const effectiveEnd = new Date(Math.min(today.getTime(), weekRange.end.getTime()));
+  const elapsedUsers = users.map((user) => {
+    const elapsedMetrics = (user.dailyMetrics.daily_weekly_standard_tasks || [])
+      .filter((metric) => {
+        const metricDate = tryParseDateOnly(metric.isoDate);
+
+        return Boolean(metricDate && metricDate.getTime() >= weekRange.start.getTime() && metricDate.getTime() <= effectiveEnd.getTime());
+      });
+    const completedCount = elapsedMetrics.reduce((total, metric) => total + metric.completedCount, 0);
+    const expectedCount = elapsedMetrics.reduce((total, metric) => total + metric.expectedCount, 0);
+    const lateCount = elapsedMetrics.reduce((total, metric) => total + metric.lateCount, 0);
+    const missingCount = elapsedMetrics.reduce((total, metric) => total + metric.missingCount, 0);
+    const missedCount = elapsedMetrics.reduce((total, metric) => {
+      const metricDate = tryParseDateOnly(metric.isoDate);
+
+      return total + (metricDate && metricDate.getTime() < today.getTime() ? metric.missingCount : 0);
+    }, 0);
+    const openTodayCount = elapsedMetrics.reduce((total, metric) => {
+      const metricDate = tryParseDateOnly(metric.isoDate);
+
+      return total + (metricDate && metricDate.getTime() === today.getTime() ? metric.missingCount : 0);
+    }, 0);
+    const onTimeCount = elapsedMetrics.reduce((total, metric) => total + (metric.onTimeCount ?? Math.max(0, metric.completedCount - metric.lateCount)), 0);
+    const lastCheckoffIso = elapsedMetrics
+      .map((metric) => metric.lastCheckoffIso || '')
+      .filter(Boolean)
+      .sort()
+      .at(-1) || null;
+
+    return {
+      completedCount,
+      completedLateCount: lateCount,
+      completionRate: calculateCompletionRate(completedCount, expectedCount),
+      departmentName: user.departmentName,
+      displayName: user.displayName,
+      expectedCount,
+      lateCount,
+      lastCheckoffIso,
+      missedCount,
+      missingCount,
+      onTimeCount,
+      onTimeRate: calculateCompletionRate(onTimeCount, completedCount),
+      openTodayCount,
+      uid: user.uid
+    };
+  });
+  const dayMetricsByDate = new Map<string, LswAdminDashboardOverview['lsw']['standardWork']['dayMetrics'][number]>();
+
+  users.forEach((user) => {
+    (user.dailyMetrics.daily_weekly_standard_tasks || []).forEach((metric) => {
+      const metricDate = tryParseDateOnly(metric.isoDate);
+
+      if (!metricDate || metricDate.getTime() < weekRange.start.getTime() || metricDate.getTime() > effectiveEnd.getTime()) {
+        return;
+      }
+
+      const existing = dayMetricsByDate.get(metric.isoDate) || {
+        completedCount: 0,
+        completionRate: 0,
+        dateLabel: metric.dateLabel,
+        dayLabel: metric.dayLabel,
+        dueState: 'no_work' as LswVerificationDayMetric['dueState'],
+        expectedCount: 0,
+        isoDate: metric.isoDate,
+        lateCount: 0,
+        missingCount: 0,
+        onTimeCount: 0
+      };
+
+      existing.completedCount += metric.completedCount;
+      existing.expectedCount += metric.expectedCount;
+      existing.lateCount += metric.lateCount;
+      existing.missingCount += metric.missingCount;
+      existing.onTimeCount += metric.onTimeCount ?? Math.max(0, metric.completedCount - metric.lateCount);
+      existing.completionRate = calculateCompletionRate(existing.completedCount, existing.expectedCount);
+      existing.dueState = inferLswVerificationDayState({
+        completedCount: existing.completedCount,
+        expectedCount: existing.expectedCount,
+        lateCount: existing.lateCount,
+        missingCount: existing.missingCount
+      });
+      dayMetricsByDate.set(metric.isoDate, existing);
+    });
+  });
+
+  const completedCount = elapsedUsers.reduce((total, user) => total + user.completedCount, 0);
+  const expectedCount = elapsedUsers.reduce((total, user) => total + user.expectedCount, 0);
+  const lateCount = elapsedUsers.reduce((total, user) => total + user.lateCount, 0);
+  const missedCount = elapsedUsers.reduce((total, user) => total + user.missedCount, 0);
+  const missingCount = elapsedUsers.reduce((total, user) => total + user.missingCount, 0);
+  const onTimeCount = elapsedUsers.reduce((total, user) => total + user.onTimeCount, 0);
+  const openTodayCount = elapsedUsers.reduce((total, user) => total + user.openTodayCount, 0);
+
+  return {
+    activeUserCount: users.length,
+    completedCount,
+    completedLateCount: lateCount,
+    completionRate: calculateCompletionRate(completedCount, expectedCount),
+    dayMetrics: [...dayMetricsByDate.values()].sort((left, right) => left.isoDate.localeCompare(right.isoDate)),
+    expectedCount,
+    lateCount,
+    missedCount,
+    missingCount,
+    onTimeCount,
+    onTimeRate: calculateCompletionRate(onTimeCount, completedCount),
+    openTodayCount,
+    userMetrics: elapsedUsers.sort((left, right) => (
+      left.completionRate - right.completionRate ||
+      right.missingCount - left.missingCount ||
+      left.displayName.localeCompare(right.displayName)
+    )),
+    usersWithActivityCount: elapsedUsers.filter((user) => user.completedCount > 0).length,
+    weekToDateDayCount: dayMetricsByDate.size
+  };
+}
+
+function buildPersonalLswUpcomingTask(
+  context: AuthorizedLswContext,
+  record: { companyId?: string; lswId?: string; ownerUid?: string; status?: string; tenantId?: string },
+  title: string,
+  section: string,
+  dateOnly: string | undefined,
+  completed: boolean,
+  weekRange: { end: Date; start: Date }
+): LswAdminDashboardOverview['lsw']['upcomingPersonalTasks'][number] | null {
+  const dueDate = dateOnly ? tryParseDateOnly(dateOnly) : null;
+
+  if (
+    !dueDate ||
+    completed ||
+    !isActiveTenantLswRecord(record, context) ||
+    dueDate.getTime() > weekRange.end.getTime()
+  ) {
+    return null;
+  }
+
+  return {
+    dateLabel: dateOnly || formatIsoDate(dueDate),
+    section,
+    status: dueDate.getTime() < weekRange.start.getTime() ? 'Past due' : 'Due this week',
+    title: title.trim() || section
+  };
+}
+
+async function getLswAdminUserNamesByUid(context: AuthorizedLswContext, uids: string[]): Promise<Map<string, string>> {
+  const uniqueUids = [...new Set(uids)].filter(Boolean);
+  const entries = await Promise.all(uniqueUids.map(async (uid) => {
+    const snapshot = await context.organizationRef.collection('users').doc(uid).get();
+
+    if (!snapshot.exists) {
+      return null;
+    }
+
+    const user = snapshot.data() as TenantUserRecord;
+
+    return [uid, getDisplayName(user)] as const;
+  }));
+
+  return new Map(entries.filter((entry): entry is readonly [string, string] => Boolean(entry)));
+}
+
+function buildLswAdminBreakdown<T>(records: T[], getLabel: (record: T) => string): Array<{ label: string; value: number }> {
+  const counts = new Map<string, number>();
+
+  records.forEach((record) => {
+    const label = getLabel(record).trim() || 'Unassigned';
+
+    counts.set(label, (counts.get(label) || 0) + 1);
+  });
+
+  return [...counts.entries()]
+    .map(([label, value]) => ({ label, value }))
+    .sort((left, right) => right.value - left.value || left.label.localeCompare(right.label))
+    .slice(0, 6);
+}
+
+function isAdminRecordInScope(context: AuthorizedLswContext, departmentId: string | null | undefined): boolean {
+  if (context.role === 'ORG_ADMIN' || context.role === 'SYSTEM_ADMIN') {
+    return true;
+  }
+
+  return context.role === 'DEPT_ADMIN' && departmentId === context.department.departmentId;
+}
+
+function buildLswVerificationSidebarSummary(
+  context: AuthorizedLswContext,
+  week: LswContextResponse['week'],
+  sections: LswVerificationSectionSummary[]
+): LswVerificationSidebarSummary {
+  const scopeType = context.role === 'ORG_ADMIN' || context.role === 'SYSTEM_ADMIN'
+    ? 'Organization'
+    : 'Department';
+  const scopeName = context.role === 'ORG_ADMIN' || context.role === 'SYSTEM_ADMIN'
+    ? context.organization.companyName || 'Organization'
+    : context.department.name;
+  const getSectionRate = (sectionKey: LswVerificationSectionKey) => (
+    sections.find((section) => section.sectionKey === sectionKey)?.completionRate || 0
+  );
+
+  return {
+    periodLabel: `${week.weekBeginningLabel} - ${week.weekEndingLabel}`,
+    scopeLabel: `${scopeType} scope`,
+    scopeName,
+    scopeSubtitle: scopeType === 'Organization' ? 'Company-wide verification' : 'Department verification',
+    workstreams: [
+      {
+        completionRate: getSectionRate('daily_weekly_standard_tasks'),
+        key: 'LSW',
+        label: 'LSW'
+      },
+      {
+        completionRate: getSectionRate('plant_specific_cause_rca_triggers'),
+        key: 'RCA',
+        label: 'RCA'
+      },
+      {
+        completionRate: getSectionRate('level_1_2_3_meeting_rails'),
+        key: 'RAILS',
+        label: 'RAILS'
+      }
+    ]
+  };
+}
+
+function aggregateVerificationTotals(sections: Array<Pick<LswVerificationSectionSummary, 'completedCount' | 'expectedCount' | 'lateCount' | 'missingCount' | 'needsReviewCount'>>): Pick<LswVerificationSectionSummary, 'completedCount' | 'expectedCount' | 'lateCount' | 'missingCount' | 'needsReviewCount'> {
+  return sections.reduce((totals, section) => ({
+    completedCount: totals.completedCount + section.completedCount,
+    expectedCount: totals.expectedCount + section.expectedCount,
+    lateCount: totals.lateCount + section.lateCount,
+    missingCount: totals.missingCount + section.missingCount,
+    needsReviewCount: totals.needsReviewCount + section.needsReviewCount
+  }), {
+    completedCount: 0,
+    expectedCount: 0,
+    lateCount: 0,
+    missingCount: 0,
+    needsReviewCount: 0
+  });
+}
+
+function calculateCompletionRate(completedCount: number, expectedCount: number): number {
+  return expectedCount > 0
+    ? Math.round((completedCount / expectedCount) * 100)
+    : 0;
+}
+
+function isActiveTenantLswRecord(
+  record: { companyId?: string; lswId?: string; ownerUid?: string; status?: string; tenantId?: string },
+  context: AuthorizedLswContext
+): boolean {
+  return (
+    (record.status || 'ACTIVE') === 'ACTIVE' &&
+    record.tenantId === context.tenantId &&
+    record.companyId === context.tenantId &&
+    record.ownerUid === context.uid &&
+    record.lswId === context.lswProfile.lswId
+  );
+}
+
+function isDateOnlyInRange(value: string | undefined, range: { end: Date; start: Date }): boolean {
+  const date = value ? tryParseDateOnly(value) : null;
+
+  return Boolean(date && date.getTime() >= range.start.getTime() && date.getTime() <= range.end.getTime());
+}
+
+function isDateOnlyDueByRangeEnd(value: string | undefined, range: { end: Date }): boolean {
+  const date = value ? tryParseDateOnly(value) : null;
+
+  return Boolean(date && date.getTime() <= range.end.getTime());
+}
+
+function isScheduledTaskInWeek(record: LswScheduledTaskRecord, range: { end: Date; start: Date }): boolean {
+  const dueDate = record.dueDate ? tryParseDateOnly(record.dueDate) : null;
+
+  if (!dueDate) {
+    return false;
+  }
+
+  if (dueDate.getTime() >= range.start.getTime() && dueDate.getTime() <= range.end.getTime()) {
+    return true;
+  }
+
+  return dueDate.getTime() <= range.end.getTime() && Boolean(record.frequency);
+}
+
+async function getAuthorizedLswContext(decodedToken: DecodedIdToken, input: LswContextInput = {}): Promise<AuthorizedLswContext> {
   const session = await buildAuthSession(decodedToken);
   const { role, status, tenantId } = session.user;
 
@@ -1791,35 +3714,80 @@ async function getAuthorizedLswContext(decodedToken: DecodedIdToken): Promise<Au
   }
 
   const organization = organizationSnapshot.data() as OrganizationRecord;
-  const user = userSnapshot.data() as TenantUserRecord;
+  const actorUser = userSnapshot.data() as TenantUserRecord;
 
   if (
     organization.status !== 'ACTIVE' ||
-    user.status !== 'ACTIVE' ||
+    actorUser.status !== 'ACTIVE' ||
     (organization.tenantId && organization.tenantId !== tenantId) ||
-    (user.tenantId && user.tenantId !== tenantId)
+    (actorUser.tenantId && actorUser.tenantId !== tenantId)
   ) {
     throw authorizationError('Your profile is not active.');
   }
 
-  const department = await resolveUserDepartment(tenantId, user, role);
+  const actorDepartment = await resolveUserDepartment(tenantId, actorUser, role);
+  const observedUid = normalizeObservedUserId(input.observeUserId);
+  const isObservation = Boolean(observedUid && observedUid !== decodedToken.uid);
+  let targetUid = decodedToken.uid;
+  let targetUser = actorUser;
+
+  if (isObservation) {
+    if (!canObserveLswProfiles(role)) {
+      throw authorizationError('You do not have permission to observe Standard Work.');
+    }
+
+    const targetSnapshot = await organizationRef.collection('users').doc(observedUid as string).get();
+
+    if (!targetSnapshot.exists) {
+      throw notFoundError('The selected employee was not found.');
+    }
+
+    const observedUser = targetSnapshot.data() as TenantUserRecord;
+
+    if (
+      observedUser.status !== 'ACTIVE' ||
+      (observedUser.tenantId && observedUser.tenantId !== tenantId)
+    ) {
+      throw authorizationError('The selected employee is not available.');
+    }
+
+    const actorContextForScope: Pick<AuthorizedLswContext, 'actorRole' | 'actorUid' | 'department' | 'tenantId'> = {
+      actorRole: role,
+      actorUid: decodedToken.uid,
+      department: actorDepartment,
+      tenantId
+    };
+
+    if (!canActorObserveLswUser(actorContextForScope, observedUser)) {
+      throw authorizationError('The selected employee is outside your observation scope.');
+    }
+
+    targetUid = observedUid as string;
+    targetUser = observedUser;
+  }
+
+  const targetRole = targetUser.role || 'EMPLOYEE';
+  const department = await resolveUserDepartment(tenantId, targetUser, targetRole);
   const { lswProfile, lswProfileRef } = await getOrCreateLswProfile({
     department,
     organizationRef,
     tenantId,
-    uid: decodedToken.uid
+    uid: targetUid
   });
 
   return {
+    actorRole: role,
+    actorUid: decodedToken.uid,
     department,
+    isObservation,
     lswProfile,
     lswProfileRef,
     organization,
     organizationRef,
-    role,
+    role: targetRole,
     tenantId,
-    user,
-    uid: decodedToken.uid
+    user: targetUser,
+    uid: targetUid
   };
 }
 
@@ -1845,6 +3813,8 @@ async function getOrCreateLswProfile(input: {
     departmentId: input.department.departmentId,
     departmentName: input.department.name,
     lswId,
+    observationAvailability: normalizeObservationAvailability(existing?.observationAvailability),
+    observationAvailabilityNote: normalizeObservationAvailabilityNote(existing?.observationAvailabilityNote),
     ownerUid: input.uid,
     status: 'ACTIVE',
     tenantId: input.tenantId,
@@ -1855,6 +3825,7 @@ async function getOrCreateLswProfile(input: {
     existing.departmentId !== input.department.departmentId ||
     existing.departmentName !== input.department.name ||
     existing.lswId !== lswId ||
+    !existing.observationAvailability ||
     existing.ownerUid !== input.uid ||
     existing.status !== 'ACTIVE' ||
     existing.tenantId !== input.tenantId ||
@@ -1866,6 +3837,7 @@ async function getOrCreateLswProfile(input: {
       departmentId: input.department.departmentId,
       departmentName: input.department.name,
       lswId,
+      observationAvailability: nextProfile.observationAvailability,
       ownerUid: input.uid,
       status: 'ACTIVE',
       tenantId: input.tenantId,
@@ -1886,7 +3858,368 @@ async function getOrCreateLswProfile(input: {
   };
 }
 
+function canObserveLswProfiles(role: SynzappRole): boolean {
+  return role === 'ORG_ADMIN' || role === 'SYSTEM_ADMIN' || role === 'DEPT_ADMIN';
+}
+
+function canActorObserveLswUser(
+  context: Pick<AuthorizedLswContext, 'actorRole' | 'actorUid' | 'department' | 'tenantId'>,
+  user: TenantUserRecord
+): boolean {
+  if (user.tenantId && user.tenantId !== context.tenantId) {
+    return false;
+  }
+
+  if (context.actorRole === 'ORG_ADMIN' || context.actorRole === 'SYSTEM_ADMIN') {
+    return true;
+  }
+
+  if (context.actorRole !== 'DEPT_ADMIN') {
+    return false;
+  }
+
+  return Boolean(context.department.departmentId && user.departmentId === context.department.departmentId);
+}
+
+function buildLswObservationCandidate(
+  uid: string,
+  user: TenantUserRecord,
+  department?: LswContextResponse['department'],
+  lswProfile?: LswProfileRecord
+): LswObservationCandidate {
+  const availability = normalizeObservationAvailability(lswProfile?.observationAvailability);
+  const photo = buildLswUserProfilePhotoSummary(uid, user);
+
+  return {
+    availability,
+    availabilityLabel: formatObservationAvailability(availability),
+    departmentId: department?.departmentId ?? user.departmentId ?? null,
+    departmentName: department?.name || user.departmentName || 'Unassigned department',
+    displayName: getDisplayName(user),
+    profilePhotoCacheKey: photo.profilePhotoCacheKey,
+    profilePhotoUrl: photo.profilePhotoUrl,
+    role: user.role || 'EMPLOYEE',
+    roleName: formatRoleName(user.roleName, user.role || 'EMPLOYEE'),
+    uid
+  };
+}
+
+function buildLswUserProfilePhotoSummary(
+  uid: string,
+  user: TenantUserRecord
+): Pick<LswObservationCandidate, 'profilePhotoCacheKey' | 'profilePhotoUrl'> {
+  const profilePhotoUrl = user.profilePhotoUrl || user.profilePhotoStoragePath || null;
+  const profilePhotoCacheKey = user.profilePhotoCacheKey
+    || (profilePhotoUrl ? `lsw-profile-photo-${uid}-${String(user.profilePhotoVersion || 1)}` : null);
+
+  return {
+    profilePhotoCacheKey,
+    profilePhotoUrl
+  };
+}
+
+async function listObservationVisitors(
+  context: AuthorizedLswContext,
+  weekKey: string
+): Promise<LswObservationVisitorSummary[]> {
+  const snapshot = await context.lswProfileRef
+    .collection(LSW_OBSERVATION_VIEWS_COLLECTION)
+    .where('weekKey', '==', weekKey)
+    .get();
+
+  return snapshot.docs
+    .map((doc) => {
+      const record = doc.data() as Record<string, unknown>;
+      const viewDateKeys = Array.isArray(record.viewDateKeys)
+        ? record.viewDateKeys.filter((value): value is string => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value))
+        : [];
+      const viewCount = viewDateKeys.length || Math.min(safeNumber(record.viewCount), 1);
+
+      return {
+        departmentName: safeString(record.actorDepartmentName, 'Unassigned department'),
+        displayName: safeString(record.actorDisplayName, 'Synzapp user'),
+        lastViewedAtIso: safeNullableString(record.lastViewedAtIso),
+        profilePhotoCacheKey: safeNullableString(record.actorProfilePhotoCacheKey),
+        profilePhotoUrl: safeNullableString(record.actorProfilePhotoUrl),
+        roleName: safeString(record.actorRoleName, 'Leader'),
+        uid: safeString(record.actorUid, doc.id),
+        viewCount
+      };
+    })
+    .sort((left, right) => timestampSortValue(right.lastViewedAtIso) - timestampSortValue(left.lastViewedAtIso));
+}
+
+async function countActiveObservationNotes(context: AuthorizedLswContext, weekKey: string): Promise<number> {
+  const snapshot = await context.lswProfileRef
+    .collection(LSW_OBSERVATION_NOTES_COLLECTION)
+    .where('weekKey', '==', weekKey)
+    .where('status', '==', 'ACTIVE')
+    .get();
+
+  return snapshot.size;
+}
+
+async function listObservationAvailabilityHistory(
+  context: AuthorizedLswContext,
+  weekKey: string
+): Promise<LswObservationAvailabilityHistorySummary[]> {
+  const snapshot = await context.lswProfileRef
+    .collection(LSW_OBSERVATION_AVAILABILITY_HISTORY_COLLECTION)
+    .where('weekKeys', 'array-contains', weekKey)
+    .where('status', '==', 'ACTIVE')
+    .get();
+
+  return snapshot.docs
+    .map((doc) => mapObservationAvailabilityHistory(doc.data() as LswObservationAvailabilityLogRecord))
+    .sort((left, right) => timestampSortValue(right.changedAtIso) - timestampSortValue(left.changedAtIso));
+}
+
+function mapObservationAvailabilityHistory(
+  record: LswObservationAvailabilityLogRecord
+): LswObservationAvailabilityHistorySummary {
+  const availability = normalizeObservationAvailability(record.availability);
+
+  return {
+    availability,
+    availabilityLabel: formatObservationAvailability(availability),
+    changedAtIso: safeNullableString(record.changedAtIso),
+    changedBy: {
+      departmentName: safeString(record.changedByDepartmentName, 'Unassigned department'),
+      displayName: safeString(record.changedByDisplayName, 'Synzapp user'),
+      roleName: safeString(record.changedByRoleName, 'Leader'),
+      uid: safeString(record.changedByUid, '')
+    },
+    endDate: safeNullableString(record.endDate),
+    note: normalizeObservationAvailabilityNote(record.note),
+    startDate: safeNullableString(record.startDate)
+  };
+}
+
+function buildObservationAvailabilityWeekKeys(
+  calendar: CalendarYearSettings,
+  startDate: string | null,
+  endDate: string | null
+): string[] {
+  if (!startDate || !endDate) {
+    return [];
+  }
+
+  const start = tryParseDateOnly(startDate);
+  const end = tryParseDateOnly(endDate);
+
+  if (!start || !end) {
+    return [];
+  }
+
+  const weekKeys = new Set<string>();
+  const cursor = new Date(start.getTime());
+
+  while (cursor.getTime() <= end.getTime()) {
+    const selection = getWeekSelectionForDate(calendar, cursor);
+
+    weekKeys.add(formatWeekKey(selection.year, selection.week));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+
+  return Array.from(weekKeys);
+}
+
+function mapObservationNote(
+  noteId: string,
+  record: Record<string, unknown>,
+  actorUid: string,
+  actorRole: SynzappRole
+): LswObservationNote {
+  const sectionKey = normalizeObservationSectionKey(safeString(record.sectionKey, DAILY_TASK_SECTION_KEY) as LswVerificationSectionKey);
+  const noteActorUid = safeString(record.actorUid, '');
+
+  return {
+    author: {
+      departmentName: safeString(record.actorDepartmentName, 'Unassigned department'),
+      displayName: safeString(record.actorDisplayName, 'Synzapp user'),
+      profilePhotoCacheKey: safeNullableString(record.actorProfilePhotoCacheKey),
+      profilePhotoUrl: safeNullableString(record.actorProfilePhotoUrl),
+      roleName: safeString(record.actorRoleName, 'Leader'),
+      uid: noteActorUid
+    },
+    body: safeString(record.body, ''),
+    canWithdraw: noteActorUid === actorUid || actorRole === 'ORG_ADMIN' || actorRole === 'SYSTEM_ADMIN',
+    createdAtIso: safeNullableString(record.createdAtIso),
+    noteId,
+    sectionKey,
+    sectionTitle: LSW_VERIFICATION_SECTION_TITLES[sectionKey],
+    weekKey: safeString(record.weekKey, '')
+  };
+}
+
+function assertObservationNoteBelongsToContext(record: Record<string, unknown>, context: AuthorizedLswContext): void {
+  if (
+    safeString(record.tenantId, '') !== context.tenantId ||
+    safeString(record.ownerUid, '') !== context.uid ||
+    safeString(record.lswId, '') !== context.lswProfile.lswId
+  ) {
+    throw authorizationError('The observation note is outside your observation scope.');
+  }
+}
+
+function normalizeObservationAvailability(value: unknown): LswObservationAvailability {
+  return value === 'ON_LEAVE' || value === 'TEMPORARILY_UNAVAILABLE' || value === 'ACTIVE'
+    ? value
+    : 'ACTIVE';
+}
+
+function normalizeObservationAvailabilityDate(value: unknown, fieldName: string): string {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw validationError(`${fieldName} is required.`);
+  }
+
+  const normalizedValue = value.trim();
+
+  if (!tryParseDateOnly(normalizedValue)) {
+    throw validationError(`${fieldName} must be a valid date.`);
+  }
+
+  return normalizedValue;
+}
+
+function normalizeObservationAvailabilityWindow(
+  availability: LswObservationAvailability,
+  input: LswObservationAvailabilityInput
+): { endDate: string | null; startDate: string | null } {
+  if (availability === 'ACTIVE') {
+    return {
+      endDate: null,
+      startDate: null
+    };
+  }
+
+  const startDate = normalizeObservationAvailabilityDate(input.startDate, 'Start date');
+  const endDate = normalizeObservationAvailabilityDate(input.endDate, 'End date');
+
+  if (endDate < startDate) {
+    throw validationError('End date must be the same as or after the start date.');
+  }
+
+  return {
+    endDate,
+    startDate
+  };
+}
+
+async function resolveEffectiveObservationAvailability(
+  context: AuthorizedLswContext,
+  input: LswContextInput
+): Promise<{ availability: LswObservationAvailability; endDate: string | null; startDate: string | null }> {
+  const availability = normalizeObservationAvailability(context.lswProfile.observationAvailability);
+  const startDate = safeNullableString(context.lswProfile.observationAvailabilityStartDate);
+  const endDate = safeNullableString(context.lswProfile.observationAvailabilityEndDate);
+
+  if (availability === 'ACTIVE') {
+    return {
+      availability: 'ACTIVE',
+      endDate: null,
+      startDate: null
+    };
+  }
+
+  const todayIso = formatIsoDate(dateOnlyFromDateInTimeZone(new Date(), input.timeZone));
+
+  if (endDate && endDate < todayIso) {
+    await context.lswProfileRef.set({
+      observationAvailability: 'ACTIVE',
+      observationAvailabilityEndDate: null,
+      observationAvailabilityNote: '',
+      observationAvailabilityResetAt: fieldValue.serverTimestamp(),
+      observationAvailabilityStartDate: null,
+      updatedAt: fieldValue.serverTimestamp()
+    }, { merge: true });
+
+    context.lswProfile.observationAvailability = 'ACTIVE';
+    context.lswProfile.observationAvailabilityEndDate = undefined;
+    context.lswProfile.observationAvailabilityNote = '';
+    context.lswProfile.observationAvailabilityStartDate = undefined;
+
+    return {
+      availability: 'ACTIVE',
+      endDate: null,
+      startDate: null
+    };
+  }
+
+  return {
+    availability,
+    endDate,
+    startDate
+  };
+}
+
+function normalizeObservationAvailabilityNote(value: unknown): string {
+  return typeof value === 'string' ? value.trim().slice(0, 240) : '';
+}
+
+function formatObservationAvailability(value: unknown): string {
+  return LSW_OBSERVATION_AVAILABILITY_LABELS[normalizeObservationAvailability(value)];
+}
+
+function normalizeObservationNoteBody(value: unknown): string {
+  const body = typeof value === 'string' ? value.trim() : '';
+
+  if (!body) {
+    throw validationError('Add a note before saving.');
+  }
+
+  return body.slice(0, 800);
+}
+
+function normalizeObservationSectionKey(value: LswVerificationSectionKey): LswVerificationSectionKey {
+  if (value && Object.prototype.hasOwnProperty.call(LSW_VERIFICATION_SECTION_TITLES, value)) {
+    return value;
+  }
+
+  throw validationError('Select a valid LSW section.');
+}
+
+function normalizeDocumentId(value: string): string {
+  const candidate = typeof value === 'string' ? value.trim() : '';
+
+  if (!/^[A-Za-z0-9_-]{8,128}$/.test(candidate)) {
+    throw validationError('The record identifier is invalid.');
+  }
+
+  return candidate;
+}
+
+function safeString(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+}
+
+function safeNullableString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function safeNumber(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function timestampSortValue(value: string | null): number {
+  return value ? Date.parse(value) || 0 : 0;
+}
+
+function normalizeObservedUserId(value: string | undefined): string | null {
+  const candidate = typeof value === 'string' ? value.trim() : '';
+
+  if (!candidate) {
+    return null;
+  }
+
+  return /^[A-Za-z0-9_-]{8,128}$/.test(candidate) ? candidate : null;
+}
+
 async function seedDefaultDailyTasksIfEmpty(context: AuthorizedLswContext): Promise<void> {
+  if (context.isObservation) {
+    return;
+  }
+
   const snapshot = await context.lswProfileRef
     .collection(LSW_DAILY_TASKS_COLLECTION)
     .limit(1)

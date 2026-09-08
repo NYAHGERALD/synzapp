@@ -7,6 +7,7 @@ RUN npm ci
 
 COPY tsconfig.json ./
 COPY src ./src
+COPY assets ./assets
 RUN npm run build
 RUN npm prune --omit=dev
 
@@ -16,6 +17,7 @@ ENV NODE_ENV=production
 WORKDIR /app
 
 COPY --chown=node:node --from=build /app/package*.json ./
+COPY --chown=node:node --from=build /app/assets ./assets
 COPY --chown=node:node --from=build /app/node_modules ./node_modules
 COPY --chown=node:node --from=build /app/dist ./dist
 

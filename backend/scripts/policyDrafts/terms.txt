@@ -1,0 +1,119 @@
+SYNZAPP TERMS OF SERVICE
+
+These terms govern an organization's use of Synzapp. They are written plainly on
+purpose: an agreement that has to be decoded is an agreement that will be
+misunderstood by both sides.
+
+1. WHO THIS AGREEMENT IS WITH
+
+This agreement is between Synzapp and the organization that subscribes to the
+service. Individual users access Synzapp through their organization and do not
+enter into a separate agreement with us.
+
+Where a person accepts these terms, they confirm they are authorised to bind
+their organization.
+
+2. WHAT SYNZAPP PROVIDES
+
+Synzapp is a workplace platform comprising:
+- Messaging between an organization's people, encrypted so that only intended
+  recipients can read it.
+- Live interpretation for meetings, with transcripts and summaries.
+- Operating disciplines: Leaders Standard Work, root cause analysis, and an
+  improvement loop.
+- Administrative controls over retention, legal holds and the production of
+  records.
+
+We may improve and change the service. Where a change removes a capability an
+organization relies on, we will give reasonable notice rather than withdrawing
+it without warning.
+
+3. THE ORGANIZATION'S RESPONSIBILITIES
+
+The organization is responsible for:
+- Who it grants access to, and removing access when someone leaves.
+- Telling its staff how the service is configured, and in particular where a
+  readable compliance archive is enabled, that their work conversations are
+  retained by their employer and can be produced.
+- Its retention settings, and the consequences of them. Content removed under a
+  rule the organization configured cannot be recovered by us.
+- The lawfulness of the content its people create and of its instructions to us.
+
+4. WHAT WE DO WITH THE ORGANIZATION'S INFORMATION
+
+We process it to provide the service and for no other purpose. We do not sell
+it, use it for advertising, or use customer content to train models.
+
+Messages are encrypted such that Synzapp cannot read them. Where the
+organization enables a compliance archive, the readable copy is protected by a
+key belonging to that organization.
+
+Our handling of information is described in the Privacy Policy, which forms part
+of these terms.
+
+5. AVAILABILITY
+
+We aim to keep Synzapp available and to restore it promptly when it is not.
+
+We do not currently offer a contractual availability guarantee or service credit
+scheme. We would rather say so than publish a figure we are not yet in a
+position to stand behind. Where an organization requires committed availability
+terms, that is a conversation to have before subscribing.
+
+6. SECURITY
+
+We protect information using the measures described in the Privacy Policy,
+including encryption in transit and at rest, access tied to a verified telephone
+number, and recorded administrative actions.
+
+No service can promise that a compromise is impossible. If one occurs, we will
+tell affected organizations without undue delay.
+
+7. SUSPENSION
+
+We may suspend access where it is necessary to protect the service or other
+customers. Examples include an account that is compromised or is being used to
+attack the platform. We will restore access as soon as the cause is resolved and
+will explain what happened.
+
+8. ENDING THE AGREEMENT
+
+An organization may stop using Synzapp at any time.
+
+On termination, the organization may export its records before deletion. We will
+say clearly how long that window is and will not delete anything within it.
+
+Where records are subject to a legal hold, deletion is refused until the hold is
+lifted. This is deliberate: destroying preserved evidence on request is not a
+service we will provide.
+
+9. INTELLECTUAL PROPERTY
+
+The organization keeps all rights in the content its people create. We claim no
+ownership of it.
+
+Synzapp keeps all rights in the software and everything we provide. Nothing in
+these terms transfers ownership of it.
+
+10. LIABILITY
+
+Nothing in these terms limits liability that cannot lawfully be limited,
+including for death or personal injury caused by negligence, or for fraud.
+
+Subject to that, the extent of each party's liability is to be agreed in the
+subscription documentation for the organization concerned.
+
+11. CHANGES TO THESE TERMS
+
+Every version is retained with the date it took effect. Where a change
+materially affects an organization we will tell that organization directly, and
+give reasonable notice before it takes effect.
+
+12. GOVERNING LAW
+
+The law governing this agreement and the courts having jurisdiction are set out
+in the subscription documentation for the organization concerned.
+
+13. CONTACT
+
+Use the contact form on our website.

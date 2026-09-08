@@ -101,6 +101,14 @@ export async function saveSynzappCallStore(
   );
 }
 
+export async function clearSynzappCallStore(scope: SynzappCallStoreScope): Promise<void> {
+  if (!scope.ownerUid || !scope.tenantId) {
+    return;
+  }
+
+  await AsyncStorage.removeItem(getSynzappCallStoreKey(scope));
+}
+
 export function upsertSynzappCallHistoryEntry(
   history: SynzappCallHistoryEntry[],
   entry: SynzappCallHistoryEntry

@@ -30,6 +30,11 @@ export interface LswContext {
   settings: {
     workDaysPerWeek: WorkDaysPerWeek;
   };
+  observation: {
+    canObserve: boolean;
+    isObserving: boolean;
+    observedUser: LswObservationCandidate | null;
+  };
   user: {
     displayName: string;
     role: string;
@@ -58,6 +63,79 @@ export type LswDayStatus = 'not_completed' | 'completed_on_time' | 'completed_la
 export type LswDayCompletionTiming = 'not_completed' | 'within_window' | 'late' | 'early';
 export type LswScheduledTaskFrequency = 'BI_WEEKLY' | 'MONTHLY' | 'QUARTERLY' | 'ANNUALLY';
 export type WorkDaysPerWeek = 5 | 6 | 7;
+
+export interface LswObservationCandidate {
+  availability: LswObservationAvailability;
+  availabilityLabel: string;
+  departmentId: string | null;
+  departmentName: string;
+  displayName: string;
+  profilePhotoCacheKey: string | null;
+  profilePhotoUrl: string | null;
+  role: string;
+  roleName: string;
+  uid: string;
+}
+
+export type LswObservationAvailability = 'ACTIVE' | 'ON_LEAVE' | 'TEMPORARILY_UNAVAILABLE';
+
+export interface LswObservationVisitorSummary {
+  departmentName: string;
+  displayName: string;
+  lastViewedAtIso: string | null;
+  profilePhotoCacheKey: string | null;
+  profilePhotoUrl: string | null;
+  roleName: string;
+  uid: string;
+  viewCount: number;
+}
+
+export interface LswObservationAvailabilityHistorySummary {
+  availability: LswObservationAvailability;
+  availabilityLabel: string;
+  changedAtIso: string | null;
+  changedBy: {
+    departmentName: string;
+    displayName: string;
+    roleName: string;
+    uid: string;
+  };
+  endDate: string | null;
+  note: string;
+  startDate: string | null;
+}
+
+export interface LswObservationStatus {
+  availability: LswObservationAvailability;
+  availabilityEndDate: string | null;
+  availabilityHistory: LswObservationAvailabilityHistorySummary[];
+  availabilityLabel: string;
+  availabilityNote: string;
+  availabilityStartDate: string | null;
+  lastObservedAtIso: string | null;
+  noteCount: number;
+  recentVisitors: LswObservationVisitorSummary[];
+  viewedBy: LswObservationVisitorSummary[];
+  weekKey: string;
+}
+
+export interface LswObservationNote {
+  author: {
+    departmentName: string;
+    displayName: string;
+    profilePhotoCacheKey: string | null;
+    profilePhotoUrl: string | null;
+    roleName: string;
+    uid: string;
+  };
+  body: string;
+  canWithdraw: boolean;
+  createdAtIso: string | null;
+  noteId: string;
+  sectionKey: LswVerificationSectionKey;
+  sectionTitle: string;
+  weekKey: string;
+}
 
 export interface LswWeekPreviewRow {
   endDate: string;
@@ -189,6 +267,224 @@ export interface LswScheduledTask {
 
 export interface LswScheduledTasksResponse {
   tasks: LswScheduledTask[];
+}
+
+export type LswVerificationSectionKey =
+  | 'daily_weekly_standard_tasks'
+  | 'plant_specific_cause_rca_triggers'
+  | 'to_do_today_this_week'
+  | 'level_1_2_3_meeting_rails'
+  | 'improvement_projects_updates'
+  | 'follow_ups'
+  | 'scheduled_tasks_meetings'
+  | 'personal_objectives_goals';
+
+export interface LswVerificationSectionSummary {
+  completedCount: number;
+  completionRate: number;
+  expectedCount: number;
+  lateCount: number;
+  missingCount: number;
+  needsReviewCount: number;
+  sectionKey: LswVerificationSectionKey;
+  targetCompletionRate: number;
+  title: string;
+}
+
+export interface LswVerificationDayMetric {
+  completedCount: number;
+  completionRate: number;
+  dayKey: DayKey;
+  dayLabel: string;
+  dateLabel: string;
+  dueState: 'complete' | 'late' | 'no_work' | 'not_due' | 'overdue' | 'partial';
+  expectedCount: number;
+  isoDate: string;
+  lateCount: number;
+  lastCheckoffIso?: string | null;
+  missingCount: number;
+  onTimeCount?: number;
+}
+
+export type LswVerificationDailyMetrics = Partial<Record<
+  Extract<
+    LswVerificationSectionKey,
+    'daily_weekly_standard_tasks' | 'level_1_2_3_meeting_rails' | 'to_do_today_this_week'
+  >,
+  LswVerificationDayMetric[]
+>>;
+
+export interface LswVerificationUserSummary {
+  completedCount: number;
+  completionRate: number;
+  dailyMetrics: LswVerificationDailyMetrics;
+  departmentId: string | null;
+  departmentName: string;
+  displayName: string;
+  expectedCount: number;
+  lateCount: number;
+  missingCount: number;
+  needsReviewCount: number;
+  role: string;
+  roleName: string;
+  sections: LswVerificationSectionSummary[];
+  status: 'COMPLETE' | 'IN_PROGRESS' | 'NOT_STARTED';
+  uid: string;
+}
+
+export interface LswVerificationDepartmentSummary {
+  completedCount: number;
+  completionRate: number;
+  departmentId: string | null;
+  departmentName: string;
+  expectedCount: number;
+  lateCount: number;
+  missingCount: number;
+  needsReviewCount: number;
+  userCount: number;
+}
+
+export interface LswVerificationTotalsSummary {
+  attentionCount: number;
+  averageDepartmentCompletion: number;
+  completedCount: number;
+  completedUsers: number;
+  completionRate: number;
+  expectedCount: number;
+  inProgressUsers: number;
+  lateCount: number;
+  missingCount: number;
+  needsReviewCount: number;
+  notStartedUsers: number;
+  userCount: number;
+}
+
+export interface LswVerificationPeopleSummary {
+  attentionUsers: LswVerificationUserSummary[];
+  departments: LswVerificationDepartmentSummary[];
+  statusMix: {
+    complete: number;
+    inProgress: number;
+    notStarted: number;
+  };
+  verificationUsers: LswVerificationUserSummary[];
+}
+
+export interface LswVerificationSidebarSummary {
+  periodLabel: string;
+  scopeLabel: string;
+  scopeName: string;
+  scopeSubtitle: string;
+  workstreams: Array<{
+    completionRate: number;
+    key: 'LSW' | 'RAILS' | 'RCA';
+    label: string;
+  }>;
+}
+
+export interface LswVerificationTrendPoint {
+  attentionCount: number;
+  completedCount: number;
+  completionRate: number;
+  departments: LswVerificationDepartmentSummary[];
+  expectedCount: number;
+  sections: LswVerificationSectionSummary[];
+  weekBeginningLabel: string;
+  weekEndingLabel: string;
+  weekKey: string;
+}
+
+export interface LswAdminDashboardOverview {
+  lsw: {
+    standardWork: {
+      activeUserCount: number;
+      completedCount: number;
+      completionRate: number;
+      dayMetrics: Array<{
+        completedCount: number;
+        completionRate: number;
+        dateLabel: string;
+        dayLabel: string;
+        dueState?: LswVerificationDayMetric['dueState'];
+        expectedCount: number;
+        isoDate: string;
+        lateCount: number;
+        missingCount: number;
+        onTimeCount: number;
+      }>;
+      expectedCount: number;
+      lateCount: number;
+      completedLateCount?: number;
+      missedCount?: number;
+      missingCount: number;
+      onTimeCount: number;
+      onTimeRate: number;
+      openTodayCount?: number;
+      userMetrics: Array<{
+        completedCount: number;
+        completedLateCount?: number;
+        completionRate: number;
+        departmentName: string;
+        displayName: string;
+        expectedCount: number;
+        lateCount: number;
+        lastCheckoffIso: string | null;
+        missedCount?: number;
+        missingCount: number;
+        onTimeCount: number;
+        onTimeRate: number;
+        openTodayCount?: number;
+        uid: string;
+      }>;
+      usersWithActivityCount: number;
+      weekToDateDayCount: number;
+    };
+    upcomingPersonalTasks: Array<{
+      dateLabel: string;
+      section: string;
+      status: 'Due this week' | 'Past due';
+      title: string;
+    }>;
+  };
+  rails: {
+    byDepartment: Array<{ label: string; value: number }>;
+    byResponsibleParty: Array<{ label: string; value: number }>;
+    closedCount: number;
+    inProgressCount: number;
+    openCount: number;
+    pastDueCount: number;
+    totalCount: number;
+  };
+  rca: {
+    closedCount: number;
+    createdByMeCount: number;
+    createdByTeamCount: number;
+    openCount: number;
+    sharedCount: number;
+    totalCount: number;
+  };
+}
+
+export interface LswVerificationSummaryResponse {
+  dashboard: LswAdminDashboardOverview;
+  departments: LswVerificationDepartmentSummary[];
+  generatedAtIso: string;
+  people: LswVerificationPeopleSummary;
+  sidebar: LswVerificationSidebarSummary;
+  scope: {
+    departmentId: string | null;
+    departmentName: string;
+    role: string;
+    scopeType: 'DEPARTMENT' | 'ORGANIZATION';
+    tenantId: string;
+  };
+  sections: LswVerificationSectionSummary[];
+  totals: LswVerificationTotalsSummary;
+  trends: LswVerificationTrendPoint[];
+  users: LswVerificationUserSummary[];
+  week: LswContext['week'] & {
+    weekKey: string;
+  };
 }
 
 export interface KeyResultUnit {
@@ -331,9 +627,14 @@ export interface LswDayStatusUpdate {
 }
 
 interface LswContextOptions {
+  observeUserId?: string;
   timeZone?: string;
   week?: number;
   year?: number;
+}
+
+interface LswExcelExportDownloadOptions extends LswContextOptions {
+  fallbackFileName?: string;
 }
 
 export async function getLswContext(options: LswContextOptions = {}): Promise<LswContext> {
@@ -345,6 +646,124 @@ export async function getLswContext(options: LswContextOptions = {}): Promise<Ls
   }
 
   return body.context;
+}
+
+export async function listLswObservationCandidates(): Promise<LswObservationCandidate[]> {
+  const body = await requestLswJson<{ candidates?: LswObservationCandidate[] }>('/api/lsw/observation-candidates');
+
+  return body.candidates || [];
+}
+
+export async function getLswObservationStatus(options: LswContextOptions = {}): Promise<LswObservationStatus> {
+  const queryString = getLswQueryString(options);
+  const body = await requestLswJson<{ status?: LswObservationStatus }>(`/api/lsw/observation-status${queryString ? `?${queryString}` : ''}`);
+
+  if (!body.status) {
+    throw new Error('Observation status could not be loaded.');
+  }
+
+  return body.status;
+}
+
+export async function updateLswObservationAvailability(input: {
+  availability: LswObservationAvailability;
+  endDate?: string;
+  note?: string;
+  startDate?: string;
+}): Promise<LswObservationStatus> {
+  const body = await requestLswJson<{ status?: LswObservationStatus }>('/api/lsw/observation-availability', {
+    body: JSON.stringify(input),
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    method: 'PATCH'
+  });
+
+  if (!body.status) {
+    throw new Error('Observation availability could not be updated.');
+  }
+
+  return body.status;
+}
+
+export async function recordLswObservationView(options: LswContextOptions = {}): Promise<LswObservationStatus> {
+  const queryString = getLswQueryString(options);
+  const body = await requestLswJson<{ status?: LswObservationStatus }>(`/api/lsw/observation-view${queryString ? `?${queryString}` : ''}`, {
+    method: 'POST'
+  });
+
+  if (!body.status) {
+    throw new Error('Observation view could not be recorded.');
+  }
+
+  return body.status;
+}
+
+export async function listLswObservationNotes(options: LswContextOptions = {}): Promise<LswObservationNote[]> {
+  const queryString = getLswQueryString(options);
+  const body = await requestLswJson<{ notes?: LswObservationNote[] }>(`/api/lsw/observation-notes${queryString ? `?${queryString}` : ''}`);
+
+  return body.notes || [];
+}
+
+export async function createLswObservationNote(
+  input: {
+    body: string;
+    sectionKey: LswVerificationSectionKey;
+  },
+  options: LswContextOptions = {}
+): Promise<LswObservationNote> {
+  const queryString = getLswQueryString(options);
+  const body = await requestLswJson<{ note?: LswObservationNote }>(`/api/lsw/observation-notes${queryString ? `?${queryString}` : ''}`, {
+    body: JSON.stringify(input),
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    method: 'POST'
+  });
+
+  if (!body.note) {
+    throw new Error('Observation note could not be saved.');
+  }
+
+  return body.note;
+}
+
+export async function withdrawLswObservationNote(noteId: string, options: LswContextOptions = {}): Promise<void> {
+  const queryString = getLswQueryString(options);
+
+  await requestLswJson<void>(`/api/lsw/observation-notes/${encodeURIComponent(noteId)}${queryString ? `?${queryString}` : ''}`, {
+    method: 'DELETE'
+  });
+}
+
+export async function getLswProfilePhotoObjectUrl(uid: string): Promise<string | null> {
+  const user = getSynzappFirebaseAuth().currentUser;
+
+  if (!user) {
+    throw new Error('You are not signed in.');
+  }
+
+  const idToken = await user.getIdToken();
+  const response = await fetch(`${getSynzappApiBaseUrl()}/api/auth/web-profile/photo?uid=${encodeURIComponent(uid)}`, {
+    cache: 'no-store',
+    headers: {
+      Accept: 'image/*',
+      Authorization: `Bearer ${idToken}`,
+      ...await getAppCheckHeader()
+    },
+    method: 'GET'
+  });
+
+  if (response.status === 404) {
+    return null;
+  }
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response, 'Profile photo could not be loaded.'));
+  }
+
+  return URL.createObjectURL(await response.blob());
 }
 
 export async function listLswDailyTasks(options: LswContextOptions = {}): Promise<LswDailyTasksResponse> {
@@ -511,8 +930,9 @@ export async function deleteLswMeetingRail(railId: string): Promise<void> {
   });
 }
 
-export async function listLswPersonalGoals(): Promise<LswPersonalGoalsResponse> {
-  const body = await requestLswJson<{ personalGoals?: LswPersonalGoalsResponse }>('/api/lsw/personal-goals');
+export async function listLswPersonalGoals(options: LswContextOptions = {}): Promise<LswPersonalGoalsResponse> {
+  const queryString = getLswQueryString(options);
+  const body = await requestLswJson<{ personalGoals?: LswPersonalGoalsResponse }>(`/api/lsw/personal-goals${queryString ? `?${queryString}` : ''}`);
 
   if (!body.personalGoals) {
     throw new Error('Personal objectives could not be loaded.');
@@ -559,8 +979,9 @@ export async function deleteLswPersonalGoal(goalId: string): Promise<void> {
   });
 }
 
-export async function listLswImprovementProjects(): Promise<LswImprovementProjectsResponse> {
-  const body = await requestLswJson<{ improvementProjects?: LswImprovementProjectsResponse }>('/api/lsw/improvement-projects');
+export async function listLswImprovementProjects(options: LswContextOptions = {}): Promise<LswImprovementProjectsResponse> {
+  const queryString = getLswQueryString(options);
+  const body = await requestLswJson<{ improvementProjects?: LswImprovementProjectsResponse }>(`/api/lsw/improvement-projects${queryString ? `?${queryString}` : ''}`);
 
   if (!body.improvementProjects) {
     throw new Error('Improvement projects could not be loaded.');
@@ -613,8 +1034,9 @@ export async function deleteLswImprovementProject(projectId: string): Promise<vo
   });
 }
 
-export async function listLswScheduledTasks(): Promise<LswScheduledTasksResponse> {
-  const body = await requestLswJson<{ scheduledTasks?: LswScheduledTasksResponse }>('/api/lsw/scheduled-tasks');
+export async function listLswScheduledTasks(options: LswContextOptions = {}): Promise<LswScheduledTasksResponse> {
+  const queryString = getLswQueryString(options);
+  const body = await requestLswJson<{ scheduledTasks?: LswScheduledTasksResponse }>(`/api/lsw/scheduled-tasks${queryString ? `?${queryString}` : ''}`);
 
   if (!body.scheduledTasks) {
     throw new Error('Scheduled tasks could not be loaded.');
@@ -671,8 +1093,20 @@ export async function listLswKeyResults(): Promise<CompanyKeyResultsConfig> {
   return body.keyResults;
 }
 
-export async function listLswFollowUps(): Promise<LswFollowUpsResponse> {
-  const body = await requestLswJson<{ followUps?: LswFollowUpsResponse }>('/api/lsw/follow-ups');
+export async function getLswVerificationSummary(options: LswContextOptions = {}): Promise<LswVerificationSummaryResponse> {
+  const queryString = getLswQueryString(options);
+  const body = await requestLswJson<{ verificationSummary?: LswVerificationSummaryResponse }>(`/api/lsw/verification-summary${queryString ? `?${queryString}` : ''}`);
+
+  if (!body.verificationSummary) {
+    throw new Error('LSW verification dashboard could not be loaded.');
+  }
+
+  return body.verificationSummary;
+}
+
+export async function listLswFollowUps(options: LswContextOptions = {}): Promise<LswFollowUpsResponse> {
+  const queryString = getLswQueryString(options);
+  const body = await requestLswJson<{ followUps?: LswFollowUpsResponse }>(`/api/lsw/follow-ups${queryString ? `?${queryString}` : ''}`);
 
   if (!body.followUps) {
     throw new Error('Follow ups could not be loaded.');
@@ -719,8 +1153,9 @@ export async function deleteLswFollowUp(followUpId: string): Promise<void> {
   });
 }
 
-export async function listLswRcaTriggers(): Promise<LswRcaTriggersResponse> {
-  const body = await requestLswJson<{ rcaTriggers?: LswRcaTriggersResponse }>('/api/lsw/rca-triggers');
+export async function listLswRcaTriggers(options: LswContextOptions = {}): Promise<LswRcaTriggersResponse> {
+  const queryString = getLswQueryString(options);
+  const body = await requestLswJson<{ rcaTriggers?: LswRcaTriggersResponse }>(`/api/lsw/rca-triggers${queryString ? `?${queryString}` : ''}`);
 
   if (!body.rcaTriggers) {
     throw new Error('RCA triggers could not be loaded.');
@@ -783,6 +1218,30 @@ export async function updateLswSettings(workDaysPerWeek: WorkDaysPerWeek): Promi
   return body.settings;
 }
 
+export async function downloadLswExcelExport(options: LswExcelExportDownloadOptions = {}): Promise<void> {
+  const queryString = getLswQueryString(options);
+  const response = await requestLswResponse(`/api/lsw/export${queryString ? `?${queryString}` : ''}`, {
+    headers: {
+      Accept: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    }
+  });
+  const blob = await response.blob();
+  const contentDisposition = response.headers.get('Content-Disposition') || '';
+  const fileNameMatch = /filename\*=UTF-8''([^;]+)|filename="?([^"]+)"?/i.exec(contentDisposition);
+  const fileName = fileNameMatch
+    ? decodeURIComponent(fileNameMatch[1] || fileNameMatch[2] || options.fallbackFileName || 'Synzapp_LSW_Export.xlsx')
+    : options.fallbackFileName || 'Synzapp_LSW_Export.xlsx';
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+
+  anchor.href = objectUrl;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 5000);
+}
+
 function getLswQueryString(options: LswContextOptions): string {
   const params = new URLSearchParams();
   const timeZone = options.timeZone || getBrowserTimeZone();
@@ -799,6 +1258,10 @@ function getLswQueryString(options: LswContextOptions): string {
     params.set('year', String(options.year));
   }
 
+  if (options.observeUserId) {
+    params.set('observeUserId', options.observeUserId);
+  }
+
   return params.toString();
 }
 
@@ -808,6 +1271,49 @@ function getBrowserTimeZone(): string {
   } catch {
     return 'UTC';
   }
+}
+
+async function requestLswResponse(
+  path: string,
+  options: RequestInit = {}
+): Promise<Response> {
+  const user = getSynzappFirebaseAuth().currentUser;
+
+  if (!user) {
+    throw new Error('You are not signed in.');
+  }
+
+  const idToken = await user.getIdToken();
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 60_000);
+  let response: Response;
+
+  try {
+    response = await fetch(`${getSynzappApiBaseUrl()}${path}`, {
+      ...options,
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+        ...options.headers,
+        ...await getAppCheckHeader()
+      },
+      method: options.method || 'GET',
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error('The LSW export took too long to create. Please try again.');
+    }
+
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response, 'The LSW Excel export could not be created.'));
+  }
+
+  return response;
 }
 
 async function requestLswJson<T>(

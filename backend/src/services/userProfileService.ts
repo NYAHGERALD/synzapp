@@ -1,3 +1,4 @@
+import { buildDirectChatId } from './conversationIdentity.js';
 import { createHash } from 'node:crypto';
 import { DecodedIdToken } from 'firebase-admin/auth';
 import { adminAuth, fieldValue, firestore, storageBucket } from '../config/firebaseAdmin.js';
@@ -92,6 +93,7 @@ export interface ChatContact {
   profilePhotoUrl: string | null;
   role: SynzappRole;
   roleName: string;
+  permanentlyDeletedAt: string | null;
   spammedAt: string | null;
   status: string;
   trashSegments: Array<ChatTrashSegment & {
@@ -187,7 +189,12 @@ export async function getCurrentUserProfile(decodedToken: DecodedIdToken): Promi
   return buildCurrentUserProfile(decodedToken, context);
 }
 
-export async function listCurrentUserChatContacts(decodedToken: DecodedIdToken): Promise<ChatContact[]> {
+export async function listCurrentUserChatContacts(
+  decodedToken: DecodedIdToken,
+  options: {
+    includeDirectoryContacts?: boolean;
+  } = {}
+): Promise<ChatContact[]> {
   const context = await getCurrentUserContext(decodedToken);
   const organizationRef = firestore.collection('organizations').doc(context.tenantId);
   const usersSnapshot = await firestore
@@ -214,22 +221,26 @@ export async function listCurrentUserChatContacts(decodedToken: DecodedIdToken):
     getActiveDeviceUserIds(context.tenantId),
     getAuthPhoneFormattedByUid(contactIds)
   ]);
-  const contacts = await Promise.all(visibleContacts.map(async (doc) => {
+  const contacts = (await Promise.all(visibleContacts.map(async (doc) => {
     const chatId = buildDirectChatId(decodedToken.uid, doc.id);
     const chatSnapshot = await organizationRef.collection('directChats').doc(chatId).get();
     const directChat = chatSnapshot.exists ? (chatSnapshot.data() as DirectChatRecord) : null;
-
-    return buildChatContact(
+    const preference = preferences.get(buildChatPreferenceKey('DIRECT', doc.id));
+    const contact = buildChatContact(
       decodedToken.uid,
       doc.id,
       doc.data() as TenantUserRecord,
       directChat,
       activeDeviceUserIds.has(doc.id),
-      preferences.get(buildChatPreferenceKey('DIRECT', doc.id)),
+      preference,
       archiveSettings,
       formattedPhoneByUid.get(doc.id) || null
     );
-  }));
+
+    return options.includeDirectoryContacts || shouldIncludeDirectChatContactInChatList(contact)
+      ? contact
+      : null;
+  }))).filter((contact): contact is ChatContact => Boolean(contact));
 
   return contacts.sort((first, second) => {
     if (first.lastMessageAt && second.lastMessageAt) {
@@ -590,6 +601,61 @@ export async function getCurrentUserProfilePhoto(
   return {
     cacheKey: buildProfilePhotoCacheKey(decodedToken.uid, context.user.profilePhotoVersion),
     contentType: context.user.profilePhotoContentType || 'image/jpeg',
+    file
+  };
+}
+
+export async function getTenantUserProfilePhoto(
+  decodedToken: DecodedIdToken,
+  targetUid: string
+): Promise<CurrentUserProfilePhoto> {
+  const context = await getCurrentUserContext(decodedToken);
+  const safeTargetUid = targetUid.trim();
+
+  if (!safeTargetUid) {
+    throw notFoundError('Profile photo not found.');
+  }
+
+  if (safeTargetUid === decodedToken.uid) {
+    return getCurrentUserProfilePhoto(decodedToken);
+  }
+
+  const userSnapshot = await firestore
+    .collection('organizations')
+    .doc(context.tenantId)
+    .collection('users')
+    .doc(safeTargetUid)
+    .get();
+
+  if (!userSnapshot.exists) {
+    throw notFoundError('Profile photo not found.');
+  }
+
+  const user = userSnapshot.data() as TenantUserRecord;
+
+  if (user.status !== 'ACTIVE' || !user.profilePhotoStoragePath) {
+    throw notFoundError('Profile photo not found.');
+  }
+
+  const file = storageBucket.file(user.profilePhotoStoragePath);
+
+  try {
+    const [exists] = await file.exists();
+
+    if (!exists) {
+      throw notFoundError('Profile photo not found.');
+    }
+  } catch (error) {
+    if (isMissingStorageBucketError(error)) {
+      throw notFoundError('Profile photo storage is not ready yet.');
+    }
+
+    throw error;
+  }
+
+  return {
+    cacheKey: buildProfilePhotoCacheKey(safeTargetUid, user.profilePhotoVersion),
+    contentType: user.profilePhotoContentType || 'image/jpeg',
     file
   };
 }
@@ -1077,11 +1143,30 @@ function buildChatContact(
     profilePhotoUrl: getChatContactProfilePhotoUrl(contactId, user.profilePhotoStoragePath, user.profilePhotoVersion),
     role: user.role || 'EMPLOYEE',
     roleName,
+    permanentlyDeletedAt: effectivePreference.permanentlyDeletedAtMs
+      ? new Date(effectivePreference.permanentlyDeletedAtMs).toISOString()
+      : null,
     spammedAt: effectivePreference.spammedAtMs ? new Date(effectivePreference.spammedAtMs).toISOString() : null,
     status: user.status || 'ACTIVE',
     trashSegments: mapTrashSegments(effectivePreference.trashSegments),
     unreadCount
   };
+}
+
+export function shouldIncludeDirectChatContactInChatList(contact: ChatContact): boolean {
+  if (contact.lastMessageAt || contact.unreadCount > 0) {
+    return true;
+  }
+
+  if (contact.trashSegments.length > 0 || contact.isArchived || contact.isFavorite || contact.isPinned || contact.isSpam) {
+    return true;
+  }
+
+  if (contact.clearedAt && !contact.permanentlyDeletedAt) {
+    return true;
+  }
+
+  return false;
 }
 
 function mapTrashSegments(trashSegments: ChatTrashSegment[]): Array<ChatTrashSegment & {
@@ -1220,10 +1305,6 @@ async function getDirectChatContext(decodedToken: DecodedIdToken, contactId: str
   };
 }
 
-function buildDirectChatId(uid: string, contactId: string): string {
-  const participantKey = [uid, contactId].sort().join('|');
-  return `direct_${createHash('sha256').update(participantKey).digest('hex')}`;
-}
 
 function getVisibleChatContactRoles(role: SynzappRole): SynzappRole[] {
   return ['ORG_ADMIN', 'DEPT_ADMIN', 'EMPLOYEE'];

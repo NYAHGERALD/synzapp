@@ -1,0 +1,21 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'com.synzapp.deviceidentityvault'
+version = '0.1.0'
+
+android {
+  namespace "com.synzapp.deviceidentityvault"
+
+  defaultConfig {
+    versionCode 1
+    versionName '0.1.0'
+  }
+}
+
+dependencies {
+  // Google's own store for a small secret that outlives an uninstall.
+  implementation 'com.google.android.gms:play-services-auth-blockstore:16.4.0'
+}

@@ -103,9 +103,13 @@ Primary live interpreter model:
 
 - `gpt-realtime-translate`
 
+Live transcript model:
+
+- `gpt-live-transcribe`
+
 Backend summary model:
 
-- `gpt-4.1-mini` can be used initially because Synzapp already has `OPENAI_MODEL` defaulting to that value.
+- `gpt-5.6-terra` is the current balanced enterprise default for summary, replay, and audit text fallback work.
 - The summary model should be configurable so we can move to the latest approved enterprise text model without changing mobile code.
 
 Backend spoken-summary model:
@@ -117,8 +121,10 @@ Environment variables:
 
 - Existing required variable: `OPENAI_API_KEY`
 - New recommended variables:
+  - `OPENAI_INTERPRETER_AGENT_REALTIME_MODEL=gpt-realtime-2.1`
   - `OPENAI_INTERPRETER_REALTIME_MODEL=gpt-realtime-translate`
-  - `OPENAI_INTERPRETER_SUMMARY_MODEL=gpt-4.1-mini`
+  - `OPENAI_INTERPRETER_TRANSCRIPTION_MODEL=gpt-live-transcribe`
+  - `OPENAI_INTERPRETER_SUMMARY_MODEL=gpt-5.6-terra`
   - `OPENAI_INTERPRETER_SUMMARY_TTS_MODEL=gpt-4o-mini-tts`
   - `OPENAI_INTERPRETER_SUMMARY_TTS_VOICE=cedar`
   - `INTERPRETER_MAX_TARGET_LANGUAGES=4`

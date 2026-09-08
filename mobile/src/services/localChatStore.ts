@@ -1,10 +1,41 @@
+import {
+  stripMediaThumbnail,
+  stripThumbnailsForPayload
+} from './localChatThumbnailSplit';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import {
+  SqliteMediaPreparationQueueRow,
+  SqliteMediaRow,
+  SqliteMediaTransferQueueRow,
+  SqliteMessageRow,
+  SqliteSyncStateRow,
+  clearSqliteChatDataForOwner,
+  getLocalChatSqliteDatabase,
+  hasSqlitePendingOutboxRows,
+  listCachedChatConversationsFromSqlite,
+  listPendingChatMessagesFromSqlite,
+  loadCachedChatContactsFromSqlite,
+  loadCachedChatConversationPageFromSqlite,
+  loadRawCachedChatConversationFromSqlite,
+  mapSqliteMediaPreparationQueueRow,
+  mapSqliteMediaRow,
+  mapSqliteMediaTransferQueueRow,
+  migratePendingChatMessagesToSqlite,
+  saveCachedChatContactsToSqlite,
+  saveCachedChatConversationToSqlite,
+  upsertPendingChatMessageToSqlite,
+} from './localChatSqlite';
 import { fromByteArray, toByteArray } from 'base64-js';
 import * as Crypto from 'expo-crypto';
 import * as SecureStore from 'expo-secure-store';
+import { planLocalChatRowWrites } from './localChatRowSignatures';
 import * as SQLite from 'expo-sqlite';
 import nacl from 'tweetnacl';
 import type { ChatContact, ChatMediaAttachment, ChatMessage } from './chatApi';
+import {
+  resolveLocalChatMediaUri,
+  toPortableChatMediaUri
+} from './chatMediaPaths';
 
 interface EncryptedPayload {
   ciphertext: string;
@@ -12,20 +43,9 @@ interface EncryptedPayload {
   version: 1;
 }
 
-interface LocalChatScope {
+export interface LocalChatScope {
   ownerUid: string;
   tenantId: string;
-}
-
-interface SqliteConversationRow {
-  contact_id: string;
-  contact_payload: string | null;
-  hidden_payload: string | null;
-  updated_at: string;
-}
-
-interface SqliteMessageRow {
-  payload: string;
 }
 
 export interface LocalConversationRecord {
@@ -33,6 +53,34 @@ export interface LocalConversationRecord {
   contactId: string;
   hiddenMessageIds?: string[];
   messages: ChatMessage[];
+  ownerUid: string;
+  tenantId: string;
+  updatedAt: string;
+  version: 1;
+}
+
+export interface LocalConversationPageRecord extends LocalConversationRecord {
+  hasMoreBefore: boolean;
+  oldestMessageSentAtMs: number | null;
+}
+
+export interface LocalChatSyncState {
+  contactId: string;
+  hasMoreBefore: boolean;
+  latestServerSentAtMs: number | null;
+  oldestLocalSentAtMs: number | null;
+  ownerUid: string;
+  tenantId: string;
+  updatedAt: string;
+  version: 1;
+}
+
+export interface LocalCachedChatMediaRecord {
+  contactId: string;
+  media: ChatMediaAttachment;
+  mediaId: string | null;
+  mediaIndex: number;
+  messageId: string;
   ownerUid: string;
   tenantId: string;
   updatedAt: string;
@@ -63,16 +111,105 @@ export interface PendingChatMessage {
   version: 1;
 }
 
+export type LocalChatMediaTransferType = 'download' | 'upload';
+
+export interface LocalChatMediaUploadRecoveryState {
+  chatType?: 'DIRECT' | 'GROUP';
+  expiresAt: string;
+  media: ChatMediaAttachment;
+  mediaId: string;
+  partNativeTransferIds?: string[];
+  uploadedPartIndexes?: number[];
+  uploadMode?: 'chunked' | 'single';
+}
+
+export interface LocalChatMediaTransferQueueItem {
+  attempts: number;
+  contactId: string;
+  lastError: string | null;
+  media: ChatMediaAttachment;
+  mediaId: string | null;
+  mediaIndex: number;
+  messageId: string;
+  nativeTransferId: string | null;
+  nextRetryAtMs: number | null;
+  ownerUid: string;
+  progress: number;
+  queueId: string;
+  status: NonNullable<ChatMediaAttachment['transferStatus']>;
+  tenantId: string;
+  transferType: LocalChatMediaTransferType;
+  uploadRecovery: LocalChatMediaUploadRecoveryState | null;
+  updatedAt: string;
+  version: 1;
+}
+
+export interface UpsertLocalChatMediaTransferQueueInput {
+  attempts?: number;
+  contactId: string;
+  lastError?: string | null;
+  media: ChatMediaAttachment;
+  mediaIndex?: number;
+  messageId: string;
+  nativeTransferId?: string | null;
+  nextRetryAtMs?: number | null;
+  ownerUid: string;
+  progress?: number;
+  queueId?: string;
+  status: ChatMediaAttachment['transferStatus'];
+  tenantId: string;
+  transferType: LocalChatMediaTransferType;
+  uploadRecovery?: LocalChatMediaUploadRecoveryState | null;
+}
+
+export type LocalChatMediaPreparationStatus = 'cancelled' | 'failed' | 'preparing' | 'queued' | 'ready';
+
+export interface LocalChatMediaPreparationQueueItem {
+  assetIdentifier: string;
+  attempts: number;
+  chatType?: 'DIRECT' | 'GROUP';
+  contactId: string;
+  lastError: string | null;
+  media: ChatMediaAttachment;
+  mediaIndex: number;
+  messageId: string;
+  ownerUid: string;
+  preparedMedia: ChatMediaAttachment | null;
+  progress: number;
+  queueId: string;
+  status: LocalChatMediaPreparationStatus;
+  tenantId: string;
+  updatedAt: string;
+  version: 1;
+}
+
+export interface UpsertLocalChatMediaPreparationQueueInput {
+  assetIdentifier: string;
+  attempts?: number;
+  chatType?: 'DIRECT' | 'GROUP';
+  contactId: string;
+  lastError?: string | null;
+  media: ChatMediaAttachment;
+  mediaIndex?: number;
+  messageId: string;
+  ownerUid: string;
+  preparedMedia?: ChatMediaAttachment | null;
+  progress?: number;
+  queueId?: string;
+  status: LocalChatMediaPreparationStatus;
+  tenantId: string;
+}
+
 const LOCAL_CHAT_KEY_STORAGE_KEY = 'synzapp.localChatKey.v1';
-const LOCAL_CACHED_CHAT_CONTACT_LIMIT = 500;
-const LOCAL_CACHED_MESSAGE_LIMIT = 1000;
+export const LOCAL_CACHED_CHAT_CONTACT_LIMIT = 500;
+export const LOCAL_CACHED_MESSAGE_LIMIT = 1000;
+export const LOCAL_CHAT_MESSAGE_PAGE_LIMIT = 60;
 const LOCAL_HIDDEN_MESSAGE_LIMIT = 5000;
-const LOCAL_SQLITE_DATABASE_NAME = 'synzapp-local-chat-v1.db';
+export const LOCAL_SQLITE_DATABASE_NAME = 'synzapp-local-chat-v1.db';
 const localChatSecureStoreOptions: SecureStore.SecureStoreOptions = {
   keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
   keychainService: 'synzapp.local.chat.v1'
 };
-let sqliteDatabasePromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
 export async function loadCachedChatContacts(input: {
   ownerUid: string;
@@ -82,6 +219,12 @@ export async function loadCachedChatContacts(input: {
 
   if (!scope) {
     return [];
+  }
+
+  const sqliteContacts = await loadCachedChatContactsFromSqlite(scope).catch(() => []);
+
+  if (sqliteContacts.length) {
+    return sqliteContacts;
   }
 
   const encryptedValue = await AsyncStorage.getItem(getChatContactsStorageKey(scope));
@@ -123,10 +266,13 @@ export async function saveCachedChatContacts(input: {
     version: 1
   };
 
-  await AsyncStorage.setItem(
-    getChatContactsStorageKey(scope),
-    await encryptJson(record)
-  );
+  await Promise.all([
+    saveCachedChatContactsToSqlite(scope, contacts).catch(() => undefined),
+    AsyncStorage.setItem(
+      getChatContactsStorageKey(scope),
+      await encryptJson(record)
+    )
+  ]);
 }
 
 export async function loadCachedChatConversation(input: {
@@ -138,6 +284,529 @@ export async function loadCachedChatConversation(input: {
   const record = sqliteRecord || await loadRawCachedChatConversation(input);
 
   return record ? filterHiddenMessagesInRecord(record) : null;
+}
+
+export async function loadCachedChatConversationPage(input: {
+  beforeSentAtMs?: number | null;
+  contactId: string;
+  limit?: number;
+  ownerUid: string;
+  tenantId: string;
+}): Promise<LocalConversationPageRecord | null> {
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    return null;
+  }
+
+  const page = await loadCachedChatConversationPageFromSqlite({
+    beforeSentAtMs: input.beforeSentAtMs,
+    contactId: input.contactId,
+    limit: input.limit,
+    ownerUid: scope.ownerUid,
+    tenantId: scope.tenantId
+  }).catch(() => null);
+
+  if (page) {
+    return filterHiddenMessagesInPageRecord(page);
+  }
+
+  const fallback = await loadCachedChatConversation({
+    contactId: input.contactId,
+    ownerUid: scope.ownerUid,
+    tenantId: scope.tenantId
+  });
+
+  if (!fallback) {
+    return null;
+  }
+
+  const limit = normalizeMessagePageLimit(input.limit);
+  const beforeSentAtMs = typeof input.beforeSentAtMs === 'number' && Number.isFinite(input.beforeSentAtMs)
+    ? input.beforeSentAtMs
+    : null;
+  const eligibleMessages = beforeSentAtMs === null
+    ? fallback.messages
+    : fallback.messages.filter((message) => getMessageSentAtMs(message) < beforeSentAtMs);
+  const messages = eligibleMessages.slice(-limit);
+
+  return {
+    ...fallback,
+    hasMoreBefore: eligibleMessages.length > messages.length,
+    messages,
+    oldestMessageSentAtMs: messages.length ? getMessageSentAtMs(messages[0]) : null
+  };
+}
+
+export async function loadLocalChatSyncState(input: {
+  contactId: string;
+  ownerUid: string;
+  tenantId: string;
+}): Promise<LocalChatSyncState | null> {
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    return null;
+  }
+
+  const db = await getLocalChatSqliteDatabase();
+  const row = await db.getFirstAsync<SqliteSyncStateRow>(
+    `SELECT latest_server_sent_at_ms, oldest_local_sent_at_ms, has_more_before, updated_at
+     FROM local_chat_sync_state
+     WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?
+     LIMIT 1`,
+    [scope.ownerUid, scope.tenantId, input.contactId]
+  );
+
+  if (!row) {
+    return null;
+  }
+
+  return {
+    contactId: input.contactId,
+    hasMoreBefore: row.has_more_before === 1,
+    latestServerSentAtMs: typeof row.latest_server_sent_at_ms === 'number' ? row.latest_server_sent_at_ms : null,
+    oldestLocalSentAtMs: typeof row.oldest_local_sent_at_ms === 'number' ? row.oldest_local_sent_at_ms : null,
+    ownerUid: scope.ownerUid,
+    tenantId: scope.tenantId,
+    updatedAt: row.updated_at,
+    version: 1
+  };
+}
+
+export async function saveLocalChatSyncState(input: {
+  contactId: string;
+  hasMoreBefore?: boolean;
+  latestServerSentAtMs?: number | null;
+  oldestLocalSentAtMs?: number | null;
+  ownerUid: string;
+  tenantId: string;
+}): Promise<void> {
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    return;
+  }
+
+  const db = await getLocalChatSqliteDatabase();
+  const existing = await loadLocalChatSyncState({
+    contactId: input.contactId,
+    ownerUid: scope.ownerUid,
+    tenantId: scope.tenantId
+  }).catch(() => null);
+  const nowIso = new Date().toISOString();
+  const latestServerSentAtMs = mergeNullableMax(
+    existing?.latestServerSentAtMs ?? null,
+    normalizeNullableTimestampMs(input.latestServerSentAtMs)
+  );
+  const oldestLocalSentAtMs = mergeNullableMin(
+    existing?.oldestLocalSentAtMs ?? null,
+    normalizeNullableTimestampMs(input.oldestLocalSentAtMs)
+  );
+
+  await db.runAsync(
+    `INSERT INTO local_chat_sync_state (
+      owner_uid, tenant_id, contact_id, latest_server_sent_at_ms,
+      oldest_local_sent_at_ms, has_more_before, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(owner_uid, tenant_id, contact_id)
+    DO UPDATE SET
+      latest_server_sent_at_ms = excluded.latest_server_sent_at_ms,
+      oldest_local_sent_at_ms = excluded.oldest_local_sent_at_ms,
+      has_more_before = excluded.has_more_before,
+      updated_at = excluded.updated_at`,
+    [
+      scope.ownerUid,
+      scope.tenantId,
+      input.contactId,
+      latestServerSentAtMs,
+      oldestLocalSentAtMs,
+      input.hasMoreBefore === undefined
+        ? existing?.hasMoreBefore === true ? 1 : 0
+        : input.hasMoreBefore ? 1 : 0,
+      nowIso
+    ]
+  );
+}
+
+export async function listCachedChatMediaForMessages(input: {
+  contactId: string;
+  messageIds: string[];
+  ownerUid: string;
+  tenantId: string;
+}): Promise<Record<string, LocalCachedChatMediaRecord[]>> {
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    return {};
+  }
+
+  const messageIds = normalizeMediaMessageIds(input.messageIds);
+
+  if (!messageIds.length) {
+    return {};
+  }
+
+  const db = await getLocalChatSqliteDatabase();
+  const placeholders = messageIds.map(() => '?').join(', ');
+  const rows = await db.getAllAsync<SqliteMediaRow>(
+    `SELECT message_id, media_index, media_id, kind, content_type, file_name,
+            size_bytes, duration_ms, width, height, thumbnail_local_uri,
+            thumbnail_data_url, plain_local_uri, transfer_status,
+            transfer_progress, payload, updated_at
+     FROM local_chat_media
+     WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?
+       AND message_id IN (${placeholders})
+     ORDER BY message_id ASC, media_index ASC`,
+    [scope.ownerUid, scope.tenantId, input.contactId, ...messageIds]
+  );
+  const records = await Promise.all(rows.map((row) =>
+    mapSqliteMediaRow(scope, input.contactId, row)
+  ));
+
+  return records
+    .filter((record): record is LocalCachedChatMediaRecord => Boolean(record))
+    .reduce<Record<string, LocalCachedChatMediaRecord[]>>((recordsByMessageId, record) => {
+      recordsByMessageId[record.messageId] = [
+        ...(recordsByMessageId[record.messageId] || []),
+        record
+      ];
+
+      return recordsByMessageId;
+    }, {});
+}
+
+export async function listCachedChatMediaForContact(input: {
+  contactId: string;
+  limit?: number;
+  ownerUid: string;
+  tenantId: string;
+  transferStatus?: ChatMediaAttachment['transferStatus'];
+}): Promise<LocalCachedChatMediaRecord[]> {
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    return [];
+  }
+
+  const db = await getLocalChatSqliteDatabase();
+  const limit = Math.max(1, Math.min(Math.round(input.limit || 200), 1000));
+  const transferStatus = normalizeMediaTransferStatus(input.transferStatus);
+  const rows = transferStatus
+    ? await db.getAllAsync<SqliteMediaRow>(
+        `SELECT message_id, media_index, media_id, kind, content_type, file_name,
+                size_bytes, duration_ms, width, height, thumbnail_local_uri,
+                thumbnail_data_url, plain_local_uri, transfer_status,
+                transfer_progress, payload, updated_at
+         FROM local_chat_media
+         WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ? AND transfer_status = ?
+         ORDER BY updated_at DESC
+         LIMIT ?`,
+        [scope.ownerUid, scope.tenantId, input.contactId, transferStatus, limit]
+      )
+    : await db.getAllAsync<SqliteMediaRow>(
+        `SELECT message_id, media_index, media_id, kind, content_type, file_name,
+                size_bytes, duration_ms, width, height, thumbnail_local_uri,
+                thumbnail_data_url, plain_local_uri, transfer_status,
+                transfer_progress, payload, updated_at
+         FROM local_chat_media
+         WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?
+         ORDER BY updated_at DESC
+         LIMIT ?`,
+        [scope.ownerUid, scope.tenantId, input.contactId, limit]
+      );
+  const records = await Promise.all(rows.map((row) =>
+    mapSqliteMediaRow(scope, input.contactId, row)
+  ));
+
+  return records.filter((record): record is LocalCachedChatMediaRecord => Boolean(record));
+}
+
+export async function listLocalChatMediaTransferQueue(input: {
+  contactId?: string;
+  limit?: number;
+  ownerUid: string;
+  tenantId: string;
+  transferType?: LocalChatMediaTransferType;
+}): Promise<LocalChatMediaTransferQueueItem[]> {
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    return [];
+  }
+
+  const db = await getLocalChatSqliteDatabase();
+  const limit = Math.max(1, Math.min(Math.round(input.limit || 200), 1000));
+  const transferType = normalizeMediaTransferType(input.transferType);
+  const params: Array<string | number> = [scope.ownerUid, scope.tenantId];
+  const whereClauses = ['owner_uid = ?', 'tenant_id = ?'];
+
+  if (input.contactId) {
+    whereClauses.push('contact_id = ?');
+    params.push(input.contactId);
+  }
+
+  if (transferType) {
+    whereClauses.push('transfer_type = ?');
+    params.push(transferType);
+  }
+
+  params.push(limit);
+
+  const rows = await db.getAllAsync<SqliteMediaTransferQueueRow>(
+    `SELECT queue_id, contact_id, message_id, media_index, media_id,
+            native_transfer_id, transfer_type, status, progress, attempts, last_error,
+            next_retry_at_ms, payload, updated_at
+     FROM local_chat_media_transfer_queue
+     WHERE ${whereClauses.join(' AND ')}
+     ORDER BY updated_at ASC, queue_id ASC
+     LIMIT ?`,
+    params
+  );
+  const items = await Promise.all(rows.map((row) => mapSqliteMediaTransferQueueRow(scope, row)));
+
+  return items.filter((item): item is LocalChatMediaTransferQueueItem => Boolean(item));
+}
+
+export async function upsertLocalChatMediaTransferQueueItem(
+  input: UpsertLocalChatMediaTransferQueueInput
+): Promise<LocalChatMediaTransferQueueItem> {
+  const scope = normalizeLocalChatScope(input);
+  const transferType = normalizeMediaTransferType(input.transferType);
+  const status = normalizeMediaTransferStatus(input.status);
+
+  if (!scope || !transferType || !status) {
+    throw new Error('A valid local media transfer queue item is required.');
+  }
+
+  const db = await getLocalChatSqliteDatabase();
+  const media = normalizeCachedMediaAttachment(input.media);
+
+  if (!media) {
+    throw new Error('A valid media attachment is required.');
+  }
+
+  const mediaIndex = Math.max(0, Math.round(input.mediaIndex || 0));
+  const nowIso = new Date().toISOString();
+  const item: LocalChatMediaTransferQueueItem = {
+    attempts: Math.max(0, Math.round(input.attempts || 0)),
+    contactId: input.contactId,
+    lastError: input.lastError || null,
+    media,
+    mediaId: media.mediaId || null,
+    mediaIndex,
+    messageId: input.messageId,
+    nativeTransferId: normalizeNativeTransferId(input.nativeTransferId),
+    nextRetryAtMs: normalizeNullableTimestampMs(input.nextRetryAtMs),
+    ownerUid: scope.ownerUid,
+    progress: normalizeTransferProgress(input.progress),
+    queueId: input.queueId || buildMediaTransferQueueId(transferType, input.contactId, input.messageId, mediaIndex),
+    status,
+    tenantId: scope.tenantId,
+    transferType,
+    uploadRecovery: normalizeMediaUploadRecoveryState(input.uploadRecovery),
+    updatedAt: nowIso,
+    version: 1
+  };
+
+  await db.runAsync(
+    `INSERT INTO local_chat_media_transfer_queue (
+      owner_uid, tenant_id, queue_id, contact_id, message_id,
+      media_index, media_id, native_transfer_id, transfer_type, status, progress,
+      attempts, last_error, next_retry_at_ms, payload, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(owner_uid, tenant_id, queue_id)
+    DO UPDATE SET
+      contact_id = excluded.contact_id,
+      message_id = excluded.message_id,
+      media_index = excluded.media_index,
+      media_id = excluded.media_id,
+      native_transfer_id = excluded.native_transfer_id,
+      transfer_type = excluded.transfer_type,
+      status = excluded.status,
+      progress = excluded.progress,
+      attempts = excluded.attempts,
+      last_error = excluded.last_error,
+      next_retry_at_ms = excluded.next_retry_at_ms,
+      payload = excluded.payload,
+      updated_at = excluded.updated_at`,
+    [
+      scope.ownerUid,
+      scope.tenantId,
+      item.queueId,
+      item.contactId,
+      item.messageId,
+      item.mediaIndex,
+      item.mediaId,
+      item.nativeTransferId,
+      item.transferType,
+      item.status,
+      item.progress,
+      item.attempts,
+      item.lastError,
+      item.nextRetryAtMs,
+      await encryptJson(item),
+      nowIso
+    ]
+  );
+
+  return item;
+}
+
+export async function removeLocalChatMediaTransferQueueItem(input: {
+  ownerUid: string;
+  queueId: string;
+  tenantId: string;
+}): Promise<void> {
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    return;
+  }
+
+  const db = await getLocalChatSqliteDatabase();
+
+  await db.runAsync(
+    'DELETE FROM local_chat_media_transfer_queue WHERE owner_uid = ? AND tenant_id = ? AND queue_id = ?',
+    [scope.ownerUid, scope.tenantId, input.queueId]
+  );
+}
+
+export async function listLocalChatMediaPreparationQueue(input: {
+  contactId?: string;
+  limit?: number;
+  ownerUid: string;
+  status?: LocalChatMediaPreparationStatus;
+  tenantId: string;
+}): Promise<LocalChatMediaPreparationQueueItem[]> {
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    return [];
+  }
+
+  const db = await getLocalChatSqliteDatabase();
+  const limit = Math.max(1, Math.min(Math.round(input.limit || 200), 1000));
+  const status = normalizeMediaPreparationStatus(input.status);
+  const params: Array<string | number> = [scope.ownerUid, scope.tenantId];
+  const whereClauses = ['owner_uid = ?', 'tenant_id = ?'];
+
+  if (input.contactId) {
+    whereClauses.push('contact_id = ?');
+    params.push(input.contactId);
+  }
+
+  if (status) {
+    whereClauses.push('status = ?');
+    params.push(status);
+  }
+
+  params.push(limit);
+
+  const rows = await db.getAllAsync<SqliteMediaPreparationQueueRow>(
+    `SELECT queue_id, contact_id, message_id, media_index, asset_identifier,
+            status, progress, attempts, last_error, payload, updated_at
+     FROM local_chat_media_preparation_queue
+     WHERE ${whereClauses.join(' AND ')}
+     ORDER BY updated_at ASC, queue_id ASC
+     LIMIT ?`,
+    params
+  );
+  const items = await Promise.all(rows.map((row) => mapSqliteMediaPreparationQueueRow(scope, row)));
+
+  return items.filter((item): item is LocalChatMediaPreparationQueueItem => Boolean(item));
+}
+
+export async function upsertLocalChatMediaPreparationQueueItem(
+  input: UpsertLocalChatMediaPreparationQueueInput
+): Promise<LocalChatMediaPreparationQueueItem> {
+  const scope = normalizeLocalChatScope(input);
+  const status = normalizeMediaPreparationStatus(input.status);
+  const media = normalizeCachedMediaAttachment(input.media);
+  const assetIdentifier = normalizeNativeAssetIdentifier(input.assetIdentifier);
+
+  if (!scope || !status || !media || !assetIdentifier) {
+    throw new Error('A valid local media preparation queue item is required.');
+  }
+
+  const preparedMedia = input.preparedMedia ? normalizeCachedMediaAttachment(input.preparedMedia) : null;
+  const mediaIndex = Math.max(0, Math.round(input.mediaIndex || 0));
+  const nowIso = new Date().toISOString();
+  const item: LocalChatMediaPreparationQueueItem = {
+    assetIdentifier,
+    attempts: Math.max(0, Math.round(input.attempts || 0)),
+    chatType: input.chatType === 'GROUP' ? 'GROUP' : input.chatType === 'DIRECT' ? 'DIRECT' : undefined,
+    contactId: input.contactId,
+    lastError: input.lastError || null,
+    media,
+    mediaIndex,
+    messageId: input.messageId,
+    ownerUid: scope.ownerUid,
+    preparedMedia,
+    progress: normalizeTransferProgress(input.progress),
+    queueId: input.queueId || buildMediaPreparationQueueId(input.contactId, input.messageId, mediaIndex, assetIdentifier),
+    status,
+    tenantId: scope.tenantId,
+    updatedAt: nowIso,
+    version: 1
+  };
+  const db = await getLocalChatSqliteDatabase();
+
+  await db.runAsync(
+    `INSERT INTO local_chat_media_preparation_queue (
+      owner_uid, tenant_id, queue_id, contact_id, message_id,
+      media_index, asset_identifier, status, progress, attempts,
+      last_error, payload, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(owner_uid, tenant_id, queue_id)
+    DO UPDATE SET
+      contact_id = excluded.contact_id,
+      message_id = excluded.message_id,
+      media_index = excluded.media_index,
+      asset_identifier = excluded.asset_identifier,
+      status = excluded.status,
+      progress = excluded.progress,
+      attempts = excluded.attempts,
+      last_error = excluded.last_error,
+      payload = excluded.payload,
+      updated_at = excluded.updated_at`,
+    [
+      scope.ownerUid,
+      scope.tenantId,
+      item.queueId,
+      item.contactId,
+      item.messageId,
+      item.mediaIndex,
+      item.assetIdentifier,
+      item.status,
+      item.progress,
+      item.attempts,
+      item.lastError,
+      await encryptJson(item),
+      nowIso
+    ]
+  );
+
+  return item;
+}
+
+export async function removeLocalChatMediaPreparationQueueItem(input: {
+  ownerUid: string;
+  queueId: string;
+  tenantId: string;
+}): Promise<void> {
+  const scope = normalizeLocalChatScope(input);
+
+  if (!scope) {
+    return;
+  }
+
+  const db = await getLocalChatSqliteDatabase();
+
+  await db.runAsync(
+    'DELETE FROM local_chat_media_preparation_queue WHERE owner_uid = ? AND tenant_id = ? AND queue_id = ?',
+    [scope.ownerUid, scope.tenantId, input.queueId]
+  );
 }
 
 export async function saveCachedChatConversation(input: {
@@ -218,6 +887,18 @@ export async function deleteCachedChatConversation(input: {
       [scope.ownerUid, scope.tenantId, input.contactId]
     );
     await db.runAsync(
+      'DELETE FROM local_chat_media WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?',
+      [scope.ownerUid, scope.tenantId, input.contactId]
+    );
+    await db.runAsync(
+      'DELETE FROM local_chat_media_transfer_queue WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?',
+      [scope.ownerUid, scope.tenantId, input.contactId]
+    );
+    await db.runAsync(
+      'DELETE FROM local_chat_sync_state WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?',
+      [scope.ownerUid, scope.tenantId, input.contactId]
+    );
+    await db.runAsync(
       'DELETE FROM local_conversations WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?',
       [scope.ownerUid, scope.tenantId, input.contactId]
     );
@@ -259,7 +940,10 @@ export async function updateCachedChatMessageMedia(input: {
 
   const nextMessage = applyCachedMediaUpdateToMessage(existingMessage, input.media, input.mediaIndex);
   const nowIso = new Date().toISOString();
-  const payload = await encryptJson(nextMessage);
+    // Sealed without its thumbnails, like the full save. This runs on every
+    // media update, so it fires more often than any other write, and it was
+    // re-encrypting 40KB of base64 while the user was tapping.
+    const payload = await encryptJson(stripThumbnailsForPayload(nextMessage));
 
   await db.withTransactionAsync(async () => {
     await db.runAsync(
@@ -286,6 +970,8 @@ export async function updateCachedChatMessageMedia(input: {
        WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?`,
       [nowIso, scope.ownerUid, scope.tenantId, input.contactId]
     );
+
+    await replaceCachedMessageMediaRows(db, scope, input.contactId, nextMessage, nowIso);
   });
 
   return true;
@@ -379,16 +1065,32 @@ export async function clearLocalChatDataForOwner(input: {
   ownerUid: string;
   tenantId?: string;
 }): Promise<void> {
+  // Drop the cached database key with the data it protects, so a later sign-in
+  // reads secure storage again rather than reusing a key held from before.
+  clearLocalChatKeyCache();
+
   const keys = await AsyncStorage.getAllKeys();
   const safeOwnerUid = sanitizeStorageKey(input.ownerUid);
-  const ownerPrefixes = [
-    `synzapp.localChat.v1.${safeOwnerUid}.`,
-    `synzapp.localChat.v2.${safeOwnerUid}.`,
-    `synzapp.localChatContacts.v1.${safeOwnerUid}`,
-    `synzapp.localChatContacts.v2.${safeOwnerUid}.`,
-    `synzapp.localOutbox.v1.${safeOwnerUid}`,
-    `synzapp.localOutbox.v2.${safeOwnerUid}.`
-  ];
+  const safeTenantId = input.tenantId ? sanitizeStorageKey(input.tenantId) : '';
+  const ownerPrefixes = safeTenantId
+    ? [
+        // Legacy v1 keys did not carry a reliable tenant partition, so they are removed during
+        // tenant cleanup to avoid retaining older company chat data on the device.
+        `synzapp.localChat.v1.${safeOwnerUid}.`,
+        `synzapp.localChatContacts.v1.${safeOwnerUid}`,
+        `synzapp.localOutbox.v1.${safeOwnerUid}`,
+        `synzapp.localChat.v2.${safeOwnerUid}.${safeTenantId}.`,
+        `synzapp.localChatContacts.v2.${safeOwnerUid}.${safeTenantId}`,
+        `synzapp.localOutbox.v2.${safeOwnerUid}.${safeTenantId}`
+      ]
+    : [
+        `synzapp.localChat.v1.${safeOwnerUid}.`,
+        `synzapp.localChat.v2.${safeOwnerUid}.`,
+        `synzapp.localChatContacts.v1.${safeOwnerUid}`,
+        `synzapp.localChatContacts.v2.${safeOwnerUid}.`,
+        `synzapp.localOutbox.v1.${safeOwnerUid}`,
+        `synzapp.localOutbox.v2.${safeOwnerUid}.`
+      ];
   const matchingKeys = keys.filter((key) =>
     ownerPrefixes.some((prefix) => key === prefix || key.startsWith(prefix))
   );
@@ -437,13 +1139,22 @@ export async function hideCachedChatMessagesForMe(input: {
     ...input.messageIds
   ]);
   const hiddenMessageIdSet = new Set(hiddenMessageIds);
+  const nextMessages = uniqueMessages(existingRecord?.messages || [])
+    .filter((message) => !hiddenMessageIdSet.has(message.messageId))
+    .slice(-LOCAL_CACHED_MESSAGE_LIMIT);
+  const nextContact = existingRecord?.contact && nextMessages.length === 0
+    ? {
+        ...existingRecord.contact,
+        lastMessageAt: null,
+        preview: '',
+        unreadCount: 0
+      }
+    : existingRecord?.contact || null;
   const nextRecord: LocalConversationRecord = {
-    contact: existingRecord?.contact || null,
+    contact: nextContact,
     contactId: input.contactId,
     hiddenMessageIds,
-    messages: uniqueMessages(existingRecord?.messages || [])
-      .filter((message) => !hiddenMessageIdSet.has(message.messageId))
-      .slice(-LOCAL_CACHED_MESSAGE_LIMIT),
+    messages: nextMessages,
     ownerUid: scope.ownerUid,
     tenantId: scope.tenantId,
     updatedAt: new Date().toISOString(),
@@ -473,26 +1184,19 @@ export async function listPendingChatMessages(input: {
     return [];
   }
 
-  const encryptedValue = await AsyncStorage.getItem(getOutboxStorageKey(scope));
+  await migratePendingChatMessagesToSqlite(scope).catch(() => undefined);
 
-  if (!encryptedValue) {
-    return [];
+  const sqliteMessages = await listPendingChatMessagesFromSqlite({
+    contactId: input.contactId,
+    ownerUid: scope.ownerUid,
+    tenantId: scope.tenantId
+  }).catch(() => []);
+
+  if (sqliteMessages.length || await hasSqlitePendingOutboxRows(scope).catch(() => false)) {
+    return sqliteMessages;
   }
 
-  const messages = await decryptJson<PendingChatMessage[]>(encryptedValue);
-
-  if (!Array.isArray(messages)) {
-    return [];
-  }
-
-  return messages
-    .filter((message) =>
-      message.version === 1 &&
-      message.ownerUid === scope.ownerUid &&
-      message.tenantId === scope.tenantId &&
-      (!input.contactId || message.contactId === input.contactId)
-    )
-    .sort((first, second) => first.createdAt.localeCompare(second.createdAt));
+  return listPendingChatMessagesFromAsyncStorage(scope, input.contactId).catch(() => []);
 }
 
 export async function enqueuePendingChatMessage(input: {
@@ -525,6 +1229,10 @@ export async function enqueuePendingChatMessage(input: {
     createdAt,
     lastError: null,
     message: {
+      // The queue id is this message's permanent client identity. It is sent to
+      // the backend as `clientMessageId` and comes back on the server envelope,
+      // which is what lets the queued bubble and its echo reconcile into one row.
+      clientMessageId: queueId,
       deliveryStatus: 'queued',
       image: media?.kind === 'image' ? media as ChatMessage['image'] : input.image || null,
       isMine: true,
@@ -543,9 +1251,7 @@ export async function enqueuePendingChatMessage(input: {
     text,
     version: 1
   };
-  const currentMessages = await listPendingChatMessages(scope);
-
-  await savePendingChatMessages(scope, [...currentMessages, pendingMessage]);
+  await upsertPendingChatMessageToSqlite(scope, pendingMessage);
 
   return pendingMessage;
 }
@@ -561,12 +1267,13 @@ export async function removePendingChatMessage(input: {
     return;
   }
 
-  const currentMessages = await listPendingChatMessages(scope);
+  const db = await getLocalChatSqliteDatabase();
 
-  await savePendingChatMessages(
-    scope,
-    currentMessages.filter((message) => message.queueId !== input.queueId)
+  await db.runAsync(
+    'DELETE FROM local_chat_outbox WHERE owner_uid = ? AND tenant_id = ? AND queue_id = ?',
+    [scope.ownerUid, scope.tenantId, input.queueId]
   );
+  await removePendingChatMessageFromAsyncStorage(scope, input.queueId).catch(() => undefined);
 }
 
 export async function removePendingChatMessagesForContact(input: {
@@ -580,19 +1287,28 @@ export async function removePendingChatMessagesForContact(input: {
     return [];
   }
 
-  const currentMessages = await listPendingChatMessages(scope);
-  const removedQueueIds = currentMessages
-    .filter((message) => message.contactId === input.contactId)
-    .map((message) => message.queueId);
+  const currentMessages = await listPendingChatMessages({
+    contactId: input.contactId,
+    ownerUid: scope.ownerUid,
+    tenantId: scope.tenantId
+  });
+  const removedQueueIds = currentMessages.map((message) => message.queueId);
 
   if (!removedQueueIds.length) {
     return [];
   }
 
-  await savePendingChatMessages(
-    scope,
-    currentMessages.filter((message) => message.contactId !== input.contactId)
+  const db = await getLocalChatSqliteDatabase();
+
+  await db.runAsync(
+    'DELETE FROM local_chat_outbox WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?',
+    [scope.ownerUid, scope.tenantId, input.contactId]
   );
+  await savePendingChatMessagesToAsyncStorage(
+    scope,
+    (await listPendingChatMessagesFromAsyncStorage(scope).catch(() => []))
+      .filter((message) => message.contactId !== input.contactId)
+  ).catch(() => undefined);
 
   return removedQueueIds;
 }
@@ -611,30 +1327,27 @@ export async function updatePendingChatMessage(input: {
     return null;
   }
 
-  const currentMessages = await listPendingChatMessages(scope);
-  let updatedMessage: PendingChatMessage | null = null;
-  const nextMessages = currentMessages.map((message) => {
-    if (message.queueId !== input.queueId) {
-      return message;
-    }
+  const currentMessage = (await listPendingChatMessages(scope))
+    .find((message) => message.queueId === input.queueId) || null;
 
-    updatedMessage = {
-      ...message,
-      attempts: input.status === 'sending' ? message.attempts + 1 : message.attempts,
-      lastError: input.lastError === undefined ? message.lastError : input.lastError,
-      message: input.message || message.message,
-      status: input.status
-    };
+  if (!currentMessage) {
+    return null;
+  }
 
-    return updatedMessage;
-  });
+  const updatedMessage: PendingChatMessage = {
+    ...currentMessage,
+    attempts: input.status === 'sending' ? currentMessage.attempts + 1 : currentMessage.attempts,
+    lastError: input.lastError === undefined ? currentMessage.lastError : input.lastError,
+    message: input.message || currentMessage.message,
+    status: input.status
+  };
 
-  await savePendingChatMessages(scope, nextMessages);
+  await upsertPendingChatMessageToSqlite(scope, updatedMessage);
 
   return updatedMessage;
 }
 
-async function savePendingChatMessages(scope: LocalChatScope, messages: PendingChatMessage[]): Promise<void> {
+async function savePendingChatMessagesToAsyncStorage(scope: LocalChatScope, messages: PendingChatMessage[]): Promise<void> {
   const safeMessages = messages
     .filter((message) => message.ownerUid === scope.ownerUid && message.tenantId === scope.tenantId)
     .slice(-200);
@@ -645,281 +1358,289 @@ async function savePendingChatMessages(scope: LocalChatScope, messages: PendingC
   );
 }
 
-async function loadRawCachedChatConversationFromSqlite(input: {
-  contactId: string;
-  ownerUid: string;
-  tenantId: string;
-}): Promise<LocalConversationRecord | null> {
-  const scope = normalizeLocalChatScope(input);
+export function buildQueuedMediaAttachmentFromRow(row: SqliteMediaTransferQueueRow): ChatMediaAttachment | null {
+  const mediaId = typeof row.media_id === 'string' && row.media_id.trim() ? row.media_id.trim() : undefined;
 
-  if (!scope) {
+  if (!mediaId) {
     return null;
   }
 
-  const db = await getLocalChatSqliteDatabase();
-  const conversation = await db.getFirstAsync<SqliteConversationRow>(
-    `SELECT contact_id, contact_payload, hidden_payload, updated_at
-     FROM local_conversations
-     WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?
-     LIMIT 1`,
-    [scope.ownerUid, scope.tenantId, input.contactId]
-  );
-
-  if (!conversation) {
-    return null;
-  }
-
-  const rows = await db.getAllAsync<SqliteMessageRow>(
-    `SELECT payload
-     FROM local_messages
-     WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?
-     ORDER BY sent_at_ms ASC, message_id ASC
-     LIMIT ?`,
-    [scope.ownerUid, scope.tenantId, input.contactId, LOCAL_CACHED_MESSAGE_LIMIT]
-  );
-  const [contact, hiddenMessageIds, messages] = await Promise.all([
-    conversation.contact_payload
-      ? decryptJson<ChatContact>(conversation.contact_payload).catch(() => null)
-      : null,
-    conversation.hidden_payload
-      ? decryptJson<string[]>(conversation.hidden_payload).catch(() => [])
-      : [],
-    Promise.all(rows.map((row) => decryptJson<ChatMessage>(row.payload).catch(() => null)))
-  ]);
-
-  return normalizeCachedConversationRecord({
-    contact,
-    contactId: conversation.contact_id,
-    hiddenMessageIds: Array.isArray(hiddenMessageIds) ? hiddenMessageIds : [],
-    messages: messages.filter((message): message is ChatMessage => Boolean(message)),
-    ownerUid: scope.ownerUid,
-    tenantId: scope.tenantId,
-    updatedAt: conversation.updated_at,
-    version: 1
-  });
+  return {
+    contentType: 'application/octet-stream',
+    fileName: mediaId,
+    kind: 'file',
+    mediaId,
+    sizeBytes: 0,
+    transferProgress: normalizeTransferProgress(row.progress),
+    transferStatus: normalizeMediaTransferStatus(row.status) || undefined
+  };
 }
 
-async function saveCachedChatConversationToSqlite(input: {
-  contact: ChatContact | null;
-  contactId: string;
-  hiddenMessageIds?: string[];
-  messages: ChatMessage[];
-  ownerUid: string;
-  tenantId: string;
-}): Promise<boolean> {
-  const scope = normalizeLocalChatScope(input);
+export async function listPendingChatMessagesFromAsyncStorage(
+  scope: LocalChatScope,
+  contactId?: string
+): Promise<PendingChatMessage[]> {
+  const encryptedValue = await AsyncStorage.getItem(getOutboxStorageKey(scope));
 
-  if (!scope) {
-    return false;
+  if (!encryptedValue) {
+    return [];
   }
 
-  const existingRecord = await loadRawCachedChatConversationFromSqlite({
-    contactId: input.contactId,
-    ownerUid: scope.ownerUid,
-    tenantId: scope.tenantId
-  }).catch(() => null);
-  const hiddenMessageIds = normalizeHiddenMessageIds([
-    ...(existingRecord?.hiddenMessageIds || []),
-    ...(input.hiddenMessageIds || [])
-  ]);
-  const hiddenMessageIdSet = new Set(hiddenMessageIds);
-  const messages = uniqueMessages(input.messages)
-    .filter((message) => !hiddenMessageIdSet.has(message.messageId))
-    .slice(-LOCAL_CACHED_MESSAGE_LIMIT);
-  const db = await getLocalChatSqliteDatabase();
-  const nowIso = new Date().toISOString();
-  const contactPayload = input.contact ? await encryptJson(input.contact) : null;
-  const hiddenPayload = await encryptJson(hiddenMessageIds);
-  const messageIds = messages.map((message) => message.messageId).filter(Boolean);
+  const messages = await decryptJson<PendingChatMessage[]>(encryptedValue);
 
-  await db.withTransactionAsync(async () => {
+  if (!Array.isArray(messages)) {
+    return [];
+  }
+
+  return messages
+    .filter((message) =>
+      message.version === 1 &&
+      message.ownerUid === scope.ownerUid &&
+      message.tenantId === scope.tenantId &&
+      (!contactId || message.contactId === contactId)
+    )
+    .sort((first, second) => first.createdAt.localeCompare(second.createdAt));
+}
+
+export async function removePendingChatMessageFromAsyncStorage(
+  scope: LocalChatScope,
+  queueId: string
+): Promise<void> {
+  const legacyMessages = await listPendingChatMessagesFromAsyncStorage(scope);
+
+  if (!legacyMessages.length) {
+    return;
+  }
+
+  await savePendingChatMessagesToAsyncStorage(
+    scope,
+    legacyMessages.filter((message) => message.queueId !== queueId)
+  );
+}
+
+export function normalizePendingMessageStatus(status: unknown): PendingChatMessage['status'] | null {
+  return status === 'failed' || status === 'pending' || status === 'sending'
+    ? status
+    : null;
+}
+
+export async function replaceCachedMessageMediaRows(
+  db: SQLite.SQLiteDatabase,
+  scope: LocalChatScope,
+  contactId: string,
+  message: ChatMessage,
+  updatedAt: string
+): Promise<void> {
+  const mediaItems = getCachedMessageMediaItems(message);
+
+  if (!mediaItems.length) {
     await db.runAsync(
-      `INSERT INTO local_conversations (
-        owner_uid, tenant_id, contact_id, contact_payload, hidden_payload, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(owner_uid, tenant_id, contact_id)
-      DO UPDATE SET
-        contact_payload = excluded.contact_payload,
-        hidden_payload = excluded.hidden_payload,
-        updated_at = excluded.updated_at`,
-      [scope.ownerUid, scope.tenantId, input.contactId, contactPayload, hiddenPayload, nowIso]
+      `DELETE FROM local_chat_media
+       WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ? AND message_id = ?`,
+      [scope.ownerUid, scope.tenantId, contactId, message.messageId]
     );
+    return;
+  }
 
-    if (messageIds.length) {
-      const placeholders = messageIds.map(() => '?').join(', ');
+  const mediaIndexes = mediaItems.map((_, index) => index);
+  const placeholders = mediaIndexes.map(() => '?').join(', ');
 
-      await db.runAsync(
-        `DELETE FROM local_messages
-         WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?
-           AND message_id NOT IN (${placeholders})`,
-        [scope.ownerUid, scope.tenantId, input.contactId, ...messageIds]
-      );
-    } else {
-      await db.runAsync(
-        `DELETE FROM local_messages
-         WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?`,
-        [scope.ownerUid, scope.tenantId, input.contactId]
-      );
-    }
+  await db.runAsync(
+    `DELETE FROM local_chat_media
+     WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ? AND message_id = ?
+       AND media_index NOT IN (${placeholders})`,
+    [scope.ownerUid, scope.tenantId, contactId, message.messageId, ...mediaIndexes]
+  );
 
-    for (const message of messages) {
-      const payload = await encryptJson(message);
+  for (let mediaIndex = 0; mediaIndex < mediaItems.length; mediaIndex += 1) {
+    const media = normalizeCachedMediaAttachment(mediaItems[mediaIndex]);
 
-      await db.runAsync(
-        `INSERT INTO local_messages (
-          owner_uid, tenant_id, contact_id, message_id, sent_at_ms,
-          sender_uid, is_mine, delivery_status, payload, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(owner_uid, tenant_id, contact_id, message_id)
-        DO UPDATE SET
-          sent_at_ms = excluded.sent_at_ms,
-          sender_uid = excluded.sender_uid,
-          is_mine = excluded.is_mine,
-          delivery_status = excluded.delivery_status,
-          payload = excluded.payload,
-          updated_at = excluded.updated_at`,
-        [
-          scope.ownerUid,
-          scope.tenantId,
-          input.contactId,
-          message.messageId,
-          getMessageSentAtMs(message),
-          message.senderUid,
-          message.isMine ? 1 : 0,
-          message.deliveryStatus || null,
-          payload,
-          nowIso
-        ]
-      );
+    if (!media) {
+      continue;
     }
 
     await db.runAsync(
-      `DELETE FROM local_messages
-       WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?
-         AND message_id NOT IN (
-           SELECT message_id FROM local_messages
-           WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?
-           ORDER BY sent_at_ms DESC, message_id DESC
-           LIMIT ?
-         )`,
+      `INSERT INTO local_chat_media (
+        owner_uid, tenant_id, contact_id, message_id, media_index,
+        media_id, kind, content_type, file_name, size_bytes,
+        duration_ms, width, height, thumbnail_local_uri, thumbnail_data_url,
+        plain_local_uri, transfer_status, transfer_progress, payload, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(owner_uid, tenant_id, contact_id, message_id, media_index)
+      DO UPDATE SET
+        media_id = excluded.media_id,
+        kind = excluded.kind,
+        content_type = excluded.content_type,
+        file_name = excluded.file_name,
+        size_bytes = excluded.size_bytes,
+        duration_ms = excluded.duration_ms,
+        width = excluded.width,
+        height = excluded.height,
+        thumbnail_local_uri = excluded.thumbnail_local_uri,
+        thumbnail_data_url = excluded.thumbnail_data_url,
+        plain_local_uri = excluded.plain_local_uri,
+        transfer_status = excluded.transfer_status,
+        transfer_progress = excluded.transfer_progress,
+        payload = excluded.payload,
+        updated_at = excluded.updated_at`,
       [
         scope.ownerUid,
         scope.tenantId,
-        input.contactId,
-        scope.ownerUid,
-        scope.tenantId,
-        input.contactId,
-        LOCAL_CACHED_MESSAGE_LIMIT
+        contactId,
+        message.messageId,
+        mediaIndex,
+        media.mediaId || null,
+        media.kind,
+        media.contentType,
+        media.fileName,
+        Math.max(0, Math.round(media.sizeBytes || 0)),
+        Number.isFinite(media.durationMs) ? Math.max(0, Math.round(media.durationMs || 0)) : null,
+        Number.isFinite(media.width) ? Math.max(1, Math.round(media.width || 1)) : null,
+        Number.isFinite(media.height) ? Math.max(1, Math.round(media.height || 1)) : null,
+        null,
+        media.thumbnailDataUrl || null,
+        toPortableChatMediaUri(media.localUri || '') || null,
+        normalizeMediaTransferStatus(media.transferStatus) || null,
+        Number.isFinite(media.transferProgress)
+          ? Math.min(Math.max(media.transferProgress || 0, 0), 1)
+          : null,
+          // Without the thumbnail: it goes to its own column in this same row,
+          // in the clear. Sealing a second copy here was the same mistake as in
+          // the message payload, in a second place.
+          await encryptJson(stripMediaThumbnail(media)),
+        updatedAt
       ]
     );
+  }
+}
+
+/**
+ * The hidden-message ids for a conversation, without touching its messages.
+ *
+ * One small decrypt instead of one per cached message.
+ */
+export async function loadCachedHiddenMessageIds(
+  scope: LocalChatScope,
+  contactId: string
+): Promise<string[]> {
+  const db = await getLocalChatSqliteDatabase();
+  const row = await db.getFirstAsync<{ hidden_payload: string | null }>(
+    `SELECT hidden_payload
+     FROM local_conversations
+     WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?
+     LIMIT 1`,
+    [scope.ownerUid, scope.tenantId, contactId]
+  ).catch(() => null);
+
+  if (!row?.hidden_payload) {
+    return [];
+  }
+
+  const hiddenMessageIds = await decryptJson<string[]>(row.hidden_payload).catch(() => []);
+
+  return Array.isArray(hiddenMessageIds) ? hiddenMessageIds : [];
+}
+
+export async function loadStoredMessageSignatures(
+  db: SQLite.SQLiteDatabase,
+  scope: LocalChatScope,
+  contactId: string
+): Promise<Map<string, string>> {
+  const rows = await db.getAllAsync<{ content_signature: string | null; message_id: string }>(
+    `SELECT message_id, content_signature
+     FROM local_messages
+     WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?`,
+    [scope.ownerUid, scope.tenantId, contactId]
+  ).catch(() => []);
+  const signatures = new Map<string, string>();
+
+  rows.forEach((row) => {
+    if (row.content_signature) {
+      signatures.set(row.message_id, row.content_signature);
+    }
   });
 
-  return true;
+  return signatures;
 }
 
-async function listCachedChatConversationsFromSqlite(
-  scope: LocalChatScope
-): Promise<LocalConversationRecord[]> {
-  const db = await getLocalChatSqliteDatabase();
-  const rows = await db.getAllAsync<Pick<SqliteConversationRow, 'contact_id'>>(
-    `SELECT contact_id
-     FROM local_conversations
-     WHERE owner_uid = ? AND tenant_id = ?
-     ORDER BY updated_at DESC
-     LIMIT ?`,
-    [scope.ownerUid, scope.tenantId, LOCAL_CACHED_CHAT_CONTACT_LIMIT]
-  );
-  const records = await Promise.all(rows.map((row) =>
-    loadRawCachedChatConversationFromSqlite({
-      contactId: row.contact_id,
-      ownerUid: scope.ownerUid,
-      tenantId: scope.tenantId
-    }).catch(() => null)
-  ));
+export async function ensureLocalMessageColumns(db: SQLite.SQLiteDatabase): Promise<void> {
+  const rows = await db.getAllAsync<{ name: string }>('PRAGMA table_info(local_messages)');
 
-  return records
-    .filter((record): record is LocalConversationRecord => Boolean(record))
-    .map(filterHiddenMessagesInRecord)
-    .sort((first, second) => first.contactId.localeCompare(second.contactId));
-}
-
-async function clearSqliteChatDataForOwner(input: {
-  ownerUid: string;
-  tenantId?: string;
-}): Promise<void> {
-  const ownerUid = typeof input.ownerUid === 'string' ? input.ownerUid.trim() : '';
-
-  if (!ownerUid) {
-    return;
+  if (!rows.some((row) => row.name === 'content_signature')) {
+    await db.execAsync('ALTER TABLE local_messages ADD COLUMN content_signature TEXT');
   }
+}
 
-  const db = await getLocalChatSqliteDatabase();
-  const tenantId = typeof input.tenantId === 'string' ? input.tenantId.trim() : '';
+export async function ensureLocalConversationColumns(db: SQLite.SQLiteDatabase): Promise<void> {
+  const rows = await db.getAllAsync<{ name: string }>('PRAGMA table_info(local_conversations)');
+  const columnNames = new Set(rows.map((row) => row.name));
+  const migrations: Array<[string, string]> = [
+    ['last_message_at_ms', 'ALTER TABLE local_conversations ADD COLUMN last_message_at_ms INTEGER'],
+    ['preview', 'ALTER TABLE local_conversations ADD COLUMN preview TEXT'],
+    ['unread_count', 'ALTER TABLE local_conversations ADD COLUMN unread_count INTEGER NOT NULL DEFAULT 0'],
+    ['is_archived', 'ALTER TABLE local_conversations ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0'],
+    ['is_pinned', 'ALTER TABLE local_conversations ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0'],
+    ['is_favorite', 'ALTER TABLE local_conversations ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0'],
+    ['is_spam', 'ALTER TABLE local_conversations ADD COLUMN is_spam INTEGER NOT NULL DEFAULT 0']
+  ];
 
-  if (tenantId) {
-    await Promise.all([
-      db.runAsync(
-        'DELETE FROM local_messages WHERE owner_uid = ? AND tenant_id = ?',
-        [ownerUid, tenantId]
-      ),
-      db.runAsync(
-        'DELETE FROM local_conversations WHERE owner_uid = ? AND tenant_id = ?',
-        [ownerUid, tenantId]
-      )
-    ]);
-    return;
+  for (const [columnName, sql] of migrations) {
+    if (!columnNames.has(columnName)) {
+      await db.execAsync(sql);
+    }
   }
-
-  await Promise.all([
-    db.runAsync('DELETE FROM local_messages WHERE owner_uid = ?', [ownerUid]),
-    db.runAsync('DELETE FROM local_conversations WHERE owner_uid = ?', [ownerUid])
-  ]);
 }
 
-async function getLocalChatSqliteDatabase(): Promise<SQLite.SQLiteDatabase> {
-  sqliteDatabasePromise ??= (async () => {
-    const db = await SQLite.openDatabaseAsync(LOCAL_SQLITE_DATABASE_NAME);
+export async function ensureLocalMediaTransferQueueColumns(db: SQLite.SQLiteDatabase): Promise<void> {
+  const rows = await db.getAllAsync<{ name: string }>('PRAGMA table_info(local_chat_media_transfer_queue)');
+  const columnNames = new Set(rows.map((row) => row.name));
 
-    await db.execAsync(`
-      PRAGMA journal_mode = WAL;
-      CREATE TABLE IF NOT EXISTS local_conversations (
-        owner_uid TEXT NOT NULL,
-        tenant_id TEXT NOT NULL,
-        contact_id TEXT NOT NULL,
-        contact_payload TEXT,
-        hidden_payload TEXT,
-        updated_at TEXT NOT NULL,
-        PRIMARY KEY (owner_uid, tenant_id, contact_id)
-      );
-      CREATE TABLE IF NOT EXISTS local_messages (
-        owner_uid TEXT NOT NULL,
-        tenant_id TEXT NOT NULL,
-        contact_id TEXT NOT NULL,
-        message_id TEXT NOT NULL,
-        sent_at_ms INTEGER NOT NULL,
-        sender_uid TEXT NOT NULL,
-        is_mine INTEGER NOT NULL,
-        delivery_status TEXT,
-        payload TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        PRIMARY KEY (owner_uid, tenant_id, contact_id, message_id)
-      );
-      CREATE INDEX IF NOT EXISTS idx_local_messages_thread_time
-        ON local_messages(owner_uid, tenant_id, contact_id, sent_at_ms);
-      CREATE INDEX IF NOT EXISTS idx_local_conversations_owner_time
-        ON local_conversations(owner_uid, tenant_id, updated_at);
-    `);
-
-    return db;
-  })();
-
-  return sqliteDatabasePromise;
+  if (!columnNames.has('native_transfer_id')) {
+    await db.execAsync('ALTER TABLE local_chat_media_transfer_queue ADD COLUMN native_transfer_id TEXT');
+  }
 }
 
-function getMessageSentAtMs(message: ChatMessage): number {
+export function getMessageSentAtMs(message: ChatMessage): number {
   const sentAtMs = Date.parse(message.sentAt);
 
   return Number.isFinite(sentAtMs) ? sentAtMs : Date.now();
+}
+
+export function getContactLastMessageAtMs(contact: ChatContact | null): number | null {
+  const lastMessageAtMs = Date.parse(contact?.lastMessageAt || '');
+
+  return Number.isFinite(lastMessageAtMs) ? lastMessageAtMs : null;
+}
+
+export function getLocalChatPreview(contact: ChatContact | null, latestMessage: ChatMessage | null): string {
+  if (latestMessage) {
+    const text = latestMessage.text.trim();
+
+    if (text) {
+      return text.slice(0, 160);
+    }
+
+    const mediaItems = getCachedMessageMediaItems(latestMessage);
+    const media = mediaItems[0] || latestMessage.media || latestMessage.image || null;
+
+    if (media?.kind === 'image') {
+      return mediaItems.length > 1 ? `${mediaItems.length} photos` : 'Photo';
+    }
+
+    if (media?.kind === 'video') {
+      return 'Video';
+    }
+
+    if (media?.kind === 'audio') {
+      return 'Voice message';
+    }
+
+    if (media?.kind === 'file') {
+      return media.fileName || 'Document';
+    }
+  }
+
+  return contact?.preview || '';
 }
 
 function getCachedMessageMediaItems(message: ChatMessage): ChatMediaAttachment[] {
@@ -936,6 +1657,161 @@ function getCachedMessageMediaItems(message: ChatMessage): ChatMediaAttachment[]
   }
 
   return [];
+}
+
+export function normalizeCachedMediaAttachment(media: ChatMediaAttachment | null | undefined): ChatMediaAttachment | null {
+  const kind = normalizeMediaKind(media?.kind);
+  const contentType = typeof media?.contentType === 'string' && media.contentType.trim()
+    ? media.contentType.trim()
+    : '';
+  const fileName = typeof media?.fileName === 'string' && media.fileName.trim()
+    ? media.fileName.trim()
+    : '';
+
+  if (!media || !kind || !contentType || !fileName) {
+    return null;
+  }
+
+  return {
+    ...media,
+    contentType,
+    durationMs: Number.isFinite(media.durationMs) ? Math.max(0, Math.round(media.durationMs || 0)) : undefined,
+    fileName,
+    height: Number.isFinite(media.height) ? Math.max(1, Math.round(media.height || 1)) : undefined,
+    kind,
+    sizeBytes: Number.isFinite(media.sizeBytes) ? Math.max(0, Math.round(media.sizeBytes || 0)) : 0,
+    transferProgress: Number.isFinite(media.transferProgress)
+      ? Math.min(Math.max(media.transferProgress || 0, 0), 1)
+      : undefined,
+    transferStatus: normalizeMediaTransferStatus(media.transferStatus) || undefined,
+    width: Number.isFinite(media.width) ? Math.max(1, Math.round(media.width || 1)) : undefined
+  };
+}
+
+export function normalizeMediaKind(kind: unknown): ChatMediaAttachment['kind'] | null {
+  return kind === 'audio' || kind === 'file' || kind === 'image' || kind === 'video'
+    ? kind
+    : null;
+}
+
+export function normalizeMediaTransferStatus(status: unknown): ChatMediaAttachment['transferStatus'] | null {
+  return status === 'available' ||
+    status === 'downloading' ||
+    status === 'failed' ||
+    status === 'preparing' ||
+    status === 'queued' ||
+    status === 'uploading'
+      ? status
+      : null;
+}
+
+export function normalizeMediaPreparationStatus(status: unknown): LocalChatMediaPreparationStatus | null {
+  return status === 'cancelled' ||
+    status === 'failed' ||
+    status === 'preparing' ||
+    status === 'queued' ||
+    status === 'ready'
+      ? status
+      : null;
+}
+
+export function normalizeMediaTransferType(value: unknown): LocalChatMediaTransferType | null {
+  return value === 'download' || value === 'upload' ? value : null;
+}
+
+export function normalizeTransferProgress(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.min(Math.max(value, 0), 1)
+    : 0;
+}
+
+export function normalizeNativeTransferId(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim().slice(0, 512) : null;
+}
+
+export function normalizeNativeAssetIdentifier(value: unknown): string {
+  return typeof value === 'string' && value.trim() ? value.trim().slice(0, 1024) : '';
+}
+
+export function normalizeMediaUploadRecoveryState(value: unknown): LocalChatMediaUploadRecoveryState | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const candidate = value as Partial<LocalChatMediaUploadRecoveryState>;
+  const mediaId = typeof candidate.mediaId === 'string' && candidate.mediaId.trim()
+    ? candidate.mediaId.trim()
+    : '';
+  const expiresAt = typeof candidate.expiresAt === 'string' && candidate.expiresAt.trim()
+    ? candidate.expiresAt.trim()
+    : '';
+  const media = normalizeCachedMediaAttachment(candidate.media);
+
+  if (!mediaId || !expiresAt || !media || media.mediaId !== mediaId) {
+    return null;
+  }
+
+  return {
+    chatType: candidate.chatType === 'GROUP' ? 'GROUP' : candidate.chatType === 'DIRECT' ? 'DIRECT' : undefined,
+    expiresAt,
+    media,
+    mediaId,
+    partNativeTransferIds: Array.isArray(candidate.partNativeTransferIds)
+      ? candidate.partNativeTransferIds.map(normalizeNativeTransferId).filter((id): id is string => Boolean(id))
+      : undefined,
+    uploadedPartIndexes: Array.isArray(candidate.uploadedPartIndexes)
+      ? candidate.uploadedPartIndexes
+          .filter((index): index is number => typeof index === 'number' && Number.isFinite(index) && index >= 0)
+          .map((index) => Math.round(index))
+          .slice(0, 500)
+      : undefined,
+    uploadMode: candidate.uploadMode === 'chunked' ? 'chunked' : 'single'
+  };
+}
+
+function buildMediaTransferQueueId(
+  transferType: LocalChatMediaTransferType,
+  contactId: string,
+  messageId: string,
+  mediaIndex: number
+): string {
+  return [
+    transferType,
+    sanitizeStorageKey(contactId),
+    sanitizeStorageKey(messageId),
+    Math.max(0, Math.round(mediaIndex))
+  ].join(':').slice(0, 360);
+}
+
+function buildMediaPreparationQueueId(
+  contactId: string,
+  messageId: string,
+  mediaIndex: number,
+  assetIdentifier: string
+): string {
+  return [
+    'prepare',
+    sanitizeStorageKey(contactId),
+    sanitizeStorageKey(messageId),
+    Math.max(0, Math.round(mediaIndex)),
+    sanitizeStorageKey(assetIdentifier)
+  ].join(':').slice(0, 420);
+}
+
+function normalizeMediaMessageIds(messageIds: string[]): string[] {
+  const seenMessageIds = new Set<string>();
+  const safeMessageIds: string[] = [];
+
+  messageIds.forEach((messageId) => {
+    const safeMessageId = typeof messageId === 'string' ? messageId.trim() : '';
+
+    if (safeMessageId && !seenMessageIds.has(safeMessageId)) {
+      seenMessageIds.add(safeMessageId);
+      safeMessageIds.push(safeMessageId);
+    }
+  });
+
+  return safeMessageIds.slice(0, 500);
 }
 
 function toCachedChatImageAttachment(media: ChatMediaAttachment) {
@@ -1003,7 +1879,7 @@ async function loadRawCachedChatConversation(input: {
   return normalizeCachedConversationRecord(record);
 }
 
-async function encryptJson(value: unknown): Promise<string> {
+export async function encryptJson(value: unknown): Promise<string> {
   const key = await getOrCreateLocalChatKey();
   const nonce = Crypto.getRandomBytes(nacl.secretbox.nonceLength);
   const plaintext = utf8ToBytes(JSON.stringify(value));
@@ -1017,7 +1893,7 @@ async function encryptJson(value: unknown): Promise<string> {
   return JSON.stringify(payload);
 }
 
-async function decryptJson<T>(encryptedValue: string): Promise<T | null> {
+export async function decryptJson<T>(encryptedValue: string): Promise<T | null> {
   try {
     const payload = JSON.parse(encryptedValue) as Partial<EncryptedPayload>;
 
@@ -1042,7 +1918,43 @@ async function decryptJson<T>(encryptedValue: string): Promise<T | null> {
   }
 }
 
-async function getOrCreateLocalChatKey(): Promise<Uint8Array> {
+/**
+ * The local database key, fetched from secure storage once per app run.
+ *
+ * Every encrypt and decrypt used to call this, and every call meant a
+ * SecureStore round trip — on Android that is an IPC to the keystore daemon plus
+ * a hardware-backed AES-GCM unwrap, which costs milliseconds each. Opening a
+ * chat decrypts one record per conversation and message batch, so the cost was
+ * paid hundreds of times in a row and the app appeared to freeze on tap. It is
+ * unnoticeable on iOS, where the Keychain is far faster, which is why this
+ * survived until the app ran on a low-end Android phone.
+ *
+ * Caching the key does not weaken anything: it is already held in memory as a
+ * Uint8Array for the duration of every operation, so the security boundary is
+ * the process either way. It is dropped when the owner's data is cleared.
+ */
+let localChatKeyPromise: Promise<Uint8Array> | null = null;
+
+function getOrCreateLocalChatKey(): Promise<Uint8Array> {
+  if (!localChatKeyPromise) {
+    // A rejection must not be cached, or one failure at startup would leave the
+    // store permanently unusable for the rest of the run.
+    localChatKeyPromise = loadOrCreateLocalChatKey().catch((error) => {
+      localChatKeyPromise = null;
+
+      throw error;
+    });
+  }
+
+  return localChatKeyPromise;
+}
+
+/** Forgets the cached key. Called when the owner's local data is cleared. */
+export function clearLocalChatKeyCache(): void {
+  localChatKeyPromise = null;
+}
+
+async function loadOrCreateLocalChatKey(): Promise<Uint8Array> {
   const secureStoreAvailable = await SecureStore.isAvailableAsync();
 
   if (!secureStoreAvailable) {
@@ -1077,7 +1989,7 @@ function getConversationStorageKeyPrefix(scope: LocalChatScope): string {
   return `synzapp.localChat.v2.${sanitizeStorageKey(scope.ownerUid)}.${sanitizeStorageKey(scope.tenantId)}.`;
 }
 
-function getOutboxStorageKey(scope: LocalChatScope): string {
+export function getOutboxStorageKey(scope: LocalChatScope): string {
   return `synzapp.localOutbox.v2.${sanitizeStorageKey(scope.ownerUid)}.${sanitizeStorageKey(scope.tenantId)}`;
 }
 
@@ -1085,7 +1997,7 @@ function getChatContactsStorageKey(scope: LocalChatScope): string {
   return `synzapp.localChatContacts.v2.${sanitizeStorageKey(scope.ownerUid)}.${sanitizeStorageKey(scope.tenantId)}`;
 }
 
-function normalizeLocalChatScope(input: {
+export function normalizeLocalChatScope(input: {
   ownerUid?: string | null;
   tenantId?: string | null;
 }): LocalChatScope | null {
@@ -1115,7 +2027,7 @@ function sanitizeStorageKey(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120);
 }
 
-function normalizeCachedChatContacts(contacts: ChatContact[] | undefined): ChatContact[] {
+export function normalizeCachedChatContacts(contacts: ChatContact[] | undefined): ChatContact[] {
   const contactById = new Map<string, ChatContact>();
 
   (contacts || []).forEach((contact) => {
@@ -1134,7 +2046,7 @@ function normalizeCachedChatContacts(contacts: ChatContact[] | undefined): ChatC
   return [...contactById.values()].slice(0, LOCAL_CACHED_CHAT_CONTACT_LIMIT);
 }
 
-function normalizeCachedConversationRecord(record: LocalConversationRecord): LocalConversationRecord {
+export function normalizeCachedConversationRecord(record: LocalConversationRecord): LocalConversationRecord {
   return {
     ...record,
     hiddenMessageIds: normalizeHiddenMessageIds(record.hiddenMessageIds),
@@ -1142,7 +2054,7 @@ function normalizeCachedConversationRecord(record: LocalConversationRecord): Loc
   };
 }
 
-function filterHiddenMessagesInRecord(record: LocalConversationRecord): LocalConversationRecord {
+export function filterHiddenMessagesInRecord(record: LocalConversationRecord): LocalConversationRecord {
   const hiddenMessageIds = normalizeHiddenMessageIds(record.hiddenMessageIds);
   const hiddenMessageIdSet = new Set(hiddenMessageIds);
 
@@ -1154,7 +2066,60 @@ function filterHiddenMessagesInRecord(record: LocalConversationRecord): LocalCon
   };
 }
 
-function normalizeHiddenMessageIds(messageIds?: string[]): string[] {
+function filterHiddenMessagesInPageRecord(record: LocalConversationPageRecord): LocalConversationPageRecord {
+  const filteredRecord = filterHiddenMessagesInRecord(record);
+
+  return {
+    ...record,
+    hiddenMessageIds: filteredRecord.hiddenMessageIds,
+    messages: filteredRecord.messages,
+    oldestMessageSentAtMs: filteredRecord.messages.length
+      ? getMessageSentAtMs(filteredRecord.messages[0])
+      : record.oldestMessageSentAtMs
+  };
+}
+
+export function normalizeMessagePageLimit(limit?: number): number {
+  if (!Number.isFinite(limit)) {
+    return LOCAL_CHAT_MESSAGE_PAGE_LIMIT;
+  }
+
+  return Math.max(20, Math.min(Math.round(limit || LOCAL_CHAT_MESSAGE_PAGE_LIMIT), 120));
+}
+
+export function normalizeNullableTimestampMs(value: number | null | undefined): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+
+  return Math.max(0, Math.floor(value));
+}
+
+function mergeNullableMax(first: number | null, second: number | null): number | null {
+  if (first === null) {
+    return second;
+  }
+
+  if (second === null) {
+    return first;
+  }
+
+  return Math.max(first, second);
+}
+
+function mergeNullableMin(first: number | null, second: number | null): number | null {
+  if (first === null) {
+    return second;
+  }
+
+  if (second === null) {
+    return first;
+  }
+
+  return Math.min(first, second);
+}
+
+export function normalizeHiddenMessageIds(messageIds?: string[]): string[] {
   const seenMessageIds = new Set<string>();
   const hiddenMessageIds: string[] = [];
 
@@ -1170,7 +2135,7 @@ function normalizeHiddenMessageIds(messageIds?: string[]): string[] {
   return hiddenMessageIds.slice(-LOCAL_HIDDEN_MESSAGE_LIMIT);
 }
 
-function uniqueMessages(messages: ChatMessage[]): ChatMessage[] {
+export function uniqueMessages(messages: ChatMessage[]): ChatMessage[] {
   const messageById = new Map<string, ChatMessage>();
 
   messages.forEach((message) => {

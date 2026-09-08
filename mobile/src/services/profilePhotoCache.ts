@@ -4,6 +4,10 @@ import * as SecureStore from 'expo-secure-store';
 import * as SQLite from 'expo-sqlite';
 import { Platform } from 'react-native';
 import { getRegisteredDeviceHeaders } from './deviceIdentity';
+import {
+  buildProfilePhotoMemoKey,
+  rememberResolvedProfilePhoto
+} from './profilePhotoMemo';
 
 interface CachedProfilePhotoInput {
   cacheKey?: string | null;
@@ -22,7 +26,17 @@ const legacyProfilePhotoCacheDirectory = FileSystem.cacheDirectory
 const PROFILE_PHOTO_CACHE_DATABASE_NAME = 'synzapp-profile-photo-cache-v1.db';
 const IOS_SHARED_KEYCHAIN_ACCESS_GROUP = 'F9M458TK87.com.synzapp.mobile.shared';
 const NOTIFICATION_AVATAR_KEYCHAIN_SERVICE = 'synzapp.notification.avatar.v1';
-const NOTIFICATION_AVATAR_STORAGE_PREFIX = 'synzapp.notificationAvatar.v1:';
+/**
+ * A dot, not a colon, and that detail is the whole feature.
+ *
+ * `expo-secure-store` **throws** on any key outside `[A-Za-z0-9._-]`, and the
+ * separator here used to be a colon. Every avatar write since this was written
+ * threw before it stored anything, the failure was swallowed by the catch
+ * below, and both platforms spent their lives with nothing cached — which is
+ * why a sender's photo never once appeared on a notification while the device
+ * identity, whose key happens to use only dots, worked perfectly.
+ */
+const NOTIFICATION_AVATAR_STORAGE_PREFIX = 'synzapp.notificationAvatar.v1.';
 const PROFILE_PHOTO_SIZE = 256;
 const PROFILE_PHOTO_QUALITY = 0.78;
 const PROFILE_PHOTO_CACHE_LIMIT = 1000;
@@ -30,6 +44,12 @@ const NOTIFICATION_AVATAR_SIZE = 96;
 const NOTIFICATION_AVATAR_QUALITY = 0.68;
 const NOTIFICATION_AVATAR_MAX_BASE64_LENGTH = 85000;
 let profilePhotoDatabasePromise: Promise<SQLite.SQLiteDatabase> | null = null;
+/**
+ * Photos already resolved this session. See `profilePhotoMemo.ts` for why: the
+ * cache hit path alone costs a disk stat, a SQLite write and a Keychain read
+ * per person, and screens re-resolve every face each time they open.
+ */
+const resolvedProfilePhotoUris = new Map<string, string>();
 const notificationAvatarSecureStoreOptions: SecureStore.SecureStoreOptions = {
   ...(Platform.OS === 'ios' ? { accessGroup: IOS_SHARED_KEYCHAIN_ACCESS_GROUP } : {}),
   keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
@@ -55,6 +75,14 @@ export async function getCachedProfilePhotoUri({
     return null;
   }
 
+  const memoKey = buildProfilePhotoMemoKey(cacheKey, profilePhotoUrl);
+  const alreadyResolved = resolvedProfilePhotoUris.get(memoKey);
+
+  // Answered without a single native call, which is the whole point.
+  if (alreadyResolved) {
+    return alreadyResolved;
+  }
+
   const safeCacheKey = sanitizeCacheKey(cacheKey);
   const fileUri = `${profilePhotoCacheDirectory}${safeCacheKey}.jpg`;
   const existingFile = await FileSystem.getInfoAsync(fileUri);
@@ -67,6 +95,7 @@ export async function getCachedProfilePhotoUri({
       sizeBytes: typeof existingFile.size === 'number' ? existingFile.size : null
     });
     await cacheNotificationAvatarThumbnail(cacheKey, fileUri);
+    rememberResolvedProfilePhoto(resolvedProfilePhotoUris, memoKey, fileUri);
 
     return fileUri;
   }
@@ -82,6 +111,7 @@ export async function getCachedProfilePhotoUri({
 
   if (migratedUri) {
     await cacheNotificationAvatarThumbnail(cacheKey, migratedUri);
+    rememberResolvedProfilePhoto(resolvedProfilePhotoUris, memoKey, migratedUri);
 
     return migratedUri;
   }
@@ -127,6 +157,7 @@ export async function getCachedProfilePhotoUri({
       sizeBytes: savedFile?.exists && typeof savedFile.size === 'number' ? savedFile.size : null
     });
     await cacheNotificationAvatarThumbnail(cacheKey, fileUri);
+    rememberResolvedProfilePhoto(resolvedProfilePhotoUris, memoKey, fileUri);
 
     return fileUri;
   } catch {
@@ -136,6 +167,9 @@ export async function getCachedProfilePhotoUri({
 }
 
 export async function clearProfilePhotoCache(): Promise<void> {
+  // Before the files go, so nothing can be handed a uri that no longer exists.
+  resolvedProfilePhotoUris.clear();
+
   const db = await getProfilePhotoDatabase().catch(() => null);
 
   if (profilePhotoCacheDirectory) {
@@ -322,8 +356,14 @@ async function cacheNotificationAvatarThumbnail(
       }),
       notificationAvatarSecureStoreOptions
     );
-  } catch {
-    // Avatar previews are best-effort; chat image rendering should never fail because of them.
+  } catch (error) {
+    // Still best effort — a face on a notification is not worth failing a chat
+    // screen for. But it is **said out loud** now. Swallowing this in silence
+    // is exactly how a broken key went unnoticed for the life of the feature.
+    console.warn('[SynzappAvatar] could not cache a notification avatar', {
+      cacheKey,
+      message: error instanceof Error ? error.message : String(error)
+    });
   }
 }
 

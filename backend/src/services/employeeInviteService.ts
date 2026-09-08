@@ -92,6 +92,7 @@ export interface ApprovedEmployeeResponse {
   departmentId: string;
   departmentName: string;
   displayName: string | null;
+  employeeUid: string | null;
   phoneFormatted?: string;
   phoneLast4: string;
   phoneMasked: string;
@@ -386,6 +387,7 @@ export async function inviteEmployeeContacts(
     departmentId: input.departmentId,
     departmentName,
     displayName: contact.displayName || contact.phoneMasked,
+    employeeUid: null,
     phoneFormatted: formatPhoneNumber(contact.phoneNumber),
     phoneLast4: contact.phoneLast4,
     phoneMasked: contact.phoneMasked,
@@ -545,6 +547,7 @@ function mapApprovedEmployee(record: ApprovedEmployeeRecord, fallbackId: string)
     departmentId: record.departmentId || '',
     departmentName: record.departmentName || 'Department',
     displayName: record.displayName || null,
+    employeeUid: record.employeeUid || record.claimedByUid || null,
     phoneFormatted: getApprovedEmployeePhoneFormatted(record),
     phoneLast4: record.phoneLast4 || '',
     phoneMasked: record.phoneMasked || '*****',

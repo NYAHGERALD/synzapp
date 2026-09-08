@@ -2,7 +2,19 @@ import { BackendAuthSession, EmployeeDraft, OrgAdminDraft } from '../types/auth'
 import { getSynzappApiBaseUrl, normalizeSynzappApiUrl } from './apiConfig';
 import { getRegisteredDeviceHeaders } from './deviceIdentity';
 
+interface CompanyAddressParts {
+  city: string;
+  countryCode: string;
+  line1: string;
+  line2: string;
+  postalCode: string;
+  region: string;
+}
+
 interface CreateOrgAdminProfileInput extends OrgAdminDraft {
+  /** The address in pieces, so it can be acted on rather than only read. */
+  companyAddressParts?: CompanyAddressParts;
+  companyEmail?: string;
   idToken: string;
   profilePhotoDataUrl?: string;
 }
@@ -84,6 +96,8 @@ export async function createOrgAdminProfile(
       adminLastName: input.adminLastName,
       calendarYearStartDate: input.calendarYearStartDate,
       companyAddress: input.companyAddress,
+      companyAddressParts: input.companyAddressParts,
+      companyEmail: input.companyEmail,
       companyName: input.companyName,
       profilePhotoDataUrl: input.profilePhotoDataUrl
     }),

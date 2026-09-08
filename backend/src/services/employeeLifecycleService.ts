@@ -6,6 +6,7 @@ import {
 } from '../config/firebaseAdmin.js';
 import { SynzappRole, SynzappUserStatus } from '../types/auth.js';
 import { buildAuthSession } from './authSessionService.js';
+import { addDeviceWipeCommandToBatch, type CompanyDataWipeReason } from './companyDataWipeService.js';
 import type { ApprovedEmployeeResponse } from './employeeInviteService.js';
 
 export type EmployeeLifecycleAction =
@@ -514,6 +515,13 @@ async function revokeEmployeeDevices(
       revokedFields,
       { merge: true }
     );
+    addDeviceWipeCommandToBatch(batch, {
+      deviceId,
+      reason: getCompanyDataWipeReason(action),
+      requestedByUid: adminUid,
+      tenantId,
+      uid: employeeUid
+    });
   });
 
   await batch.commit();
@@ -531,6 +539,7 @@ function mapLifecycleEmployee(
     departmentId: record.departmentId || '',
     departmentName: record.departmentName || 'Department',
     displayName: record.displayName || null,
+    employeeUid: record.employeeUid || record.claimedByUid || null,
     phoneLast4: record.phoneLast4 || '',
     phoneMasked: record.phoneMasked || '*****',
     profilePhotoCacheKey: record.profilePhotoStoragePath
@@ -614,6 +623,30 @@ function getDeviceRevocationReason(action: EmployeeLifecycleAction): string {
   }
 
   return 'Employee anonymized by organization admin';
+}
+
+function getCompanyDataWipeReason(action: EmployeeLifecycleAction): CompanyDataWipeReason {
+  if (action === 'DEACTIVATE') {
+    return 'EMPLOYEE_DEACTIVATED';
+  }
+
+  if (action === 'ARCHIVE') {
+    return 'EMPLOYEE_ARCHIVED';
+  }
+
+  if (action === 'DELETE') {
+    return 'EMPLOYEE_DELETED';
+  }
+
+  if (action === 'PERMANENT_DELETE') {
+    return 'EMPLOYEE_PERMANENTLY_REMOVED';
+  }
+
+  if (action === 'ANONYMIZE') {
+    return 'EMPLOYEE_ANONYMIZED';
+  }
+
+  return 'MANUAL_SECURITY_ACTION';
 }
 
 function authorizationError(message: string): Error {

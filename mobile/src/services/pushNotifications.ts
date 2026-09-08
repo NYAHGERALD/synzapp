@@ -2,6 +2,8 @@ import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 import { getSynzappApiBaseUrl } from './apiConfig';
 import type { ChatContact } from './chatApi';
+import * as TaskManager from 'expo-task-manager';
+import { CHAT_DELIVERY_RECEIPT_TASK } from './chatDeliveryReceiptTask';
 import { getRegisteredDeviceHeaders } from './deviceIdentity';
 import {
   addSynzappVoipTokenListener,
@@ -31,6 +33,7 @@ interface ExpoProjectConfig {
 
 const CHAT_MESSAGES_CHANNEL_ID = 'chat-messages';
 const CALLS_CHANNEL_ID = 'synzapp-calls';
+const INTERPRETER_CHANNEL_ID = 'interpreter-reminders';
 const MAX_APP_BADGE_COUNT = 9999;
 let notificationHandlerConfigured = false;
 let notificationsModulePromise: Promise<ExpoNotificationsModule> | null = null;
@@ -63,7 +66,29 @@ export interface CallPushNotificationData {
   type: 'call.incoming';
 }
 
-type SynzappPushNotificationData = ChatPushNotificationData | CallPushNotificationData;
+export interface InterpreterPushNotificationData {
+  artifactId?: string;
+  endedAtIso?: string;
+  languageCode?: string;
+  languageCodes?: string;
+  meetingId: string;
+  notificationId: string;
+  scheduledAtIso?: string;
+  segmentId?: string;
+  summaryId?: string;
+  title?: string;
+  type:
+    | 'INTERPRETER_MEETING_REMINDER'
+    | 'INTERPRETER_SESSION_ENDED'
+    | 'INTERPRETER_SESSION_SCHEDULED'
+    | 'INTERPRETER_SUMMARY_AUDIO_READY'
+    | 'INTERPRETER_TRANSCRIPT_AUDIO_READY';
+}
+
+type SynzappPushNotificationData =
+  | ChatPushNotificationData
+  | CallPushNotificationData
+  | InterpreterPushNotificationData;
 
 export async function configureSynzappNotificationHandling(): Promise<ExpoNotificationsModule | null> {
   const Notifications = await getNotificationsModule();
@@ -86,6 +111,31 @@ export async function configureSynzappNotificationHandling(): Promise<ExpoNotifi
   });
   notificationHandlerConfigured = true;
 
+  // Routes pushes that arrive with the app shut to the background task, which
+  // is the only way a closed app can confirm it has a message. Registering is
+  // separate from defining the task: the definition has to exist in the bare
+  // JavaScript context the platform starts, and this tells the notification
+  // system to hand that context the push.
+  //
+  // Not fatal if it fails. Delivery is still recorded when the app is next
+  // opened, so the worst case is a tick that arrives late.
+  // Reported rather than swallowed. Registering is the step everything else
+  // depends on, and a failure here shows up only as a notification that never
+  // reveals itself — the same symptom as a dozen unrelated faults.
+  try {
+    await Notifications.registerTaskAsync(CHAT_DELIVERY_RECEIPT_TASK);
+    console.log('[SynzappPreview] task registered', JSON.stringify({
+      defined: TaskManager.isTaskDefined(CHAT_DELIVERY_RECEIPT_TASK),
+      registered: await TaskManager.isTaskRegisteredAsync(CHAT_DELIVERY_RECEIPT_TASK),
+      task: CHAT_DELIVERY_RECEIPT_TASK
+    }));
+  } catch (error) {
+    console.log('[SynzappPreview] task registration FAILED', JSON.stringify({
+      defined: TaskManager.isTaskDefined(CHAT_DELIVERY_RECEIPT_TASK),
+      message: error instanceof Error ? error.message : String(error)
+    }));
+  }
+
   return Notifications;
 }
 
@@ -103,21 +153,39 @@ export async function registerDevicePushNotifications(idToken: string): Promise<
 
   await Promise.all([
     ensureChatNotificationChannel(Notifications),
-    ensureCallNotificationChannel(Notifications)
+    ensureCallNotificationChannel(Notifications),
+    ensureInterpreterNotificationChannel(Notifications)
   ]);
 
   const permission = await ensureNotificationPermission(Notifications);
 
   if (!permission) {
+    // Logged rather than returned quietly: a device that never asks for a token
+    // looks identical, from the outside, to one whose pushes are being dropped.
+    console.log('[SynzappPush]', JSON.stringify({ permission: false, platform: Platform.OS }));
+
     return didRegisterVoipToken;
   }
 
   const pushToken = await getPushToken(Notifications);
+
   await registerPushTokenWithBackend(idToken, {
     platform: getPushPlatform(),
     provider: pushToken.provider,
     token: pushToken.token
   });
+
+  // Every stage of push registration succeeds silently, so when notifications do
+  // not arrive there is no way to tell whether the token was never obtained,
+  // never sent, or sent and ignored. The token itself is not logged; its length
+  // and provider are enough to tell those apart.
+  console.log('[SynzappPush]', JSON.stringify({
+    permission: true,
+    platform: getPushPlatform(),
+    provider: pushToken.provider,
+    registered: true,
+    tokenLength: pushToken.token.length
+  }));
 
   return true;
 }
@@ -272,8 +340,17 @@ export function getSynzappUnreadBadgeCount(
 }
 
 export function addChatPushNotificationListeners(handlers: {
+  /**
+   * Called for every notification that arrives, whatever it is.
+   *
+   * Used to refresh things that a push implies have changed but which carry no
+   * payload of their own, such as announcements.
+   */
+  onAnyReceived?: () => void;
   onCallReceived?: (data: CallPushNotificationData) => void;
   onCallResponse?: (data: CallPushNotificationData) => void;
+  onInterpreterReceived?: (data: InterpreterPushNotificationData) => void;
+  onInterpreterResponse?: (data: InterpreterPushNotificationData) => void;
   onReceived?: (data: ChatPushNotificationData) => void;
   onResponse?: (data: ChatPushNotificationData) => void;
 }): () => void {
@@ -290,19 +367,27 @@ export function addChatPushNotificationListeners(handlers: {
       receivedSubscription = Notifications.addNotificationReceivedListener((notification) => {
         const data = parseSynzappPushNotificationData(notification.request.content.data);
 
+        handlers.onAnyReceived?.();
+
         if (data?.type === 'chat.message') {
           handlers.onReceived?.(data);
         } else if (data?.type === 'call.incoming') {
           handlers.onCallReceived?.(data);
+        } else if (isInterpreterPushNotificationData(data)) {
+          handlers.onInterpreterReceived?.(data);
         }
       });
       responseSubscription = Notifications.addNotificationResponseReceivedListener((response) => {
         const data = parseSynzappPushNotificationData(response.notification.request.content.data);
 
+        handlers.onAnyReceived?.();
+
         if (data?.type === 'chat.message') {
           handlers.onResponse?.(data);
         } else if (data?.type === 'call.incoming') {
           handlers.onCallResponse?.(data);
+        } else if (isInterpreterPushNotificationData(data)) {
+          handlers.onInterpreterResponse?.(data);
         }
       });
 
@@ -316,6 +401,8 @@ export function addChatPushNotificationListeners(handlers: {
             handlers.onResponse?.(data);
           } else if (data?.type === 'call.incoming') {
             handlers.onCallResponse?.(data);
+          } else if (isInterpreterPushNotificationData(data)) {
+            handlers.onInterpreterResponse?.(data);
           }
         })
         .catch(() => undefined);
@@ -366,6 +453,12 @@ async function ensureChatNotificationChannel(Notifications: ExpoNotificationsMod
 
   await Notifications.setNotificationChannelAsync(CHAT_MESSAGES_CHANNEL_ID, {
     importance: Notifications.AndroidImportance.HIGH,
+    // The message itself is shown, and Android decides who may read it: in
+    // full while the phone is unlocked, hidden behind "contents hidden" while
+    // it is locked. Letting the system draw that line is better than a setting
+    // of ours, because it already knows whether the person is present and it
+    // cannot be got wrong on one screen and right on another.
+    lockscreenVisibility: Notifications.AndroidNotificationVisibility.PRIVATE,
     name: 'Chat messages',
     sound: 'default',
     vibrationPattern: [0, 250, 250, 250]
@@ -383,6 +476,19 @@ async function ensureCallNotificationChannel(Notifications: ExpoNotificationsMod
     name: 'Synzapp calls',
     sound: 'default',
     vibrationPattern: [0, 500, 250, 500, 250, 500]
+  });
+}
+
+async function ensureInterpreterNotificationChannel(Notifications: ExpoNotificationsModule): Promise<void> {
+  if (Platform.OS !== 'android') {
+    return;
+  }
+
+  await Notifications.setNotificationChannelAsync(INTERPRETER_CHANNEL_ID, {
+    importance: Notifications.AndroidImportance.HIGH,
+    name: 'Interpreter',
+    sound: 'default',
+    vibrationPattern: [0, 250, 120, 250]
   });
 }
 
@@ -449,7 +555,9 @@ function getPushPlatform(): PushPlatform {
 }
 
 function parseSynzappPushNotificationData(data: unknown): SynzappPushNotificationData | null {
-  return parseChatPushNotificationData(data) || parseCallPushNotificationData(data);
+  return parseChatPushNotificationData(data) ||
+    parseCallPushNotificationData(data) ||
+    parseInterpreterPushNotificationData(data);
 }
 
 function parseChatPushNotificationData(data: unknown): ChatPushNotificationData | null {
@@ -511,6 +619,47 @@ function parseCallPushNotificationData(data: unknown): CallPushNotificationData 
     title: typeof payload.title === 'string' && payload.title.trim() ? payload.title : 'Synzapp call',
     type: 'call.incoming'
   };
+}
+
+function parseInterpreterPushNotificationData(data: unknown): InterpreterPushNotificationData | null {
+  if (!data || typeof data !== 'object') {
+    return null;
+  }
+
+  const payload = data as Record<string, unknown>;
+  const type = typeof payload.type === 'string' ? payload.type : '';
+
+  if (!isInterpreterPushNotificationType(type) || typeof payload.meetingId !== 'string') {
+    return null;
+  }
+
+  return {
+    artifactId: typeof payload.artifactId === 'string' ? payload.artifactId : undefined,
+    endedAtIso: typeof payload.endedAtIso === 'string' ? payload.endedAtIso : undefined,
+    languageCode: typeof payload.languageCode === 'string' ? payload.languageCode : undefined,
+    languageCodes: typeof payload.languageCodes === 'string' ? payload.languageCodes : undefined,
+    meetingId: payload.meetingId,
+    notificationId: typeof payload.notificationId === 'string' ? payload.notificationId : '',
+    scheduledAtIso: typeof payload.scheduledAtIso === 'string' ? payload.scheduledAtIso : undefined,
+    segmentId: typeof payload.segmentId === 'string' ? payload.segmentId : undefined,
+    summaryId: typeof payload.summaryId === 'string' ? payload.summaryId : undefined,
+    title: typeof payload.title === 'string' ? payload.title : undefined,
+    type
+  };
+}
+
+function isInterpreterPushNotificationData(
+  data: SynzappPushNotificationData | null
+): data is InterpreterPushNotificationData {
+  return Boolean(data && isInterpreterPushNotificationType(data.type));
+}
+
+function isInterpreterPushNotificationType(type: string): type is InterpreterPushNotificationData['type'] {
+  return type === 'INTERPRETER_MEETING_REMINDER' ||
+    type === 'INTERPRETER_SESSION_ENDED' ||
+    type === 'INTERPRETER_SESSION_SCHEDULED' ||
+    type === 'INTERPRETER_SUMMARY_AUDIO_READY' ||
+    type === 'INTERPRETER_TRANSCRIPT_AUDIO_READY';
 }
 
 function parseParticipantUids(value: unknown): string[] {

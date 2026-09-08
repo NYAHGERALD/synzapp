@@ -2,11 +2,17 @@ import { DecodedIdToken } from 'firebase-admin/auth';
 import { env } from '../config/env.js';
 import { assertRateLimit } from '../middleware/rateLimit.js';
 import {
+  estimateOpenAiCostUsd,
+  getAiUsageContext,
+  writeAiUsageEvent
+} from './aiUsageLedgerService.js';
+import {
   listRailsItemActivity,
   listRailsWorkspace,
   type RailsAuditActivity,
   type RailsItem
 } from './railsService.js';
+import { assertTenantAiAllowed } from './tenantAiPolicyService.js';
 
 interface RailsKnowledgeAskInput {
   itemId?: string;
@@ -19,7 +25,7 @@ interface RailsKnowledgeAskResponse {
   source: 'AI' | 'SYSTEM_GUIDE';
 }
 
-const RAILS_KNOWLEDGE_VERSION = 'rails-knowledge-2026-07-18-action-progress-evidence-links';
+const RAILS_KNOWLEDGE_VERSION = 'rails-knowledge-2026-08-04-scoped-board-search';
 
 const RAILS_KNOWLEDGE_PACK = [
   `Knowledge version: ${RAILS_KNOWLEDGE_VERSION}.`,
@@ -34,7 +40,8 @@ const RAILS_KNOWLEDGE_PACK = [
   'Verification stage: confirm effectiveness. Every action must be 100%, governed action documentation must be complete, required verification evidence must be linked from the centralized Evidence Library, and verification method/results must support that the issue is controlled.',
   'Approved stage: manager or assigned approver confirms the loop is ready for closure. High risk work must have approval before closure.',
   'Closed stage: the record is retained for audit history. Reopen requires a documented reason. Archive is controlled and should be used for retained records, not to bypass incomplete work.',
-  'Evidence model: RAILS uses one centralized Evidence Library in Loop Detail. Users upload evidence once, then link or unlink that visible evidence from action steps, verification, standardization, and closure requirements. Photo evidence shows thumbnails and can be opened in full view; documents open through authenticated backend routes.',
+  'Evidence model: RCA and RAILS share one centralized tenant Evidence Library. Users upload evidence once, then link or unlink that visible evidence from RCA records, RAILS action steps, verification, standardization, and closure requirements. Photo evidence shows thumbnails and can be opened in full view; documents open through authenticated backend routes.',
+  'RCA Evidence Library: RCA opens the shared Evidence Library from the canvas toolbar Library icon. It shows public evidence plus private evidence uploaded by the current user. The library window is top-level, draggable, resizable, and can expand to fullscreen below the main navigation bar.',
   'Evidence governance: deleting an action step unlinks evidence references but does not delete the centralized evidence record. Linking and unlinking evidence are audited with the actor, timestamp, action, and evidence label. Unlinking requires user confirmation.',
   'Evidence visibility: uploaded evidence is public by default for RAILS linking. Users can switch evidence to private. Private evidence can only be linked when the RAILS loop owner is the same user who uploaded the evidence.',
   'Evidence metadata: evidence records include uploader, upload date and time, file type, file size, status, purpose, label, and visibility. The UI should use the evidence hint icon to show this metadata.',
@@ -46,6 +53,7 @@ const RAILS_KNOWLEDGE_PACK = [
   'Collaboration model: owner remains accountable, collaborators can see and help the loop, and changes are logged. The UI should show collaborators with profile pictures and audit activity with human names.',
   'Standardization model: standardization is mainly used after action effectiveness is proven and before closure. It captures the target, type, owner, due date, verification method, document, and verification approval.',
   'Pagination model: Loop Detail guided workflow is split into Overview, Actions, Verify, Standardize, and Close. Evidence is not part of that pagination. Evidence is a separate Evidence Library tab opened from the Loop Detail header and used only for upload, edit, metadata, visibility, and evidence library management.',
+  'Board search model: the RAILS board has a floating scoped search opened from the Improvement Board header or from any stage column header. Board search scans all active workflow lanes. Stage search only narrows the selected lane. It searches loop title, display ID, owner, department, due dates, created and updated dates, RCA, LSW, problem text, action text, evidence labels and file names, comments, priority, status, category, and standardization content. Close the floating search with the X button.',
   'Answer style: use simple English, be practical, short, and specific. Tell the user exactly which RAILS page, section, field, button, or workflow gate to use next.',
   'Security: do not reveal secrets, tokens, storage paths, internal database details, raw user ids, or hidden implementation details. Do not provide legal, medical, regulatory, or HR disciplinary advice.'
 ].join('\n');
@@ -78,8 +86,36 @@ export async function askRailsKnowledgeBase(
     };
   }
 
+  await assertTenantAiAllowed(decodedToken, {
+    featureId: 'rails_ai',
+    operationId: 'rails.knowledge.ask',
+    operationLabel: 'Ask RAILS guide',
+    resourceId: input.itemId || null,
+    resourceType: input.itemId ? 'rails_item' : 'rails_workspace'
+  });
+
+  const usageContext = await getAiUsageContext(decodedToken, { requireAdmin: false });
+  const startedAt = Date.now();
+
   try {
     const answer = await requestOpenAiRailsGuidance(question, context);
+    const inputTokens = estimateTokenCount(RAILS_SYSTEM_PROMPT.length + context.length + question.length);
+    const outputTokens = estimateTokenCount(answer.length);
+
+    await writeAiUsageEvent({
+      ...usageContext,
+      durationMs: Date.now() - startedAt,
+      estimatedCostUsd: estimateOpenAiCostUsd({ inputTokens, outputTokens }),
+      featureId: 'rails_ai',
+      inputTokens,
+      model: env.openAiModel,
+      operationId: 'rails.knowledge.ask',
+      operationLabel: 'Ask RAILS guide',
+      outputTokens,
+      resourceId: input.itemId || null,
+      resourceType: input.itemId ? 'rails_item' : 'rails_workspace',
+      status: 'succeeded'
+    }).catch(() => undefined);
 
     return {
       answer,
@@ -88,6 +124,18 @@ export async function askRailsKnowledgeBase(
     };
   } catch (error) {
     console.warn('RAILS knowledge AI fallback:', error instanceof Error ? error.message : error);
+    await writeAiUsageEvent({
+      ...usageContext,
+      durationMs: Date.now() - startedAt,
+      errorCategory: getAiKnowledgeErrorCategory(error),
+      featureId: 'rails_ai',
+      model: env.openAiModel,
+      operationId: 'rails.knowledge.ask',
+      operationLabel: 'Ask RAILS guide',
+      resourceId: input.itemId || null,
+      resourceType: input.itemId ? 'rails_item' : 'rails_workspace',
+      status: 'failed'
+    }).catch(() => undefined);
 
     return {
       answer: buildDeterministicRailsAnswer(question, context),
@@ -332,4 +380,34 @@ function normalizeContextText(value: unknown, maxLength: number): string {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, maxLength);
+}
+
+function estimateTokenCount(characterCount: number): number {
+  return Math.max(1, Math.ceil(characterCount / 4));
+}
+
+function getAiKnowledgeErrorCategory(error: unknown) {
+  const message = error instanceof Error ? error.message.toLowerCase() : '';
+
+  if (message.includes('quota') || message.includes('credit') || message.includes('billing')) {
+    return 'provider_credit_exhausted' as const;
+  }
+
+  if (message.includes('rate')) {
+    return 'provider_rate_limited' as const;
+  }
+
+  if (message.includes('abort') || message.includes('timeout')) {
+    return 'provider_timeout' as const;
+  }
+
+  if (message.includes('401') || message.includes('403') || message.includes('auth')) {
+    return 'provider_auth_error' as const;
+  }
+
+  if (message.includes('404') || message.includes('model')) {
+    return 'provider_model_unavailable' as const;
+  }
+
+  return 'unknown' as const;
 }

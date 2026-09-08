@@ -8,6 +8,7 @@ import {
   storageBucket
 } from '../config/firebaseAdmin.js';
 import { buildAuthSession } from './authSessionService.js';
+import { assertTenantDeletableUnderHolds } from './legalHoldService.js';
 
 const DELETION_CHALLENGE_TTL_MS = 10 * 60 * 1000;
 const RECENT_AUTH_WINDOW_MS = 10 * 60 * 1000;
@@ -133,6 +134,12 @@ export async function deleteOrganizationForTenantOwner(
   if (normalizeConfirmation(input.confirmationText) !== normalizeConfirmation(requiredConfirmation)) {
     throw validationError(`Type ${requiredConfirmation} to confirm deleting this organization.`);
   }
+
+  // Checked after the typed confirmation, so the operator learns a hold is
+  // blocking them only once they have genuinely asked to delete — and checked
+  // here rather than in the UI because this is the operation that destroys
+  // everything a hold exists to preserve. A warning is not a control.
+  await assertTenantDeletableUnderHolds(context.tenantId);
 
   const [usersSnapshot, approvedPhonesSnapshot, nameDirectorySnapshot] = await Promise.all([
     context.organizationRef.collection('users').get(),

@@ -182,9 +182,23 @@ async function requireSecurityAdmin(decodedToken: DecodedIdToken): Promise<{ ten
   return { tenantId: tenantId as string };
 }
 
+/**
+ * The policy an organization has, and what it means when it has never set one.
+ *
+ * **Both are on unless somebody turned them off.** They used to be off unless
+ * somebody turned them on, and no organization ever had a policy written until
+ * an admin opened the screen and saved one — so the ordinary state of a live
+ * tenant was backups disabled and self-restore disabled, silently.
+ *
+ * That is the wrong way round. An employee who reinstalls their app expects
+ * their history back; losing it is the surprising outcome, and it should not be
+ * what happens to an organization that never went looking for a setting. An
+ * organization that wants it off can still turn it off, and that choice is
+ * stored and respected.
+ */
 function mapChatBackupPolicy(policy?: Partial<ChatBackupPolicyRecord>): ChatBackupPolicyResponse {
-  const encryptedBackupsEnabled = policy?.encryptedBackupsEnabled === true;
-  const selfRestoreEnabled = encryptedBackupsEnabled && policy?.selfRestoreEnabled === true;
+  const encryptedBackupsEnabled = policy?.encryptedBackupsEnabled !== false;
+  const selfRestoreEnabled = encryptedBackupsEnabled && policy?.selfRestoreEnabled !== false;
 
   return {
     adminApprovalRequired: policy?.adminApprovalRequired ?? !selfRestoreEnabled,

@@ -1,0 +1,166 @@
+# Synzapp app style
+
+The house style for every screen, sheet and modal in the mobile app. Agreed
+5 September 2026 after the Create Action sheets. If a screen and this document
+disagree, the screen is wrong.
+
+The point is that a person moving between the chat, the settings and an action
+is looking at one app, not three.
+
+---
+
+## 0. The rule broken most often
+
+**The entire background is `groupedBackground`.** Headers, footers, page bodies,
+blank space, all of it.
+
+**The only white surfaces are:**
+
+- cards with rounded corners
+- the floating footer navigation bar
+
+Light: background `#F2F2F6`, cards `#FFFFFF`.
+Dark: background `#000000`, cards `#1C1C1E`.
+
+A white page with a grey panel sitting on it is this rule applied upside down.
+That has shipped once already. If a surface is not a rounded card, it is not
+white.
+
+**Exception: the chat list.** A conversation list is one continuous list, not a
+stack of cards. Its rows share the page colour and a 1px `separator` divider
+separates one conversation from the next. Cards would make each conversation
+look like a separate object, when the point of the screen is the sequence.
+
+This is repeated at the top of `mobile/src/theme/colors.ts` and in
+`mobile/CLAUDE.md`, so it is in front of whoever is about to change a screen.
+
+## 1. Colour
+
+Never a raw hex value in a component. Every colour is a token from
+`mobile/src/theme/colors.ts`, so light and dark both work from one set of rules.
+
+| Token | Light | Dark | Used for |
+| --- | --- | --- | --- |
+| `groupedBackground` | `#F2F2F6` | `#000000` | The ground a card list sits on |
+| `groupedCard` | `#FFFFFF` | `#1C1C1E` | Cards on that ground |
+| `separator` | `#DCDCE0` | `#2C2C2E` | Hairline between rows in a card |
+| `link` | `#0079FE` | `#0A84FF` | Text that acts as a button |
+| `ink` | | | Primary text |
+| `muted` | | | Secondary text, values, footnotes |
+| `destructive` | | | Anything that deletes or cannot be undone |
+
+`primary` is the brand teal. It stays the brand accent. It is **not** the colour
+of a link.
+
+A card must stay clearly lighter than the ground in both themes. This is why
+dark has its own pair rather than reusing `card` and `surface`, which are
+almost the same shade of near-black.
+
+## 2. Layout
+
+Cards on a tinted ground. No shadows anywhere, with exactly one exception noted
+in section 4. Depth comes from the card being lighter than the page, which is
+what the platform does.
+
+- Card corner radius: **22**
+- Card inset from the screen edge: **15**, in sheets and in tabs alike
+- Section label above a card: `marginLeft: 15`, so it lines up with the card
+- Row padding **inside** a card: **16**. Different number, different job
+- **Watch for double padding.** `coreStyles.screen` carries
+  `paddingHorizontal: 10` for tabs whose rows have none of their own, so a card
+  inside a tab would land at 25. The settings tab cancels it with
+  `styles.groupedTabContent`. Cancel the page padding that way; never shrink a
+  card's own margin to compensate
+- Row padding inside a card: **16** horizontal
+- Divider: **1px**, `separator`, inset **16 on both sides** so it never touches
+  the card edge
+- Section title above a card: 13pt, `muted`, 16 from the left
+- Section footnote below a card: 12.5pt, `muted`, explains the rule above it
+
+Build these with `mobile/src/components/ui/GroupedList.tsx`, never by hand:
+
+| Component | For |
+| --- | --- |
+| `ListSection` | A card, with optional title and footnote |
+| `ListRow` | Label left, value right |
+| `ListNavRow` | Icon, title, subtitle, chevron. Opens something |
+| `ListActionRow` | An action, as tinted text |
+| `ListTextRow` | Free text, history, an input |
+
+## 3. Buttons
+
+**No large filled buttons.** An action is a row of tinted text inside a card.
+Three filled slabs on one screen shout at somebody who only wanted to read.
+
+The one exception is a control that moves a flow forward, which may be a filled
+circle. There is at most one per screen.
+
+Destructive actions use `destructive`, and are never the only thing in a card
+with a harmless action.
+
+## 4. Close, Back and Next
+
+**Never a word. Never a typed character like `‹` or `×`.**
+
+Use `mobile/src/components/ui/CircleIconButton.tsx`:
+
+| Action | Icon |
+| --- | --- |
+| `back` | `chevron-left` |
+| `close` | `x` |
+| `next` | `chevron-right` |
+
+- 44 point circle in `groupedCard` white, 23 point icon, `hitSlop` of 8 so a
+  near miss still counts
+- **The only shadow in the app.** It floats above whatever it sits on, because
+  it has to be findable over a photo, a list or a card without changing colour
+  to suit each one. Nothing else gets a shadow
+- `tone="plain"` by default; `tone="accent"` fills it for the forward control
+- `CircleIconSpacer` balances the other side so a title stays centred
+
+A word has to be read and translated. A chevron is understood at a glance,
+which matters when the person holding the phone is wearing gloves.
+
+## 5. Movement
+
+Screens should settle, not snap.
+
+- Content fades in over 260ms once it has loaded
+- Anything that changes layout calls a 220ms `easeInEaseOut` layout animation
+- On Android, `UIManager.setLayoutAnimationEnabledExperimental(true)` must be
+  called or nothing animates at all
+
+## 6. Keyboard
+
+Any screen with a text field wraps its scrolling part in a `KeyboardAvoidingView`,
+`padding` on iOS and `height` on Android. A field near the bottom must ride
+above the keyboard, never hide behind it.
+
+## 7. Testing
+
+Pure wording and colour logic lives in a service module with **no native
+import**. A helper that imports `react-native` or `expo-image-picker` cannot be
+tested, and this has already broken the suite twice: `describeCounts` and the
+attachment size rules both had to be moved out afterwards.
+
+Put the rule in a service, test it there, and let the component only render it.
+
+## 8. Where this is applied
+
+Done:
+
+- `components/actions/ActionDetailModal.tsx`
+- `components/actions/CreateActionModal.tsx`
+- `components/actions/ActionBubble.tsx`
+- `components/settings/SettingsList.tsx`
+- `components/chatHeader/BackHeader.tsx`
+
+Not yet converted, in rough order of how often they are seen:
+
+- The settings sub-screens: directory, security, groups, company profile,
+  my devices, chat backup, offline chat, key results, role permissions
+- The announcement sheets and the audience picker
+- Group info, chat settings and the call screens
+
+Convert them as they are touched. Do not convert a working screen for its own
+sake without asking.

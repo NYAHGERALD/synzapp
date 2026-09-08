@@ -6,6 +6,7 @@ import {
 } from '@react-native-firebase/auth';
 import { getFirebaseAuth } from './firebaseConfig';
 import { auditBackendLogout, verifyBackendAuthSession } from './backendAuth';
+import { markCompanyDataScopeActive } from './companyDataManifest';
 import { FirebasePhoneSession, VerifiedOrgAdmin } from '../types/auth';
 
 type VerifiedOrgAdminHandler = (verifiedAdmin: VerifiedOrgAdmin | null) => void;
@@ -83,6 +84,21 @@ async function getVerifiedOrgAdminFromUser(
 
   if (session.claimsRefreshed) {
     idToken = await firebaseUser.getIdToken(true);
+  }
+
+  // The server decides who has access, so a confirmed ACTIVE session clears any
+  // stale local block for that same person and organization.
+  //
+  // Without this the phone could refuse a person the server had just admitted,
+  // and nothing on the server could undo it. It happens here rather than in a
+  // screen effect because React runs a child's effects before its parent's: the
+  // chat screen was asking "is this scope blocked?" before anything had had the
+  // chance to record that the session was good.
+  if (session.access === 'ACTIVE' && session.user.uid && session.user.tenantId) {
+    await markCompanyDataScopeActive({
+      ownerUid: session.user.uid,
+      tenantId: session.user.tenantId
+    }).catch(() => undefined);
   }
 
   return {

@@ -118,7 +118,11 @@ describe('RAILS enterprise readiness foundation', () => {
     assert.match(railsService, /async function queueRailsNotification/);
     assert.match(railsService, /sendRailsPushNotification/);
     assert.match(notificationService, /export async function sendRailsPushNotification/);
-    assert.match(notificationService, /channel: 'rails'/);
+    // Reads the source rather than running it, so it broke when the channel
+    // became a parameter even though the behaviour was unchanged. Kept, but
+    // pointed at the default that actually matters: a RAILS notification with
+    // no channel given must still be recorded as a rails one.
+    assert.match(notificationService, /input\.channel \|\| 'rails'/);
     assert.match(notificationService, /rails-updates/);
     assert.match(railsRoutes, /railsRouter\.post\('\/items\/bulk-update'/);
     assert.match(railsApi, /export async function bulkUpdateRailsItems/);
