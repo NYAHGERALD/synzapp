@@ -42,6 +42,10 @@ row that has to stay a single Pressable.
   is exactly as wide as the scroll view, so a negative margin makes the content
   wider than the screen and pushes it off both edges rather than moving it.
   That was shipped once and had to be undone
+- **No bold anywhere a person reads.** Regular weight (`400`) only — no `500`,
+  `600`, `700` or `800` on a title, a label, a name or a value. Emphasis comes
+  from colour, size, spacing and an icon, never from weight. A screen with four
+  bold things has nothing emphasised at all
 - Cards: 22px corners, **no shadows**
 - **Three things cast a shadow, and nothing else ever does:** the round icon
   button, the search field and the chat header. All three are `groupedCard`
@@ -82,6 +86,11 @@ row that has to stay a single Pressable.
   own style says. This has happened once, on key results
 - Close, Back, Next: `CircleIconButton` only. Never a word, never `‹` or `×`
 - Switches: `AppSwitch` only. On `#36C75A`, off `#C5C5C7`. Never brand-tinted
+- **A setting is a switch. Never a checkbox, never a radio button.** Two
+  choices that exclude each other become two switches that are always opposite,
+  so turning either off turns the other on and no gesture can leave the setting
+  with no answer. The exception is a **picker list**, where a tick marks the row
+  somebody chose — that is a selection, not a setting
 - Never a raw hex in a component. Always a token from `src/theme/colors.ts`
 - **A `presentationStyle="pageSheet"` modal is full screen on Android**, so its
   header sits under the status bar unless it adds `insets.top`. iOS insets the

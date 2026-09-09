@@ -1680,6 +1680,9 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
   const isConversationSurfaceOpen = Boolean(selectedChat);
   const shouldHideMainShellForInterpreter = activeTab === 'Interpreter' && isInterpreterRoomOpen;
   const shouldHideMainHeaderForInterpreter = activeTab === 'Interpreter';
+  // Interpreter leaves by its own back button, like Actions and the Library.
+  // A screen with a back button never also shows the tab bar.
+  const isInterpreterSurfaceOpen = activeTab === 'Interpreter';
   const isLibrarySurfaceOpen = activeTab === 'Library';
   const isLswSurfaceOpen = activeTab === 'LSW';
   const isBackNavigableSurface = (activeTab === 'Settings' && settingsScreen !== 'list')
@@ -1690,6 +1693,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
     !isScreenKeyboardVisible &&
     !isBackNavigableSurface &&
     !shouldHideMainShellForInterpreter &&
+    !isInterpreterSurfaceOpen &&
     !isLibrarySurfaceOpen &&
     !isLswSurfaceOpen;
   const isCompactAndroid = Platform.OS === 'android' && height < 720;
@@ -13739,6 +13743,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
       ) : activeTab === 'Interpreter' ? (
         <InterpreterScreen
           getIdToken={getIdToken}
+          onBack={() => handleSelectFooterTab('Chats')}
           onRoomActiveChange={setIsInterpreterRoomOpen}
         />
       ) : activeTab === 'Chats' && !isArchiveScreenOpen && !isSpamScreenOpen ? (

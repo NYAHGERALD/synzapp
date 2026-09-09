@@ -1,14 +1,25 @@
-import Feather from '@expo/vector-icons/Feather';
-import { Modal, Platform, Pressable, Text, View } from 'react-native';
+import React from 'react';
+import { Modal, Platform, StyleSheet, Text, View } from 'react-native';
+import { ANDROID_MAX_NAVIGATION_INSET } from '../../services/androidNavigationInset';
+import { CircleIconButton, CircleIconSpacer } from '../../components/ui/CircleIconButton';
+import { ListSection, ListSwitchRow } from '../../components/ui/GroupedList';
 import { getFullScreenModalTopPadding, getNativeFullHeightModalPresentationStyle } from '../../components/keyResults/KeyResultsSettings';
-import { styles } from '../../screens/adminChatStyles';
+import { resolveScreenBottomInset } from '../../services/rootSafeArea';
 import { useAppTheme } from '../../theme/AppThemeProvider';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 /**
- * Group permissions.
+ * Who may do what in a group.
  *
- * Lifted out of the chat screen unchanged.
+ * Two switches, not two radio buttons: this app settles a setting with an
+ * `AppSwitch` and never with a tick box or a circle.
+ *
+ * They are strictly opposite, because the choice is one thing with two names.
+ * Turning either one off is the same as turning the other on, so every gesture
+ * lands somewhere valid and nothing can leave the group with no rule at all.
+ * Both descriptions stay on screen, which is the reason for keeping two rows
+ * rather than collapsing to one switch: what "admins only" actually means is
+ * worth reading before it is chosen.
  */
 
 export function GroupPermissionsModal({
@@ -25,6 +36,11 @@ export function GroupPermissionsModal({
   const appTheme = useAppTheme();
   const insets = useSafeAreaInsets();
   const modalTopPadding = getFullScreenModalTopPadding(insets.top);
+  const screenBottomInset = resolveScreenBottomInset({
+    androidNavigationInset: Math.min(insets.bottom, ANDROID_MAX_NAVIGATION_INSET),
+    platform: Platform.OS
+  });
+  const isAllMembers = permissionMode === 'ALL_MEMBERS';
 
   return (
     <Modal
@@ -36,83 +52,55 @@ export function GroupPermissionsModal({
       visible={isOpen}
     >
       <View style={[
-        styles.newChatModalScreen,
+        permissionStyles.screen,
         {
-          backgroundColor: appTheme.colors.screen,
+          backgroundColor: appTheme.colors.groupedBackground,
+          paddingBottom: Math.max(16, screenBottomInset + 12),
           paddingTop: modalTopPadding
         }
       ]}>
-        <View style={styles.newChatHeader}>
-          <Pressable
-            accessibilityLabel="Back to group details"
-            accessibilityRole="button"
-            onPress={onBack}
-            style={({ pressed }) => [styles.newChatHeaderIconButton, pressed && styles.pressed]}
-          >
-            <Text style={[styles.backButtonText, { color: appTheme.colors.primary }]}>‹</Text>
-          </Pressable>
-          <Text style={[styles.newChatHeaderTitle, { color: appTheme.colors.ink }]}>Group permissions</Text>
-          <View style={styles.newChatHeaderSpacer} />
+        <View style={permissionStyles.header}>
+          <CircleIconButton action="back" label="Back to group details" onPress={onBack} />
+          <Text numberOfLines={1} style={[permissionStyles.headerTitle, { color: appTheme.colors.ink }]}>
+            Group permissions
+          </Text>
+          <CircleIconSpacer />
         </View>
 
-        <GroupPermissionOption
-          description="Members can send messages and participate normally."
-          isSelected={permissionMode === 'ALL_MEMBERS'}
-          onPress={() => onSelectPermission('ALL_MEMBERS')}
-          title="All members"
-        />
-        <GroupPermissionOption
-          description="Admins control key group actions. Member messaging rules can be expanded later."
-          isSelected={permissionMode === 'ADMINS'}
-          onPress={() => onSelectPermission('ADMINS')}
-          title="Admins only"
-        />
+        <ListSection footer="One or the other. Turning either off turns the other on.">
+          <ListSwitchRow
+            onValueChange={() => onSelectPermission('ALL_MEMBERS')}
+            subtitle="Members can send messages and participate normally."
+            title="All members"
+            value={isAllMembers}
+          />
+          <ListSwitchRow
+            onValueChange={() => onSelectPermission('ADMINS')}
+            subtitle="Admins control key group actions. Member messaging rules can be expanded later."
+            title="Admins only"
+            value={!isAllMembers}
+          />
+        </ListSection>
       </View>
     </Modal>
   );
 }
 
-function GroupPermissionOption({
-  description,
-  isSelected,
-  onPress,
-  title
-}: {
-  description: string;
-  isSelected: boolean;
-  onPress: () => void;
-  title: string;
-}) {
-  const appTheme = useAppTheme();
-
-  return (
-    <Pressable
-      accessibilityRole="radio"
-      accessibilityState={{ checked: isSelected }}
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.groupPermissionOption,
-        {
-          backgroundColor: appTheme.colors.screen,
-          borderBottomColor: appTheme.colors.divider
-        },
-        pressed && styles.pressed
-      ]}
-    >
-      <View style={[
-        styles.memberSelectCheck,
-        {
-          borderColor: isSelected ? appTheme.colors.primary : appTheme.colors.muted
-        },
-        isSelected && styles.memberSelectCheckActive,
-        isSelected && { backgroundColor: appTheme.colors.primary }
-      ]}>
-        {isSelected ? <Feather color="#FFFFFF" name="check" size={14} /> : null}
-      </View>
-      <View style={styles.chatText}>
-        <Text style={[styles.groupPermissionTitle, { color: appTheme.colors.ink }]}>{title}</Text>
-        <Text style={[styles.groupPermissionSubtitle, { color: appTheme.colors.muted }]}>{description}</Text>
-      </View>
-    </Pressable>
-  );
-}
+const permissionStyles = StyleSheet.create({
+  screen: {
+    flex: 1
+  },
+  header: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: 15
+  },
+  headerTitle: {
+    flex: 1,
+    fontSize: 17,
+    lineHeight: 22,
+    paddingHorizontal: 10,
+    textAlign: 'center'
+  }
+});

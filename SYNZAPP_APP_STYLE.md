@@ -87,7 +87,22 @@ Build these with `mobile/src/components/ui/GroupedList.tsx`, never by hand:
 | `ListActionRow` | An action, as tinted text |
 | `ListTextRow` | Free text, history, an input |
 
-## 3. Buttons
+## 3. Type
+
+**No bold. Anywhere a person reads.**
+
+Regular weight (`400`) throughout: titles, section labels, names in a list,
+values in a settings row. No `500`, no `600`, no `700`, no `800`.
+
+Weight is not how this app separates things. **Colour, size, spacing and an
+icon** are, and they carry more meaning: a heading is a heading because it is
+quiet grey above a card, not because it shouts. A screen where four things are
+bold has nothing emphasised at all.
+
+A number or a word that must stand out takes `colors.link`, `colors.amber` or
+`colors.destructive` — never extra weight.
+
+## 4. Buttons
 
 **No large filled buttons.** An action is a row of tinted text inside a card.
 Three filled slabs on one screen shout at somebody who only wanted to read.
@@ -98,7 +113,7 @@ circle. There is at most one per screen.
 Destructive actions use `destructive`, and are never the only thing in a card
 with a harmless action.
 
-## 4. Close, Back and Next
+## 5. Close, Back and Next
 
 **Never a word. Never a typed character like `‹` or `×`.**
 
@@ -122,7 +137,30 @@ Use `mobile/src/components/ui/CircleIconButton.tsx`:
 A word has to be read and translated. A chevron is understood at a glance,
 which matters when the person holding the phone is wearing gloves.
 
-## 5. The search field
+## 6. Settings and choices
+
+**A setting is a switch.** `mobile/src/components/ui/AppSwitch.tsx`, on
+`#36C75A`, off `#C5C5C7`, never brand-tinted. **Never a checkbox, and never a
+radio button.**
+
+Where two choices exclude each other, they become **two switches that are always
+opposite**: turning either one off turns the other on. Every gesture then lands
+somewhere valid, and the setting can never be left with no answer — which is
+what a pair of radio buttons allows the moment somebody deselects one.
+
+Two rows rather than one switch when each choice needs explaining. What "admins
+only" actually means is worth reading before it is chosen, and a single switch
+has room for one description, not two.
+
+**Three or more choices keep a tick**, not switches. A switch works for two
+because turning one off plainly means the other; among three it says nothing —
+turning *Light* off does not say whether *System* or *Dark* was meant. Draw them
+as rows in a card with a `check` in `colors.link` against the one in force.
+
+**A picker list keeps its tick too.** A tick against a row marks what somebody
+chose from many; that is a selection, not a setting.
+
+## 7. The search field
 
 **One field, everywhere.** `ChatSearchBar` in
 `mobile/src/components/chatUiPrimitives.tsx`, and no screen keeps its own.
@@ -142,7 +180,33 @@ same everywhere is worth more than any screen's own version of one.
 field — a view toggle, a refresh — belong in the header. A search box somebody
 cannot type a whole word into is a search box nobody uses.
 
-## 6. Movement
+## 8. The safe areas
+
+**The bottom safe area is paid for exactly once.**
+
+React Native's `SafeAreaView` at the app root pads on **iOS** and does nothing at
+all on **Android**, so the two platforms need opposite answers. Never read
+`insets.bottom` directly for anything that sits against the bottom of the
+screen. Ask `resolveScreenBottomInset` in `mobile/src/services/rootSafeArea.ts`:
+
+- **iOS: nothing.** The root already moved every screen clear of the home
+  indicator. Adding it again lays a second copy under the content, which is what
+  left an empty band beneath the iPhone composer
+- **Android: the navigation bar**, clamped to 64 — gesture navigation reports
+  about 24 and three buttons about 48, and anything larger is a keyboard being
+  mistaken for a bar
+
+**Everything that reaches the foot of the screen owes this**: a bottom sheet, a
+full-height modal's scroll content, a fixed footer, a pinned line of text. A
+sheet that stops at the screen edge has its last line under the navigation bar.
+
+**The top is the same story in reverse.** A full-height modal is drawn over the
+status bar on Android, so it adds `getFullScreenModalTopPadding(insets.top)`;
+iOS insets the sheet itself and reports 0, so one number is right on both. **An
+absolutely positioned child does not inherit its parent's padding** — it has to
+be given the offset, or it lands at the very top of the window.
+
+## 9. Movement
 
 Screens should settle, not snap.
 
@@ -151,13 +215,13 @@ Screens should settle, not snap.
 - On Android, `UIManager.setLayoutAnimationEnabledExperimental(true)` must be
   called or nothing animates at all
 
-## 7. Keyboard
+## 10. Keyboard
 
 Any screen with a text field wraps its scrolling part in a `KeyboardAvoidingView`,
 `padding` on iOS and `height` on Android. A field near the bottom must ride
 above the keyboard, never hide behind it.
 
-## 8. Testing
+## 11. Testing
 
 Pure wording and colour logic lives in a service module with **no native
 import**. A helper that imports `react-native` or `expo-image-picker` cannot be
@@ -166,7 +230,7 @@ attachment size rules both had to be moved out afterwards.
 
 Put the rule in a service, test it there, and let the component only render it.
 
-## 9. Where this is applied
+## 12. Where this is applied
 
 Done:
 

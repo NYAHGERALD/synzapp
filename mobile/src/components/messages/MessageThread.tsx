@@ -8,6 +8,9 @@ import DateTimePicker, {
   type DateTimePickerEvent
 } from '@react-native-community/datetimepicker';
 import Feather from '@expo/vector-icons/Feather';
+import { ANDROID_MAX_NAVIGATION_INSET } from '../../services/androidNavigationInset';
+import { resolveScreenBottomInset } from '../../services/rootSafeArea';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AudioMode } from 'expo-audio';
@@ -1571,6 +1574,11 @@ function ChatPrivacyInfoModal({
   visible: boolean;
 }) {
   const appTheme = useAppTheme();
+  const privacyInsets = useSafeAreaInsets();
+  const privacySheetBottomInset = resolveScreenBottomInset({
+    androidNavigationInset: Math.min(privacyInsets.bottom, ANDROID_MAX_NAVIGATION_INSET),
+    platform: Platform.OS
+  });
 
   return (
     <Modal
@@ -1592,7 +1600,7 @@ function ChatPrivacyInfoModal({
         <View style={[
           styles.chatPrivacySheet,
           {
-            backgroundColor: appTheme.colors.surfaceElevated,
+            backgroundColor: appTheme.colors.groupedBackground,
             borderColor: appTheme.colors.border
           }
         ]}>
@@ -1609,6 +1617,21 @@ function ChatPrivacyInfoModal({
             <Feather color={appTheme.colors.ink} name="x" size={24} />
           </Pressable>
 
+          {/*
+            * Scrolls, and that is the point.
+            *
+            * The sheet is capped at 82% of the screen. Padding cannot save
+            * content that is taller than its container — it simply spilled out
+            * of the bottom and ran under the navigation bar. Inside a scroll
+            * view nothing can escape, and the inset is paid on the content so
+            * the last line always comes to rest above the bar.
+            */}
+          <ScrollView
+            contentContainerStyle={{
+              paddingBottom: Math.max(28, privacySheetBottomInset + 20)
+            }}
+            showsVerticalScrollIndicator={false}
+          >
           <View style={styles.chatPrivacyHero}>
             <View style={[
               styles.chatPrivacyDevice,
@@ -1631,21 +1654,42 @@ function ChatPrivacyInfoModal({
           </View>
 
           <Text style={[styles.chatPrivacyTitle, { color: appTheme.colors.ink }]}>Synzapp keeps this conversation private</Text>
-          <Text style={[styles.chatPrivacyBody, { color: appTheme.colors.mutedStrong }]}>
+          <Text style={[styles.chatPrivacyBody, { color: appTheme.colors.muted }]}>
             Message text, voice notes, media, and files are encrypted before sync. Synzapp stores encrypted records for delivery and history, while readable content stays limited to approved devices in this {isGroupChat ? 'group' : 'chat'}.
           </Text>
 
-          <View style={styles.chatPrivacyPointList}>
-            <ChatPrivacyPoint icon="message-square" label="Messages and replies" />
-            <ChatPrivacyPoint icon="mic" label="Voice notes and audio attachments" />
-            <ChatPrivacyPoint icon="image" label="Photos, videos, and documents" />
-            <ChatPrivacyPoint icon={isGroupChat ? 'users' : 'user-check'} label={isGroupChat ? 'Group membership controls' : 'Verified one-to-one access'} />
-            <ChatPrivacyPoint icon="database" label="Encrypted server sync and device cache" />
+          {/* One card with hairlines between, the way every list in this app
+              is drawn — rather than five rows floating on the sheet. */}
+          <View style={[
+            styles.chatPrivacyPointList,
+            { backgroundColor: appTheme.colors.groupedCard }
+          ]}>
+            {([
+              { icon: 'message-square' as const, label: 'Messages and replies' },
+              { icon: 'mic' as const, label: 'Voice notes and audio attachments' },
+              { icon: 'image' as const, label: 'Photos, videos, and documents' },
+              {
+                icon: (isGroupChat ? 'users' : 'user-check') as 'user-check' | 'users',
+                label: isGroupChat ? 'Group membership controls' : 'Verified one-to-one access'
+              },
+              { icon: 'database' as const, label: 'Encrypted server sync and device cache' }
+            ]).map((point, index) => (
+              <View key={point.label}>
+                {index > 0 ? (
+                  <View style={[
+                    styles.chatPrivacyPointDivider,
+                    { backgroundColor: appTheme.colors.separator }
+                  ]} />
+                ) : null}
+                <ChatPrivacyPoint icon={point.icon} label={point.label} />
+              </View>
+            ))}
           </View>
 
           <Text style={[styles.chatPrivacyFooter, { color: appTheme.colors.muted }]}>
             Delivery status, membership, and audit metadata help the workplace run safely, but message content is opened only inside Synzapp on trusted devices.
           </Text>
+          </ScrollView>
         </View>
       </View>
     </Modal>

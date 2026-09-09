@@ -37,6 +37,9 @@ import DateTimePicker, {
   type DateTimePickerEvent
 } from '@react-native-community/datetimepicker';
 import Ionicons from '@expo/vector-icons/Ionicons';
+import { ANDROID_MAX_NAVIGATION_INSET } from '../services/androidNavigationInset';
+import { CircleIconButton } from '../components/ui/CircleIconButton';
+import { resolveScreenBottomInset } from '../services/rootSafeArea';
 import Svg, { Circle, Defs, Line, LinearGradient, Stop } from 'react-native-svg';
 import {
   setIsAudioActiveAsync,
@@ -99,6 +102,11 @@ import { AppSwitch } from '../components/ui/AppSwitch';
 
 interface InterpreterScreenProps {
   getIdToken: () => Promise<string>;
+  /**
+   * Back to the chat list. This screen hides the tab bar — one way out, not
+   * two — so without this there is no way off it.
+   */
+  onBack?: () => void;
   onRoomActiveChange?: (isActive: boolean) => void;
 }
 
@@ -271,10 +279,14 @@ type InterpreterSummaryCreateResult = {
   summaryAudioByLanguage?: Record<string, InterpreterSummaryAudio>;
 };
 
-export function InterpreterScreen({ getIdToken, onRoomActiveChange }: InterpreterScreenProps) {
+export function InterpreterScreen({ getIdToken, onBack, onRoomActiveChange }: InterpreterScreenProps) {
   const appTheme = useAppTheme();
   const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
   const insets = useSafeAreaInsets();
+  const screenBottomInset = resolveScreenBottomInset({
+    androidNavigationInset: Math.min(insets.bottom, ANDROID_MAX_NAVIGATION_INSET),
+    platform: Platform.OS
+  });
   const [meetings, setMeetings] = useState<InterpreterMeeting[]>([]);
   const [languages, setLanguages] = useState<InterpreterLanguage[]>([]);
   const [voiceProfiles, setVoiceProfiles] = useState<InterpreterVoiceProfile[]>(FALLBACK_INTERPRETER_VOICES);
@@ -810,32 +822,59 @@ export function InterpreterScreen({ getIdToken, onRoomActiveChange }: Interprete
         styles.screen,
         styles.workspaceScreen,
         {
-          paddingBottom: Math.max(insets.bottom + 106, 124),
+          // No tab bar here any more, so the old 106 points of room for one
+          // would be an empty band. Only the navigation bar is owed.
+          paddingBottom: Math.max(screenBottomInset + 16, 20),
           paddingTop: Math.max(insets.top + 2, 14)
         }
       ]}
     >
       <View style={styles.workspaceHeader}>
-        <View style={styles.workspaceHeaderSpacer} />
+        {onBack ? (
+          <CircleIconButton action="back" label="Back to chats" onPress={onBack} />
+        ) : (
+          <View style={styles.workspaceHeaderSpacer} />
+        )}
         <Text style={styles.workspaceTitle}>Interpreter</Text>
-        <Pressable
-          accessibilityLabel="Interpreter session options"
-          disabled={isBusy}
-          onPress={openInterpreterListOptions}
-          style={({ pressed }) => [
-            styles.workspaceOptionsButton,
-            (hasActiveMeetingFilters || hasActiveMeetingSearch || isMeetingDeleteMode) && styles.workspaceOptionsButtonActive,
-            pressed && styles.pressed
-          ]}
-        >
-          <Ionicons
-            color={(hasActiveMeetingFilters || hasActiveMeetingSearch || isMeetingDeleteMode)
-              ? appTheme.colors.primary
-              : appTheme.colors.ink}
-            name="ellipsis-horizontal"
-            size={22}
-          />
-        </Pressable>
+        <View style={styles.workspaceHeaderActions}>
+          <Pressable
+            accessibilityLabel="Interpreter session options"
+            disabled={isBusy}
+            onPress={openInterpreterListOptions}
+            style={({ pressed }) => [
+              styles.workspaceOptionsButton,
+              (hasActiveMeetingFilters || hasActiveMeetingSearch || isMeetingDeleteMode) && styles.workspaceOptionsButtonActive,
+              pressed && styles.pressed
+            ]}
+          >
+            <Ionicons
+              color={(hasActiveMeetingFilters || hasActiveMeetingSearch || isMeetingDeleteMode)
+                ? appTheme.colors.link
+                : appTheme.colors.ink}
+              name="ellipsis-horizontal"
+              size={22}
+            />
+          </Pressable>
+          {/* The screen's one action, as a word. The filled disc that used to
+              float over the list is gone: this app has no solid buttons. */}
+          <Pressable
+            accessibilityLabel="Create interpreter meeting"
+            disabled={isCreatingMeeting}
+            hitSlop={8}
+            onPress={() => setIsCreateOpen(true)}
+            style={({ pressed }) => [
+              styles.workspaceHeaderAction,
+              pressed && styles.pressed,
+              isCreatingMeeting && styles.disabledButton
+            ]}
+          >
+            {isCreatingMeeting ? (
+              <ActivityIndicator color={appTheme.colors.link} size="small" />
+            ) : (
+              <Text style={styles.workspaceHeaderActionText}>New</Text>
+            )}
+          </Pressable>
+        </View>
       </View>
 
       {isMeetingSearchOpen ? (
@@ -939,24 +978,6 @@ export function InterpreterScreen({ getIdToken, onRoomActiveChange }: Interprete
       ) : (
         <View style={styles.quietWorkspaceFill} />
       )}
-
-      <Pressable
-        accessibilityLabel="Create interpreter meeting"
-        disabled={isCreatingMeeting}
-        onPress={() => setIsCreateOpen(true)}
-        style={({ pressed }) => [
-          styles.floatingCreateButton,
-          { bottom: 18 },
-          isCreatingMeeting && styles.disabledButton,
-          pressed && styles.pressed
-        ]}
-      >
-        {isCreatingMeeting ? (
-          <ActivityIndicator color="#fff" size="small" />
-        ) : (
-          <Ionicons color="#fff" name="add" size={26} />
-        )}
-      </Pressable>
 
       <InterpreterCreateModal
         getIdToken={getIdToken}
@@ -2711,15 +2732,29 @@ function createStyles(colors: AppColors) {
     },
     workspaceHeader: {
       alignItems: 'center',
-      borderBottomColor: colors.divider,
-      borderBottomWidth: 1,
       flexDirection: 'row',
-      justifyContent: 'center',
+      justifyContent: 'space-between',
       marginBottom: 10,
-      minHeight: 42
+      minHeight: 44
     },
     workspaceHeaderSpacer: {
-      width: 42
+      width: 44
+    },
+    workspaceHeaderActions: {
+      alignItems: 'center',
+      flexDirection: 'row',
+      gap: 6
+    },
+    workspaceHeaderAction: {
+      alignItems: 'flex-end',
+      justifyContent: 'center',
+      minHeight: 44,
+      paddingHorizontal: 4
+    },
+    workspaceHeaderActionText: {
+      color: colors.link,
+      fontSize: 16,
+      lineHeight: 21
     },
     workspaceOptionsButton: {
       alignItems: 'center',
@@ -2733,7 +2768,7 @@ function createStyles(colors: AppColors) {
       backgroundColor: colors.primarySoft
     },
     workspaceScreen: {
-      backgroundColor: colors.screen
+      backgroundColor: colors.groupedBackground
     },
     workspaceTitle: {
       color: colors.ink,

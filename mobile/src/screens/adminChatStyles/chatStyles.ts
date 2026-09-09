@@ -384,7 +384,9 @@ export const chatStyles = StyleSheet.create({
     borderTopLeftRadius: 28,
     borderTopRightRadius: 28,
     maxHeight: '82%',
-    paddingBottom: 28,
+    // No paddingBottom. The scroll inside owns it, so the inset is applied
+    // once and tall content cannot spill past it.
+    overflow: 'hidden',
     paddingHorizontal: 22,
     paddingTop: 26,
     shadowColor: '#0F172A',
@@ -438,29 +440,33 @@ export const chatStyles = StyleSheet.create({
   },
   chatPrivacyTitle: {
     color: colors.ink,
-    fontSize: 24,
-    fontWeight: '800',
-    lineHeight: 30,
+    fontSize: 22,
+    lineHeight: 28,
     marginTop: 8,
     textAlign: 'center'
   },
   chatPrivacyBody: {
-    color: '#475569',
     fontSize: 15,
-    fontWeight: '400',
     lineHeight: 21,
     marginTop: 12,
     textAlign: 'center'
   },
   chatPrivacyPointList: {
-    gap: 12,
-    marginTop: 22
+    borderRadius: 22,
+    marginTop: 22,
+    overflow: 'hidden'
   },
   chatPrivacyPointRow: {
     alignItems: 'center',
     flexDirection: 'row',
     gap: 12,
-    minHeight: 32
+    minHeight: 52,
+    paddingHorizontal: 16,
+    paddingVertical: 10
+  },
+  chatPrivacyPointDivider: {
+    height: 1,
+    marginHorizontal: 15
   },
   chatPrivacyPointIcon: {
     alignItems: 'center',
@@ -473,13 +479,10 @@ export const chatStyles = StyleSheet.create({
     color: colors.ink,
     flex: 1,
     fontSize: 15,
-    fontWeight: '500',
     lineHeight: 20
   },
   chatPrivacyFooter: {
-    color: '#64748B',
     fontSize: 13,
-    fontWeight: '400',
     lineHeight: 18,
     marginTop: 20,
     textAlign: 'center'

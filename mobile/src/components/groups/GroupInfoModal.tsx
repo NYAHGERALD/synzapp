@@ -1,9 +1,13 @@
 import Feather from '@expo/vector-icons/Feather';
 import React, { useMemo } from 'react';
-import { ActivityIndicator, Modal, Platform, Pressable, ScrollView, Text, View } from 'react-native';
+import { ActivityIndicator, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { ChatContact, ChatGroupMember, ChatNotificationSettings, ChatTrashSegment } from '../../services/chatApi';
 import { ProfileAvatar } from '../../components/messages/MessageThread';
+import { ANDROID_MAX_NAVIGATION_INSET } from '../../services/androidNavigationInset';
+import { CircleIconButton, CircleIconSpacer } from '../../components/ui/CircleIconButton';
+import { ListNavRow, ListSection } from '../../components/ui/GroupedList';
 import { getFullScreenModalTopPadding, getNativeFullHeightModalPresentationStyle } from '../../components/keyResults/KeyResultsSettings';
+import { resolveScreenBottomInset } from '../../services/rootSafeArea';
 import { styles } from '../../screens/adminChatStyles';
 import { useAppTheme } from '../../theme/AppThemeProvider';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -98,6 +102,10 @@ export function GroupInfoModal({
   const appTheme = useAppTheme();
   const insets = useSafeAreaInsets();
   const modalTopPadding = getFullScreenModalTopPadding(insets.top);
+  const screenBottomInset = resolveScreenBottomInset({
+    androidNavigationInset: Math.min(insets.bottom, ANDROID_MAX_NAVIGATION_INSET),
+    platform: Platform.OS
+  });
   const directContactById = useMemo(() => new Map(
     directContacts.map((contact) => [contact.contactId, contact])
   ), [directContacts]);
@@ -123,140 +131,136 @@ export function GroupInfoModal({
       visible={isOpen}
     >
       <View style={[
-        styles.groupInfoScreen,
+        groupInfoStyles.screen,
         {
-          backgroundColor: appTheme.colors.screen,
+          backgroundColor: appTheme.colors.groupedBackground,
           paddingTop: modalTopPadding
         }
       ]}>
-        <View style={styles.groupInfoTopBar}>
-          <Pressable
-            accessibilityLabel="Close group info"
-            accessibilityRole="button"
-            onPress={onClose}
-            style={({ pressed }) => [
-              styles.groupInfoTopButton,
-              { backgroundColor: appTheme.colors.surface },
-              pressed && styles.pressed
-            ]}
-          >
-            <Text style={[styles.backButtonText, { color: appTheme.colors.primary }]}>‹</Text>
-          </Pressable>
-          <View style={styles.groupInfoTopButtonSpacer} />
+        <View style={groupInfoStyles.header}>
+          <CircleIconButton action="back" label="Close group info" onPress={onClose} />
+          <Text numberOfLines={1} style={[groupInfoStyles.headerTitle, { color: appTheme.colors.ink }]}>
+            Group info
+          </Text>
+          <CircleIconSpacer />
         </View>
 
         <ScrollView
-          contentContainerStyle={styles.groupInfoContent}
+          contentContainerStyle={[
+            groupInfoStyles.content,
+            { paddingBottom: Math.max(28, screenBottomInset + 24) }
+          ]}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          <View style={styles.groupInfoHero}>
-            {canChangePhoto ? (
-              <Pressable
-                accessibilityLabel="Change group photo"
-                accessibilityRole="button"
-                disabled={isUpdatingPhoto}
-                onPress={onChangePhoto}
-                style={({ pressed }) => [
-                  styles.groupInfoAvatarButton,
-                  pressed && styles.pressed
-                ]}
-              >
+          {/* Words on the left, the picture on the right — the same identity
+              card as a person's, because a group is identified the same way. */}
+          <ListSection>
+            <View style={groupInfoStyles.identityRow}>
+              <View style={groupInfoStyles.identityText}>
+                <Text style={[groupInfoStyles.identityName, { color: appTheme.colors.ink }]}>
+                  {chat.title}
+                </Text>
+                <Text style={[groupInfoStyles.identityMeta, { color: appTheme.colors.muted }]}>
+                  {`Group in ${companyName} · ${memberCountLabel}`}
+                </Text>
+                {groupDescription ? (
+                  <Text style={[groupInfoStyles.identityMeta, { color: appTheme.colors.muted }]}>
+                    {groupDescription}
+                  </Text>
+                ) : null}
+              </View>
+
+              {canChangePhoto ? (
+                <Pressable
+                  accessibilityLabel="Change group photo"
+                  accessibilityRole="button"
+                  disabled={isUpdatingPhoto}
+                  onPress={onChangePhoto}
+                  style={({ pressed }) => [
+                    groupInfoStyles.avatarButton,
+                    pressed && styles.pressed
+                  ]}
+                >
+                  <ProfileAvatar
+                    headers={profilePhotoHeaders}
+                    name={chat.title}
+                    size={72}
+                    uri={chat.profilePhotoUrl}
+                  />
+                  <View style={[
+                    groupInfoStyles.avatarBadge,
+                    {
+                      backgroundColor: appTheme.colors.primary,
+                      borderColor: appTheme.colors.groupedCard
+                    }
+                  ]}>
+                    {isUpdatingPhoto ? (
+                      <ActivityIndicator color="#FFFFFF" size="small" />
+                    ) : (
+                      <Feather color="#FFFFFF" name="camera" size={13} />
+                    )}
+                  </View>
+                </Pressable>
+              ) : (
                 <ProfileAvatar
                   headers={profilePhotoHeaders}
                   name={chat.title}
-                  size={92}
+                  size={72}
                   uri={chat.profilePhotoUrl}
                 />
-                <View style={[
-                  styles.groupInfoAvatarBadge,
-                  { backgroundColor: appTheme.colors.primary }
-                ]}>
-                  {isUpdatingPhoto ? (
-                    <ActivityIndicator color="#FFFFFF" size="small" />
-                  ) : (
-                    <Feather color="#FFFFFF" name="camera" size={16} />
-                  )}
-                </View>
-              </Pressable>
-            ) : (
-              <ProfileAvatar
-                headers={profilePhotoHeaders}
-                name={chat.title}
-                size={92}
-                uri={chat.profilePhotoUrl}
-              />
-            )}
-            <Text numberOfLines={3} style={[styles.groupInfoTitle, { color: appTheme.colors.ink }]}>{chat.title}</Text>
-            <Text numberOfLines={1} style={[styles.groupInfoCompany, { color: appTheme.colors.muted }]}>
-              Group in "{companyName}"
-            </Text>
-            <Text style={[styles.groupInfoMemberCount, { color: appTheme.colors.primary }]}>{memberCountLabel}</Text>
-            <Text numberOfLines={2} style={[styles.groupInfoDescription, { color: appTheme.colors.muted }]}>{groupDescription}</Text>
-          </View>
-
-          <View style={styles.groupInfoActionGrid}>
-            <GroupInfoActionButton icon="phone" label="Audio" onPress={onStartVoiceCall} />
-            <GroupInfoActionButton icon="video" label="Video" onPress={onStartVideoCall} />
-            <GroupInfoActionButton icon="user-plus" label="Add" onPress={onOpenAddMembers} />
-            <GroupInfoActionButton icon="search" label="Search" onPress={onOpenSearchMessages} />
-          </View>
-
-          <View style={[styles.groupInfoSection, { backgroundColor: appTheme.colors.surfaceElevated }]}>
-            <GroupInfoSettingRow
-              icon="users"
-              label={companyName}
-              onPress={onOpenGroupSwitcher}
-              value={groupCount > 0 ? `Community - ${groupCount} ${groupCount === 1 ? 'group' : 'groups'}` : 'Community'}
-            />
-          </View>
-
-          <View style={[styles.groupInfoSection, { backgroundColor: appTheme.colors.surfaceElevated }]}>
-            <GroupInfoSettingRow
-              icon="star"
-              label="Starred"
-              onPress={onOpenStarred}
-              value={formatStarredMessageCount(starredCount)}
-            />
-            <GroupInfoSettingRow
-              icon="bell"
-              label="Notifications"
-              onPress={onOpenNotifications}
-              value={getChatNotificationSummary(notificationSettings)}
-            />
-          </View>
-
-          <View style={[styles.groupInfoSection, { backgroundColor: appTheme.colors.surfaceElevated }]}>
-            <View style={[
-              styles.groupInfoMembersHeader,
-              { borderBottomColor: appTheme.colors.divider }
-            ]}>
-              <Text style={[styles.groupInfoMembersTitle, { color: appTheme.colors.ink }]}>{memberCountLabel}</Text>
-              <Pressable
-                accessibilityLabel="Search members"
-                accessibilityRole="button"
-                onPress={onOpenMembers}
-                style={({ pressed }) => [styles.groupInfoMemberSearchButton, pressed && styles.pressed]}
-              >
-                <Feather color={appTheme.colors.ink} name="search" size={18} />
-              </Pressable>
+              )}
             </View>
+          </ListSection>
 
+          <ListSection>
+            <View style={groupInfoStyles.actionRow}>
+              <GroupInfoAction icon="phone" label="Audio" onPress={onStartVoiceCall} />
+              <View style={[groupInfoStyles.actionDivider, { backgroundColor: appTheme.colors.separator }]} />
+              <GroupInfoAction icon="video" label="Video" onPress={onStartVideoCall} />
+              <View style={[groupInfoStyles.actionDivider, { backgroundColor: appTheme.colors.separator }]} />
+              <GroupInfoAction icon="user-plus" label="Add" onPress={onOpenAddMembers} />
+              <View style={[groupInfoStyles.actionDivider, { backgroundColor: appTheme.colors.separator }]} />
+              <GroupInfoAction icon="search" label="Search" onPress={onOpenSearchMessages} />
+            </View>
+          </ListSection>
+
+          <ListSection>
+            <ListNavRow
+              icon="users"
+              onPress={onOpenGroupSwitcher}
+              subtitle={groupCount > 0
+                ? `Community · ${groupCount} ${groupCount === 1 ? 'group' : 'groups'}`
+                : 'Community'}
+              title={companyName}
+            />
+            <ListNavRow
+              icon="star"
+              onPress={onOpenStarred}
+              subtitle={formatStarredMessageCount(starredCount)}
+              title="Starred"
+            />
+            <ListNavRow
+              icon="bell"
+              onPress={onOpenNotifications}
+              subtitle={getChatNotificationSummary(notificationSettings)}
+              title="Notifications"
+            />
+          </ListSection>
+
+          <ListSection title={memberCountLabel}>
             {/* Not offered on a department's group. Its members are the
                 department, decided when somebody is invited and given a role
                 there, so there is nobody to add by hand. The server refuses it
                 either way; a button that always fails is worse than none. */}
             {canAddMembersToGroup(chat) ? (
-              <GroupInfoSettingRow
-                icon="plus"
-                label="Add members"
-                onPress={onOpenAddMembers}
-              />
+              <ListNavRow icon="plus" onPress={onOpenAddMembers} title="Add members" />
             ) : null}
 
             {visibleMembers.map((member) => (
               <GroupInfoMemberRow
                 directContact={directContactById.get(member.uid)}
+                insideCard
                 isCurrentUser={member.uid === currentUid}
                 key={member.uid || member.displayName}
                 member={member}
@@ -264,31 +268,30 @@ export function GroupInfoModal({
               />
             ))}
 
+            {/* One row, not two. The members screen has its own search, so a
+                separate search control here would open the same place. */}
             {members.length > visibleMembers.length ? (
-              <GroupInfoSettingRow
-                icon="chevron-down"
-                label="See all"
-                onPress={onOpenMembers}
-              />
+              <ListNavRow icon="search" onPress={onOpenMembers} title="See all members" />
             ) : null}
-          </View>
+          </ListSection>
 
           {showExitGroup ? (
-            <View style={[styles.groupInfoSection, { backgroundColor: appTheme.colors.surfaceElevated }]}>
+            <ListSection>
               <Pressable
                 accessibilityLabel="Exit group"
                 accessibilityRole="button"
                 onPress={onExitGroup}
                 style={({ pressed }) => [
-                  styles.groupInfoExitRow,
-                  { backgroundColor: appTheme.colors.surfaceElevated },
-                  pressed && styles.pressed
+                  groupInfoStyles.exitRow,
+                  pressed && { backgroundColor: appTheme.colors.groupedBackground }
                 ]}
               >
-                <Feather color={appTheme.colors.destructive} name="log-out" size={20} />
-                <Text style={[styles.groupInfoExitText, { color: appTheme.colors.destructive }]}>Exit group</Text>
+                <Feather color={appTheme.colors.destructive} name="log-out" size={18} />
+                <Text style={[groupInfoStyles.exitText, { color: appTheme.colors.destructive }]}>
+                  Exit group
+                </Text>
               </Pressable>
-            </View>
+            </ListSection>
           ) : null}
         </ScrollView>
       </View>
@@ -367,11 +370,17 @@ export function GroupInfoSettingRow({
 
 export function GroupInfoMemberRow({
   directContact,
+  insideCard = false,
   isCurrentUser,
   member,
   profilePhotoHeaders
 }: {
   directContact?: ChatContact;
+  /**
+   * Draws the row for a rounded card: no colour and no rule of its own, since
+   * the card supplies both. Opt in, so the members modal keeps its own look.
+   */
+  insideCard?: boolean;
   isCurrentUser: boolean;
   member: ChatGroupMember;
   profilePhotoHeaders?: Record<string, string>;
@@ -383,10 +392,12 @@ export function GroupInfoMemberRow({
   return (
     <View style={[
       styles.groupInfoMemberRow,
-      {
-        backgroundColor: appTheme.colors.surfaceElevated,
-        borderBottomColor: appTheme.colors.divider
-      }
+      insideCard
+        ? groupInfoStyles.cardRow
+        : {
+          backgroundColor: appTheme.colors.surfaceElevated,
+          borderBottomColor: appTheme.colors.divider
+        }
     ]}>
       <ProfileAvatar
         headers={profilePhotoHeaders}
@@ -502,3 +513,129 @@ function getGroupInfoMemberBadge(member: ChatGroupMember): string {
 
   return '';
 }
+
+/** One of the four things you can do with a group. */
+function GroupInfoAction({
+  icon,
+  label,
+  onPress
+}: {
+  icon: 'phone' | 'search' | 'user-plus' | 'video';
+  label: string;
+  onPress: () => void;
+}) {
+  const appTheme = useAppTheme();
+
+  return (
+    <Pressable
+      accessibilityLabel={label}
+      accessibilityRole="button"
+      onPress={onPress}
+      style={({ pressed }) => [
+        groupInfoStyles.action,
+        pressed && { backgroundColor: appTheme.colors.groupedBackground }
+      ]}
+    >
+      <Feather color={appTheme.colors.link} name={icon} size={21} />
+      <Text numberOfLines={1} style={[groupInfoStyles.actionText, { color: appTheme.colors.link }]}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
+const groupInfoStyles = StyleSheet.create({
+  screen: {
+    flex: 1
+  },
+  header: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: 15
+  },
+  headerTitle: {
+    flex: 1,
+    fontSize: 17,
+    lineHeight: 22,
+    paddingHorizontal: 10,
+    textAlign: 'center'
+  },
+  content: {
+    paddingTop: 2
+  },
+  identityRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 16
+  },
+  identityText: {
+    flex: 1,
+    gap: 3,
+    minWidth: 0
+  },
+  identityName: {
+    fontSize: 22,
+    lineHeight: 28
+  },
+  identityMeta: {
+    fontSize: 14.5,
+    lineHeight: 20
+  },
+  avatarButton: {
+    position: 'relative'
+  },
+  avatarBadge: {
+    alignItems: 'center',
+    borderRadius: 14,
+    borderWidth: 2,
+    bottom: -2,
+    height: 28,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: -2,
+    width: 28
+  },
+  actionRow: {
+    alignItems: 'stretch',
+    flexDirection: 'row'
+  },
+  action: {
+    alignItems: 'center',
+    flex: 1,
+    gap: 6,
+    justifyContent: 'center',
+    minWidth: 0,
+    paddingHorizontal: 4,
+    paddingVertical: 14
+  },
+  actionText: {
+    fontSize: 13,
+    lineHeight: 18,
+    textAlign: 'center'
+  },
+  actionDivider: {
+    marginVertical: 12,
+    width: 1
+  },
+  // The card draws the colour and the rules; the row only holds its padding.
+  cardRow: {
+    borderBottomWidth: 0,
+    paddingHorizontal: 16
+  },
+  exitRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    justifyContent: 'center',
+    minHeight: 50,
+    paddingHorizontal: 16,
+    paddingVertical: 13
+  },
+  exitText: {
+    fontSize: 16,
+    lineHeight: 21
+  }
+});
