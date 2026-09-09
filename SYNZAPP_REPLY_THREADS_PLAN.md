@@ -6,21 +6,31 @@ must be settled rather than guessed at.
 
 ## 1. What is being built
 
-Replying to a message opens a **focused view**: the conversation behind it goes
-quiet, the message being answered stays sharp, and its replies gather beneath
-it joined by a rail down the left. Several replies can be sent without leaving.
-Closing it returns to the whole conversation.
+Two halves, and the second is the one that is easy to under-describe.
 
-In the conversation, a message that has been answered carries **"3 replies"**
-under it. Tapping that opens the same focused view.
+**Composing.** Slide a message to the right and it goes into focus: the
+conversation behind it goes quiet, that message stays sharp, and the composer
+stays open. Send as many replies as you like without leaving. Close it and the
+whole conversation returns.
 
-The reference is iMessage's inline replies, which do three separate things
-people tend to describe as one:
+**Reading.** The replies are ordinary messages, so they appear in the
+conversation **at the bottom, as the newest messages** — that is when they were
+sent. They are grouped by a bracket rail, with a **wireframe copy of the
+original at the top of the group**, so somebody reading knows what is being
+answered without scrolling back for it.
 
-1. **A focused view** — the rest of the thread blurs, the parent stays sharp.
-2. **A real thread** — replies are gathered and counted, readable on their own.
-3. **A wireframe parent** — in the focused view the parent is redrawn as an
-   outlined bubble, so it reads as context rather than as another message.
+**The original never moves.** It stays exactly where it was in the conversation
+and gains one line beneath it: **"5 replies"**. Tapping that scrolls down to the
+group and briefly highlights it.
+
+That last point is the whole shape of the feature. The parent and its replies
+are deliberately far apart — the parent keeps its place in the history, the
+replies keep theirs — and the count and the wireframe copy are the two things
+that tie them together across that distance.
+
+**The focused view is for composing, not for reading.** Reading always happens
+in the conversation. A count that opened an overlay would be a read action
+wearing a compose button.
 
 ## 2. What already exists
 
@@ -63,17 +73,18 @@ content, and the server already knows the parent id because the envelope
 carries it in the clear for delivery. No encrypted content is read to maintain
 it.
 
-## 4. Opening a thread whose replies are not loaded
+## 4. Tapping the count when the replies are not loaded
 
-Two answers, and the plan takes the second.
+Because the replies live in the conversation rather than in an overlay, there is
+**no thread to fetch for reading**. The transcript already has them, or will as
+it pages.
 
-- **Show what is loaded.** Cheap, and lies exactly as the derived count would.
-- **Fetch the thread.** `GET /api/chat/messages/:messageId/replies`, the same
-  paging shape the conversation already uses.
-
-The focused view opens with whatever is already in memory so it is instant, and
-fetches the rest behind that. If the fetch fails, the view says how many replies
-it could not load rather than pretending it has them all.
+The count row scrolls to the group with `scrollToMessage`, which the thread
+already has for search. One case needs care: the replies may be newer than what
+is loaded, or the parent older. When the group is not in memory, the row pages
+towards it the way search already does, and says so while it works. It never
+silently does nothing, which is what a scroll to a message that is not there
+looks like.
 
 ## 5. Blur, and Android
 
@@ -91,15 +102,27 @@ dims with.
 
 Ours, not Apple's.
 
-- The **parent** redraws as an outlined bubble: `groupedCard` fill,
-  `colors.separator` outline, ink text. No sender colour — it is context.
-- The **replies** are ordinary Synzapp bubbles, unchanged.
-- A **rail** runs down the left from the parent to the last reply,
-  `colors.separator`, 2 points, joining them.
-- The composer is the one the thread already uses.
+**In the conversation**, a reply group is:
+
+- A **wireframe copy of the original** at the top: `groupedCard` fill,
+  `colors.separator` outline, ink text, no sender colour. It is context, not a
+  message, and it is never tappable as one.
+- The **replies** beneath it as ordinary Synzapp bubbles, unchanged.
+- A **bracket rail** down the left, `colors.separator`, 2 points, from the
+  wireframe copy to the last reply, enclosing the group.
+
+**At the original's own position**, one row beneath it: **"5 replies"** in
+`colors.link`, because it takes you somewhere.
+
+**In the focused view**:
+
+- The conversation behind is dimmed with `colors.overlay`.
+- The message being answered is drawn as it normally is — sharp, not wireframe.
+  The wireframe is for the group in the transcript, where the original is
+  elsewhere; here it is the subject.
+- The composer is the one the thread already uses, with its reply target held
+  rather than cleared after each send.
 - Close is `CircleIconButton` with `action="close"`, top right.
-- The count row under a parent in the conversation reads **"3 replies"** in
-  `colors.link` — a link, because it opens something.
 
 Bottom inset through `resolveScreenBottomInset`, and the keyboard through
 `react-native-keyboard-controller`, as everywhere else.
@@ -112,8 +135,9 @@ Bottom inset through `resolveScreenBottomInset`, and the keyboard through
 | `backend/src/services/…messageService` | `replyCount` maintained in the store transaction. |
 | `backend/src/routes/chatRoutes.ts` | The replies page, App Check, active device, audit on both branches. |
 | `mobile/src/services/replyThreads.ts` | **New.** Pure: grouping loaded messages, the wording of the count, what the view shows while a fetch is in flight. Tested. |
-| `mobile/src/components/messages/ReplyThreadView.tsx` | **New.** The focused view. |
-| `mobile/src/components/messages/MessageThread.tsx` | The count row, and opening the view. |
+| `mobile/src/components/messages/ReplyThreadView.tsx` | **New.** The focused view, for composing. |
+| `mobile/src/components/messages/ReplyGroup.tsx` | **New.** The bracket rail, the wireframe copy, the replies inside it. |
+| `mobile/src/components/messages/MessageThread.tsx` | The count row under a parent, grouping consecutive replies, and the scroll. |
 
 ## 8. Not in this change
 
@@ -121,12 +145,19 @@ Bottom inset through `resolveScreenBottomInset`, and the keyboard through
 - Notifications for a reply, which today are the ordinary message notification.
 - RAILS, LSW, RCA and the interpreter are not touched.
 
-## 9. Two decisions taken
+## 9. Decisions taken
 
-- **Tapping the count opens the focused view.** It is the only thing it could
-  usefully do.
-- **The focused view fetches**, per section 4. Showing only what happens to be
-  loaded reintroduces the exact problem the stored count solves.
+- **Tapping the count scrolls to the group**, it does not open the focused
+  view. The replies are already in the conversation; the count's job is to
+  cross the distance to them. An earlier draft of this plan had it opening the
+  focused view, which is what iMessage does — and which is a read action
+  wearing a compose button.
+- **Replies are grouped where they were sent**, at the bottom, and the original
+  never moves. Moving a message because somebody answered it would rewrite the
+  history of the conversation.
+- **The wireframe copy appears in the group, not in the focused view.** In the
+  group it stands in for a message that is elsewhere. In the focused view that
+  message is the subject and is drawn as itself.
 
 ## 10. Done means
 
