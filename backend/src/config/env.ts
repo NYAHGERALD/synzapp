@@ -35,6 +35,17 @@ export const env = {
   openAiInterpreterRealtimeModel: process.env.OPENAI_INTERPRETER_REALTIME_MODEL || 'gpt-realtime-translate',
   openAiInterpreterTranscriptionModel: process.env.OPENAI_INTERPRETER_TRANSCRIPTION_MODEL || 'gpt-live-transcribe',
   openAiInterpreterSegmentModel: process.env.OPENAI_INTERPRETER_SEGMENT_MODEL || process.env.OPENAI_INTERPRETER_SUMMARY_MODEL || process.env.OPENAI_MODEL || 'gpt-5.6-terra',
+  /**
+   * The model that turns a saved transcript into another language for reading.
+   *
+   * Separate from the live interpreter's model on purpose. Live interpretation
+   * is a hard task under time pressure and is worth a reasoning model; reading a
+   * saved transcript aloud is a plain translation, and paying reasoning latency
+   * per passage is what made Play take a long time to say anything.
+   *
+   * Defaults to the live model, so nothing changes until this is set.
+   */
+  openAiInterpreterReadAloudModel: process.env.OPENAI_INTERPRETER_READ_ALOUD_MODEL || process.env.OPENAI_INTERPRETER_SEGMENT_MODEL || 'gpt-5.6-terra',
   openAiInterpreterSegmentTtsModel: process.env.OPENAI_INTERPRETER_SEGMENT_TTS_MODEL || process.env.OPENAI_INTERPRETER_SUMMARY_TTS_MODEL || 'gpt-4o-mini-tts',
   openAiInterpreterSegmentTtsVoice: process.env.OPENAI_INTERPRETER_SEGMENT_TTS_VOICE || process.env.OPENAI_INTERPRETER_SUMMARY_TTS_VOICE || 'cedar',
   openAiInterpreterSummaryModel: process.env.OPENAI_INTERPRETER_SUMMARY_MODEL || process.env.OPENAI_MODEL || 'gpt-5.6-terra',

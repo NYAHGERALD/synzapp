@@ -102,9 +102,31 @@ export function uniqueChatMessages(messages: ChatMessage[]): ChatMessage[] {
     messagesByKey.set(canonicalKey, mergeChatMessageWithLocalState(existingMessage, message));
   });
 
-  return [...messagesByKey.values()].sort((first, second) =>
-    first.sentAt.localeCompare(second.sentAt)
-  );
+  return [...messagesByKey.values()].sort(compareChatMessagesBySentAt);
+}
+
+/**
+ * Orders two messages by when they were sent.
+ *
+ * `sentAt` is an ISO-8601 string, so plain relational comparison already orders
+ * it correctly, and costs a fraction of `localeCompare`, which runs full Unicode
+ * collation for every pair. This sort runs three times over the whole history
+ * for each arriving message, and once more when the thread renders, so on a long
+ * conversation the saving lands on the JS thread the keyboard animation shares.
+ *
+ * Messages sent in the same instant fall back to the id, so the order is stable
+ * rather than left to whatever the engine's sort happens to do.
+ */
+export function compareChatMessagesBySentAt(first: ChatMessage, second: ChatMessage): number {
+  if (first.sentAt !== second.sentAt) {
+    return first.sentAt < second.sentAt ? -1 : 1;
+  }
+
+  if (first.messageId === second.messageId) {
+    return 0;
+  }
+
+  return first.messageId < second.messageId ? -1 : 1;
 }
 
 /**

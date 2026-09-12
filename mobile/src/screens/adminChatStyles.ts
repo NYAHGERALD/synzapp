@@ -9,6 +9,7 @@ export {
   MESSAGE_INPUT_MIN_HEIGHT,
   SPAM_ROW_ACTION_WIDTH,
 } from './adminChatStyles/metrics';
+export { FOOTER_BAR_HORIZONTAL_PADDING } from './adminChatStyles/coreStyles';
 
 /**
  * The Admin chat screen's stylesheet.

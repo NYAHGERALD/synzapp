@@ -1565,9 +1565,70 @@ export async function loadStoredMessageSignatures(
 
 export async function ensureLocalMessageColumns(db: SQLite.SQLiteDatabase): Promise<void> {
   const rows = await db.getAllAsync<{ name: string }>('PRAGMA table_info(local_messages)');
+  const columnNames = new Set(rows.map((row) => row.name));
 
-  if (!rows.some((row) => row.name === 'content_signature')) {
+  if (!columnNames.has('content_signature')) {
     await db.execAsync('ALTER TABLE local_messages ADD COLUMN content_signature TEXT');
+  }
+
+  /**
+   * Which message this one answers, beside the row rather than inside it.
+   *
+   * The reply reference is sealed in `payload` with everything else, and
+   * counting replies by decrypting a conversation of five thousand to show one
+   * number is the freeze this codebase has already been bitten by three times.
+   * A plain column can be read by SQLite without opening anything.
+   *
+   * It sits beside `sender_uid` and `sent_at_ms`, which are already plain here
+   * for the same reason. This is the device's own store; the server is told
+   * none of it.
+   */
+  if (!columnNames.has('reply_to_message_id')) {
+    await db.execAsync('ALTER TABLE local_messages ADD COLUMN reply_to_message_id TEXT');
+    await db.execAsync(`CREATE INDEX IF NOT EXISTS idx_local_messages_reply_parent
+      ON local_messages(owner_uid, tenant_id, contact_id, reply_to_message_id)`);
+  }
+}
+
+/**
+ * The reply ids in this conversation, grouped by the message each answers.
+ *
+ * Ids rather than counts, because the caller has to join this with the replies
+ * currently in memory and only identity can do that: a stored nine and a loaded
+ * two is eleven if those two are new and nine if they are two of the nine.
+ *
+ * Read straight out of an indexed column over every message the device holds.
+ * **Nothing is decrypted**, which is what makes it safe to run on every change.
+ */
+export async function loadCachedReplyIds(input: {
+  contactId: string;
+  ownerUid: string;
+  tenantId: string;
+}): Promise<Record<string, string[]>> {
+  try {
+    const db = await getLocalChatSqliteDatabase();
+
+    await ensureLocalMessageColumns(db);
+
+    const rows = await db.getAllAsync<{ message_id: string; parent_id: string }>(
+      `SELECT reply_to_message_id AS parent_id, message_id
+       FROM local_messages
+       WHERE owner_uid = ? AND tenant_id = ? AND contact_id = ?
+         AND reply_to_message_id IS NOT NULL AND reply_to_message_id != ''`,
+      [input.ownerUid, input.tenantId, input.contactId]
+    );
+    const idsByParent: Record<string, string[]> = {};
+
+    rows.forEach((row) => {
+      if (row.parent_id && row.message_id) {
+        idsByParent[row.parent_id] = [...(idsByParent[row.parent_id] || []), row.message_id];
+      }
+    });
+
+    return idsByParent;
+  } catch {
+    // A count is worth nothing if fetching it can break opening a chat.
+    return {};
   }
 }
 

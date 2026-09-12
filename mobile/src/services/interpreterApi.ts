@@ -1,3 +1,5 @@
+import * as FileSystem from 'expo-file-system/legacy';
+import { describeDownloadFailure } from './downloadFailureMessage';
 import { getSynzappApiBaseUrl } from './apiConfig';
 import { getRegisteredDeviceHeaders } from './deviceIdentity';
 
@@ -457,6 +459,153 @@ export async function prepareInterpreterTranscriptAudio(
   );
 
   return response.json() as Promise<{ audioArtifact: InterpreterTranscriptAudioArtifact }>;
+}
+
+export interface InterpreterTranscriptReadingState {
+  isComplete: boolean;
+  languageCode: string;
+  /**
+   * An HLS playlist. Handed straight to the player, which fetches segments as
+   * they appear, plays them in order and joins them without a gap — none of
+   * which this app has to implement.
+   */
+  playlistUrl: string;
+  readingId: string;
+  segmentsReady: number;
+  segmentsTotal: number;
+}
+
+/**
+ * Makes one more piece of a reading.
+ *
+ * Called repeatedly while listening. Each call does a bounded amount of work,
+ * so nothing is left running unattended on the server and a failure costs one
+ * retry rather than the whole recording.
+ */
+export async function advanceInterpreterTranscriptReading(
+  idToken: string,
+  meetingId: string,
+  segmentId: string,
+  input: {
+    languageCode: string;
+    voiceId?: string | null;
+  }
+) {
+  const response = await interpreterFetch(
+    idToken,
+    `/meetings/${encodeURIComponent(meetingId)}/transcripts/${encodeURIComponent(segmentId)}/reading`,
+    {
+      body: JSON.stringify({
+        languageCode: input.languageCode,
+        voiceId: input.voiceId || null
+      }),
+      method: 'POST'
+    }
+  );
+
+  return response.json() as Promise<InterpreterTranscriptReadingState>;
+}
+
+/**
+ * Makes one more piece of a spoken summary.
+ *
+ * Same contract as the transcript reading: called repeatedly while listening,
+ * and the playlist it returns goes straight to the player.
+ */
+export async function advanceInterpreterSummaryReading(
+  idToken: string,
+  meetingId: string,
+  summaryId: string,
+  input: {
+    languageCode: string;
+    voiceId?: string | null;
+  }
+) {
+  const response = await interpreterFetch(
+    idToken,
+    `/meetings/${encodeURIComponent(meetingId)}/summaries/${encodeURIComponent(summaryId)}/reading`,
+    {
+      body: JSON.stringify({
+        languageCode: input.languageCode,
+        voiceId: input.voiceId || null
+      }),
+      method: 'POST'
+    }
+  );
+
+  return response.json() as Promise<InterpreterTranscriptReadingState>;
+}
+
+export type InterpreterExportFormat = 'audio' | 'pdf' | 'word';
+
+export interface InterpreterExportFile {
+  fileName: string;
+  uri: string;
+}
+
+
+
+/**
+ * Downloads one exported document straight to a file.
+ *
+ * The server sends the document itself rather than a link to a stored copy, so
+ * nothing is left behind to expire, be swept up, or keep working after the
+ * person who asked for it has gone.
+ *
+ * `downloadAsync` streams it to disk carrying the same credentials as any other
+ * call, which is why the endpoint is a GET: a whole document never has to be
+ * held in memory on the way past.
+ */
+export async function downloadInterpreterExport(
+  idToken: string,
+  input: {
+    fileName: string;
+    format: InterpreterExportFormat;
+    languageCode: string;
+    meetingId: string;
+    ownerId: string;
+    ownerKind: 'summary' | 'transcript';
+    voiceId?: string | null;
+  }
+): Promise<InterpreterExportFile> {
+  const deviceHeaders = await getInterpreterDeviceHeaders(idToken);
+  const owner = input.ownerKind === 'summary'
+    ? `summaries/${encodeURIComponent(input.ownerId)}`
+    : `transcripts/${encodeURIComponent(input.ownerId)}`;
+  const query = new URLSearchParams({
+    format: input.format,
+    languageCode: input.languageCode,
+    ...(input.voiceId ? { voiceId: input.voiceId } : {})
+  }).toString();
+
+  const url =
+    `${getSynzappApiBaseUrl()}/api/interpreter/meetings/${encodeURIComponent(input.meetingId)}/${owner}/export?${query}`;
+  const uri = `${FileSystem.cacheDirectory}${input.fileName}`;
+
+  const result = await FileSystem.downloadAsync(url, uri, {
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      ...deviceHeaders
+    }
+  });
+
+  if (result.status !== 200) {
+    /**
+     * The reason is in the file, not in the status.
+     *
+     * `downloadAsync` writes whatever came back — including the server's
+     * explanation — to disk and reports only a number. Reading it is the
+     * difference between "that document could not be downloaded" and being
+     * told which permission is missing and who can grant it.
+     */
+    const body = await FileSystem.readAsStringAsync(result.uri).catch(() => null);
+
+    await FileSystem.deleteAsync(result.uri, { idempotent: true }).catch(() => undefined);
+
+    throw new Error(describeDownloadFailure({ body, status: result.status }));
+  }
+
+  return { fileName: input.fileName, uri: result.uri };
 }
 
 export async function deleteInterpreterTranscriptSegments(

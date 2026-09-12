@@ -5293,24 +5293,40 @@ function RailsAssistantPanel({
         </button>
       </header>
 
-      <div className="rails-ai-assistant-prompts" aria-label="Suggested RAILS questions">
-        {starterPrompts.map((prompt) => (
-          <button disabled={isResponding} key={prompt} onClick={() => onAsk(prompt)} type="button">
-            <Sparkles aria-hidden="true" size={13} />
-            <span>{prompt}</span>
-          </button>
-        ))}
-      </div>
+      {/*
+        Suggestions belong to an empty conversation.
+        Kept on screen for ever they take a fixed slice of the panel's height
+        from the answers, and once somebody has asked something they already
+        know what to do.
+      */}
+      {messages.length === 0 ? (
+        <div className="rails-ai-assistant-prompts" aria-label="Suggested RAILS questions">
+          <p className="rails-ai-prompts-title">Ask about</p>
+          {starterPrompts.map((prompt) => (
+            <button disabled={isResponding} key={prompt} onClick={() => onAsk(prompt)} type="button">
+              <Sparkles aria-hidden="true" size={13} />
+              <span>{prompt}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       <div className="rails-ai-message-region">
         <div className="rails-ai-message-list" aria-live="polite" onScroll={handleAssistantScroll} ref={messageListRef}>
           {messages.map((message) => (
-            <article className={`rails-ai-message is-${message.role}`} key={message.id}>
-              <div className="rails-ai-message-meta">
-                <span>{message.role === 'assistant' ? 'RAILS Guide' : 'You'}</span>
-                {message.answerSource ? <small>{message.answerSource === 'AI' ? 'AI assisted' : 'System guide'}</small> : null}
-              </div>
-              <div className="rails-ai-message-body">
+            <article className={`rails-ai-turn is-${message.role}`} key={message.id}>
+              {message.role === 'assistant' ? (
+                <div className="rails-ai-turn-meta">
+                  <span className="rails-ai-turn-avatar" aria-hidden="true">
+                    <Bot size={12} />
+                  </span>
+                  <span>RAILS Guide</span>
+                  {message.answerSource ? (
+                    <small>{message.answerSource === 'AI' ? 'AI assisted' : 'System guide'}</small>
+                  ) : null}
+                </div>
+              ) : null}
+              <div className="rails-ai-turn-body">
                 {formatAssistantAnswer(message.body).map((line, index) => (
                   <p key={`${message.id}-${index}`}>{line}</p>
                 ))}
@@ -5318,8 +5334,11 @@ function RailsAssistantPanel({
             </article>
           ))}
           {isResponding ? (
-            <article className="rails-ai-message is-assistant is-thinking">
-              <div className="rails-ai-message-meta">
+            <article className="rails-ai-turn is-assistant is-thinking">
+              <div className="rails-ai-turn-meta">
+                <span className="rails-ai-turn-avatar" aria-hidden="true">
+                  <Bot size={12} />
+                </span>
                 <span>RAILS Guide</span>
                 <small>Reviewing gates</small>
               </div>

@@ -120,6 +120,7 @@ export function EvidenceLibraryWindow({
   const [draftFiles, setDraftFiles] = React.useState<File[]>([]);
   const [uploadProgress, setUploadProgress] = React.useState(0);
   const [isFullscreen, setIsFullscreen] = React.useState(false);
+  const [fullscreenRect, setFullscreenRect] = React.useState<{ height: number; left: number; top: number; width: number } | null>(null);
   const [rect, setRect] = React.useState<LibraryRect>(() => getInitialWindowRect());
   const [hintUploaderPhotoUrl, setHintUploaderPhotoUrl] = React.useState<string | null>(null);
   const windowRef = React.useRef<HTMLDivElement | null>(null);
@@ -541,6 +542,45 @@ export function EvidenceLibraryWindow({
     }
   }
 
+  React.useLayoutEffect(() => {
+    if (!isFullscreen) {
+      setFullscreenRect(null);
+
+      return undefined;
+    }
+
+    const surface = document.querySelector('[data-workspace-surface="true"]');
+
+    if (!surface) {
+      setFullscreenRect(null);
+
+      return undefined;
+    }
+
+    const measure = () => {
+      const area = surface.getBoundingClientRect();
+
+      setFullscreenRect({
+        height: area.height,
+        left: area.left,
+        top: area.top,
+        width: area.width
+      });
+    };
+
+    measure();
+
+    const observer = new ResizeObserver(measure);
+
+    observer.observe(surface);
+    window.addEventListener('resize', measure);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', measure);
+    };
+  }, [isFullscreen]);
+
   const searchText = searchQuery.trim().toLowerCase();
   const filteredEvidence = searchText
     ? evidence.filter((item) => getEvidenceSearchText(item).includes(searchText))
@@ -548,13 +588,29 @@ export function EvidenceLibraryWindow({
   const isSelectionMode = Boolean(onLinkEvidence);
   const linkedEvidenceIdSet = React.useMemo(() => new Set(linkedEvidenceIds), [linkedEvidenceIds]);
   const selectedEvidenceItems = evidence.filter((item) => selectedEvidenceIds.has(item.evidenceId) && !linkedEvidenceIdSet.has(item.evidenceId));
+  /**
+   * Full screen means the workspace surface, measured — not the viewport.
+   *
+   * Working it out from a nav offset and a margin cannot know where the surface
+   * actually is: the side panel collapses, the window resizes, and the app
+   * footer sits below the surface. The surface already stops short of all three,
+   * so covering exactly it is the whole requirement. The constants stay as a
+   * fallback for any workspace that publishes no surface.
+   */
   const windowStyle = isFullscreen
-    ? {
-        height: `calc(100vh - ${TOP_NAV_OFFSET + WINDOW_MARGIN}px)`,
-        left: `${WINDOW_MARGIN}px`,
-        top: `${TOP_NAV_OFFSET}px`,
-        width: `calc(100vw - ${WINDOW_MARGIN * 2}px)`
-      }
+    ? fullscreenRect
+      ? {
+          height: `${fullscreenRect.height}px`,
+          left: `${fullscreenRect.left}px`,
+          top: `${fullscreenRect.top}px`,
+          width: `${fullscreenRect.width}px`
+        }
+      : {
+          height: `calc(100vh - ${TOP_NAV_OFFSET + WINDOW_MARGIN}px)`,
+          left: `${WINDOW_MARGIN}px`,
+          top: `${TOP_NAV_OFFSET}px`,
+          width: `calc(100vw - ${WINDOW_MARGIN * 2}px)`
+        }
     : {
         height: `${rect.height}px`,
         left: `${rect.left}px`,
@@ -687,16 +743,16 @@ export function EvidenceLibraryWindow({
           </div>
         </div>
 
-        <div className={`shared-evidence-library-list is-${viewStyle}`}>
+        <div className={`shared-evidence-library-list is-${viewStyle}${filteredEvidence.length ? '' : ' is-empty'}`}>
           {isLoading && !filteredEvidence.length ? (
             <div className="shared-evidence-library-empty">
-              <UploadCloud aria-hidden="true" size={18} />
+              <UploadCloud aria-hidden="true" size={22} />
               <span>Loading shared evidence.</span>
             </div>
           ) : null}
           {!isLoading && !filteredEvidence.length ? (
             <div className="shared-evidence-library-empty">
-              <Search aria-hidden="true" size={18} />
+              <Search aria-hidden="true" size={22} />
               <span>{searchQuery ? 'No evidence matches this search.' : 'No shared evidence has been uploaded yet.'}</span>
             </div>
           ) : null}

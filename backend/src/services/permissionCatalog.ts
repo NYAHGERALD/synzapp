@@ -13,7 +13,8 @@ export const ORG_ADMIN_PERMISSIONS = [
   'roles.manage',
   'groups.manage',
   'audit.read',
-  'security.manage'
+  'security.manage',
+  'interpreter.export'
 ];
 
 export const ROLE_PERMISSION_CATALOG: PermissionCatalogItem[] = [
@@ -26,6 +27,11 @@ export const ROLE_PERMISSION_CATALOG: PermissionCatalogItem[] = [
     description: 'Send announcements where allowed by role and scope.',
     permission: 'announcements.send',
     title: 'Send announcements'
+  },
+  {
+    description: 'Download meeting summaries and transcripts as files that leave Synzapp. Reading them in the app does not require this.',
+    permission: 'interpreter.export',
+    title: 'Export meeting documents'
   },
   {
     description: 'Create work orders where allowed by role and scope.',
@@ -74,6 +80,11 @@ export const DEPARTMENT_ADMIN_PERMISSION_CATALOG: PermissionCatalogItem[] = [
     description: 'View department-level activity for the assigned department.',
     permission: 'department.activity.read',
     title: 'View department activity'
+  },
+  {
+    description: 'Download meeting summaries and transcripts as files that leave Synzapp. Reading them in the app does not require this.',
+    permission: 'interpreter.export',
+    title: 'Export meeting documents'
   }
 ];
 

@@ -11,6 +11,7 @@ vi.mock('expo-file-system/legacy', () => ({
 
 import type { ChatMediaAttachment, ChatMessage } from './chatApi';
 import {
+  compareChatMessagesBySentAt,
   getChatMessageRowKey,
   getMediaLocalUri,
   mergeChatMessageMedia,
@@ -250,5 +251,49 @@ describe('undecryptable placeholders', () => {
     const readable: ChatMessage = { ...placeholder, decryptionFailed: false, text: 'Good morning' };
 
     expect(uniqueChatMessages([placeholder, readable])).toHaveLength(1);
+  });
+});
+
+describe('compareChatMessagesBySentAt', () => {
+  it('orders ISO timestamps the same way the old collation did', () => {
+    const ordered = [
+      message({ messageId: 'c', sentAt: '2026-08-29T11:00:00.000Z' }),
+      message({ messageId: 'a', sentAt: '2026-08-29T09:00:00.000Z' }),
+      message({ messageId: 'b', sentAt: '2026-08-29T10:00:00.000Z' })
+    ].sort(compareChatMessagesBySentAt);
+
+    expect(ordered.map((entry) => entry.messageId)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('agrees with localeCompare across a spread of timestamps', () => {
+    const timestamps = [
+      '2026-01-01T00:00:00.000Z',
+      '2026-08-29T09:59:59.999Z',
+      '2026-08-29T10:00:00.000Z',
+      '2026-12-31T23:59:59.000Z',
+      '2027-02-01T05:30:00.500Z'
+    ];
+
+    timestamps.forEach((first) => {
+      timestamps.forEach((second) => {
+        const collated = Math.sign(first.localeCompare(second));
+        const compared = Math.sign(compareChatMessagesBySentAt(
+          message({ messageId: 'x', sentAt: first }),
+          message({ messageId: 'x', sentAt: second })
+        ));
+
+        expect(compared).toBe(collated);
+      });
+    });
+  });
+
+  it('breaks a tie on the message id so the order never wobbles', () => {
+    const sentAt = '2026-08-29T10:00:00.000Z';
+    const first = message({ messageId: 'a', sentAt });
+    const second = message({ messageId: 'b', sentAt });
+
+    expect(compareChatMessagesBySentAt(first, second)).toBeLessThan(0);
+    expect(compareChatMessagesBySentAt(second, first)).toBeGreaterThan(0);
+    expect(compareChatMessagesBySentAt(first, first)).toBe(0);
   });
 });

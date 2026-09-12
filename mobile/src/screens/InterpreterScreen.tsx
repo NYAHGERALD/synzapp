@@ -21,11 +21,13 @@ import {
   Alert,
   Animated,
   ActionSheetIOS,
+  Dimensions,
   Modal,
   PanResponder,
   Platform,
   Pressable,
   ScrollView,
+  StatusBar as RNStatusBar,
   StyleSheet,
   Switch,
   Text,
@@ -37,9 +39,20 @@ import DateTimePicker, {
   type DateTimePickerEvent
 } from '@react-native-community/datetimepicker';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { ANDROID_MAX_NAVIGATION_INSET } from '../services/androidNavigationInset';
+import {
+  ANDROID_MAX_NAVIGATION_INSET,
+  resolveAndroidNavigationInset
+} from '../services/androidNavigationInset';
+import { ChatSearchBar } from '../components/chatUiPrimitives';
 import { CircleIconButton } from '../components/ui/CircleIconButton';
+import { getFullScreenModalTopPadding } from '../components/keyResults/KeyResultsSettings';
 import { resolveScreenBottomInset } from '../services/rootSafeArea';
+import { getLanguageFlagEmoji } from '../services/languageFlags';
+import { buildInterpreterExportFileName } from '../services/interpreterExportFileName';
+import {
+  orderLanguagesForSpokenOutput,
+  resolveSpokenOutputLanguageCode
+} from '../services/interpreterOutputLanguage';
 import Svg, { Circle, Defs, Line, LinearGradient, Stop } from 'react-native-svg';
 import {
   setIsAudioActiveAsync,
@@ -74,6 +87,7 @@ import {
   InterpreterSummaryAudio,
   InterpreterMeetingType,
   InterpreterTranscriptAudioArtifact,
+  InterpreterExportFormat,
   InterpreterTranscriptLibraryItem,
   InterpreterVoiceProfile,
   InterpreterVoicePreviewAudio,
@@ -81,6 +95,9 @@ import {
   listInterpreterMeetings,
   listInterpreterParticipants,
   lookupInterpreterApprovedKnowledge,
+  advanceInterpreterSummaryReading,
+  downloadInterpreterExport,
+  advanceInterpreterTranscriptReading,
   prepareInterpreterTranscriptAudio,
   startInterpreterMeeting,
   updateInterpreterMeetingInvitations,
@@ -123,6 +140,14 @@ export type InterpreterCreateDraft = {
   reminderLeadMinutes: number | null;
   scheduledAtIso: string | null;
   sourceLanguageCode: string | null;
+  /**
+   * The language the interpreter speaks when the room opens.
+   *
+   * Carried as the first entry of `languageCodes` on the way out — the room
+   * already takes its output from the meeting's first language, and the
+   * backend keeps the order it is given, so this needs no field of its own.
+   */
+  spokenOutputLanguageCode: string | null;
   timeFormat: '12h' | '24h';
 };
 
@@ -169,17 +194,30 @@ export const INTERPRETER_TRANSCRIPT_AUDIO_PLAYBACK_RATES = [0.75, 1, 1.25, 1.5, 
 export const INTERPRETER_TRANSCRIPT_LIBRARY_SUMMARY_VERSION_ID = 'saved-transcripts';
 type InterpreterRealtimeSessionMode = 'controlled_voice' | 'translation' | 'voice_agent';
 
-export type InterpreterMeetingCreatedDateFilter = 'all' | 'last_7_days' | 'last_30_days' | 'today';
+export type InterpreterMeetingCreatedDateFilter =
+  | 'all'
+  | 'custom'
+  | 'last_7_days'
+  | 'last_30_days'
+  | 'today';
 export type InterpreterMeetingTypeFilter = 'ALL' | InterpreterMeetingType;
 
 export type InterpreterMeetingListFilters = {
   createdDate: InterpreterMeetingCreatedDateFilter;
+  /**
+   * The one day a custom filter is asking for, as an ISO string.
+   *
+   * Only read when `createdDate` is `custom`. Held separately so switching to
+   * "Last 7 days" and back does not lose the day somebody picked.
+   */
+  customDateIso: string | null;
   meetingType: InterpreterMeetingTypeFilter;
   nameQuery: string;
 };
 
 export const DEFAULT_INTERPRETER_MEETING_FILTERS: InterpreterMeetingListFilters = {
   createdDate: 'all',
+  customDateIso: null,
   meetingType: 'ALL',
   nameQuery: ''
 };
@@ -201,7 +239,8 @@ export type InterpreterLiveVersionStatus = 'connecting' | 'listening' | 'ready' 
 export type InterpreterTranscriptLibraryFilter = 'all' | 'ready' | 'preparing' | 'needs_audio';
 
 export type InterpreterTranscriptAudioPlayerContext = {
-  artifact: InterpreterTranscriptAudioArtifact;
+  /** Null for a reading, which is played from a playlist rather than a file. */
+  artifact: InterpreterTranscriptAudioArtifact | null;
   audioKey: string;
   item: InterpreterTranscriptLibraryItem;
   languageCode: string;
@@ -297,7 +336,6 @@ export function InterpreterScreen({ getIdToken, onBack, onRoomActiveChange }: In
   const [isBusy, setIsBusy] = useState(false);
   const [isCreatingMeeting, setIsCreatingMeeting] = useState(false);
   const [creatingMeetingLabel, setCreatingMeetingLabel] = useState<string | null>(null);
-  const [isMeetingSearchOpen, setIsMeetingSearchOpen] = useState(false);
   const [meetingSearchQuery, setMeetingSearchQuery] = useState('');
   const [meetingFilters, setMeetingFilters] =
     useState<InterpreterMeetingListFilters>(DEFAULT_INTERPRETER_MEETING_FILTERS);
@@ -464,7 +502,9 @@ export function InterpreterScreen({ getIdToken, onBack, onRoomActiveChange }: In
   }
 
   function openInterpreterListOptions() {
-    const searchOption = isMeetingSearchOpen ? 'Hide search' : 'Search';
+    // Starting a session leads the list, because it is the thing people come to
+    // this screen to do. The rest are ways of looking at what is already here.
+    const newOption = 'New session';
     const filterOption = hasActiveMeetingFilters ? 'Edit filters' : 'Filter';
     const deleteOption = isMeetingDeleteMode ? 'Cancel delete mode' : 'Delete sessions';
     const cancelOption = 'Cancel';
@@ -475,12 +515,12 @@ export function InterpreterScreen({ getIdToken, onBack, onRoomActiveChange }: In
           cancelButtonIndex: 3,
           destructiveButtonIndex: isMeetingDeleteMode ? undefined : 2,
           disabledButtonIndices: meetings.length ? [] : [2],
-          options: [searchOption, filterOption, deleteOption, cancelOption],
+          options: [newOption, filterOption, deleteOption, cancelOption],
           title: 'Interpreter sessions'
         },
         (buttonIndex) => {
           if (buttonIndex === 0) {
-            setIsMeetingSearchOpen((currentValue) => !currentValue);
+            setIsCreateOpen(true);
             return;
           }
 
@@ -498,7 +538,7 @@ export function InterpreterScreen({ getIdToken, onBack, onRoomActiveChange }: In
     }
 
     Alert.alert('Interpreter sessions', 'Choose an action.', [
-      { onPress: () => setIsMeetingSearchOpen((currentValue) => !currentValue), text: searchOption },
+      { onPress: () => setIsCreateOpen(true), text: newOption },
       { onPress: () => setIsMeetingFilterOpen(true), text: filterOption },
       { onPress: toggleMeetingDeleteMode, style: isMeetingDeleteMode ? 'default' : 'destructive', text: deleteOption },
       { style: 'cancel', text: cancelOption }
@@ -825,17 +865,23 @@ export function InterpreterScreen({ getIdToken, onBack, onRoomActiveChange }: In
           // No tab bar here any more, so the old 106 points of room for one
           // would be an empty band. Only the navigation bar is owed.
           paddingBottom: Math.max(screenBottomInset + 16, 20),
-          paddingTop: Math.max(insets.top + 2, 14)
+          // The status bar's room, from the one helper that knows Android
+          // reports nothing here under edge to edge and falls back to the
+          // measured bar. `insets.top + 2` was a guess, and on a phone that
+          // reports 0 it left the buttons under the clock.
+          paddingTop: getFullScreenModalTopPadding(insets.top)
         }
       ]}
     >
+      {/* Controls on one row, the name of the screen on the next. A title
+          squeezed between two buttons has to shrink to fit them and stops
+          reading as the heading of the page. */}
       <View style={styles.workspaceHeader}>
         {onBack ? (
           <CircleIconButton action="back" label="Back to chats" onPress={onBack} />
         ) : (
           <View style={styles.workspaceHeaderSpacer} />
         )}
-        <Text style={styles.workspaceTitle}>Interpreter</Text>
         <View style={styles.workspaceHeaderActions}>
           <Pressable
             accessibilityLabel="Interpreter session options"
@@ -855,77 +901,73 @@ export function InterpreterScreen({ getIdToken, onBack, onRoomActiveChange }: In
               size={22}
             />
           </Pressable>
-          {/* The screen's one action, as a word. The filled disc that used to
-              float over the list is gone: this app has no solid buttons. */}
-          <Pressable
-            accessibilityLabel="Create interpreter meeting"
-            disabled={isCreatingMeeting}
-            hitSlop={8}
-            onPress={() => setIsCreateOpen(true)}
-            style={({ pressed }) => [
-              styles.workspaceHeaderAction,
-              pressed && styles.pressed,
-              isCreatingMeeting && styles.disabledButton
-            ]}
-          >
-            {isCreatingMeeting ? (
+          {/* Starting a session lives in the options list beside the other
+              things that can be done to it, so the header carries one control
+              rather than two competing for the same corner. The spinner stays
+              here, because that is where the tap was. */}
+          {isCreatingMeeting ? (
+            <View style={styles.workspaceHeaderAction}>
               <ActivityIndicator color={appTheme.colors.link} size="small" />
-            ) : (
-              <Text style={styles.workspaceHeaderActionText}>New</Text>
-            )}
-          </Pressable>
+            </View>
+          ) : null}
         </View>
       </View>
 
-      {isMeetingSearchOpen ? (
-        <View style={styles.meetingSearchBar}>
-          <Ionicons color={appTheme.colors.mutedStrong} name="search-outline" size={18} />
-          <TextInput
-            autoCapitalize="none"
-            autoCorrect={false}
-            onChangeText={setMeetingSearchQuery}
-            placeholder="Search by name or meeting type"
-            placeholderTextColor={appTheme.colors.mutedStrong}
-            style={styles.meetingSearchInput}
-            value={meetingSearchQuery}
-          />
-          {meetingSearchQuery.trim() ? (
-            <Pressable
-              accessibilityLabel="Clear interpreter search"
-              hitSlop={8}
-              onPress={() => setMeetingSearchQuery('')}
-            >
-              <Ionicons color={appTheme.colors.mutedStrong} name="close-circle" size={18} />
-            </Pressable>
-          ) : null}
-        </View>
-      ) : null}
+      {/* The app's one search field, and it stays. A search somebody has to
+          find in a menu before they can use it is one they stop reaching for.
+          See section 7 of SYNZAPP_APP_STYLE.md. */}
+      <Text style={styles.workspaceTitle}>Interpreter</Text>
+
+      <View style={styles.meetingSearchWrap}>
+        <ChatSearchBar
+          onChangeText={setMeetingSearchQuery}
+          placeholder="Search by name or meeting type"
+          value={meetingSearchQuery}
+        />
+      </View>
 
       {isMeetingDeleteMode ? (
         <View style={styles.meetingSelectionToolbar}>
-          <TranscriptLibraryCheckbox
-            isChecked={isAllVisibleMeetingsSelected}
-            isDisabled={!filteredMeetingIds.length}
-            label="Select all"
+          {/* Two words, not two buttons. Select all ticks everything; Delete is
+              red because it is destructive, and text because this app has no
+              filled buttons. */}
+          <Pressable
+            accessibilityLabel={isAllVisibleMeetingsSelected ? 'Clear selection' : 'Select all'}
+            accessibilityRole="button"
+            disabled={!filteredMeetingIds.length}
+            hitSlop={8}
             onPress={toggleSelectAllVisibleMeetings}
-            styles={styles}
-          />
+            style={({ pressed }) => [
+              styles.selectionToolbarAction,
+              pressed && styles.pressed,
+              !filteredMeetingIds.length && styles.disabledButton
+            ]}
+          >
+            <Text style={styles.selectionToolbarLink}>
+              {isAllVisibleMeetingsSelected ? 'Clear selection' : 'Select all'}
+            </Text>
+          </Pressable>
+
           {selectedMeetingIds.length ? (
             <Pressable
+              accessibilityLabel={`Delete ${selectedMeetingIds.length} selected`}
+              accessibilityRole="button"
               disabled={isBusy}
+              hitSlop={8}
               onPress={confirmDeleteSelectedMeetings}
               style={({ pressed }) => [
-                styles.meetingBulkDeleteButton,
+                styles.selectionToolbarAction,
                 isBusy && styles.disabledButton,
                 pressed && styles.pressed
               ]}
             >
               {isBusy ? (
-                <ActivityIndicator color="#fff" size="small" />
+                <ActivityIndicator color={appTheme.colors.destructive} size="small" />
               ) : (
-                <Ionicons color="#fff" name="trash-outline" size={15} />
+                <Text style={styles.selectionToolbarDelete}>
+                  {`Delete ${selectedMeetingIds.length}`}
+                </Text>
               )}
-              <Text style={styles.meetingBulkDeleteText}>Delete</Text>
             </Pressable>
           ) : null}
         </View>
@@ -950,17 +992,29 @@ export function InterpreterScreen({ getIdToken, onBack, onRoomActiveChange }: In
 	          overScrollMode="never"
 	          showsVerticalScrollIndicator={false}
 	        >
-          {filteredMeetings.length ? filteredMeetings.map((meeting) => (
-            <InterpreterMeetingSwipeRow
+          {/* One card, built a row at a time. A company runs these steadily and
+              never deletes them, so a card each would be a page of stripes;
+              only the ends round their corners. */}
+          {filteredMeetings.length ? filteredMeetings.map((meeting, index) => (
+            <View
               key={meeting.meetingId}
-              disabled={isBusy}
-              isDeleteMode={isMeetingDeleteMode}
-              isSelected={selectedMeetingIdSet.has(meeting.meetingId)}
-              meeting={meeting}
-              onDelete={handleDeleteMeeting}
-              onOpen={handleOpenMeeting}
-              onToggleSelected={toggleMeetingSelection}
-            />
+              style={[
+                styles.meetingCard,
+                index === 0 && styles.meetingCardFirst,
+                index === filteredMeetings.length - 1 && styles.meetingCardLast
+              ]}
+            >
+              {index > 0 ? <View style={styles.meetingCardDivider} /> : null}
+              <InterpreterMeetingSwipeRow
+                disabled={isBusy}
+                isDeleteMode={isMeetingDeleteMode}
+                isSelected={selectedMeetingIdSet.has(meeting.meetingId)}
+                meeting={meeting}
+                onDelete={handleDeleteMeeting}
+                onOpen={handleOpenMeeting}
+                onToggleSelected={toggleMeetingSelection}
+              />
+            </View>
           )) : (
             <View style={styles.emptyState}>
               <Ionicons color={appTheme.colors.mutedStrong} name="search-outline" size={34} />
@@ -1147,9 +1201,17 @@ export function TranscriptLibraryCheckbox({
         pressed && styles.pressed
       ]}
     >
-      <View style={[styles.transcriptCheckboxBox, isChecked && styles.transcriptCheckboxBoxChecked]}>
+      {/*
+        * A tick, not a box.
+        *
+        * The slot keeps its width when nothing is chosen so the rows do not
+        * jump sideways one at a time as somebody works down the list. Entering
+        * selection moves them all at once, which reads as a change of mode; a
+        * row shifting on its own reads as a glitch.
+        */}
+      <View style={styles.transcriptCheckboxSlot}>
         {isChecked ? (
-          <Ionicons color="#fff" name="checkmark" size={15} />
+          <Ionicons color={styles.transcriptCheckMark.color} name="checkmark" size={20} />
         ) : null}
       </View>
       {label ? (
@@ -1170,6 +1232,8 @@ export interface InterpreterLiveOutputLanguagePickerProps {
 export interface InterpreterTranscriptLibraryModalProps {
   activeAudioKey: string | null;
   audioPlayerContext: InterpreterTranscriptAudioPlayerContext | null;
+  /** Set only while a long reading is still being made behind the playback. */
+  audioReadAloudProgress?: string | null;
   audioPlayerDuration: number;
   audioPlayerMode: InterpreterTranscriptAudioPlayerMode;
   audioPlayerPosition: number;
@@ -1199,6 +1263,12 @@ export interface InterpreterTranscriptLibraryModalProps {
   onDeleteTranscripts: (segmentIds: string[]) => Promise<void>;
   onFilterChange: (filter: InterpreterTranscriptLibraryFilter) => void;
   onPlayAudio: (item: InterpreterTranscriptLibraryItem) => void;
+  exportingSummaryKey: string | null;
+  onExportSummary: (
+    summary: InterpreterMeetingDetails['summaries'][number],
+    languageCode: string
+  ) => void;
+  onExportTranscript: (item: InterpreterTranscriptLibraryItem) => void;
   onPlaySummary: (
     summary: InterpreterMeetingDetails['summaries'][number],
     languageCode: string
@@ -1274,6 +1344,8 @@ export interface InterpreterTranscriptAudioPlayerModalProps {
   onTogglePlayback: () => void;
   playbackRate: number;
   position: number;
+  /** Set only while a long reading is still being made behind the playback. */
+  readAloudProgress?: string | null;
 }
 
 export interface InterpreterTranscriptSummaryModalProps {
@@ -1286,6 +1358,12 @@ export interface InterpreterTranscriptSummaryModalProps {
   items: InterpreterTranscriptLibraryItem[];
   onClose: () => void;
   onCreateSummary: (languageCode: string) => Promise<InterpreterSummaryCreateResult | null>;
+  /** Set while a download is being built, so the row can say so. */
+  exportingSummaryKey: string | null;
+  onExportSummary: (
+    summary: InterpreterMeetingDetails['summaries'][number],
+    languageCode: string
+  ) => void;
   onPlaySummary: (
     summary: InterpreterMeetingDetails['summaries'][number],
     languageCode: string
@@ -1491,7 +1569,17 @@ function InterpreterOptionPickerModal({
   return (
     <Modal animationType="fade" onRequestClose={onClose} transparent visible={isOpen}>
       <Pressable onPress={onClose} style={styles.pickerOverlay}>
-        <Pressable style={[styles.pickerSheet, { paddingBottom: Math.max(insets.bottom + 14, 24) }]}>
+        <Pressable
+          style={[
+            styles.pickerSheet,
+            // Held still only while it can be searched: a sheet sized by its
+            // results moves under the finger typing into it. Without a search
+            // there is nothing to filter, and a fixed height would leave a
+            // short list floating in an empty sheet.
+            options.length > 8 && styles.pickerSheetFixed,
+            { paddingBottom: Math.max(resolveInterpreterModalBottomInset(insets.bottom) + 14, 24) }
+          ]}
+        >
           <View style={styles.modalHandle} />
           <View style={styles.modalHeader}>
             <Text style={styles.modalTitle}>{title}</Text>
@@ -1578,7 +1666,7 @@ export function ScheduleDateTimePickerModal({
   return (
     <Modal animationType="fade" onRequestClose={onCancel} transparent visible={isOpen}>
       <View style={styles.pickerOverlay}>
-        <View style={[styles.datePickerSheet, { paddingBottom: Math.max(insets.bottom + 12, 22) }]}>
+        <View style={[styles.datePickerSheet, { paddingBottom: Math.max(resolveInterpreterModalBottomInset(insets.bottom) + 12, 22) }]}>
           <View style={styles.modalHeader}>
             <Pressable onPress={onCancel} style={({ pressed }) => [styles.secondaryTextButton, pressed && styles.pressed]}>
               <Text style={styles.secondaryTextButtonText}>Cancel</Text>
@@ -1634,12 +1722,17 @@ function doesInterpreterMeetingMatchListControls(
     return false;
   }
 
-  return doesInterpreterMeetingMatchCreatedDateFilter(meeting, filters.createdDate);
+  return doesInterpreterMeetingMatchCreatedDateFilter(
+    meeting,
+    filters.createdDate,
+    filters.customDateIso
+  );
 }
 
 function doesInterpreterMeetingMatchCreatedDateFilter(
   meeting: InterpreterMeeting,
-  filter: InterpreterMeetingCreatedDateFilter
+  filter: InterpreterMeetingCreatedDateFilter,
+  customDateIso: string | null
 ): boolean {
   if (filter === 'all') {
     return true;
@@ -1656,6 +1749,30 @@ function doesInterpreterMeetingMatchCreatedDateFilter(
 
   if (filter === 'today') {
     return createdAtMs >= todayStart;
+  }
+
+  /**
+   * One chosen day, from its own midnight to the next.
+   *
+   * Compared in local time rather than by ISO prefix: a session created at
+   * eleven at night is stored in UTC as the following day, and matching on the
+   * text of the date would file it under a day nobody was working.
+   */
+  if (filter === 'custom') {
+    if (!customDateIso) {
+      return true;
+    }
+
+    const chosen = new Date(customDateIso);
+
+    if (Number.isNaN(chosen.getTime())) {
+      return true;
+    }
+
+    const dayStart = new Date(chosen.getFullYear(), chosen.getMonth(), chosen.getDate()).getTime();
+    const dayEnd = dayStart + (24 * 60 * 60 * 1000);
+
+    return createdAtMs >= dayStart && createdAtMs < dayEnd;
   }
 
   const ageMs = Date.now() - createdAtMs;
@@ -2205,14 +2322,11 @@ function createStyles(colors: AppColors) {
     },
     dropdownRow: {
       alignItems: 'center',
-      backgroundColor: colors.surface,
-      borderBottomColor: colors.divider,
-      borderBottomWidth: 1,
       flexDirection: 'row',
-      gap: 10,
-      minHeight: 58,
-      paddingHorizontal: 4,
-      paddingVertical: 10
+      gap: 12,
+      minHeight: 62,
+      paddingHorizontal: 16,
+      paddingVertical: 12
     },
     floatingCreateButton: {
       alignItems: 'center',
@@ -2373,10 +2487,29 @@ function createStyles(colors: AppColors) {
     circularAudioWrapCompact: {
       marginBottom: 6
     },
+    /**
+     * An audio sink, so it is given no area to draw in.
+     *
+     * This is an `RTCView`, and on Android that is a surface of its own rather
+     * than something React Native paints. `backgroundColor: 'transparent'` and
+     * a low `opacity` do not reach it: the surface keeps drawing, and with an
+     * audio-only stream it has no frames, so it draws **black**.
+     *
+     * At `absoluteFillObject` that black covered the entire room the moment
+     * the stream attached — the page turned black behind the cards the instant
+     * Listen was tapped, and the heading became dark text on black. It read as
+     * a theme fault and was not one.
+     *
+     * One point in the corner. It stays mounted, because the stream is
+     * attached to it, and it can no longer cover anything.
+     */
     remoteInterpreterAudioSink: {
-      ...StyleSheet.absoluteFillObject,
-      backgroundColor: 'transparent',
-      opacity: 0.01
+      height: 1,
+      left: 0,
+      opacity: 0.01,
+      position: 'absolute',
+      top: 0,
+      width: 1
     },
     interpretationLanguageButton: {
       alignItems: 'center',
@@ -2468,8 +2601,8 @@ function createStyles(colors: AppColors) {
       lineHeight: 19
     },
     modalContent: {
-      gap: 14,
-      paddingBottom: 16
+      paddingBottom: 20,
+      paddingTop: 2
     },
     modalHandle: {
       alignSelf: 'center',
@@ -2491,11 +2624,13 @@ function createStyles(colors: AppColors) {
       justifyContent: 'flex-end'
     },
     modalSheet: {
-      backgroundColor: colors.surface,
+      // The tinted ground, so the cards on it read as cards. Padding is
+      // vertical only: each card states its own 15 from the edge.
+      backgroundColor: colors.groupedBackground,
       borderTopLeftRadius: 32,
       borderTopRightRadius: 32,
       maxHeight: '92%',
-      padding: 18
+      paddingTop: 10
     },
     modalTitle: {
       color: colors.ink,
@@ -2624,6 +2759,10 @@ function createStyles(colors: AppColors) {
       marginBottom: 10,
       paddingHorizontal: 14
     },
+    pickerSheetFixed: {
+      height: '72%',
+      overflow: 'hidden'
+    },
     pickerSheet: {
       backgroundColor: colors.surface,
       borderTopLeftRadius: 30,
@@ -2734,8 +2873,9 @@ function createStyles(colors: AppColors) {
       alignItems: 'center',
       flexDirection: 'row',
       justifyContent: 'space-between',
-      marginBottom: 10,
-      minHeight: 44
+      marginBottom: 12,
+      minHeight: 44,
+      paddingHorizontal: 15
     },
     workspaceHeaderSpacer: {
       width: 44
@@ -2756,26 +2896,44 @@ function createStyles(colors: AppColors) {
       fontSize: 16,
       lineHeight: 21
     },
+    /**
+     * The same floated circle as the back button beside it.
+     *
+     * White on the tinted page with a shadow under it, 44 across so a thumb
+     * finds it without looking. It sits over a list that scrolls, and a flat
+     * tinted disc disappears the moment something pale scrolls beneath it.
+     */
     workspaceOptionsButton: {
       alignItems: 'center',
-      backgroundColor: colors.surface,
-      borderRadius: 999,
-      height: 38,
+      backgroundColor: colors.groupedCard,
+      borderRadius: 22,
+      elevation: 4,
+      height: 44,
       justifyContent: 'center',
-      width: 38
+      shadowColor: '#000000',
+      shadowOffset: { height: 2, width: 0 },
+      shadowOpacity: 0.16,
+      shadowRadius: 6,
+      width: 44
     },
     workspaceOptionsButtonActive: {
       backgroundColor: colors.primarySoft
     },
     workspaceScreen: {
-      backgroundColor: colors.groupedBackground
+      backgroundColor: colors.groupedBackground,
+      // The shared screen style pays 14 on every side, which put cards 19 from
+      // the edge. Cards sit at 15, so this surface pays nothing horizontally
+      // and the header, the field and the card each state their own.
+      paddingHorizontal: 0
     },
+    // The page heading, matching the tabs: large, left aligned, on its own row.
     workspaceTitle: {
       color: colors.ink,
-      flex: 1,
-      fontSize: 20,
-      lineHeight: 26,
-      textAlign: 'center'
+      fontSize: 26,
+      letterSpacing: 0,
+      lineHeight: 33,
+      marginBottom: 14,
+      marginHorizontal: 15
     },
     settingsContent: {
       gap: 18,
@@ -2783,16 +2941,56 @@ function createStyles(colors: AppColors) {
     },
     settingsSaveButton: {
       alignItems: 'center',
-      backgroundColor: colors.primary,
-      borderRadius: 999,
       justifyContent: 'center',
-      minHeight: 36,
-      minWidth: 70,
-      paddingHorizontal: 14
+      minHeight: 44,
+      paddingHorizontal: 4
     },
     settingsSaveButtonText: {
-      color: '#fff',
-      fontSize: 13
+      color: colors.link,
+      fontSize: 16
+    },
+    roomSettingsHeader: {
+      alignItems: 'center',
+      flexDirection: 'row',
+      gap: 8,
+      paddingHorizontal: 15
+    },
+    roomSettingsHeaderSpacer: {
+      flex: 1
+    },
+    roomSettingsHeadingWrap: {
+      marginBottom: 16,
+      marginTop: 14,
+      paddingHorizontal: 15
+    },
+    roomSettingsHeading: {
+      color: colors.ink,
+      fontSize: 26,
+      lineHeight: 31
+    },
+    roomSettingsHeadingMeta: {
+      color: colors.muted,
+      fontSize: 13,
+      marginTop: 3
+    },
+    settingsCard: {
+      backgroundColor: colors.groupedCard,
+      borderRadius: 22,
+      marginHorizontal: 15,
+      overflow: 'hidden'
+    },
+    inlinePickerRowDivider: {
+      backgroundColor: colors.separator,
+      height: 1,
+      left: 16,
+      position: 'absolute',
+      right: 16,
+      top: 0
+    },
+    inlinePickerTickSlot: {
+      alignItems: 'flex-end',
+      flexShrink: 0,
+      width: 20
     },
     settingsSection: {
       gap: 9
@@ -2856,10 +3054,9 @@ function createStyles(colors: AppColors) {
       justifyContent: 'space-between'
     },
     sectionLabel: {
-      color: colors.mutedStrong,
-      fontSize: 12,
-      letterSpacing: 0.8,
-      textTransform: 'uppercase'
+      color: colors.muted,
+      fontSize: 13,
+      marginLeft: 15
     },
     selectionBody: {
       flex: 1,
@@ -2917,23 +3114,15 @@ function createStyles(colors: AppColors) {
       gap: 10
     },
     inlinePickerPanel: {
-      backgroundColor: colors.surface,
-      borderTopColor: colors.divider,
-      borderTopWidth: 1
+      backgroundColor: 'transparent'
     },
     inlinePickerRow: {
       alignItems: 'center',
-      backgroundColor: colors.surface,
-      borderBottomColor: colors.divider,
-      borderBottomWidth: 1,
       flexDirection: 'row',
-      gap: 10,
-      minHeight: 56,
-      paddingHorizontal: 4,
-      paddingVertical: 9
-    },
-    inlinePickerRowSelected: {
-      backgroundColor: colors.primarySoft
+      gap: 14,
+      minHeight: 62,
+      paddingHorizontal: 16,
+      paddingVertical: 11
     },
     inlinePickerEmptyRow: {
       backgroundColor: colors.surface,
@@ -2980,6 +3169,12 @@ function createStyles(colors: AppColors) {
     },
     statusPillText: {
       fontSize: 12
+    },
+    // The status, as a word. No capsule: it reports what happened, it is not
+    // something to press.
+    meetingStatusText: {
+      fontSize: 13,
+      lineHeight: 18
     },
     statusDot: {
       borderRadius: 6,
@@ -3095,9 +3290,11 @@ function createStyles(colors: AppColors) {
     filterChipTextSelected: {
       color: colors.primary
     },
+    // No gap. The rows form one card and the hairlines between them do the
+    // separating; a gap here cut that card into a stack of slabs.
     listContent: {
-      gap: 10,
-      paddingBottom: 18
+      paddingBottom: 18,
+      paddingTop: 4
     },
     meetingBody: {
       flex: 1,
@@ -3137,16 +3334,32 @@ function createStyles(colors: AppColors) {
       color: colors.ink,
       fontSize: 16
     },
+    // No colour and no rule of its own: the card around it draws both.
     meetingRow: {
       alignItems: 'center',
-      backgroundColor: colors.screen,
-      borderBottomColor: colors.divider,
-      borderBottomWidth: 1,
       flexDirection: 'row',
       gap: 12,
       minHeight: 70,
-      paddingHorizontal: 2,
+      paddingHorizontal: 16,
       paddingVertical: 12
+    },
+    meetingCard: {
+      backgroundColor: colors.groupedCard,
+      marginHorizontal: 15,
+      overflow: 'hidden'
+    },
+    meetingCardFirst: {
+      borderTopLeftRadius: 22,
+      borderTopRightRadius: 22
+    },
+    meetingCardLast: {
+      borderBottomLeftRadius: 22,
+      borderBottomRightRadius: 22
+    },
+    meetingCardDivider: {
+      backgroundColor: colors.separator,
+      height: 1,
+      marginHorizontal: 15
     },
     meetingRowSelected: {
       backgroundColor: colors.primarySoft
@@ -3172,7 +3385,7 @@ function createStyles(colors: AppColors) {
       top: 0
     },
     meetingSwipeContent: {
-      backgroundColor: colors.screen
+      backgroundColor: colors.groupedCard
     },
     meetingSwipeShell: {
       backgroundColor: colors.red,
@@ -3227,11 +3440,150 @@ function createStyles(colors: AppColors) {
       marginTop: 18
     },
     meetingFilterSheet: {
-      backgroundColor: colors.surface,
+      // Tinted ground, and no gap: the section labels and the standalone card
+      // margin space the cards, so a gap here would double it.
+      backgroundColor: colors.groupedBackground,
       borderTopLeftRadius: 32,
       borderTopRightRadius: 32,
-      gap: 16,
-      padding: 18
+      // Capped so the sheet can never grow past the top of the screen. The
+      // content scrolls inside it once it no longer fits.
+      maxHeight: '92%',
+      overflow: 'hidden'
+    },
+    meetingFilterSheetContent: {
+      paddingTop: 2
+    },
+    // The tab surface pays nothing here, so a card sits 15 from the edge and
+    // the field lines up with the list under it.
+    // The grouped list, inside a bottom sheet. Same card, same 15, same
+    // hairlines as everywhere else — see SYNZAPP_APP_STYLE.md.
+    sheetHeaderRow: {
+      alignItems: 'center',
+      flexDirection: 'row',
+      gap: 10,
+      justifyContent: 'space-between',
+      paddingBottom: 4,
+      paddingHorizontal: 15
+    },
+    sheetHeaderTitle: {
+      color: colors.ink,
+      flex: 1,
+      fontSize: 17,
+      lineHeight: 22,
+      textAlign: 'center'
+    },
+    sheetHeaderAction: {
+      alignItems: 'flex-end',
+      justifyContent: 'center',
+      minHeight: 44,
+      minWidth: 44
+    },
+    sheetHeaderActionText: {
+      color: colors.link,
+      fontSize: 16,
+      lineHeight: 21
+    },
+    sheetSectionLabel: {
+      color: colors.muted,
+      fontSize: 13,
+      marginLeft: 15,
+      marginTop: 18,
+      paddingBottom: 7
+    },
+    sheetCard: {
+      backgroundColor: colors.groupedCard,
+      borderRadius: 22,
+      marginHorizontal: 15,
+      overflow: 'hidden'
+    },
+    /**
+     * For a card with no label above it.
+     *
+     * A section label carries the gap that separates one card from the last.
+     * A card without one has nothing holding it apart, and lands touching the
+     * card above — two cards sharing an edge read as one card with a seam.
+     */
+    sheetCardStandalone: {
+      marginTop: 18
+    },
+    sheetResetRow: {
+      alignItems: 'center',
+      justifyContent: 'center',
+      minHeight: 50,
+      paddingHorizontal: 16,
+      paddingVertical: 13
+    },
+    sheetResetText: {
+      color: colors.destructive,
+      fontSize: 16,
+      lineHeight: 21
+    },
+    sheetCardDivider: {
+      backgroundColor: colors.separator,
+      height: 1,
+      marginHorizontal: 15
+    },
+    // Inside a card, so it draws no box of its own: the card is the box.
+    sheetInput: {
+      color: colors.ink,
+      fontSize: 16,
+      minHeight: 52,
+      paddingHorizontal: 16,
+      paddingVertical: 14
+    },
+    sheetChoiceRow: {
+      alignItems: 'center',
+      flexDirection: 'row',
+      gap: 12,
+      justifyContent: 'space-between',
+      minHeight: 52,
+      paddingHorizontal: 16,
+      paddingVertical: 12
+    },
+    sheetChoiceText: {
+      color: colors.ink,
+      flex: 1,
+      fontSize: 16,
+      lineHeight: 21,
+      minWidth: 0
+    },
+    sheetChoiceMeta: {
+      color: colors.muted,
+      fontSize: 13,
+      lineHeight: 18,
+      marginTop: 2
+    },
+    sheetChoiceLead: {
+      alignItems: 'center',
+      flexDirection: 'row',
+      flexShrink: 1,
+      gap: 10
+    },
+    sheetChoiceTrailing: {
+      alignItems: 'center',
+      flexDirection: 'row',
+      gap: 8
+    },
+    sheetChoiceValue: {
+      color: colors.muted,
+      fontSize: 15.5,
+      lineHeight: 20
+    },
+    sheetSwitchRow: {
+      alignItems: 'center',
+      flexDirection: 'row',
+      gap: 12,
+      minHeight: 56,
+      paddingHorizontal: 16,
+      paddingVertical: 12
+    },
+    sheetSwitchText: {
+      flex: 1,
+      minWidth: 0
+    },
+    meetingSearchWrap: {
+      marginHorizontal: 15,
+      paddingBottom: 10
     },
     meetingSearchBar: {
       alignItems: 'center',
@@ -3258,15 +3610,28 @@ function createStyles(colors: AppColors) {
     },
     meetingSelectionToolbar: {
       alignItems: 'center',
-      backgroundColor: colors.surface,
-      borderColor: colors.border,
-      borderRadius: 18,
-      borderWidth: 1,
+      backgroundColor: colors.groupedCard,
+      borderRadius: 22,
       flexDirection: 'row',
       justifyContent: 'space-between',
       marginBottom: 10,
-      minHeight: 48,
-      paddingHorizontal: 12
+      marginHorizontal: 15,
+      minHeight: 52,
+      paddingHorizontal: 16
+    },
+    selectionToolbarAction: {
+      justifyContent: 'center',
+      minHeight: 44
+    },
+    selectionToolbarLink: {
+      color: colors.link,
+      fontSize: 16,
+      lineHeight: 21
+    },
+    selectionToolbarDelete: {
+      color: colors.destructive,
+      fontSize: 16,
+      lineHeight: 21
     },
     createSessionButton: {
       alignItems: 'center',
@@ -3401,28 +3766,31 @@ function createStyles(colors: AppColors) {
     },
     liveEndButton: {
       alignItems: 'center',
-      backgroundColor: colors.redSoft,
-      borderRadius: 999,
-      minHeight: 36,
       justifyContent: 'center',
-      paddingHorizontal: 14
+      minHeight: 44,
+      paddingHorizontal: 4
     },
     liveEndButtonText: {
-      color: colors.red,
-      fontSize: 13
+      color: colors.destructive,
+      fontSize: 16
     },
     liveIconButton: {
       alignItems: 'center',
-      backgroundColor: colors.surfaceElevated,
-      borderRadius: 999,
-      height: 38,
+      backgroundColor: colors.groupedCard,
+      borderRadius: 22,
+      elevation: 4,
+      height: 44,
       justifyContent: 'center',
-      width: 38
+      shadowColor: '#000000',
+      shadowOffset: { height: 2, width: 0 },
+      shadowOpacity: 0.16,
+      shadowRadius: 6,
+      width: 44
     },
     liveHeaderCountBadge: {
       alignItems: 'center',
       backgroundColor: colors.primary,
-      borderColor: colors.surface,
+      borderColor: colors.groupedCard,
       borderRadius: 999,
       borderWidth: 2,
       minWidth: 18,
@@ -3438,22 +3806,27 @@ function createStyles(colors: AppColors) {
     },
     liveCenterAction: {
       alignItems: 'center',
-      backgroundColor: colors.primary,
+      backgroundColor: colors.groupedCard,
       borderRadius: 999,
+      elevation: 4,
       flexDirection: 'row',
-      gap: 8,
+      gap: 9,
       justifyContent: 'center',
-      marginBottom: 6,
-      minHeight: 44,
-      minWidth: 158,
-      paddingHorizontal: 22
+      marginBottom: 8,
+      minHeight: 52,
+      minWidth: 176,
+      paddingHorizontal: 26,
+      shadowColor: '#000000',
+      shadowOffset: { height: 2, width: 0 },
+      shadowOpacity: 0.16,
+      shadowRadius: 6
     },
     liveCenterActionListening: {
-      backgroundColor: colors.primary
+      backgroundColor: colors.groupedCard
     },
     liveCenterActionText: {
-      color: '#fff',
-      fontSize: 15
+      color: colors.primary,
+      fontSize: 16
     },
     liveStatusBadge: {
       alignItems: 'center',
@@ -3471,36 +3844,30 @@ function createStyles(colors: AppColors) {
     },
     liveLanguageRouteCard: {
       alignItems: 'stretch',
-      backgroundColor: colors.surface,
-      borderColor: colors.border,
-      borderRadius: 18,
-      borderWidth: 1,
+      alignSelf: 'stretch',
+      backgroundColor: colors.groupedCard,
+      borderRadius: 22,
       flexDirection: 'row',
-      marginBottom: 9,
-      maxWidth: 360,
-      overflow: 'hidden',
-      width: '100%'
+      marginBottom: 14,
+      marginHorizontal: 15,
+      overflow: 'hidden'
     },
     liveLanguageRouteDivider: {
-      backgroundColor: colors.divider,
+      backgroundColor: colors.separator,
+      marginVertical: 12,
       width: 1
     },
     liveLanguageRouteLabel: {
       color: colors.mutedStrong,
-      fontSize: 10,
-      letterSpacing: 1.1,
-      textTransform: 'uppercase'
+      fontSize: 12.5
     },
     liveLanguageRouteOption: {
       flex: 1,
-      gap: 4,
+      gap: 5,
       justifyContent: 'center',
-      minHeight: 48,
-      paddingHorizontal: 12,
-      paddingVertical: 7
-    },
-    liveLanguageRoutePressable: {
-      backgroundColor: colors.surfaceElevated
+      minHeight: 62,
+      paddingHorizontal: 16,
+      paddingVertical: 10
     },
     liveLanguageRouteOptionDisabled: {
       opacity: 0.58
@@ -3508,7 +3875,7 @@ function createStyles(colors: AppColors) {
     liveLanguageRouteValue: {
       color: colors.ink,
       flexShrink: 1,
-      fontSize: 14
+      fontSize: 15.5
     },
     liveLanguageRouteValueMuted: {
       color: colors.mutedStrong
@@ -3569,29 +3936,34 @@ function createStyles(colors: AppColors) {
       width: 8
     },
     liveLanguagePickerBackdrop: {
-      alignItems: 'center',
-      backgroundColor: 'rgba(8, 15, 31, 0.42)',
+      backgroundColor: colors.overlay,
       flex: 1,
-      justifyContent: 'flex-end',
-      paddingHorizontal: 12
+      justifyContent: 'flex-end'
     },
     liveLanguagePickerSheet: {
-      backgroundColor: colors.surface,
-      borderColor: colors.border,
-      borderRadius: 26,
-      borderWidth: 1,
-      maxHeight: '86%',
-      paddingHorizontal: 16,
-      shadowColor: colors.ink,
-      shadowOffset: { height: -10, width: 0 },
-      shadowOpacity: 0.16,
-      shadowRadius: 26,
+      backgroundColor: colors.groupedBackground,
+      borderTopLeftRadius: 22,
+      borderTopRightRadius: 22,
+      /**
+       * A fixed height, not a maximum.
+       *
+       * Sized by its content, the sheet shrank as a search narrowed the list
+       * and grew again as it was cleared — the sheet moving under the finger
+       * that is typing into it. The list scrolls inside a sheet that stays put.
+       */
+      height: '86%',
+      overflow: 'hidden',
+      paddingTop: 22,
       width: '100%'
+    },
+    liveLanguagePickerScroll: {
+      flex: 1
     },
     liveLanguagePickerHeader: {
       alignItems: 'flex-start',
       flexDirection: 'row',
-      gap: 12
+      gap: 12,
+      paddingHorizontal: 15
     },
     liveLanguagePickerTitleWrap: {
       flex: 1,
@@ -3599,50 +3971,26 @@ function createStyles(colors: AppColors) {
     },
     liveLanguagePickerTitle: {
       color: colors.ink,
-      fontSize: 18
+      fontSize: 20
     },
     liveLanguagePickerHint: {
-      color: colors.mutedStrong,
-      fontSize: 12,
-      lineHeight: 17
-    },
-    liveLanguageSearchBox: {
-      alignItems: 'center',
-      backgroundColor: colors.surfaceElevated,
-      borderColor: colors.border,
-      borderRadius: 16,
-      borderWidth: 1,
-      flexDirection: 'row',
-      gap: 8,
-      marginTop: 14,
-      paddingHorizontal: 12
-    },
-    liveLanguageSearchInput: {
-      color: colors.ink,
-      flex: 1,
-      fontSize: 15,
-      minHeight: 44,
-      paddingVertical: 0
+      color: colors.muted,
+      fontSize: 12.5,
+      lineHeight: 18
     },
     liveLanguagePickerList: {
-      gap: 8,
-      paddingTop: 12
+      paddingBottom: 12,
+      paddingTop: 14
     },
     liveLanguagePickerRow: {
       alignItems: 'center',
-      backgroundColor: colors.surfaceElevated,
-      borderColor: colors.divider,
-      borderRadius: 16,
-      borderWidth: 1,
+      backgroundColor: colors.groupedCard,
       flexDirection: 'row',
-      gap: 10,
-      minHeight: 58,
-      paddingHorizontal: 12,
-      paddingVertical: 9
-    },
-    liveLanguagePickerRowSelected: {
-      backgroundColor: colors.primarySoft,
-      borderColor: colors.primary
+      gap: 12,
+      marginHorizontal: 15,
+      minHeight: 60,
+      paddingHorizontal: 16,
+      paddingVertical: 10
     },
     liveLanguagePickerRowCopy: {
       flex: 1,
@@ -3650,30 +3998,40 @@ function createStyles(colors: AppColors) {
     },
     liveLanguagePickerRowTitle: {
       color: colors.ink,
-      fontSize: 15
+      fontSize: 15.5
     },
     liveLanguagePickerRowMeta: {
-      color: colors.mutedStrong,
-      fontSize: 11,
+      color: colors.muted,
+      fontSize: 11.5,
       marginTop: 2
     },
-    liveLanguageCapabilityPill: {
-      backgroundColor: colors.amberSoft,
-      borderRadius: 999,
-      paddingHorizontal: 8,
-      paddingVertical: 4
-    },
-    liveLanguageCapabilityPillValidated: {
-      backgroundColor: colors.successSoft
-    },
     liveLanguageCapabilityText: {
-      color: colors.amber,
-      fontSize: 10,
-      letterSpacing: 0.3,
-      textTransform: 'uppercase'
+      color: colors.success,
+      fontSize: 11.5
     },
-    liveLanguageCapabilityTextValidated: {
-      color: colors.success
+    liveLanguageSearchWrap: {
+      paddingHorizontal: 15,
+      paddingTop: 14
+    },
+    liveLanguagePickerRowFirst: {
+      borderTopLeftRadius: 22,
+      borderTopRightRadius: 22
+    },
+    liveLanguagePickerRowLast: {
+      borderBottomLeftRadius: 22,
+      borderBottomRightRadius: 22
+    },
+    liveLanguagePickerRowDivider: {
+      backgroundColor: colors.separator,
+      height: 1,
+      left: 16,
+      position: 'absolute',
+      right: 16,
+      top: 0
+    },
+    liveLanguagePickerTickSlot: {
+      alignItems: 'flex-end',
+      width: 20
     },
     liveLanguagePickerEmpty: {
       alignItems: 'center',
@@ -3849,8 +4207,8 @@ function createStyles(colors: AppColors) {
     liveRoomHeader: {
       alignItems: 'center',
       flexDirection: 'row',
-      gap: 7,
-      marginBottom: 7
+      gap: 8,
+      paddingHorizontal: 15
     },
     liveRoomLanguageArea: {
       gap: 10,
@@ -3929,9 +4287,8 @@ function createStyles(colors: AppColors) {
       marginBottom: 10
     },
     liveRoomScreen: {
-      backgroundColor: colors.screen,
-      flex: 1,
-      paddingHorizontal: 16
+      backgroundColor: colors.groupedBackground,
+      flex: 1
     },
     liveRoomSectionLabel: {
       color: colors.primary,
@@ -3939,12 +4296,38 @@ function createStyles(colors: AppColors) {
       letterSpacing: 1.4,
       textTransform: 'uppercase'
     },
+    liveRoomHeaderSpacer: {
+      flex: 1
+    },
+    liveRoomHeadingWrap: {
+      marginBottom: 14,
+      marginTop: 14,
+      paddingHorizontal: 15
+    },
+    liveRoomHeading: {
+      color: colors.ink,
+      fontSize: 26,
+      lineHeight: 31
+    },
+    liveRoomHeadingMeta: {
+      color: colors.muted,
+      fontSize: 13,
+      marginTop: 3
+    },
+    liveLanguageFlag: {
+      fontSize: 19,
+      lineHeight: 23
+    },
+    liveTranslationDivider: {
+      backgroundColor: colors.separator,
+      height: 1,
+      marginHorizontal: 16
+    },
     liveRoomStage: {
       alignItems: 'center',
       flexShrink: 0,
       justifyContent: 'center',
-      paddingHorizontal: 8,
-      paddingVertical: 4
+      paddingBottom: 8
     },
     liveRoomStateText: {
       color: colors.mutedStrong,
@@ -4018,17 +4401,12 @@ function createStyles(colors: AppColors) {
       lineHeight: 23
     },
     liveTranslationPanel: {
-      backgroundColor: colors.surface,
-      borderColor: colors.border,
+      backgroundColor: colors.groupedCard,
       borderRadius: 22,
-      borderWidth: 1,
       flex: 1,
+      marginHorizontal: 15,
       minHeight: 236,
-      overflow: 'hidden',
-      shadowColor: colors.ink,
-      shadowOffset: { height: 10, width: 0 },
-      shadowOpacity: 0.08,
-      shadowRadius: 20
+      overflow: 'hidden'
     },
     liveTranslationHeader: {
       alignItems: 'center',
@@ -4065,22 +4443,12 @@ function createStyles(colors: AppColors) {
       flex: 1
     },
     liveTranslationContent: {
-      gap: 10,
-      padding: 12,
       paddingBottom: 16
     },
     liveTranslationCard: {
-      backgroundColor: colors.surfaceElevated,
-      borderColor: colors.divider,
-      borderRadius: 16,
-      borderWidth: 1,
       gap: 8,
-      paddingHorizontal: 12,
-      paddingVertical: 11
-    },
-    liveTranslationCardPrimary: {
-      backgroundColor: colors.primarySoft,
-      borderColor: colors.primary
+      paddingHorizontal: 16,
+      paddingVertical: 14
     },
     liveTranslationCardHeader: {
       alignItems: 'center',
@@ -4101,9 +4469,10 @@ function createStyles(colors: AppColors) {
     },
     liveTranslationFooterNote: {
       color: colors.mutedStrong,
-      fontSize: 12,
-      lineHeight: 17,
-      paddingHorizontal: 2
+      fontSize: 12.5,
+      lineHeight: 18,
+      paddingHorizontal: 16,
+      paddingTop: 12
     },
     liveSecondaryAction: {
       alignItems: 'center',
@@ -4143,14 +4512,10 @@ function createStyles(colors: AppColors) {
     },
     voicePreviewButton: {
       alignItems: 'center',
-      backgroundColor: colors.primarySoft,
-      borderRadius: 999,
-      height: 38,
+      flexShrink: 0,
       justifyContent: 'center',
-      width: 38
-    },
-    voicePreviewButtonActive: {
-      backgroundColor: colors.primary
+      minHeight: 40,
+      width: 26
     },
     roomHeader: {
       alignItems: 'center',
@@ -4170,9 +4535,8 @@ function createStyles(colors: AppColors) {
     },
     roomSettingsOverlay: {
       ...StyleSheet.absoluteFillObject,
-      backgroundColor: colors.screen,
+      backgroundColor: colors.groupedBackground,
       elevation: 30,
-      paddingHorizontal: 18,
       zIndex: 30
     },
     roomScreen: {
@@ -4193,16 +4557,15 @@ function createStyles(colors: AppColors) {
     },
     transcriptLibraryOverlay: {
       ...StyleSheet.absoluteFillObject,
-      backgroundColor: colors.background,
+      backgroundColor: colors.groupedBackground,
       elevation: 50,
-      paddingHorizontal: 16,
       zIndex: 50
     },
     transcriptLibraryHeader: {
       alignItems: 'center',
       flexDirection: 'row',
-      gap: 12,
-      marginBottom: 14
+      gap: 8,
+      paddingHorizontal: 15
     },
     transcriptLibraryTitleWrap: {
       flex: 1,
@@ -4223,9 +4586,32 @@ function createStyles(colors: AppColors) {
       textAlign: 'center'
     },
     transcriptLibraryHint: {
-      color: colors.mutedStrong,
-      fontSize: 12,
-      lineHeight: 17
+      color: colors.muted,
+      fontSize: 13,
+      lineHeight: 19,
+      marginTop: 4
+    },
+    transcriptLibraryHeaderSpacer: {
+      flex: 1
+    },
+    transcriptLibraryHeadingWrap: {
+      marginBottom: 16,
+      marginTop: 14,
+      paddingHorizontal: 15
+    },
+    transcriptLibraryHeading: {
+      color: colors.ink,
+      fontSize: 26,
+      lineHeight: 31
+    },
+    transcriptCardDivider: {
+      backgroundColor: colors.separator,
+      height: 1
+    },
+    transcriptCardDividerInset: {
+      backgroundColor: colors.separator,
+      height: 1,
+      marginHorizontal: 16
     },
     transcriptLibraryList: {
       gap: 12,
@@ -4239,16 +4625,15 @@ function createStyles(colors: AppColors) {
     },
     transcriptLibraryToolbar: {
       alignItems: 'center',
-      backgroundColor: colors.surface,
-      borderColor: colors.border,
-      borderRadius: 18,
-      borderWidth: 1,
+      backgroundColor: colors.groupedCard,
+      borderRadius: 22,
       flexDirection: 'row',
       gap: 10,
       justifyContent: 'space-between',
       marginBottom: 12,
-      paddingHorizontal: 12,
-      paddingVertical: 10
+      marginHorizontal: 15,
+      paddingHorizontal: 16,
+      paddingVertical: 12
     },
     transcriptLibraryToolbarCopy: {
       flex: 1,
@@ -4257,11 +4642,11 @@ function createStyles(colors: AppColors) {
     },
     transcriptLibraryToolbarTitle: {
       color: colors.ink,
-      fontSize: 14
+      fontSize: 15
     },
     transcriptLibraryToolbarMeta: {
-      color: colors.mutedStrong,
-      fontSize: 11
+      color: colors.muted,
+      fontSize: 12
     },
     transcriptLibrarySelectionActions: {
       alignItems: 'center',
@@ -4276,23 +4661,18 @@ function createStyles(colors: AppColors) {
       gap: 8
     },
     transcriptLibraryCard: {
-      backgroundColor: colors.surface,
-      borderColor: colors.border,
-      borderRadius: 18,
-      borderWidth: 1,
+      backgroundColor: colors.groupedCard,
+      borderRadius: 22,
       gap: 12,
-      padding: 14,
-      shadowColor: colors.ink,
-      shadowOffset: { height: 8, width: 0 },
-      shadowOpacity: 0.08,
-      shadowRadius: 18
+      marginHorizontal: 15,
+      paddingHorizontal: 16,
+      paddingVertical: 16
     },
     transcriptLibraryCardSelectable: {
-      borderColor: colors.primarySoft
+      opacity: 1
     },
     transcriptLibraryCardSelected: {
-      backgroundColor: colors.primarySoft,
-      borderColor: colors.primary
+      backgroundColor: colors.groupedCard
     },
     transcriptLibraryCardHeader: {
       alignItems: 'flex-start',
@@ -4306,11 +4686,12 @@ function createStyles(colors: AppColors) {
     },
     transcriptLibraryCardTitle: {
       color: colors.ink,
-      fontSize: 15
+      fontSize: 16
     },
     transcriptLibraryCardMeta: {
-      color: colors.mutedStrong,
-      fontSize: 12
+      color: colors.muted,
+      fontSize: 12.5,
+      marginTop: 2
     },
     transcriptLibraryBodyText: {
       color: colors.ink,
@@ -4319,30 +4700,19 @@ function createStyles(colors: AppColors) {
     },
     transcriptStatusPill: {
       alignItems: 'center',
-      backgroundColor: colors.surfaceElevated,
-      borderRadius: 999,
       flexDirection: 'row',
-      gap: 5,
-      paddingHorizontal: 9,
-      paddingVertical: 5
+      flexShrink: 0,
+      gap: 5
     },
     transcriptStatusPillText: {
-      fontSize: 11,
-      textTransform: 'uppercase'
+      fontSize: 12.5
     },
     transcriptSpokenPreview: {
-      backgroundColor: colors.primarySoft,
-      borderColor: colors.border,
-      borderRadius: 14,
-      borderWidth: 1,
-      gap: 5,
-      padding: 10
+      gap: 6
     },
     transcriptSpokenPreviewLabel: {
-      color: colors.primary,
-      fontSize: 10,
-      letterSpacing: 1.1,
-      textTransform: 'uppercase'
+      color: colors.muted,
+      fontSize: 12.5
     },
     transcriptSpokenPreviewText: {
       color: colors.ink,
@@ -4350,67 +4720,55 @@ function createStyles(colors: AppColors) {
       lineHeight: 20
     },
     transcriptLibraryActions: {
+      alignItems: 'center',
       flexDirection: 'row',
-      flexWrap: 'wrap',
-      gap: 10
+      gap: 14
     },
     transcriptLanguageButton: {
       alignItems: 'center',
-      backgroundColor: colors.surfaceElevated,
-      borderColor: colors.border,
-      borderRadius: 999,
-      borderWidth: 1,
       flex: 1,
       flexDirection: 'row',
       gap: 7,
-      minHeight: 42,
-      paddingHorizontal: 12
+      minHeight: 40,
+      minWidth: 0
     },
     transcriptLanguageButtonText: {
       color: colors.ink,
-      flex: 1,
-      fontSize: 13
+      flexShrink: 1,
+      fontSize: 14
     },
     transcriptPrepareButton: {
       alignItems: 'center',
-      backgroundColor: colors.surfaceElevated,
-      borderColor: colors.border,
-      borderRadius: 999,
-      borderWidth: 1,
       flexDirection: 'row',
+      flexShrink: 0,
       gap: 7,
       justifyContent: 'center',
-      minHeight: 42,
-      minWidth: 136,
-      paddingHorizontal: 14
+      minHeight: 40
     },
     transcriptPrepareButtonDisabled: {
       opacity: 0.58
     },
     transcriptPrepareButtonText: {
-      color: colors.primary,
-      fontSize: 13
+      color: colors.link,
+      fontSize: 15
     },
     transcriptPrepareButtonTextReady: {
       color: colors.success
     },
     transcriptPlayButton: {
       alignItems: 'center',
-      backgroundColor: colors.primary,
-      borderRadius: 999,
       flexDirection: 'row',
+      flexShrink: 0,
       gap: 7,
       justifyContent: 'center',
-      minHeight: 42,
-      minWidth: 116,
-      paddingHorizontal: 14
+      minHeight: 40
     },
     transcriptPlayButtonDisabled: {
-      backgroundColor: colors.mutedStrong
+      opacity: 0.45
     },
     transcriptPlayButtonText: {
-      color: '#fff',
-      fontSize: 13
+      color: colors.link,
+      fontSize: 15
     },
     transcriptLibraryError: {
       color: colors.red,
@@ -4425,6 +4783,16 @@ function createStyles(colors: AppColors) {
     },
     transcriptCheckboxDisabled: {
       opacity: 0.45
+    },
+    transcriptCheckboxSlot: {
+      alignItems: 'center',
+      height: 24,
+      justifyContent: 'center',
+      width: 24
+    },
+    // Read for its colour by the tick above, so it lives with the styles.
+    transcriptCheckMark: {
+      color: colors.link
     },
     transcriptCheckboxBox: {
       alignItems: 'center',
@@ -4446,52 +4814,44 @@ function createStyles(colors: AppColors) {
     },
     transcriptDeleteButton: {
       alignItems: 'center',
-      backgroundColor: colors.red,
-      borderRadius: 999,
       flexDirection: 'row',
       gap: 6,
       minHeight: 34,
-      paddingHorizontal: 13
+      paddingHorizontal: 4
     },
     transcriptDeleteButtonDisabled: {
       opacity: 0.65
     },
     transcriptDeleteButtonText: {
-      color: '#fff',
-      fontSize: 13
+      color: colors.destructive,
+      fontSize: 15
     },
     transcriptRefreshButton: {
       alignItems: 'center',
-      backgroundColor: colors.primarySoft,
-      borderRadius: 999,
       flexDirection: 'row',
       flexShrink: 0,
       gap: 6,
       minHeight: 34,
-      paddingHorizontal: 12
+      paddingHorizontal: 4
     },
     transcriptRefreshButtonText: {
-      color: colors.primary,
-      fontSize: 13
+      color: colors.link,
+      fontSize: 15
     },
     transcriptSummaryButton: {
       alignItems: 'center',
-      backgroundColor: colors.surfaceElevated,
-      borderColor: colors.border,
-      borderRadius: 999,
-      borderWidth: 1,
       flexDirection: 'row',
       flexShrink: 0,
       gap: 6,
       minHeight: 34,
-      paddingHorizontal: 12
+      paddingHorizontal: 4
     },
     transcriptSummaryButtonDisabled: {
       opacity: 0.48
     },
     transcriptSummaryButtonText: {
-      color: colors.primary,
-      fontSize: 13
+      color: colors.link,
+      fontSize: 15
     },
     transcriptAudioMiniPlayer: {
       alignItems: 'center',
@@ -4812,75 +5172,42 @@ function createStyles(colors: AppColors) {
       textAlign: 'center'
     },
     transcriptSummaryScreen: {
-      backgroundColor: colors.background,
-      flex: 1,
-      paddingHorizontal: 16
+      backgroundColor: colors.groupedBackground,
+      flex: 1
     },
     transcriptSummaryHeader: {
       alignItems: 'center',
       flexDirection: 'row',
-      gap: 12,
-      marginBottom: 14
-    },
-    transcriptSummaryTitleWrap: {
-      flex: 1,
-      gap: 3,
-      minWidth: 0
+      gap: 8,
+      paddingHorizontal: 15
     },
     transcriptSummaryCreateCard: {
-      backgroundColor: colors.surface,
-      borderColor: colors.border,
+      backgroundColor: colors.groupedCard,
       borderRadius: 22,
-      borderWidth: 1,
       gap: 12,
-      marginBottom: 12,
-      padding: 14,
-      shadowColor: colors.ink,
-      shadowOffset: { height: 8, width: 0 },
-      shadowOpacity: 0.06,
-      shadowRadius: 18
-    },
-    transcriptSummaryCreateHeader: {
-      alignItems: 'center',
-      flexDirection: 'row',
-      gap: 11
-    },
-    transcriptSummaryCountPill: {
-      alignItems: 'center',
-      backgroundColor: colors.primarySoft,
-      borderRadius: 999,
-      height: 42,
-      justifyContent: 'center',
-      width: 42
-    },
-    transcriptSummaryCountText: {
-      color: colors.primary,
-      fontSize: 17
+      marginHorizontal: 15,
+      paddingVertical: 16
     },
     transcriptSummaryCreateCopy: {
-      flex: 1,
-      gap: 2,
-      minWidth: 0
+      gap: 3,
+      minWidth: 0,
+      paddingHorizontal: 16
     },
     transcriptSummaryCreateTitle: {
       color: colors.ink,
-      fontSize: 15
+      fontSize: 16
     },
     transcriptSummaryCreateMeta: {
-      color: colors.mutedStrong,
-      fontSize: 12,
-      lineHeight: 17
+      color: colors.muted,
+      fontSize: 13,
+      lineHeight: 19
     },
     transcriptSummaryLanguageButton: {
       alignItems: 'center',
-      backgroundColor: colors.surfaceElevated,
-      borderColor: colors.border,
-      borderRadius: 18,
-      borderWidth: 1,
       flexDirection: 'row',
-      gap: 10,
+      gap: 12,
       minHeight: 52,
-      paddingHorizontal: 12
+      paddingHorizontal: 16
     },
     transcriptSummaryLanguageCopy: {
       flex: 1,
@@ -4888,66 +5215,73 @@ function createStyles(colors: AppColors) {
       minWidth: 0
     },
     transcriptSummaryLanguageLabel: {
-      color: colors.mutedStrong,
-      fontSize: 10,
-      letterSpacing: 1.1,
-      textTransform: 'uppercase'
+      color: colors.muted,
+      fontSize: 12.5
     },
     transcriptSummaryLanguageValue: {
       color: colors.ink,
-      fontSize: 15
+      fontSize: 15.5
     },
     transcriptSummaryCreateButton: {
       alignItems: 'center',
       alignSelf: 'stretch',
-      backgroundColor: colors.primary,
-      borderRadius: 999,
       flexDirection: 'row',
       gap: 8,
       justifyContent: 'center',
       minHeight: 44,
       paddingHorizontal: 16
     },
+    // Dims, like every other disabled action. It used to paint itself grey,
+    // which was right when this was a filled slab and wrong the moment it
+    // became a text link: the fill spanned the row and cut the card's corners.
     transcriptSummaryCreateButtonDisabled: {
-      backgroundColor: colors.mutedStrong,
-      opacity: 0.68
+      opacity: 0.45
     },
     transcriptSummaryCreateButtonText: {
-      color: '#fff',
-      fontSize: 14
+      color: colors.link,
+      fontSize: 16
+    },
+    transcriptSummaryHeadingWrap: {
+      marginBottom: 16,
+      marginTop: 14,
+      paddingHorizontal: 15
+    },
+    transcriptSummaryHeading: {
+      color: colors.ink,
+      fontSize: 26,
+      lineHeight: 31
+    },
+    transcriptSummaryDownloadButton: {
+      alignItems: 'center',
+      flexShrink: 0,
+      justifyContent: 'center',
+      minHeight: 40,
+      width: 28
+    },
+    transcriptSummaryPlayButtonText: {
+      color: colors.link,
+      fontSize: 15
     },
     transcriptSummaryList: {
       gap: 12,
-      paddingBottom: 24
+      paddingBottom: 24,
+      paddingTop: 2
     },
     transcriptSummarySavedCard: {
-      backgroundColor: colors.surface,
-      borderColor: colors.border,
-      borderRadius: 20,
-      borderWidth: 1,
-      gap: 10,
-      padding: 14
+      backgroundColor: colors.groupedCard,
+      borderRadius: 22,
+      gap: 12,
+      marginHorizontal: 15,
+      paddingHorizontal: 16,
+      paddingVertical: 16
     },
     transcriptSummaryLanguageCard: {
-      backgroundColor: colors.surfaceElevated,
-      borderColor: colors.divider,
-      borderRadius: 16,
-      borderWidth: 1,
-      gap: 10,
-      padding: 12
+      gap: 10
     },
     transcriptSummaryLanguageCardHeader: {
       alignItems: 'center',
       flexDirection: 'row',
       gap: 10
-    },
-    transcriptSummaryLanguageIcon: {
-      alignItems: 'center',
-      backgroundColor: colors.primarySoft,
-      borderRadius: 999,
-      height: 34,
-      justifyContent: 'center',
-      width: 34
     },
     transcriptSummaryLanguageCardCopy: {
       flex: 1,
@@ -4956,22 +5290,18 @@ function createStyles(colors: AppColors) {
     },
     transcriptSummarySavedLanguage: {
       color: colors.ink,
-      fontSize: 14
+      fontSize: 15
     },
     transcriptSummarySavedMeta: {
-      color: colors.mutedStrong,
-      fontSize: 11
+      color: colors.muted,
+      fontSize: 12
     },
     transcriptSummaryPlayButton: {
       alignItems: 'center',
-      backgroundColor: colors.primarySoft,
-      borderRadius: 999,
-      height: 36,
-      justifyContent: 'center',
-      width: 36
-    },
-    transcriptSummaryPlayButtonActive: {
-      backgroundColor: colors.primary
+      flexDirection: 'row',
+      flexShrink: 0,
+      gap: 6,
+      minHeight: 40
     },
     transcriptSummaryPlayButtonDisabled: {
       opacity: 0.58
@@ -5333,6 +5663,10 @@ function formatInterpreterMeetingCreatedDateFilter(filter: InterpreterMeetingCre
     return 'Today';
   }
 
+  if (filter === 'custom') {
+    return 'Choose a day';
+  }
+
   if (filter === 'last_7_days') {
     return 'Last 7 days';
   }
@@ -5344,16 +5678,16 @@ function formatInterpreterMeetingCreatedDateFilter(filter: InterpreterMeetingCre
   return 'Any date';
 }
 
-function getStatusColor(status: InterpreterMeeting['status']): string {
+function getStatusColor(status: InterpreterMeeting['status'], colors: AppColors): string {
   if (status === 'LIVE') {
-    return '#07816f';
+    return colors.primary;
   }
 
   if (status === 'ENDED') {
-    return '#64748b';
+    return colors.muted;
   }
 
-  return '#2563eb';
+  return colors.link;
 }
 
 function getStatusSoftColor(status: InterpreterMeeting['status'], colors: AppColors): string {
@@ -5514,37 +5848,37 @@ function getInterpreterAudioSignalBadge({
 
   if (isPreparing) {
     return {
-      backgroundColor: '#fef3c7',
+      backgroundColor: colors.amberSoft,
       iconName: 'sync-outline',
       label: 'Preparing',
-      textColor: '#92400e'
+      textColor: colors.amber
     };
   }
 
   if (liveStatus === 'connecting' || liveMode === 'connecting') {
     return {
-      backgroundColor: '#fef3c7',
+      backgroundColor: colors.amberSoft,
       iconName: 'radio-outline',
       label: 'Opening audio',
-      textColor: '#92400e'
+      textColor: colors.amber
     };
   }
 
   if (liveMode === 'listening') {
     return {
-      backgroundColor: '#dcfce7',
+      backgroundColor: colors.successSoft,
       iconName: 'ear-outline',
       label: 'Listening',
-      textColor: '#047857'
+      textColor: colors.success
     };
   }
 
   if (liveStatus === 'error') {
     return {
-      backgroundColor: '#fee2e2',
+      backgroundColor: colors.redSoft,
       iconName: 'warning-outline',
       label: 'Needs attention',
-      textColor: '#b91c1c'
+      textColor: colors.red
     };
   }
 
@@ -6152,12 +6486,14 @@ async function getLocalTranscriptAudioShareUri(
     }
   }
 
-  if (!context.artifact.downloadUrl) {
-    throw new Error('Prepared transcript audio is not available yet.');
+  const artifact = context.artifact;
+
+  if (!artifact?.downloadUrl) {
+    throw new Error('The file for sharing has not been made yet.');
   }
 
-  if (context.artifact.downloadUrl.startsWith('file://')) {
-    return context.artifact.downloadUrl;
+  if (artifact.downloadUrl.startsWith('file://')) {
+    return artifact.downloadUrl;
   }
 
   if (!FileSystem.cacheDirectory) {
@@ -6169,9 +6505,9 @@ async function getLocalTranscriptAudioShareUri(
   }).catch(() => undefined);
 
   const safeMeetingName = sanitizeFileNamePart(meetingName, 'meeting');
-  const safeSegmentId = sanitizeFileNamePart(context.item.segmentId || context.artifact.segmentId, 'transcript');
+  const safeSegmentId = sanitizeFileNamePart(context.item.segmentId || artifact.segmentId, 'transcript');
   const safeLanguageCode = sanitizeFileNamePart(context.languageCode, 'language');
-  const safeVoice = sanitizeFileNamePart(context.artifact.voice, 'voice');
+  const safeVoice = sanitizeFileNamePart(artifact.voice, 'voice');
   const fileUri = `${INTERPRETER_TRANSCRIPT_AUDIO_SHARE_DIR}${safeMeetingName}-${safeSegmentId}-${safeLanguageCode}-${safeVoice}.mp3`;
   const existingFile = await FileSystem.getInfoAsync(fileUri).catch(() => null);
 
@@ -6179,7 +6515,7 @@ async function getLocalTranscriptAudioShareUri(
     return fileUri;
   }
 
-  await FileSystem.downloadAsync(context.artifact.downloadUrl, fileUri);
+  await FileSystem.downloadAsync(artifact.downloadUrl, fileUri);
 
   return fileUri;
 }
@@ -6222,6 +6558,7 @@ function getErrorMessage(error: unknown): string {
 function InterpreterTranscriptLibraryModal({
   activeAudioKey,
   audioPlayerContext,
+  audioReadAloudProgress,
   audioPlayerDuration,
   audioPlayerMode,
   audioPlayerPosition,
@@ -6250,6 +6587,9 @@ function InterpreterTranscriptLibraryModal({
   onCreateSummary,
   onDeleteTranscripts,
   onFilterChange,
+  exportingSummaryKey,
+  onExportSummary,
+  onExportTranscript,
   onPlayAudio,
   onPlaySummary,
   onPrepareAudio,
@@ -6461,18 +6801,17 @@ function InterpreterTranscriptLibraryModal({
       style={[
         styles.transcriptLibraryOverlay,
         {
-          paddingBottom: Math.max(insets.bottom + 12, 20),
-          paddingTop: Math.max(insets.top + 10, 20)
+          paddingBottom: resolveInterpreterModalBottomInset(insets.bottom),
+          paddingTop: getFullScreenModalTopPadding(insets.top)
         }
       ]}
     >
+        {/* Controls on one row, the meeting's name on the next. Centred between
+            the two buttons it had to shrink to fit and read as a toolbar
+            label rather than the name of what you are looking at. */}
         <View style={styles.transcriptLibraryHeader}>
-          <Pressable onPress={onClose} style={({ pressed }) => [styles.liveIconButton, pressed && styles.pressed]}>
-            <Ionicons color={appTheme.colors.ink} name="chevron-back" size={23} />
-          </Pressable>
-          <View style={styles.transcriptLibraryTitleWrapCentered}>
-            <Text numberOfLines={1} style={styles.transcriptLibraryTitleCentered}>{meeting.meetingName}</Text>
-          </View>
+          <CircleIconButton action="back" label="Back to the room" onPress={onClose} />
+          <View style={styles.transcriptLibraryHeaderSpacer} />
           <Pressable
             disabled={isDeletingTranscripts}
             onPress={openOptionsMenu}
@@ -6480,6 +6819,10 @@ function InterpreterTranscriptLibraryModal({
           >
             <Ionicons color={appTheme.colors.ink} name="ellipsis-horizontal" size={22} />
           </Pressable>
+        </View>
+
+        <View style={styles.transcriptLibraryHeadingWrap}>
+          <Text style={styles.transcriptLibraryHeading}>{meeting.meetingName}</Text>
         </View>
 
         <View style={styles.transcriptLibraryToolbar}>
@@ -6511,11 +6854,11 @@ function InterpreterTranscriptLibraryModal({
                   ]}
                 >
                   {isDeletingTranscripts ? (
-                    <ActivityIndicator color="#fff" size="small" />
+                    <ActivityIndicator color={appTheme.colors.destructive} size="small" />
                   ) : (
-                    <Ionicons color="#fff" name="trash-outline" size={15} />
+                    <Ionicons color={appTheme.colors.destructive} name="trash-outline" size={15} />
                   )}
-                  <Text style={styles.transcriptDeleteButtonText}>Delete</Text>
+                  <Text style={styles.transcriptDeleteButtonText}>Delete {selectedCount}</Text>
                 </Pressable>
               ) : null}
             </View>
@@ -6530,7 +6873,7 @@ function InterpreterTranscriptLibraryModal({
                   pressed && styles.pressed
                 ]}
               >
-                <Ionicons color={appTheme.colors.primary} name="sparkles-outline" size={16} />
+                <Ionicons color={appTheme.colors.link} name="sparkles-outline" size={16} />
                 <Text style={styles.transcriptSummaryButtonText}>Summary</Text>
               </Pressable>
               <Pressable
@@ -6539,9 +6882,9 @@ function InterpreterTranscriptLibraryModal({
                 style={({ pressed }) => [styles.transcriptRefreshButton, pressed && styles.pressed]}
               >
                 {isLoading ? (
-                  <ActivityIndicator color={appTheme.colors.primary} size="small" />
+                  <ActivityIndicator color={appTheme.colors.link} size="small" />
                 ) : (
-                  <Ionicons color={appTheme.colors.primary} name="refresh" size={16} />
+                  <Ionicons color={appTheme.colors.link} name="refresh" size={16} />
                 )}
                 <Text style={styles.transcriptRefreshButtonText}>Refresh</Text>
               </Pressable>
@@ -6598,6 +6941,12 @@ function InterpreterTranscriptLibraryModal({
                 ]}
               >
                 <View style={styles.transcriptLibraryCardHeader}>
+                  <View style={styles.transcriptLibraryCardTitleWrap}>
+                    <Text style={styles.transcriptLibraryCardTitle}>Clean transcript</Text>
+                    <Text style={styles.transcriptLibraryCardMeta}>
+                      {formatTranscriptLibraryTimestamp(item.createdAtIso)}
+                    </Text>
+                  </View>
                   {isDeleteMode ? (
                     <TranscriptLibraryCheckbox
                       isChecked={isSelected}
@@ -6606,12 +6955,6 @@ function InterpreterTranscriptLibraryModal({
                       styles={styles}
                     />
                   ) : null}
-                  <View style={styles.transcriptLibraryCardTitleWrap}>
-                    <Text style={styles.transcriptLibraryCardTitle}>Clean transcript</Text>
-                    <Text style={styles.transcriptLibraryCardMeta}>
-                      {formatTranscriptLibraryTimestamp(item.createdAtIso)}
-                    </Text>
-                  </View>
                   <View style={styles.transcriptStatusPill}>
                     <Ionicons
                       color={getTranscriptArtifactStatusColor(artifact, appTheme.colors)}
@@ -6631,24 +6974,29 @@ function InterpreterTranscriptLibraryModal({
 
                 <Text style={styles.transcriptLibraryBodyText}>{transcriptText}</Text>
 
+                {/* A quiet block under a rule, not a tinted card inside the
+                    card. Two borders around the one thing being read is what
+                    made this look boxed in. */}
                 {artifact?.spokenText ? (
                   <View style={styles.transcriptSpokenPreview}>
+                    <View style={styles.transcriptCardDivider} />
                     <Text style={styles.transcriptSpokenPreviewLabel}>Prepared read-aloud text</Text>
                     <Text style={styles.transcriptSpokenPreviewText}>{artifact.spokenText}</Text>
                   </View>
                 ) : null}
 
+                <View style={styles.transcriptCardDivider} />
                 <View style={styles.transcriptLibraryActions}>
                   <Pressable
                     disabled={!segmentId || isDeleteMode}
                     onPress={() => setLanguagePickerSegmentId(segmentId)}
                     style={({ pressed }) => [styles.transcriptLanguageButton, pressed && styles.pressed]}
                   >
-                    <Ionicons color={appTheme.colors.primary} name="language-outline" size={16} />
+                    <InterpreterLanguageFlag languageCode={language.code} styles={styles} />
                     <Text numberOfLines={1} style={styles.transcriptLanguageButtonText}>
                       {language.label}
                     </Text>
-                    <Ionicons color={appTheme.colors.mutedStrong} name="chevron-down" size={15} />
+                    <Ionicons color={appTheme.colors.link} name="chevron-down" size={15} />
                   </Pressable>
                   <Pressable
                     disabled={!segmentId || isPreparing || isDeleteMode}
@@ -6663,7 +7011,7 @@ function InterpreterTranscriptLibraryModal({
                       <ActivityIndicator color={appTheme.colors.primary} size="small" />
                     ) : (
                       <Ionicons
-                        color={artifact?.status === 'ready' ? appTheme.colors.success : appTheme.colors.primary}
+                        color={artifact?.status === 'ready' ? appTheme.colors.success : appTheme.colors.link}
                         name={artifact?.status === 'ready' ? 'checkmark-circle-outline' : 'cloud-download-outline'}
                         size={16}
                       />
@@ -6678,6 +7026,19 @@ function InterpreterTranscriptLibraryModal({
                     </Text>
                   </Pressable>
                   <Pressable
+                    accessibilityLabel="Download this transcript"
+                    disabled={!segmentId || isDeleteMode || exportingSummaryKey === audioKey}
+                    hitSlop={10}
+                    onPress={() => onExportTranscript(item)}
+                    style={({ pressed }) => [styles.transcriptSummaryDownloadButton, pressed && styles.pressed]}
+                  >
+                    {exportingSummaryKey === audioKey ? (
+                      <ActivityIndicator color={appTheme.colors.link} size="small" />
+                    ) : (
+                      <Ionicons color={appTheme.colors.link} name="download-outline" size={20} />
+                    )}
+                  </Pressable>
+                  <Pressable
                     disabled={!segmentId || isPreparing || isDeleteMode}
                     onPress={() => onPlayAudio(item)}
                     style={({ pressed }) => [
@@ -6687,9 +7048,13 @@ function InterpreterTranscriptLibraryModal({
                     ]}
                   >
                     {isPreparing ? (
-                      <ActivityIndicator color="#fff" size="small" />
+                      <ActivityIndicator color={appTheme.colors.link} size="small" />
                     ) : (
-                      <Ionicons color="#fff" name={isPlayingThisItem ? 'pause' : 'play'} size={17} />
+                      <Ionicons
+                        color={appTheme.colors.link}
+                        name={isPlayingThisItem ? 'pause' : 'play'}
+                        size={17}
+                      />
                     )}
                     <Text style={styles.transcriptPlayButtonText}>
                       {isPreparing ? 'Preparing' : isPlayingThisItem ? 'Pause' : 'Play'}
@@ -6744,18 +7109,21 @@ function InterpreterTranscriptLibraryModal({
             onTogglePlayback={onAudioTogglePlayback}
             playbackRate={playbackRate}
             position={audioPlayerPosition}
+            readAloudProgress={audioReadAloudProgress}
           />
         ) : null}
         <InterpreterTranscriptSummaryModal
           activeSummaryAudioKey={activeSummaryAudioKey}
           availableLanguages={sortedLanguages}
           creatingLanguageCode={creatingSummaryLanguageCode}
+          exportingSummaryKey={exportingSummaryKey}
           isAudioPlaying={isSummaryAudioPlaying}
           isBusy={isBusy}
           isOpen={isTranscriptSummaryPanelOpen}
           items={items}
           onClose={() => setIsTranscriptSummaryPanelOpen(false)}
           onCreateSummary={onCreateSummary}
+          onExportSummary={onExportSummary}
           onPlaySummary={onPlaySummary}
           onSelectLanguage={onSummaryLanguageChange}
           preparingSummaryAudioKey={preparingSummaryAudioKey}
@@ -6764,6 +7132,33 @@ function InterpreterTranscriptLibraryModal({
         />
       </View>
   );
+}
+
+/**
+ * The flag for whichever language a side of the room is working in.
+ *
+ * A globe when the code names no country, which is the honest answer for a
+ * language spoken across borders and for "Auto detect", where nothing has been
+ * heard yet. Guessing a country there would put a flag on the screen that is
+ * simply wrong, and people read a flag as a fact.
+ */
+function InterpreterLanguageFlag({
+  languageCode,
+  styles
+}: {
+  languageCode: string | null;
+  styles: ReturnType<typeof createStyles>;
+}) {
+  const appTheme = useAppTheme();
+  const flag = languageCode ? getLanguageFlagEmoji(languageCode) : null;
+
+  if (!flag) {
+    return (
+      <Ionicons color={appTheme.colors.mutedStrong} name="globe-outline" size={17} />
+    );
+  }
+
+  return <Text style={styles.liveLanguageFlag}>{flag}</Text>;
 }
 
 function InterpreterLiveRoomModal({
@@ -6830,6 +7225,17 @@ function InterpreterLiveRoomModal({
     ? getLanguageLabel(liveSelectableLanguages, detectedSourceLanguageCode)
     : null;
   const transcriptScrollRef = useRef<ScrollView | null>(null);
+  /**
+   * A Modal is its own window on Android, and it reports no safe area at all:
+   * `insets.bottom` is 0 in here even on a phone with a navigation bar, which
+   * is what let the transcript panel run underneath it.
+   *
+   * So the measurement fallback is the one that answers. It is safe here in a
+   * way it is not on the chat screen: this room has no text field, so no
+   * keyboard can shrink the window and be mistaken for a navigation bar, and
+   * the helper clamps whatever it finds to 64 regardless.
+   */
+  const liveRoomBottomInset = resolveInterpreterModalBottomInset(insets.bottom);
   const audioSignalBadge = getInterpreterAudioSignalBadge({
     colors: appTheme.colors,
     isPlaying: isInterpretationAudioPlaying,
@@ -6903,8 +7309,8 @@ function InterpreterLiveRoomModal({
         style={[
           styles.liveRoomScreen,
           {
-            paddingBottom: Math.max(insets.bottom + 12, 18),
-            paddingTop: Math.max(insets.top + 6, 18)
+            paddingBottom: liveRoomBottomInset + 12,
+            paddingTop: getFullScreenModalTopPadding(insets.top)
           }
         ]}
       >
@@ -6914,16 +7320,14 @@ function InterpreterLiveRoomModal({
             styles={styles}
           />
         ) : null}
+        {/* Controls on one row, the meeting's name on the next. A name squeezed
+            between four buttons wraps to two lines and reads as a toolbar
+            label rather than as the thing the room is for. */}
         <View style={styles.liveRoomHeader}>
           <Pressable onPress={onClose} style={({ pressed }) => [styles.liveIconButton, pressed && styles.pressed]}>
-            <Ionicons color={appTheme.colors.ink} name="chevron-down" size={24} />
+            <Ionicons color={appTheme.colors.ink} name="chevron-down" size={23} />
           </Pressable>
-          <View style={styles.liveRoomTitleWrap}>
-            <Text style={styles.liveRoomTitle}>{details.meeting.meetingName}</Text>
-            <Text style={styles.liveRoomMeta}>
-              {roomMetaText}
-            </Text>
-          </View>
+          <View style={styles.liveRoomHeaderSpacer} />
           <Pressable
             onPress={onOpenSettings}
             style={({ pressed }) => [styles.liveIconButton, pressed && styles.pressed]}
@@ -6942,9 +7346,20 @@ function InterpreterLiveRoomModal({
               </View>
             ) : null}
           </Pressable>
-          <Pressable onPress={onEnd} style={({ pressed }) => [styles.liveEndButton, pressed && styles.pressed]}>
+          <Pressable
+            hitSlop={8}
+            onPress={onEnd}
+            style={({ pressed }) => [styles.liveEndButton, pressed && styles.pressed]}
+          >
             <Text style={styles.liveEndButtonText}>End</Text>
           </Pressable>
+        </View>
+
+        <View style={styles.liveRoomHeadingWrap}>
+          <Text style={styles.liveRoomHeading}>{details.meeting.meetingName}</Text>
+          <Text style={styles.liveRoomHeadingMeta}>
+            {roomMetaText}
+          </Text>
         </View>
 
         <View style={styles.liveRoomStage}>
@@ -6959,15 +7374,18 @@ function InterpreterLiveRoomModal({
           <View style={styles.liveLanguageRouteCard}>
             <View style={styles.liveLanguageRouteOption}>
               <Text style={styles.liveLanguageRouteLabel}>Input</Text>
-              <Text
-                numberOfLines={1}
-                style={[
-                  styles.liveLanguageRouteValue,
-                  !detectedSourceLanguageLabel && styles.liveLanguageRouteValueMuted
-                ]}
-              >
-                {detectedSourceLanguageLabel || (liveMode === 'listening' ? 'Auto-detecting' : 'Auto detect')}
-              </Text>
+              <View style={styles.liveLanguageRouteValueRow}>
+                <InterpreterLanguageFlag languageCode={detectedSourceLanguageCode} styles={styles} />
+                <Text
+                  numberOfLines={1}
+                  style={[
+                    styles.liveLanguageRouteValue,
+                    !detectedSourceLanguageLabel && styles.liveLanguageRouteValueMuted
+                  ]}
+                >
+                  {detectedSourceLanguageLabel || (liveMode === 'listening' ? 'Auto-detecting' : 'Auto detect')}
+                </Text>
+              </View>
             </View>
             <View style={styles.liveLanguageRouteDivider} />
             <Pressable
@@ -6975,18 +7393,18 @@ function InterpreterLiveRoomModal({
               onPress={() => setIsTargetLanguagePickerOpen(true)}
               style={({ pressed }) => [
                 styles.liveLanguageRouteOption,
-                styles.liveLanguageRoutePressable,
                 !canChangeTargetLanguage && styles.liveLanguageRouteOptionDisabled,
                 pressed && styles.pressed
               ]}
             >
               <Text style={styles.liveLanguageRouteLabel}>Output</Text>
               <View style={styles.liveLanguageRouteValueRow}>
+                <InterpreterLanguageFlag languageCode={selectedLanguage?.code || null} styles={styles} />
                 <Text numberOfLines={1} style={styles.liveLanguageRouteValue}>
                   {selectedOutputLanguageLabel}
                 </Text>
                 <Ionicons
-                  color={canChangeTargetLanguage ? appTheme.colors.primary : appTheme.colors.mutedStrong}
+                  color={canChangeTargetLanguage ? appTheme.colors.link : appTheme.colors.mutedStrong}
                   name="chevron-down"
                   size={16}
                 />
@@ -7011,11 +7429,11 @@ function InterpreterLiveRoomModal({
             ]}
           >
             {liveStatus === 'connecting' ? (
-              <ActivityIndicator color="#fff" />
+              <ActivityIndicator color={appTheme.colors.primary} />
             ) : (
-              <Ionicons color="#fff" name={primaryActionIcon} size={24} />
+              <Ionicons color={appTheme.colors.primary} name={primaryActionIcon} size={23} />
             )}
-          <Text style={styles.liveCenterActionText}>{primaryActionLabel}</Text>
+            <Text style={styles.liveCenterActionText}>{primaryActionLabel}</Text>
           </Pressable>
           <Text style={styles.liveRoomStateText}>{getLiveModeDescription(liveMode)}</Text>
           {/* A passing hint, styled as guidance rather than as a failure. An
@@ -7039,7 +7457,10 @@ function InterpreterLiveRoomModal({
             showsVerticalScrollIndicator={false}
             style={styles.liveTranslationScroll}
           >
-            <View style={[styles.liveTranslationCard, styles.liveTranslationCardPrimary]}>
+            {/* No card inside a card. The panel is already the white surface;
+                boxing the transcript again inside it stacks two borders around
+                the one thing on the screen people are trying to read. */}
+            <View style={styles.liveTranslationCard}>
               <View style={styles.liveTranslationCardHeader}>
                 <Ionicons color={appTheme.colors.primary} name="sparkles-outline" size={15} />
                 <Text style={styles.liveTranslationLabel}>Clean transcription</Text>
@@ -7056,6 +7477,7 @@ function InterpreterLiveRoomModal({
                 {cleanedTranscriptText || 'A readable transcript will be saved after speech is captured.'}
               </Text>
             </View>
+            <View style={styles.liveTranslationDivider} />
             <Text style={styles.liveTranslationFooterNote}>
               {getLiveFooterHint(liveMode)}
             </Text>
@@ -7110,6 +7532,7 @@ function InterpreterCreateModal({
     reminderLeadMinutes: 15,
     scheduledAtIso: null,
     sourceLanguageCode: 'en-US',
+    spokenOutputLanguageCode: null,
     timeFormat: '12h'
   }));
   const selectedVoice = getInterpreterVoiceProfile(voiceProfiles, draft.interpreterVoiceId);
@@ -7122,15 +7545,23 @@ function InterpreterCreateModal({
       return;
     }
 
-    setDraft((currentDraft) => ({
-      ...currentDraft,
-      interpreterVoiceId: currentDraft.interpreterVoiceId || DEFAULT_INTERPRETER_VOICE_ID,
-      languageCodes: currentDraft.languageCodes.length
+    setDraft((currentDraft) => {
+      const languageCodes = currentDraft.languageCodes.length
         ? currentDraft.languageCodes.filter((code) => fallbackLanguages.some((language) => language.code === code))
         : defaultLanguageCodes.length
           ? defaultLanguageCodes
-          : [fallbackLanguages[0]?.code || 'en-US']
-    }));
+          : [fallbackLanguages[0]?.code || 'en-US'];
+
+      return {
+        ...currentDraft,
+        interpreterVoiceId: currentDraft.interpreterVoiceId || DEFAULT_INTERPRETER_VOICE_ID,
+        languageCodes,
+        spokenOutputLanguageCode: resolveSpokenOutputLanguageCode(
+          languageCodes,
+          currentDraft.spokenOutputLanguageCode
+        )
+      };
+    });
   }, [defaultLanguageCodes, fallbackLanguages, isOpen]);
 
   function patchDraft(patch: Partial<InterpreterCreateDraft>) {
@@ -7206,7 +7637,7 @@ function InterpreterCreateModal({
       return;
     }
 
-    const languageCodes = draft.languageCodes.length
+    const chosenLanguageCodes = draft.languageCodes.length
       ? draft.languageCodes
       : defaultLanguageCodes.length
         ? defaultLanguageCodes
@@ -7216,7 +7647,12 @@ function InterpreterCreateModal({
       ...draft,
       autoDetectSourceLanguage: true,
       invitedUserIds: [],
-      languageCodes,
+      // The spoken language goes first, because that is where the room reads it
+      // from. Nothing else about the meeting changes.
+      languageCodes: orderLanguagesForSpokenOutput(
+        chosenLanguageCodes,
+        draft.spokenOutputLanguageCode
+      ),
       meetingName,
       sourceLanguageCode: null
     });
@@ -7229,128 +7665,179 @@ function InterpreterCreateModal({
   return (
     <Modal animationType="fade" onRequestClose={onClose} transparent visible={isOpen}>
       <Pressable onPress={onClose} style={styles.modalOverlay}>
-        <Pressable style={[styles.modalSheet, { paddingBottom: Math.max(insets.bottom + 14, 24) }]}>
+        <Pressable
+          style={[
+            styles.modalSheet,
+            { paddingTop: getFullScreenModalTopPadding(insets.top) + 10 }
+          ]}
+        >
           <View style={styles.modalHandle} />
-          <View style={styles.modalHeader}>
-            <View>
-              <Text style={styles.eyebrow}>INTERPRETER SESSION</Text>
-              <Text style={styles.modalTitle}>Create meeting</Text>
-            </View>
-            <Pressable onPress={onClose} style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}>
-              <Ionicons color={appTheme.colors.ink} name="close" size={24} />
+          {/* The one action is a word beside the round close button, which is
+              where this app puts a screen's action. A filled slab at the foot
+              of a form is something people scroll past to reach. */}
+          <View style={styles.sheetHeaderRow}>
+            <CircleIconButton action="close" label="Close create meeting" onPress={onClose} />
+            <Text numberOfLines={1} style={styles.sheetHeaderTitle}>New session</Text>
+            <Pressable
+              accessibilityLabel="Create session"
+              accessibilityRole="button"
+              accessibilityState={{ disabled: isBusy }}
+              disabled={isBusy}
+              hitSlop={8}
+              onPress={() => void submit()}
+              style={({ pressed }) => [
+                styles.sheetHeaderAction,
+                pressed && styles.pressed,
+                isBusy && styles.disabledButton
+              ]}
+            >
+              {isBusy ? (
+                <ActivityIndicator color={appTheme.colors.link} size="small" />
+              ) : (
+                <Text style={styles.sheetHeaderActionText}>Create</Text>
+              )}
             </Pressable>
           </View>
 
           <ScrollView
-            contentContainerStyle={styles.modalContent}
+            contentContainerStyle={[
+              styles.modalContent,
+              { paddingBottom: Math.max(resolveInterpreterModalBottomInset(insets.bottom) + 14, 24) }
+            ]}
             keyboardShouldPersistTaps="handled"
             showsVerticalScrollIndicator={false}
           >
-            <View style={styles.settingsSection}>
-              <Text style={styles.sectionLabel}>Meeting name</Text>
+            <Text style={styles.sheetSectionLabel}>Meeting name</Text>
+            <View style={styles.sheetCard}>
               <TextInput
                 onChangeText={(meetingName) => patchDraft({ meetingName })}
                 placeholder="Team meeting, coaching, handoff..."
                 placeholderTextColor={appTheme.colors.muted}
-                style={styles.input}
+                style={styles.sheetInput}
                 value={draft.meetingName}
               />
             </View>
 
-            <View style={styles.settingsSection}>
-              <Text style={styles.sectionLabel}>Meeting type</Text>
-              <View style={styles.segmentedRow}>
-                {(['ONE_ON_ONE', 'LEVEL_1', 'LEVEL_3'] as InterpreterMeetingType[]).map((meetingType) => {
-                  const isSelected = draft.meetingType === meetingType;
+            {/* Three choices, so the marker is a tick. A switch settles a
+                two-way setting; among three, turning one off says nothing about
+                which of the others was meant. Section 6 of
+                SYNZAPP_APP_STYLE.md. */}
+            <Text style={styles.sheetSectionLabel}>Meeting type</Text>
+            <View style={styles.sheetCard}>
+              {(['ONE_ON_ONE', 'LEVEL_1', 'LEVEL_3'] as InterpreterMeetingType[]).map((meetingType, index) => {
+                const isSelected = draft.meetingType === meetingType;
 
-                  return (
+                return (
+                  <View key={meetingType}>
+                    {index > 0 ? <View style={styles.sheetCardDivider} /> : null}
                     <Pressable
-                      key={meetingType}
+                      accessibilityRole="radio"
+                      accessibilityState={{ checked: isSelected }}
                       onPress={() => patchDraft({ meetingType })}
-                      style={({ pressed }) => [
-                        styles.segmentButton,
-                        isSelected && styles.segmentButtonActive,
-                        pressed && styles.pressed
-                      ]}
+                      style={({ pressed }) => [styles.sheetChoiceRow, pressed && styles.pressed]}
                     >
-                      <Text style={[styles.segmentButtonText, isSelected && styles.languageChipTextActive]}>
-                        {formatMeetingType(meetingType)}
-                      </Text>
+                      <Text style={styles.sheetChoiceText}>{formatMeetingType(meetingType)}</Text>
+                      {isSelected ? (
+                        <Ionicons color={appTheme.colors.link} name="checkmark" size={19} />
+                      ) : null}
                     </Pressable>
-                  );
-                })}
-              </View>
+                  </View>
+                );
+              })}
             </View>
 
-            <View style={styles.settingsSection}>
-              <Text style={styles.sectionLabel}>Interpreter speaker</Text>
-              <Text style={styles.selectionTitle}>{selectedVoice.label}</Text>
-              <View style={styles.languageGrid}>
-                {(voiceProfiles.length ? voiceProfiles : FALLBACK_INTERPRETER_VOICES).map((voice) => {
-                  const isSelected = draft.interpreterVoiceId === voice.id;
+            {/* Which way round the room works is known by the person setting
+                it up, not by the app. An app-wide default would be one
+                language imposed on every company using Synzapp. */}
+            <Text style={styles.sheetSectionLabel}>Interpreter speaks</Text>
+            <View style={styles.sheetCard}>
+              {(draft.languageCodes.length ? draft.languageCodes : defaultLanguageCodes).map((languageCode, index) => {
+                const language = fallbackLanguages.find((entry) => entry.code === languageCode);
+                const isSelected = resolveSpokenOutputLanguageCode(
+                  draft.languageCodes,
+                  draft.spokenOutputLanguageCode
+                ) === languageCode;
 
-                  return (
+                return (
+                  <View key={languageCode}>
+                    {index > 0 ? <View style={styles.sheetCardDivider} /> : null}
                     <Pressable
-                      key={voice.id}
-                      onPress={() => patchDraft({ interpreterVoiceId: voice.id })}
-                      style={({ pressed }) => [
-                        styles.languageToggle,
-                        isSelected && styles.languageToggleActive,
-                        pressed && styles.pressed
-                      ]}
+                      accessibilityRole="radio"
+                      accessibilityState={{ checked: isSelected }}
+                      onPress={() => patchDraft({ spokenOutputLanguageCode: languageCode })}
+                      style={({ pressed }) => [styles.sheetChoiceRow, pressed && styles.pressed]}
                     >
-                      <Ionicons
-                        color={isSelected ? appTheme.colors.primary : appTheme.colors.mutedStrong}
-                        name={isSelected ? 'checkmark-circle' : 'mic-outline'}
-                        size={17}
-                      />
-                      <Text style={[styles.languageToggleText, isSelected && styles.languageChipTextActive]}>
-                        {voice.label}
-                      </Text>
+                      <View style={styles.sheetChoiceLead}>
+                        <InterpreterLanguageFlag languageCode={languageCode} styles={styles} />
+                        <Text style={styles.sheetChoiceText}>{language?.label || languageCode}</Text>
+                      </View>
+                      {isSelected ? (
+                        <Ionicons color={appTheme.colors.link} name="checkmark" size={19} />
+                      ) : null}
                     </Pressable>
-                  );
-                })}
-              </View>
+                  </View>
+                );
+              })}
             </View>
 
-            <View style={styles.settingsSection}>
-              <View style={styles.inlineOption}>
-                <Ionicons color={appTheme.colors.primary} name={draft.isScheduled ? 'calendar' : 'calendar-outline'} size={18} />
-                <View style={styles.selectionBody}>
-                  <Text style={styles.sectionLabel}>Schedule</Text>
-                  <Text style={styles.selectionTitle}>{draft.isScheduled ? 'Scheduled meeting' : 'Start when opened'}</Text>
+            <Text style={styles.sheetSectionLabel}>Interpreter speaker</Text>
+            <View style={styles.sheetCard}>
+              {(voiceProfiles.length ? voiceProfiles : FALLBACK_INTERPRETER_VOICES).map((voice, index) => {
+                const isSelected = draft.interpreterVoiceId === voice.id;
+
+                return (
+                  <View key={voice.id}>
+                    {index > 0 ? <View style={styles.sheetCardDivider} /> : null}
+                    <Pressable
+                      accessibilityRole="radio"
+                      accessibilityState={{ checked: isSelected }}
+                      onPress={() => patchDraft({ interpreterVoiceId: voice.id })}
+                      style={({ pressed }) => [styles.sheetChoiceRow, pressed && styles.pressed]}
+                    >
+                      <Text style={styles.sheetChoiceText}>{voice.label}</Text>
+                      {isSelected ? (
+                        <Ionicons color={appTheme.colors.link} name="checkmark" size={19} />
+                      ) : null}
+                    </Pressable>
+                  </View>
+                );
+              })}
+            </View>
+
+            <View style={[styles.sheetCard, styles.sheetCardStandalone]}>
+              <View style={styles.sheetSwitchRow}>
+                <View style={styles.sheetSwitchText}>
+                  <Text style={styles.sheetChoiceText}>Schedule</Text>
+                  <Text style={styles.sheetChoiceMeta}>
+                    {draft.isScheduled ? 'Starts at the time you choose' : 'Starts when it is opened'}
+                  </Text>
                 </View>
-                <AppSwitch
-                  onValueChange={setScheduleEnabled}
-                  value={draft.isScheduled}
-                />
+                <AppSwitch onValueChange={setScheduleEnabled} value={draft.isScheduled} />
               </View>
+
               {draft.isScheduled ? (
-                <View style={styles.segmentedRow}>
-                  <Pressable onPress={() => openSchedulePicker('date')} style={styles.secondaryButton}>
-                    <Ionicons color={appTheme.colors.primary} name="calendar-outline" size={17} />
-                    <Text style={styles.secondaryButtonText}>{formatScheduleDate(draft.scheduledAtIso)}</Text>
+                <>
+                  <View style={styles.sheetCardDivider} />
+                  <Pressable
+                    onPress={() => openSchedulePicker('date')}
+                    style={({ pressed }) => [styles.sheetChoiceRow, pressed && styles.pressed]}
+                  >
+                    <Text style={styles.sheetChoiceText}>Date</Text>
+                    <Text style={styles.sheetChoiceValue}>{formatScheduleDate(draft.scheduledAtIso)}</Text>
                   </Pressable>
-                  <Pressable onPress={() => openSchedulePicker('time')} style={styles.secondaryButton}>
-                    <Ionicons color={appTheme.colors.primary} name="time-outline" size={17} />
-                    <Text style={styles.secondaryButtonText}>{formatScheduleTime(draft.scheduledAtIso, draft.timeFormat)}</Text>
+                  <View style={styles.sheetCardDivider} />
+                  <Pressable
+                    onPress={() => openSchedulePicker('time')}
+                    style={({ pressed }) => [styles.sheetChoiceRow, pressed && styles.pressed]}
+                  >
+                    <Text style={styles.sheetChoiceText}>Time</Text>
+                    <Text style={styles.sheetChoiceValue}>
+                      {formatScheduleTime(draft.scheduledAtIso, draft.timeFormat)}
+                    </Text>
                   </Pressable>
-                </View>
+                </>
               ) : null}
             </View>
-
-            <Pressable
-              disabled={isBusy}
-              onPress={() => void submit()}
-              style={({ pressed }) => [
-                styles.createSessionButton,
-                isBusy && styles.disabledButton,
-                pressed && styles.pressed
-              ]}
-            >
-              {isBusy ? <ActivityIndicator color="#fff" size="small" /> : null}
-              <Text style={styles.summaryCreateButtonText}>Create session</Text>
-            </Pressable>
           </ScrollView>
           <ScheduleDateTimePickerModal
             date={schedulePickerDraftDate}
@@ -7382,7 +7869,8 @@ function InterpreterTranscriptAudioPlayerModal({
   onSkip,
   onTogglePlayback,
   playbackRate,
-  position
+  position,
+  readAloudProgress
 }: InterpreterTranscriptAudioPlayerModalProps) {
   const appTheme = useAppTheme();
   const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
@@ -7441,8 +7929,8 @@ function InterpreterTranscriptAudioPlayerModal({
         style={[
           styles.transcriptAudioFullScreen,
           {
-            paddingBottom: Math.max(insets.bottom + 20, 30),
-            paddingTop: Math.max(insets.top + 12, 22),
+            paddingBottom: Math.max(resolveInterpreterModalBottomInset(insets.bottom) + 20, 30),
+            paddingTop: getFullScreenModalTopPadding(insets.top),
             transform: [{ translateY }]
           }
         ]}
@@ -7467,8 +7955,10 @@ function InterpreterTranscriptAudioPlayerModal({
             <Text numberOfLines={1} style={styles.transcriptAudioPlayerTitle}>
               {context.languageLabel}
             </Text>
+            {/* Says the reading is still being made while it plays, rather than
+                letting the elapsed time imply the whole thing is here. */}
             <Text numberOfLines={1} style={styles.transcriptAudioPlayerSubtitle}>
-              {formatAudioDuration(safePosition)} of {formatAudioDuration(safeDuration)}
+              {readAloudProgress || `${formatAudioDuration(safePosition)} of ${formatAudioDuration(safeDuration)}`}
             </Text>
           </View>
           <Pressable
@@ -7656,7 +8146,10 @@ function InterpreterSummaryLanguageModal({
       <View
         style={[
           presentation === 'overlay' ? styles.roomSettingsOverlay : styles.liveDetailScreen,
-          { paddingBottom: Math.max(insets.bottom + 14, 24), paddingTop: Math.max(insets.top + 10, 22) }
+          {
+            paddingBottom: resolveInterpreterModalBottomInset(insets.bottom) + 14,
+            paddingTop: getFullScreenModalTopPadding(insets.top)
+          }
         ]}
       >
         <View style={styles.liveRoomHeader}>
@@ -7822,12 +8315,14 @@ function InterpreterTranscriptSummaryModal({
   activeSummaryAudioKey,
   availableLanguages,
   creatingLanguageCode,
+  exportingSummaryKey,
   isAudioPlaying,
   isBusy,
   isOpen,
   items,
   onClose,
   onCreateSummary,
+  onExportSummary,
   onPlaySummary,
   onSelectLanguage,
   preparingSummaryAudioKey,
@@ -7859,69 +8354,71 @@ function InterpreterTranscriptSummaryModal({
       <View
         style={[
           styles.transcriptSummaryScreen,
-          { paddingBottom: Math.max(insets.bottom + 14, 24), paddingTop: Math.max(insets.top + 12, 22) }
+          {
+            paddingBottom: resolveInterpreterModalBottomInset(insets.bottom),
+            paddingTop: getFullScreenModalTopPadding(insets.top)
+          }
         ]}
       >
         <View style={styles.transcriptSummaryHeader}>
-          <Pressable onPress={onClose} style={({ pressed }) => [styles.liveIconButton, pressed && styles.pressed]}>
-            <Ionicons color={appTheme.colors.ink} name="chevron-back" size={23} />
-          </Pressable>
-          <View style={styles.transcriptSummaryTitleWrap}>
-            <Text style={styles.liveRoomSectionLabel}>Saved transcript summary</Text>
-            <Text style={styles.transcriptLibraryTitle}>All saved transcripts</Text>
-            <Text style={styles.transcriptLibraryHint}>
-              Summaries are saved by language and can be replayed as audio.
-            </Text>
-          </View>
+          <CircleIconButton action="back" label="Back to transcripts" onPress={onClose} />
         </View>
 
-        <View style={styles.transcriptSummaryCreateCard}>
-          <View style={styles.transcriptSummaryCreateHeader}>
-            <View style={styles.transcriptSummaryCountPill}>
-              <Text style={styles.transcriptSummaryCountText}>{sourceTranscriptCount}</Text>
-            </View>
-            <View style={styles.transcriptSummaryCreateCopy}>
-              <Text style={styles.transcriptSummaryCreateTitle}>Clean transcripts ready</Text>
-              <Text style={styles.transcriptSummaryCreateMeta}>
-                The summary uses saved cleaned transcripts in the order they were captured.
-              </Text>
-            </View>
-          </View>
-          <Pressable
-            onPress={() => setIsLanguagePickerOpen(true)}
-            style={({ pressed }) => [styles.transcriptSummaryLanguageButton, pressed && styles.pressed]}
-          >
-            <Ionicons color={appTheme.colors.primary} name="language-outline" size={18} />
-            <View style={styles.transcriptSummaryLanguageCopy}>
-              <Text style={styles.transcriptSummaryLanguageLabel}>Summary language</Text>
-              <Text style={styles.transcriptSummaryLanguageValue}>{selectedLanguage.label}</Text>
-            </View>
-            <Ionicons color={appTheme.colors.mutedStrong} name="chevron-down" size={17} />
-          </Pressable>
-          <Pressable
-            disabled={!canCreateSummary}
-            onPress={() => void onCreateSummary(selectedLanguage.code)}
-            style={({ pressed }) => [
-              styles.transcriptSummaryCreateButton,
-              !canCreateSummary && styles.transcriptSummaryCreateButtonDisabled,
-              pressed && styles.pressed
-            ]}
-          >
-            {creatingLanguageCode === selectedLanguage.code ? (
-              <ActivityIndicator color="#fff" size="small" />
-            ) : (
-              <Ionicons color="#fff" name="sparkles-outline" size={17} />
-            )}
-            <Text style={styles.transcriptSummaryCreateButtonText}>
-              {creatingLanguageCode === selectedLanguage.code ? 'Creating summary' : 'Create summary'}
-            </Text>
-          </Pressable>
+        <View style={styles.transcriptSummaryHeadingWrap}>
+          <Text style={styles.transcriptSummaryHeading}>All saved transcripts</Text>
+          <Text style={styles.transcriptLibraryHint}>
+            Summaries are saved by language and can be replayed as audio.
+          </Text>
         </View>
 
         <ScrollView
           contentContainerStyle={styles.transcriptSummaryList}
           showsVerticalScrollIndicator={false}
         >
+          {/* The card scrolls with the list rather than sitting fixed above it.
+              Held in place it took a third of the screen and pushed the
+              summaries people came to read off the bottom. */}
+          <View style={styles.transcriptSummaryCreateCard}>
+            <View style={styles.transcriptSummaryCreateCopy}>
+              <Text style={styles.transcriptSummaryCreateTitle}>
+                {sourceTranscriptCount} clean transcript{sourceTranscriptCount === 1 ? '' : 's'} ready
+              </Text>
+              <Text style={styles.transcriptSummaryCreateMeta}>
+                The summary uses saved cleaned transcripts in the order they were captured.
+              </Text>
+            </View>
+            <View style={styles.transcriptCardDividerInset} />
+            <Pressable
+              onPress={() => setIsLanguagePickerOpen(true)}
+              style={({ pressed }) => [styles.transcriptSummaryLanguageButton, pressed && styles.pressed]}
+            >
+              <InterpreterLanguageFlag languageCode={selectedLanguage.code} styles={styles} />
+              <View style={styles.transcriptSummaryLanguageCopy}>
+                <Text style={styles.transcriptSummaryLanguageLabel}>Summary language</Text>
+                <Text style={styles.transcriptSummaryLanguageValue}>{selectedLanguage.label}</Text>
+              </View>
+              <Ionicons color={appTheme.colors.link} name="chevron-down" size={17} />
+            </Pressable>
+            <View style={styles.transcriptCardDividerInset} />
+            <Pressable
+              disabled={!canCreateSummary}
+              onPress={() => void onCreateSummary(selectedLanguage.code)}
+              style={({ pressed }) => [
+                styles.transcriptSummaryCreateButton,
+                !canCreateSummary && styles.transcriptSummaryCreateButtonDisabled,
+                pressed && styles.pressed
+              ]}
+            >
+              {creatingLanguageCode === selectedLanguage.code ? (
+                <ActivityIndicator color={appTheme.colors.link} size="small" />
+              ) : (
+                <Ionicons color={appTheme.colors.link} name="sparkles-outline" size={17} />
+              )}
+              <Text style={styles.transcriptSummaryCreateButtonText}>
+                {creatingLanguageCode === selectedLanguage.code ? 'Creating summary' : 'Create summary'}
+              </Text>
+            </Pressable>
+          </View>
           {summaries.length ? summaries.map((summary) => (
             <View key={summary.summaryId} style={styles.transcriptSummarySavedCard}>
               <Text style={styles.transcriptLibraryCardMeta}>{formatTranscriptLibraryTimestamp(summary.createdAtIso)}</Text>
@@ -7934,10 +8431,9 @@ function InterpreterTranscriptSummaryModal({
 
                 return (
                   <View key={`${summary.summaryId}-${languageCode}`} style={styles.transcriptSummaryLanguageCard}>
+                    <View style={styles.transcriptCardDivider} />
                     <View style={styles.transcriptSummaryLanguageCardHeader}>
-                      <View style={styles.transcriptSummaryLanguageIcon}>
-                        <Ionicons color={appTheme.colors.primary} name="reader-outline" size={18} />
-                      </View>
+                      <InterpreterLanguageFlag languageCode={languageCode} styles={styles} />
                       <View style={styles.transcriptSummaryLanguageCardCopy}>
                         <Text style={styles.transcriptSummarySavedLanguage}>{languageLabel}</Text>
                         <Text style={styles.transcriptSummarySavedMeta}>Saved summary with read-aloud audio</Text>
@@ -7947,15 +8443,34 @@ function InterpreterTranscriptSummaryModal({
                         onPress={() => onPlaySummary(summary, languageCode)}
                         style={({ pressed }) => [
                           styles.transcriptSummaryPlayButton,
-                          isActive && styles.transcriptSummaryPlayButtonActive,
                           isPreparing && styles.transcriptSummaryPlayButtonDisabled,
                           pressed && styles.pressed
                         ]}
                       >
                         {isPreparing ? (
-                          <ActivityIndicator color={appTheme.colors.primary} size="small" />
+                          <ActivityIndicator color={appTheme.colors.link} size="small" />
                         ) : (
-                          <Ionicons color={isActive ? '#fff' : appTheme.colors.primary} name={isActive ? 'pause' : 'play'} size={16} />
+                          <Ionicons
+                            color={appTheme.colors.link}
+                            name={isActive ? 'pause' : 'play'}
+                            size={16}
+                          />
+                        )}
+                        <Text style={styles.transcriptSummaryPlayButtonText}>
+                          {isPreparing ? 'Preparing' : isActive ? 'Pause' : 'Play'}
+                        </Text>
+                      </Pressable>
+                      <Pressable
+                        accessibilityLabel={`Download the ${languageLabel} summary`}
+                        disabled={exportingSummaryKey === audioKey}
+                        hitSlop={10}
+                        onPress={() => onExportSummary(summary, languageCode)}
+                        style={({ pressed }) => [styles.transcriptSummaryDownloadButton, pressed && styles.pressed]}
+                      >
+                        {exportingSummaryKey === audioKey ? (
+                          <ActivityIndicator color={appTheme.colors.link} size="small" />
+                        ) : (
+                          <Ionicons color={appTheme.colors.link} name="download-outline" size={20} />
                         )}
                       </Pressable>
                     </View>
@@ -8004,6 +8519,44 @@ function InterpreterMeetingFilterModal({
   const styles = useMemo(() => createStyles(appTheme.colors), [appTheme.colors]);
   const insets = useSafeAreaInsets();
   const [draftFilters, setDraftFilters] = useState<InterpreterMeetingListFilters>(filters);
+  const [isCustomDatePickerOpen, setIsCustomDatePickerOpen] = useState(false);
+  const [customDateDraft, setCustomDateDraft] = useState(() => new Date());
+
+  /**
+   * The platform's own picker, not a copy of it.
+   *
+   * Android opens its dialog directly; iOS shows the inline picker in a sheet,
+   * which is what `ScheduleDateTimePickerModal` already does for scheduling a
+   * session. A lookalike wheel is the sort of thing that is nearly right for
+   * years and wrong for anybody using large text or a screen reader.
+   */
+  function openCustomDatePicker() {
+    const startingPoint = draftFilters.customDateIso
+      ? new Date(draftFilters.customDateIso)
+      : new Date();
+    const safeStartingPoint = Number.isNaN(startingPoint.getTime()) ? new Date() : startingPoint;
+
+    setCustomDateDraft(safeStartingPoint);
+
+    if (Platform.OS === 'android') {
+      DateTimePickerAndroid.open({
+        display: 'calendar',
+        maximumDate: new Date(),
+        mode: 'date',
+        onChange: (event, selectedDate) => {
+          if (event.type !== 'set' || !selectedDate) {
+            return;
+          }
+
+          patchDraft({ createdDate: 'custom', customDateIso: selectedDate.toISOString() });
+        },
+        value: safeStartingPoint
+      });
+      return;
+    }
+
+    setIsCustomDatePickerOpen(true);
+  }
 
   useEffect(() => {
     if (isOpen) {
@@ -8027,95 +8580,149 @@ function InterpreterMeetingFilterModal({
   return (
     <Modal animationType="fade" onRequestClose={onClose} transparent visible={isOpen}>
       <Pressable onPress={onClose} style={styles.modalOverlay}>
-        <Pressable style={[styles.meetingFilterSheet, { paddingBottom: Math.max(insets.bottom + 14, 24) }]}>
+        {/* Capped, and padded for the status bar at that cap.
+            The sheet grows with its content, so adding one row was enough to
+            push it to the full height of the screen — and with nothing holding
+            it back, the close button and Apply ended up drawn behind the
+            clock and the battery. */}
+        <Pressable
+          style={[
+            styles.meetingFilterSheet,
+            { paddingTop: getFullScreenModalTopPadding(insets.top) + 10 }
+          ]}
+        >
           <View style={styles.modalHandle} />
-          <View style={styles.modalHeader}>
-            <View>
-              <Text style={styles.eyebrow}>FILTER</Text>
-              <Text style={styles.modalTitle}>Interpreter sessions</Text>
-            </View>
-            <Pressable onPress={onClose} style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}>
-              <Ionicons color={appTheme.colors.ink} name="close" size={22} />
+          <View style={styles.sheetHeaderRow}>
+            <CircleIconButton action="close" label="Close filters" onPress={onClose} />
+            <Text numberOfLines={1} style={styles.sheetHeaderTitle}>Filter sessions</Text>
+            <Pressable
+              accessibilityLabel="Apply filters"
+              accessibilityRole="button"
+              hitSlop={8}
+              onPress={() => onApply(draftFilters)}
+              style={({ pressed }) => [styles.sheetHeaderAction, pressed && styles.pressed]}
+            >
+              <Text style={styles.sheetHeaderActionText}>Apply</Text>
             </Pressable>
           </View>
 
-          <View style={styles.settingsSection}>
-            <Text style={styles.sectionLabel}>Name contains</Text>
+          {/* A capped sheet needs to scroll. Padding cannot rescue content that
+              is taller than the box holding it. */}
+          <ScrollView
+            contentContainerStyle={[
+              styles.meetingFilterSheetContent,
+              { paddingBottom: Math.max(resolveInterpreterModalBottomInset(insets.bottom) + 14, 24) }
+            ]}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+          <Text style={styles.sheetSectionLabel}>Name contains</Text>
+          <View style={styles.sheetCard}>
             <TextInput
               autoCapitalize="none"
               autoCorrect={false}
               onChangeText={(nameQuery) => patchDraft({ nameQuery })}
               placeholder="Meeting name"
-              placeholderTextColor={appTheme.colors.mutedStrong}
-              style={styles.input}
+              placeholderTextColor={appTheme.colors.muted}
+              style={styles.sheetInput}
               value={draftFilters.nameQuery}
             />
           </View>
 
-          <View style={styles.settingsSection}>
-            <Text style={styles.sectionLabel}>Meeting type</Text>
-            <View style={styles.filterChipRow}>
-              {(['ALL', 'ONE_ON_ONE', 'LEVEL_1', 'LEVEL_3'] as InterpreterMeetingTypeFilter[]).map((meetingType) => {
-                const isSelected = draftFilters.meetingType === meetingType;
+          <Text style={styles.sheetSectionLabel}>Meeting type</Text>
+          <View style={styles.sheetCard}>
+            {(['ALL', 'ONE_ON_ONE', 'LEVEL_1', 'LEVEL_3'] as InterpreterMeetingTypeFilter[]).map((meetingType, index) => {
+              const isSelected = draftFilters.meetingType === meetingType;
 
-                return (
+              return (
+                <View key={meetingType}>
+                  {index > 0 ? <View style={styles.sheetCardDivider} /> : null}
                   <Pressable
-                    key={meetingType}
+                    accessibilityRole="radio"
+                    accessibilityState={{ checked: isSelected }}
                     onPress={() => patchDraft({ meetingType })}
-                    style={({ pressed }) => [
-                      styles.filterChip,
-                      isSelected && styles.filterChipSelected,
-                      pressed && styles.pressed
-                    ]}
+                    style={({ pressed }) => [styles.sheetChoiceRow, pressed && styles.pressed]}
                   >
-                    <Text style={[styles.filterChipText, isSelected && styles.filterChipTextSelected]}>
+                    <Text style={styles.sheetChoiceText}>
                       {meetingType === 'ALL' ? 'All' : formatMeetingType(meetingType)}
                     </Text>
+                    {isSelected ? (
+                      <Ionicons color={appTheme.colors.link} name="checkmark" size={19} />
+                    ) : null}
                   </Pressable>
-                );
-              })}
-            </View>
+                </View>
+              );
+            })}
           </View>
 
-          <View style={styles.settingsSection}>
-            <Text style={styles.sectionLabel}>Date created</Text>
-            <View style={styles.filterChipRow}>
-              {(['all', 'today', 'last_7_days', 'last_30_days'] as InterpreterMeetingCreatedDateFilter[]).map((createdDate) => {
-                const isSelected = draftFilters.createdDate === createdDate;
+          <Text style={styles.sheetSectionLabel}>Date created</Text>
+          <View style={styles.sheetCard}>
+            {(['all', 'today', 'last_7_days', 'last_30_days', 'custom'] as InterpreterMeetingCreatedDateFilter[]).map((createdDate, index) => {
+              const isSelected = draftFilters.createdDate === createdDate;
 
-                return (
+              return (
+                <View key={createdDate}>
+                  {index > 0 ? <View style={styles.sheetCardDivider} /> : null}
                   <Pressable
-                    key={createdDate}
-                    onPress={() => patchDraft({ createdDate })}
-                    style={({ pressed }) => [
-                      styles.filterChip,
-                      isSelected && styles.filterChipSelected,
-                      pressed && styles.pressed
-                    ]}
+                    accessibilityRole="radio"
+                    accessibilityState={{ checked: isSelected }}
+                    onPress={() => {
+                      // Choosing the custom row opens the picker straight away.
+                      // Selecting "a day" and then having to find where to say
+                      // which day is two taps for one decision.
+                      if (createdDate === 'custom') {
+                        openCustomDatePicker();
+                        return;
+                      }
+
+                      patchDraft({ createdDate });
+                    }}
+                    style={({ pressed }) => [styles.sheetChoiceRow, pressed && styles.pressed]}
                   >
-                    <Text style={[styles.filterChipText, isSelected && styles.filterChipTextSelected]}>
+                    <Text style={styles.sheetChoiceText}>
                       {formatInterpreterMeetingCreatedDateFilter(createdDate)}
                     </Text>
+                    <View style={styles.sheetChoiceTrailing}>
+                      {createdDate === 'custom' && draftFilters.customDateIso ? (
+                        <Text style={styles.sheetChoiceValue}>
+                          {formatScheduleDate(draftFilters.customDateIso)}
+                        </Text>
+                      ) : null}
+                      {isSelected ? (
+                        <Ionicons color={appTheme.colors.link} name="checkmark" size={19} />
+                      ) : null}
+                    </View>
                   </Pressable>
-                );
-              })}
-            </View>
+                </View>
+              );
+            })}
           </View>
 
-          <View style={styles.meetingFilterActions}>
+          {/* Reset is the destructive half of this pair, so it is red text in
+              its own card rather than an outlined slab beside a filled one. */}
+          <View style={[styles.sheetCard, styles.sheetCardStandalone]}>
             <Pressable
+              accessibilityLabel="Reset filters"
+              accessibilityRole="button"
               onPress={resetFilters}
-              style={({ pressed }) => [styles.secondaryButtonFull, pressed && styles.pressed]}
+              style={({ pressed }) => [styles.sheetResetRow, pressed && styles.pressed]}
             >
-              <Text style={styles.secondaryButtonText}>Reset</Text>
-            </Pressable>
-            <Pressable
-              onPress={() => onApply(draftFilters)}
-              style={({ pressed }) => [styles.createSessionButton, pressed && styles.pressed]}
-            >
-              <Text style={styles.summaryCreateButtonText}>Apply filters</Text>
+              <Text style={styles.sheetResetText}>Reset filters</Text>
             </Pressable>
           </View>
+          </ScrollView>
+          <ScheduleDateTimePickerModal
+            date={customDateDraft}
+            is24Hour={false}
+            isOpen={isCustomDatePickerOpen}
+            mode="date"
+            onCancel={() => setIsCustomDatePickerOpen(false)}
+            onChange={setCustomDateDraft}
+            onConfirm={() => {
+              setIsCustomDatePickerOpen(false);
+              patchDraft({ createdDate: 'custom', customDateIso: customDateDraft.toISOString() });
+            }}
+          />
         </Pressable>
       </Pressable>
     </Modal>
@@ -8165,7 +8772,7 @@ function InterpreterTranscriptAudioLanguagePicker({
         <View
           style={[
             styles.liveLanguagePickerSheet,
-            { paddingBottom: Math.max(insets.bottom + 12, 22), paddingTop: Math.max(insets.top + 12, 22) }
+            { paddingBottom: Math.max(resolveInterpreterModalBottomInset(insets.bottom) + 12, 22) }
           ]}
         >
           <View style={styles.liveLanguagePickerHeader}>
@@ -8176,20 +8783,13 @@ function InterpreterTranscriptAudioLanguagePicker({
                 {hint}
               </Text>
             </View>
-            <Pressable onPress={onClose} style={({ pressed }) => [styles.liveIconButton, pressed && styles.pressed]}>
-              <Ionicons color={appTheme.colors.ink} name="close" size={22} />
-            </Pressable>
+            <CircleIconButton action="close" label="Close language picker" onPress={onClose} />
           </View>
 
-          <View style={styles.liveLanguageSearchBox}>
-            <Ionicons color={appTheme.colors.mutedStrong} name="search-outline" size={18} />
-            <TextInput
-              autoCapitalize="none"
-              autoCorrect={false}
+          <View style={styles.liveLanguageSearchWrap}>
+            <ChatSearchBar
               onChangeText={setQuery}
               placeholder="Search language"
-              placeholderTextColor={appTheme.colors.mutedStrong}
-              style={styles.liveLanguageSearchInput}
               value={query}
             />
           </View>
@@ -8198,29 +8798,35 @@ function InterpreterTranscriptAudioLanguagePicker({
             contentContainerStyle={styles.liveLanguagePickerList}
             keyboardShouldPersistTaps="handled"
             showsVerticalScrollIndicator={false}
+            style={styles.liveLanguagePickerScroll}
           >
-            {filteredLanguages.map((language) => {
+            {filteredLanguages.map((language, index) => {
               const isSelected = language.code === selectedLanguageCode;
 
               return (
                 <Pressable
+                  accessibilityRole="radio"
+                  accessibilityState={{ checked: isSelected }}
                   key={language.code}
                   onPress={() => onSelectLanguage(language.code)}
                   style={({ pressed }) => [
                     styles.liveLanguagePickerRow,
-                    isSelected && styles.liveLanguagePickerRowSelected,
+                    index === 0 && styles.liveLanguagePickerRowFirst,
+                    index === filteredLanguages.length - 1 && styles.liveLanguagePickerRowLast,
                     pressed && styles.pressed
                   ]}
                 >
+                  {index > 0 ? <View style={styles.liveLanguagePickerRowDivider} /> : null}
+                  <InterpreterLanguageFlag languageCode={language.code} styles={styles} />
                   <View style={styles.liveLanguagePickerRowCopy}>
                     <Text style={styles.liveLanguagePickerRowTitle}>{language.label}</Text>
                     <Text style={styles.liveLanguagePickerRowMeta}>{language.code}</Text>
                   </View>
-                  <Ionicons
-                    color={isSelected ? appTheme.colors.primary : appTheme.colors.mutedStrong}
-                    name={isSelected ? 'checkmark-circle' : 'ellipse-outline'}
-                    size={20}
-                  />
+                  <View style={styles.liveLanguagePickerTickSlot}>
+                    {isSelected ? (
+                      <Ionicons color={appTheme.colors.link} name="checkmark" size={19} />
+                    ) : null}
+                  </View>
                 </Pressable>
               );
             })}
@@ -8254,7 +8860,7 @@ function InterpreterVoicePickerModal({
   return (
     <Modal animationType="fade" onRequestClose={onClose} transparent visible={isOpen}>
       <Pressable onPress={onClose} style={styles.pickerOverlay}>
-        <Pressable style={[styles.pickerSheet, { paddingBottom: Math.max(insets.bottom + 14, 24) }]}>
+        <Pressable style={[styles.pickerSheet, { paddingBottom: Math.max(resolveInterpreterModalBottomInset(insets.bottom) + 14, 24) }]}>
           <View style={styles.modalHandle} />
           <View style={styles.modalHeader}>
             <View>
@@ -8301,24 +8907,22 @@ function InterpreterVoicePickerModal({
                     <Text style={styles.mutedText}>{voice.description}</Text>
                   </View>
                   <Pressable
+                    accessibilityLabel={`Hear ${voice.label}`}
                     disabled={Boolean(isPreparingPreview)}
+                    hitSlop={10}
                     onPress={(event) => {
                       event.stopPropagation();
                       onPreview(voice);
                     }}
-                    style={({ pressed }) => [
-                      styles.voicePreviewButton,
-                      isPreviewPlaying && styles.voicePreviewButtonActive,
-                      pressed && styles.pressed
-                    ]}
+                    style={({ pressed }) => [styles.voicePreviewButton, pressed && styles.pressed]}
                   >
                     {isPreparingPreview ? (
-                      <ActivityIndicator color={appTheme.colors.primary} size="small" />
+                      <ActivityIndicator color={appTheme.colors.link} size="small" />
                     ) : (
                       <Ionicons
-                        color={isPreviewPlaying ? '#fff' : appTheme.colors.primary}
+                        color={appTheme.colors.link}
                         name={isPreviewPlaying ? 'pause' : 'play'}
-                        size={17}
+                        size={19}
                       />
                     )}
                   </Pressable>
@@ -8330,6 +8934,37 @@ function InterpreterVoicePickerModal({
       </Pressable>
     </Modal>
   );
+}
+
+/**
+ * How much room to leave at the bottom of a Modal on this device.
+ *
+ * **A Modal is not covered by the app root's `SafeAreaView`.** It is its own
+ * window on both platforms, so the usual rule — that the bottom inset is paid
+ * once at the root and screens add nothing on iOS — does not hold in here.
+ * `resolveScreenBottomInset` is therefore the wrong helper for a Modal, and
+ * using it left iPhone content sitting on the home indicator.
+ *
+ * On iOS the safe area reports honestly inside a Modal, so it is used as is.
+ *
+ * On Android a Modal reports **no safe area at all**: `insets.bottom` is 0 in
+ * one even on a phone with a navigation bar, which is what let the interpreter
+ * room run underneath it. The measurement fallback is what answers there, and
+ * it is safe in these sheets because none of them can shrink the window with a
+ * keyboard; the helper clamps whatever it finds to 64 regardless.
+ */
+function resolveInterpreterModalBottomInset(safeAreaBottom: number): number {
+  if (Platform.OS !== 'android') {
+    return Math.max(0, safeAreaBottom);
+  }
+
+  return resolveAndroidNavigationInset({
+    isKeyboardVisible: false,
+    safeAreaBottom: Math.min(safeAreaBottom, ANDROID_MAX_NAVIGATION_INSET),
+    screenHeight: Dimensions.get('screen').height,
+    statusBarHeight: RNStatusBar.currentHeight || 0,
+    tallestWindowHeight: Dimensions.get('window').height
+  });
 }
 
 function InterpreterLiveOutputLanguagePicker({
@@ -8376,7 +9011,7 @@ function InterpreterLiveOutputLanguagePicker({
         <View
           style={[
             styles.liveLanguagePickerSheet,
-            { paddingBottom: Math.max(insets.bottom + 12, 22), paddingTop: Math.max(insets.top + 12, 22) }
+            { paddingBottom: Math.max(resolveInterpreterModalBottomInset(insets.bottom) + 12, 22) }
           ]}
         >
           <View style={styles.liveLanguagePickerHeader}>
@@ -8387,20 +9022,13 @@ function InterpreterLiveOutputLanguagePicker({
                 The selected language is used the next time you tap Respond.
               </Text>
             </View>
-            <Pressable onPress={onClose} style={({ pressed }) => [styles.liveIconButton, pressed && styles.pressed]}>
-              <Ionicons color={appTheme.colors.ink} name="close" size={22} />
-            </Pressable>
+            <CircleIconButton action="close" label="Close language picker" onPress={onClose} />
           </View>
 
-          <View style={styles.liveLanguageSearchBox}>
-            <Ionicons color={appTheme.colors.mutedStrong} name="search-outline" size={18} />
-            <TextInput
-              autoCapitalize="none"
-              autoCorrect={false}
+          <View style={styles.liveLanguageSearchWrap}>
+            <ChatSearchBar
               onChangeText={setQuery}
               placeholder="Search language"
-              placeholderTextColor={appTheme.colors.mutedStrong}
-              style={styles.liveLanguageSearchInput}
               value={query}
             />
           </View>
@@ -8409,45 +9037,47 @@ function InterpreterLiveOutputLanguagePicker({
             contentContainerStyle={styles.liveLanguagePickerList}
             keyboardShouldPersistTaps="handled"
             showsVerticalScrollIndicator={false}
+            style={styles.liveLanguagePickerScroll}
           >
-            {filteredLanguages.map((language) => {
+            {/* One continuous card, not a card per language. There are more
+                than two hundred of these, and a stack of separate cards turns
+                a list somebody is scanning into a strip of floating tiles. */}
+            {filteredLanguages.map((language, index) => {
               const isSelected = language.code === selectedLanguageCode;
               const capability = getControlledLiveLanguageCapability(language);
 
               return (
                 <Pressable
+                  accessibilityRole="radio"
+                  accessibilityState={{ checked: isSelected }}
                   key={language.code}
                   onPress={() => onSelectLanguage(language.code)}
                   style={({ pressed }) => [
                     styles.liveLanguagePickerRow,
-                    isSelected && styles.liveLanguagePickerRowSelected,
+                    index === 0 && styles.liveLanguagePickerRowFirst,
+                    index === filteredLanguages.length - 1 && styles.liveLanguagePickerRowLast,
                     pressed && styles.pressed
                   ]}
                 >
+                  {index > 0 ? <View style={styles.liveLanguagePickerRowDivider} /> : null}
+                  <InterpreterLanguageFlag languageCode={language.code} styles={styles} />
                   <View style={styles.liveLanguagePickerRowCopy}>
                     <Text style={styles.liveLanguagePickerRowTitle}>{language.label}</Text>
                     <Text style={styles.liveLanguagePickerRowMeta}>{language.code}</Text>
                   </View>
-                  <View
-                    style={[
-                      styles.liveLanguageCapabilityPill,
-                      capability.kind === 'validated' && styles.liveLanguageCapabilityPillValidated
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.liveLanguageCapabilityText,
-                        capability.kind === 'validated' && styles.liveLanguageCapabilityTextValidated
-                      ]}
-                    >
-                      {capability.label}
-                    </Text>
+                  {/* Only the validated ones say anything. "GPT Live" was on
+                      almost every row, so it marked nothing and just crowded
+                      the language name it sat beside. */}
+                  {capability.kind === 'validated' ? (
+                    <Text style={styles.liveLanguageCapabilityText}>{capability.label}</Text>
+                  ) : null}
+                  {/* The slot keeps its width whether or not the tick is in it,
+                      so rows do not shift sideways one at a time. */}
+                  <View style={styles.liveLanguagePickerTickSlot}>
+                    {isSelected ? (
+                      <Ionicons color={appTheme.colors.link} name="checkmark" size={19} />
+                    ) : null}
                   </View>
-                  <Ionicons
-                    color={isSelected ? appTheme.colors.primary : appTheme.colors.mutedStrong}
-                    name={isSelected ? 'checkmark-circle' : 'ellipse-outline'}
-                    size={20}
-                  />
                 </Pressable>
               );
             })}
@@ -8754,6 +9384,17 @@ function InterpreterMeetingSwipeRow({
             pressed && styles.pressed
           ]}
         >
+          <View style={styles.meetingBody}>
+            <Text style={styles.meetingName}>{meeting.meetingName}</Text>
+            <Text style={styles.meetingMeta}>
+              {formatInterpreterMeetingRowMeta(meeting)}
+            </Text>
+          </View>
+          <Text style={[styles.meetingStatusText, { color: getStatusColor(meeting.status, appTheme.colors) }]}>
+            {formatInterpreterMeetingDisplayStatus(meeting)}
+          </Text>
+          {/* At the end of the row, where every other tick in the app sits.
+              A mark of what is chosen belongs after the thing it marks. */}
           {isDeleteMode ? (
             <TranscriptLibraryCheckbox
               isChecked={isSelected}
@@ -8761,34 +9402,6 @@ function InterpreterMeetingSwipeRow({
               styles={styles}
             />
           ) : null}
-          <View style={styles.meetingAvatarWrap}>
-            <View style={styles.meetingAvatar}>
-              <Ionicons color={appTheme.colors.primary} name="language-outline" size={21} />
-            </View>
-            <View style={[styles.meetingAvatarBadge, { backgroundColor: getStatusColor(meeting.status) }]}>
-              <Ionicons
-                color="#fff"
-                name={meeting.status === 'ENDED' ? 'checkmark' : 'radio'}
-                size={11}
-              />
-            </View>
-          </View>
-          <View style={styles.meetingBody}>
-            <Text style={styles.meetingName}>{meeting.meetingName}</Text>
-            <Text style={styles.meetingMeta}>
-              {formatInterpreterMeetingRowMeta(meeting)}
-            </Text>
-          </View>
-          <View style={[styles.statusPill, { backgroundColor: getStatusSoftColor(meeting.status, appTheme.colors) }]}>
-            <Ionicons
-              color={getStatusColor(meeting.status)}
-              name={getInterpreterMeetingStatusIcon(meeting.status)}
-              size={13}
-            />
-            <Text style={[styles.statusPillText, { color: getStatusColor(meeting.status) }]}>
-              {formatInterpreterMeetingDisplayStatus(meeting)}
-            </Text>
-          </View>
         </Pressable>
       </Animated.View>
     </View>
@@ -8847,31 +9460,44 @@ function InterpreterRoomSettingsPanel({
   }
 
   return (
-    <View style={[styles.roomSettingsOverlay, { paddingBottom: Math.max(insets.bottom + 16, 28), paddingTop: Math.max(insets.top + 12, 24) }]}>
-      <View style={styles.liveRoomHeader}>
-        <Pressable onPress={onClose} style={({ pressed }) => [styles.liveIconButton, pressed && styles.pressed]}>
-          <Ionicons color={appTheme.colors.ink} name="chevron-back" size={23} />
-        </Pressable>
-        <View style={styles.liveRoomTitleWrap}>
-          <Text style={styles.liveRoomTitle}>Interpreter settings</Text>
-          <Text style={styles.liveRoomMeta}>{details.meeting.meetingName}</Text>
-        </View>
+    <View
+      style={[
+        styles.roomSettingsOverlay,
+        {
+          paddingBottom: resolveInterpreterModalBottomInset(insets.bottom),
+          paddingTop: getFullScreenModalTopPadding(insets.top)
+        }
+      ]}
+    >
+      {/* Controls on one row, the name of the screen on the next. Save has to
+          sit beside a heading that shrinks to make room for it otherwise. */}
+      <View style={styles.roomSettingsHeader}>
+        <CircleIconButton action="back" label="Back to the room" onPress={onClose} />
+        <View style={styles.roomSettingsHeaderSpacer} />
         <Pressable
           disabled={!canSave}
           onPress={() => void saveSettings()}
           style={({ pressed }) => [styles.settingsSaveButton, !canSave && styles.disabledButton, pressed && styles.pressed]}
         >
           {isBusy ? (
-            <ActivityIndicator color="#fff" size="small" />
+            <ActivityIndicator color={appTheme.colors.link} size="small" />
           ) : (
             <Text style={styles.settingsSaveButtonText}>Save</Text>
           )}
         </Pressable>
       </View>
 
+      <View style={styles.roomSettingsHeadingWrap}>
+        <Text style={styles.roomSettingsHeading}>Interpreter settings</Text>
+        <Text style={styles.roomSettingsHeadingMeta}>{details.meeting.meetingName}</Text>
+      </View>
+
       <ScrollView contentContainerStyle={styles.settingsContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
         <View style={styles.settingsSection}>
           <Text style={styles.sectionLabel}>Interpreter speaker</Text>
+          {/* The chosen voice and the list it opens are one card, so opening it
+              extends the card rather than dropping a second panel below it. */}
+          <View style={styles.settingsCard}>
           <Pressable
             onPress={() => setIsVoicePickerOpen((currentValue) => !currentValue)}
             style={({ pressed }) => [styles.dropdownRow, pressed && styles.pressed]}
@@ -8881,7 +9507,7 @@ function InterpreterRoomSettingsPanel({
               <Text style={styles.selectionTitle}>{draftVoiceProfile.label}</Text>
               <Text style={styles.mutedText} numberOfLines={2}>{draftVoiceProfile.description}</Text>
             </View>
-            <Ionicons color={appTheme.colors.mutedStrong} name={isVoicePickerOpen ? 'chevron-up-outline' : 'chevron-down-outline'} size={18} />
+            <Ionicons color={appTheme.colors.link} name={isVoicePickerOpen ? 'chevron-up-outline' : 'chevron-down-outline'} size={18} />
           </Pressable>
           {isVoicePickerOpen ? (
             <View style={styles.inlinePickerPanel}>
@@ -8898,40 +9524,49 @@ function InterpreterRoomSettingsPanel({
                       setDraftVoiceId(voice.id);
                       setIsVoicePickerOpen(false);
                     }}
-                    style={({ pressed }) => [
-                      styles.inlinePickerRow,
-                      isSelected && styles.inlinePickerRowSelected,
-                      pressed && styles.pressed
-                    ]}
+                    accessibilityRole="radio"
+                    accessibilityState={{ checked: isSelected }}
+                    style={({ pressed }) => [styles.inlinePickerRow, pressed && styles.pressed]}
                   >
-                    <Ionicons color={isSelected ? appTheme.colors.primary : appTheme.colors.mutedStrong} name={isSelected ? 'checkmark-circle-outline' : 'mic-outline'} size={20} />
+                    <View style={styles.inlinePickerRowDivider} />
                     <View style={styles.selectionBody}>
                       <Text style={styles.selectionTitle}>{voice.label}</Text>
                       <Text style={styles.mutedText}>{voice.description}</Text>
                     </View>
                     <Pressable
+                      accessibilityLabel={`Hear ${voice.label}`}
                       disabled={Boolean(isPreparingPreview)}
+                      hitSlop={10}
                       onPress={(event) => {
                         event.stopPropagation();
                         onPreviewVoice(voice);
                       }}
-                      style={({ pressed }) => [
-                        styles.voicePreviewButton,
-                        isPreviewPlaying && styles.voicePreviewButtonActive,
-                        pressed && styles.pressed
-                      ]}
+                      style={({ pressed }) => [styles.voicePreviewButton, pressed && styles.pressed]}
                     >
                       {isPreparingPreview ? (
-                        <ActivityIndicator color={appTheme.colors.primary} size="small" />
+                        <ActivityIndicator color={appTheme.colors.link} size="small" />
                       ) : (
-                        <Ionicons color={isPreviewPlaying ? '#fff' : appTheme.colors.primary} name={isPreviewPlaying ? 'pause' : 'play'} size={17} />
+                        <Ionicons
+                          color={appTheme.colors.link}
+                          name={isPreviewPlaying ? 'pause' : 'play'}
+                          size={19}
+                        />
                       )}
                     </Pressable>
+                    {/* The tick marks the chosen voice, at the end of the row.
+                        Its slot keeps its width so rows do not shift sideways
+                        as the choice moves down the list. */}
+                    <View style={styles.inlinePickerTickSlot}>
+                      {isSelected ? (
+                        <Ionicons color={appTheme.colors.link} name="checkmark" size={19} />
+                      ) : null}
+                    </View>
                   </Pressable>
                 );
               })}
             </View>
           ) : null}
+          </View>
         </View>
       </ScrollView>
     </View>
@@ -9066,6 +9701,14 @@ function InterpreterRoom({
     updateInterval: 250
   });
   const transcriptAudioStatus = useAudioPlayerStatus(transcriptAudioPlayer);
+  /**
+   * Stops the loop that keeps asking the server for more of a reading, when
+   * somebody closes the player or starts a different one.
+   */
+  const readingCancelRef = useRef<{ cancelled: boolean } | null>(null);
+  const summaryReadingCancelRef = useRef<{ cancelled: boolean } | null>(null);
+  const [exportingSummaryKey, setExportingSummaryKey] = useState<string | null>(null);
+  const [readingProgress, setReadingProgress] = useState<string | null>(null);
   const latestTranslation = [...details.translations].reverse()
     .find((translation) => translation.targetLanguageCode === selectedLanguageCode);
   const selectedLanguageSession = languageSessionState[selectedLanguageCode];
@@ -10631,6 +11274,92 @@ function InterpreterRoom({
     setPendingTranscriptAudioKey(audioKey);
   }
 
+  /**
+   * Plays a saved transcript, starting as soon as the opening passage exists.
+   *
+   * The server is asked for one piece of the reading at a time and hands back a
+   * playlist. **The playlist goes straight to the player**, which fetches each
+   * new piece as it appears, plays them in order and joins them without a gap.
+   * Ordering, buffering and recovery are the player's job, so none of that
+   * logic lives here to go wrong.
+   *
+   * The loop keeps asking for the next piece while the reading plays, and stops
+   * the moment somebody closes the player — nobody is listening, so there is no
+   * reason to keep making it.
+   */
+  async function playTranscriptReading(
+    item: InterpreterTranscriptLibraryItem,
+    languageCode: string,
+    audioKey: string
+  ) {
+    if (!item.segmentId) {
+      return;
+    }
+
+    readingCancelRef.current?.cancelled === false && (readingCancelRef.current.cancelled = true);
+
+    const token = { cancelled: false };
+
+    readingCancelRef.current = token;
+
+    setPreparingTranscriptAudioKey(audioKey);
+
+    try {
+      let state = await advanceInterpreterTranscriptReading(
+        await getIdToken(),
+        details.meeting.meetingId,
+        item.segmentId,
+        { languageCode, voiceId: selectedVoiceId }
+      );
+
+      if (token.cancelled) {
+        return;
+      }
+
+      setTranscriptAudioPlayerContext({
+        artifact: null,
+        audioKey,
+        item,
+        languageCode,
+        languageLabel: getLanguageLabel(liveLanguageCatalog, languageCode)
+      });
+      setTranscriptAudioPlayerMode('expanded');
+      setTranscriptAudioSourceUri(state.playlistUrl);
+      setPendingTranscriptAudioKey(audioKey);
+      setPreparingTranscriptAudioKey(null);
+
+      // Kept ahead of the listening. A passage takes far longer to hear than to
+      // make, so this stays comfortably in front without racing.
+      while (!state.isComplete && !token.cancelled) {
+        setReadingProgress(`Still reading: ${state.segmentsReady} of ${state.segmentsTotal} passages ready.`);
+
+        state = await advanceInterpreterTranscriptReading(
+          await getIdToken(),
+          details.meeting.meetingId,
+          item.segmentId,
+          { languageCode, voiceId: selectedVoiceId }
+        );
+      }
+
+      if (!token.cancelled) {
+        setReadingProgress(null);
+      }
+    } catch (error) {
+      if (!token.cancelled) {
+        setPreparingTranscriptAudioKey(null);
+        setReadingProgress(null);
+        onError(getErrorMessage(error), 'Transcript audio needs attention');
+      }
+    }
+  }
+
+  /**
+   * "Prepare" now only means "start reading it".
+   *
+   * There is nothing to prepare in advance any more: the reading is produced
+   * while it plays, so a separate preparation step would be a wait with no
+   * purpose. Both the Prepare and Play actions do the same thing.
+   */
   async function prepareTranscriptAudioForSavedItem(
     item: InterpreterTranscriptLibraryItem,
     mode: 'prepare' | 'play'
@@ -10638,57 +11367,61 @@ function InterpreterRoom({
     const selectedAudio = getSelectedTranscriptAudioLanguage(item);
 
     if (!item.segmentId || !selectedAudio) {
-      onError('This saved transcript cannot be prepared yet.', 'Transcript audio needs attention');
+      onError('This saved transcript cannot be read aloud yet.', 'Transcript audio needs attention');
+
+      return;
+    }
+
+    if (mode !== 'play') {
+      return;
+    }
+
+    await playTranscriptReading(item, selectedAudio.languageCode, selectedAudio.audioKey);
+  }
+
+  /**
+   * Makes the whole reading without playing it.
+   *
+   * Worth keeping now that it means something: somebody about to go into a
+   * meeting can have the reading finished and cached first, so it plays with no
+   * production happening behind it at all. Playing does not need this — the
+   * reading is made while it plays — so this is a convenience, not a step.
+   */
+  async function handlePrepareTranscriptAudio(item: InterpreterTranscriptLibraryItem) {
+    const selectedAudio = getSelectedTranscriptAudioLanguage(item);
+
+    if (!item.segmentId || !selectedAudio) {
+      onError('This saved transcript cannot be read aloud yet.', 'Transcript audio needs attention');
+
       return;
     }
 
     const { audioKey, languageCode } = selectedAudio;
-    const existingArtifact = getTranscriptAudioArtifactForLanguage(item, languageCode, selectedVoiceId);
-
-    if (existingArtifact?.status === 'ready' && existingArtifact.downloadUrl) {
-      if (mode === 'play') {
-        openTranscriptAudioPlayer(item, existingArtifact, languageCode, audioKey);
-      }
-
-      return;
-    }
+    const token = { cancelled: false };
 
     try {
       setPreparingTranscriptAudioKey(audioKey);
 
-      const idToken = await getIdToken();
-      const result = await prepareInterpreterTranscriptAudio(
-        idToken,
+      let state = await advanceInterpreterTranscriptReading(
+        await getIdToken(),
         details.meeting.meetingId,
         item.segmentId,
-        {
-          languageCode,
-          voiceId: selectedVoiceId
-        }
+        { languageCode, voiceId: selectedVoiceId }
       );
 
-      updateTranscriptAudioArtifact(result.audioArtifact);
-
-      if (result.audioArtifact.status !== 'ready' || !result.audioArtifact.downloadUrl) {
-        if (mode === 'play') {
-          onError('Transcript audio is still being prepared. Please try again in a moment.', 'Transcript audio needs attention');
-        }
-
-        return;
-      }
-
-      if (mode === 'play') {
-        openTranscriptAudioPlayer(item, result.audioArtifact, languageCode, audioKey);
+      while (!state.isComplete && !token.cancelled) {
+        state = await advanceInterpreterTranscriptReading(
+          await getIdToken(),
+          details.meeting.meetingId,
+          item.segmentId,
+          { languageCode, voiceId: selectedVoiceId }
+        );
       }
     } catch (error) {
       onError(getErrorMessage(error), 'Transcript audio needs attention');
     } finally {
       setPreparingTranscriptAudioKey(null);
     }
-  }
-
-  async function handlePrepareTranscriptAudio(item: InterpreterTranscriptLibraryItem) {
-    await prepareTranscriptAudioForSavedItem(item, 'prepare');
   }
 
   async function handlePlayTranscriptAudio(item: InterpreterTranscriptLibraryItem) {
@@ -10733,6 +11466,11 @@ function InterpreterRoom({
   }
 
   function closeTranscriptAudioPlayer() {
+    if (readingCancelRef.current) {
+      readingCancelRef.current.cancelled = true;
+    }
+
+    setReadingProgress(null);
     safePauseAudioPlayer(transcriptAudioPlayer);
     setActiveTranscriptAudioKey(null);
     setPendingTranscriptAudioKey(null);
@@ -10770,11 +11508,57 @@ function InterpreterRoom({
     await seekTranscriptAudio((transcriptAudioStatus.currentTime || 0) + deltaSeconds);
   }
 
+  /**
+   * Sharing needs one file, which a reading is not.
+   *
+   * A reading is a playlist of passages, so there is nothing to attach to a
+   * message. The single-file path still exists and is used here, made on demand
+   * the first time somebody actually shares — which is rare enough that the
+   * wait is expected, and is the reason that path was kept rather than removed.
+   */
+  /** Makes the single file a reading does not have, then shares it. */
+  async function shareTranscriptAudioAsFile(playerContext: InterpreterTranscriptAudioPlayerContext) {
+    if (!playerContext.item.segmentId) {
+      return;
+    }
+
+    try {
+      setSharingTranscriptAudioKey(playerContext.audioKey);
+
+      const result = await prepareInterpreterTranscriptAudio(
+        await getIdToken(),
+        details.meeting.meetingId,
+        playerContext.item.segmentId,
+        { languageCode: playerContext.languageCode, voiceId: selectedVoiceId }
+      );
+
+      if (result.audioArtifact.status !== 'ready' || !result.audioArtifact.downloadUrl) {
+        onError(
+          'The file for sharing is still being made. Try again in a moment.',
+          'Transcript audio needs attention'
+        );
+
+        return;
+      }
+
+      setTranscriptAudioPlayerContext({ ...playerContext, artifact: result.audioArtifact });
+    } catch (error) {
+      onError(getErrorMessage(error), 'Transcript audio needs attention');
+    } finally {
+      setSharingTranscriptAudioKey(null);
+    }
+  }
+
   async function sharePreparedTranscriptAudio() {
     const playerContext = transcriptAudioPlayerContext;
 
-    if (!playerContext?.artifact.downloadUrl) {
-      onError('Prepare the transcript audio before sharing it.', 'Transcript audio needs attention');
+    if (!playerContext) {
+      return;
+    }
+
+    if (!playerContext.artifact?.downloadUrl) {
+      await shareTranscriptAudioAsFile(playerContext);
+
       return;
     }
 
@@ -10925,6 +11709,164 @@ function InterpreterRoom({
     }
   }
 
+  /**
+   * Asks what to take away, then builds it.
+   *
+   * The platform's own chooser rather than a sheet of our own: this is a short,
+   * final decision about a file, which is exactly what an action sheet is for,
+   * and it comes up instantly rather than after a screen has been laid out.
+   */
+  function handleExportInterpreterSummary(
+    summary: InterpreterMeetingDetails['summaries'][number],
+    languageCode: string
+  ) {
+    askWhatToDownload('summary', (formats) => {
+      void runInterpreterExport({
+        exportKey: getInterpreterSummaryAudioKey(summary.summaryId, languageCode),
+        fileNameStem: buildInterpreterExportFileName(details.meeting.meetingName, 'summary', languageCode),
+        formats,
+        languageCode,
+        ownerId: summary.summaryId,
+        ownerKind: 'summary'
+      });
+    });
+  }
+
+  function handleExportTranscript(item: InterpreterTranscriptLibraryItem) {
+    const selectedAudio = getSelectedTranscriptAudioLanguage(item);
+
+    if (!item.segmentId || !selectedAudio) {
+      return;
+    }
+
+    const { audioKey, languageCode } = selectedAudio;
+    const segmentId = item.segmentId;
+
+    askWhatToDownload('transcript', (formats) => {
+      void runInterpreterExport({
+        exportKey: audioKey,
+        fileNameStem: buildInterpreterExportFileName(details.meeting.meetingName, 'transcript', languageCode),
+        formats,
+        languageCode,
+        ownerId: segmentId,
+        ownerKind: 'transcript'
+      });
+    });
+  }
+
+  /**
+   * Asks what to take away, using the platform's own chooser.
+   *
+   * The same four choices in the same order for a summary and for a transcript.
+   * Somebody who has downloaded one should not have to read the list again to
+   * download the other.
+   */
+  function askWhatToDownload(
+    kind: 'summary' | 'transcript',
+    onChoose: (formats: InterpreterExportFormat[]) => void
+  ) {
+    const choices: Array<{ formats: InterpreterExportFormat[]; label: string }> = [
+      { formats: ['pdf'], label: 'PDF' },
+      { formats: ['word'], label: 'Word document' },
+      { formats: ['audio'], label: 'Audio (MP3)' },
+      { formats: ['audio', 'pdf', 'word'], label: 'All three' }
+    ];
+    const title = kind === 'summary' ? 'Download this summary' : 'Download this transcript';
+
+    if (Platform.OS === 'ios') {
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          cancelButtonIndex: choices.length,
+          options: [...choices.map((choice) => choice.label), 'Cancel'],
+          title
+        },
+        (index) => {
+          const choice = choices[index];
+
+          if (choice) {
+            onChoose(choice.formats);
+          }
+        }
+      );
+
+      return;
+    }
+
+    Alert.alert(title, 'Choose what to save.', [
+      ...choices.map((choice) => ({
+        onPress: () => onChoose(choice.formats),
+        text: choice.label
+      })),
+      { style: 'cancel' as const, text: 'Cancel' }
+    ]);
+  }
+
+  /**
+   * Builds the files, then hands them to the phone to save or send.
+   *
+   * Two files are shared one after the other rather than together, because the
+   * share sheet takes one file at a time — offering both at once would silently
+   * drop one of them.
+   */
+  /**
+   * Fetches each chosen document and offers it to the phone to keep or send.
+   *
+   * One at a time, because the share sheet takes a single file and offering
+   * three at once silently drops two. The document first, since that is what
+   * somebody filing this actually wants.
+   */
+  async function runInterpreterExport(input: {
+    exportKey: string;
+    fileNameStem: string;
+    formats: InterpreterExportFormat[];
+    languageCode: string;
+    ownerId: string;
+    ownerKind: 'summary' | 'transcript';
+  }) {
+    try {
+      setExportingSummaryKey(input.exportKey);
+
+      if (!(await Sharing.isAvailableAsync())) {
+        onError('This device cannot save files from the app.', 'Download needs attention');
+
+        return;
+      }
+
+      const order: InterpreterExportFormat[] = ['pdf', 'word', 'audio'];
+      const chosen = order.filter((format) => input.formats.includes(format));
+
+      for (const format of chosen) {
+        const extension = format === 'audio' ? 'mp3' : format === 'pdf' ? 'pdf' : 'docx';
+        const mimeType = format === 'audio'
+          ? 'audio/mpeg'
+          : format === 'pdf'
+            ? 'application/pdf'
+            : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+        const uti = format === 'audio'
+          ? 'public.mp3'
+          : format === 'pdf'
+            ? 'com.adobe.pdf'
+            : 'org.openxmlformats.wordprocessingml.document';
+
+        const file = await downloadInterpreterExport(await getIdToken(), {
+          fileName: `${input.fileNameStem}.${extension}`,
+          format,
+          languageCode: input.languageCode,
+          meetingId: details.meeting.meetingId,
+          ownerId: input.ownerId,
+          ownerKind: input.ownerKind,
+          voiceId: selectedVoiceId
+        });
+
+        await Sharing.shareAsync(file.uri, { mimeType, UTI: uti });
+      }
+    } catch (error) {
+      onError(getErrorMessage(error), 'Download needs attention');
+    } finally {
+      setExportingSummaryKey(null);
+    }
+  }
+
   async function handlePlayInterpreterSummary(
     summary: InterpreterMeetingDetails['summaries'][number],
     languageCode: string
@@ -10937,6 +11879,13 @@ function InterpreterRoom({
       return;
     }
 
+    summaryReadingCancelRef.current?.cancelled === false &&
+      (summaryReadingCancelRef.current.cancelled = true);
+
+    const token = { cancelled: false };
+
+    summaryReadingCancelRef.current = token;
+
     try {
       setPreparingSummaryAudioKey(audioKey);
 
@@ -10948,18 +11897,40 @@ function InterpreterRoom({
         return;
       }
 
-      const idToken = await getIdToken();
-      const result = await createInterpreterSummaryAudio(
-        idToken,
+      /**
+       * Starts on the opening passage and keeps asking for the rest.
+       *
+       * The same arrangement as a saved transcript: the playlist goes to the
+       * player, which fetches each new passage as it appears and joins them
+       * without a gap, and the loop stops the moment nobody is listening.
+       */
+      let state = await advanceInterpreterSummaryReading(
+        await getIdToken(),
         details.meeting.meetingId,
         summary.summaryId,
-        languageCode,
-        selectedVoiceId
+        { languageCode, voiceId: selectedVoiceId }
       );
 
-      await playInterpreterSummaryAudioPayload(summary.summaryId, result.audio);
+      if (token.cancelled) {
+        return;
+      }
+
+      setSummaryAudioSourceUri(state.playlistUrl);
+      setPendingSummaryAudioKey(audioKey);
+      setPreparingSummaryAudioKey(null);
+
+      while (!state.isComplete && !token.cancelled) {
+        state = await advanceInterpreterSummaryReading(
+          await getIdToken(),
+          details.meeting.meetingId,
+          summary.summaryId,
+          { languageCode, voiceId: selectedVoiceId }
+        );
+      }
     } catch (error) {
-      onError(getErrorMessage(error), 'Spoken summary needs attention');
+      if (!token.cancelled) {
+        onError(getErrorMessage(error), 'Spoken summary needs attention');
+      }
     } finally {
       setPreparingSummaryAudioKey(null);
     }
@@ -11302,6 +12273,7 @@ function InterpreterRoom({
           <InterpreterTranscriptLibraryModal
             activeAudioKey={activeTranscriptAudioKey}
             audioPlayerContext={transcriptAudioPlayerContext}
+            audioReadAloudProgress={readingProgress}
             audioPlayerDuration={transcriptAudioStatus.duration}
             audioPlayerMode={transcriptAudioPlayerMode}
             audioPlayerPosition={transcriptAudioStatus.currentTime}
@@ -11333,6 +12305,9 @@ function InterpreterRoom({
             onDeleteTranscripts={(segmentIds) => handleDeleteTranscriptSegments(segmentIds)}
             onFilterChange={setTranscriptLibraryFilter}
             onPlaySummary={(summary, languageCode) => void handlePlayInterpreterSummary(summary, languageCode)}
+            exportingSummaryKey={exportingSummaryKey}
+            onExportSummary={handleExportInterpreterSummary}
+            onExportTranscript={handleExportTranscript}
             onPrepareAudio={(item) => void handlePrepareTranscriptAudio(item)}
             onRefresh={loadTranscriptLibrary}
             onPlayAudio={(item) => void handlePlayTranscriptAudio(item)}

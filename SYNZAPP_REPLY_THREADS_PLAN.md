@@ -60,18 +60,42 @@ deliberately — it is why a thread with three videos opens quickly. Grouping by
 message from March with four replies would say **"1 reply"** because that is all
 that is in memory. Somebody would open the thread believing they had read it.
 
-**The count is stored on the parent, not derived on the phone.**
+### The correction that matters
 
-- `replyCount` on the message record, incremented in the same transaction that
-  stores a reply.
-- Incremented from `replyTo.messageId`, which the server already receives.
-- Never decremented below zero; a deleted reply decrements it.
-- The phone renders what the server sends and never counts rows itself.
+The first draft said the count should be stored on the server, "because the
+envelope carries the parent id in the clear for delivery."
 
-**Nothing about the count is private.** It is a number of replies, not their
-content, and the server already knows the parent id because the envelope
-carries it in the clear for delivery. No encrypted content is read to maintain
-it.
+**That is false, and checking it changed the design.** `replyTo` is passed to
+`encryptChatMessage` and sealed inside the payload. The word `replyTo` does not
+appear anywhere in the backend. The server has never known which message answers
+which, and the only thing sent beside the ciphertext is `mediaIds`, which
+carries a comment explaining why that exception exists.
+
+Making the server maintain the count would mean sending it the parent id in the
+clear on every reply. That is not content, but it is a **conversation graph** —
+who answered what, and when — for a product whose whole claim is that readable
+content stays on approved devices. It is the wrong price for a number.
+
+### Counted on the device, from the device's own store
+
+The phone already keeps the whole conversation in encrypted SQLite. Crucially,
+`local_messages` already stores `message_id`, `sender_uid`, `sent_at_ms` and
+`delivery_status` as **plain columns**, with only `payload` encrypted.
+
+So the count is a column and a query:
+
+- `reply_to_message_id TEXT` on `local_messages`, written when a message is
+  stored, read straight out of the reply reference the phone already has.
+- An index on it, and a `GROUP BY` for the counts. **Nothing is decrypted to
+  count**, which matters: a conversation of five thousand cannot be decrypted to
+  show one number, and JavaScript crypto over a whole thread is the freeze this
+  codebase has already been bitten by three times.
+- The server learns nothing new. No new field, no new route, no new metadata.
+
+**What this costs.** The count is only as complete as that device's history. A
+phone restored from a backup that does not reach back far enough will undercount
+on old messages until it has synced. That is honest and self-correcting, and it
+is a far smaller price than handing the server a map of who answers whom.
 
 ## 4. Tapping the count when the replies are not loaded
 
@@ -131,10 +155,9 @@ Bottom inset through `resolveScreenBottomInset`, and the keyboard through
 
 | File | Change |
 | --- | --- |
-| `backend/src/services/chatReplyThreads.ts` | **New.** Pure: counting rules, what a decrement may do, what a thread page contains. Tested. |
-| `backend/src/services/…messageService` | `replyCount` maintained in the store transaction. |
-| `backend/src/routes/chatRoutes.ts` | The replies page, App Check, active device, audit on both branches. |
-| `mobile/src/services/replyThreads.ts` | **New.** Pure: grouping loaded messages, the wording of the count, what the view shows while a fetch is in flight. Tested. |
+| **No backend change at all.** | The server never sees a reply and does not need to. |
+| `mobile/src/services/localChatSqlite.ts` | `reply_to_message_id` column and its index; the count query. |
+| `mobile/src/services/replyThreads.ts` | **New.** Pure: grouping consecutive replies, the wording of the count, which message a group belongs to. Tested. |
 | `mobile/src/components/messages/ReplyThreadView.tsx` | **New.** The focused view, for composing. |
 | `mobile/src/components/messages/ReplyGroup.tsx` | **New.** The bracket rail, the wireframe copy, the replies inside it. |
 | `mobile/src/components/messages/MessageThread.tsx` | The count row under a parent, grouping consecutive replies, and the scroll. |
@@ -162,8 +185,9 @@ Bottom inset through `resolveScreenBottomInset`, and the keyboard through
 ## 10. Done means
 
 - `npx tsc --noEmit` clean, both sides.
-- `npm test` (backend) and `npx vitest run` (mobile) pass, including the two
-  coverage tests that read the route file.
+- `npx vitest run` (mobile) passes. The backend is untouched, so its tests
+  should be unchanged — if they move, something was edited that should not have
+  been.
 - Built and installed on a device, and the log read rather than the exit code.
 - A reply sent from the focused view appears in the conversation, and the count
   on the parent is right after a reload — the case the stored count exists for.

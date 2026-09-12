@@ -5,6 +5,24 @@ import { fieldValue, firestore, storageBucket } from '../config/firebaseAdmin.js
 import { assertRateLimit } from '../middleware/rateLimit.js';
 import { SynzappRole } from '../types/auth.js';
 import { mapWithConcurrency, splitTextForSpeech } from './interpreterSpeechChunking.js';
+import { buildInterpreterSummaryInstructions } from './interpreterSummaryPrompt.js';
+import {
+  buildExportDigest,
+  buildInterpreterExportPdf,
+  buildInterpreterExportWord,
+  type InterpreterExportKind
+} from './interpreterExportDocument.js';
+import { selectProfileAdminContact } from './adminContactPolicy.js';
+import {
+  getReadAloudNeighbourText,
+  splitTranscriptIntoReadAloudSegments,
+  type ReadAloudSegment
+} from './interpreterReadAloudSegments.js';
+import {
+  buildHlsEventPlaylist,
+  measureAdtsDurationSeconds,
+  withHlsTimestamp
+} from './hlsPackedAudio.js';
 import {
   AiUsageFeatureId,
   estimateOpenAiCostUsd,
@@ -332,6 +350,15 @@ const TRANSCRIPT_COLLECTION = 'transcriptSegments';
 const TRANSCRIPT_AUDIO_ARTIFACT_COLLECTION = 'audioArtifacts';
 const TRANSLATION_COLLECTION = 'translationSegments';
 const SUMMARY_COLLECTION = 'summaries';
+/**
+ * How many passages are made at once, after the first.
+ *
+ * Four keeps production comfortably ahead of listening without firing so many
+ * requests together that the account is rate limited — which would fail the
+ * whole reading rather than merely making it slow.
+ */
+const READ_ALOUD_BATCH_SIZE = 4;
+
 const TRANSCRIPT_AUDIO_SIGNED_URL_TTL_MS = 60 * 60_000;
 
 const REALTIME_TARGET_LANGUAGE_CODES = new Set([
@@ -1333,6 +1360,867 @@ export async function listInterpreterTranscriptLibrary(decodedToken: DecodedIdTo
   }));
 
   return { transcripts: items };
+}
+
+export interface InterpreterTranscriptReadingState {
+  isComplete: boolean;
+  languageCode: string;
+  playlistUrl: string;
+  readingId: string;
+  segmentsReady: number;
+  segmentsTotal: number;
+}
+
+/**
+ * Produces one more piece of a reading, and hands back the playlist.
+ *
+ * **The listener drives this, one request at a time.** Cloud Run allocates CPU
+ * for the length of a request and throttles it to nothing in between, so work
+ * left running after a reply has been sent is starved — which is what killed
+ * the previous attempt halfway through long recordings. Producing exactly one
+ * segment per request keeps every second of work inside a request, makes a
+ * failure cost one retry instead of a whole recording, and stops the moment
+ * nobody is listening any more.
+ *
+ * The phone never assembles anything. It plays the playlist, and the player
+ * fetches new segments as they appear.
+ */
+export async function advanceInterpreterTranscriptReading(
+  decodedToken: DecodedIdToken,
+  meetingId: string,
+  segmentId: string,
+  input: InterpreterTranscriptAudioInput
+): Promise<InterpreterTranscriptReadingState> {
+  const context = await getAuthorizedInterpreterContext(decodedToken);
+  assertRateLimit(`interpreter:transcript-reading:${context.uid}`, 60_000, 240);
+
+  const meeting = await readAccessibleMeeting(context, meetingId);
+  const transcript = await readInterpreterTranscriptRecord(context, meeting, segmentId);
+  const language = getSupportedLanguage(input.languageCode);
+  const voiceId = normalizeInterpreterVoiceId(input.voiceId, getMeetingInterpreterVoiceId(meeting));
+
+  const sourceText = getInterpreterTranscriptSourceText(transcript);
+  const readAloudSegments = splitTranscriptIntoReadAloudSegments(sourceText);
+
+  if (!readAloudSegments.length) {
+    throw validationError('There is no saved transcript text to read aloud.');
+  }
+
+  return await advanceInterpreterReading({
+    context,
+    language,
+    meeting,
+    meetingId,
+    ownerId: segmentId,
+    readAloudSegments,
+    readingRef: getInterpreterTranscriptReadingRef(
+      context,
+      meetingId,
+      segmentId,
+      getInterpreterReadingId(segmentId, language.code, voiceId, createInterpreterTextFingerprint(sourceText))
+    ),
+    readingId: getInterpreterReadingId(
+      segmentId,
+      language.code,
+      voiceId,
+      createInterpreterTextFingerprint(sourceText)
+    ),
+    // A saved transcript is stored in whatever was spoken, so each passage is
+    // put into the chosen language on its way to being read.
+    resolveSpokenText: (segment) => getInterpreterTranscriptSpokenText({
+      context,
+      language,
+      meeting,
+      sourceLanguageCode: transcript.sourceLanguageCode || transcript.detectedLanguageCode || null,
+      sourceText: segment.text
+    }),
+    voiceId
+  });
+}
+
+/**
+ * Makes one more piece of a spoken meeting summary.
+ *
+ * The same pipeline as a saved transcript, with one difference: a summary is
+ * already written in the language it was asked for, so its passages go straight
+ * to being spoken with nothing to translate.
+ */
+export type InterpreterExportFormat = 'audio' | 'pdf' | 'word';
+
+/**
+ * The files themselves, not links to them.
+ *
+ * Nothing is written to storage: an export that is never stored cannot outlive
+ * a retention policy, cannot be swept up later and leaves no link that keeps
+ * working after the person who made it has left.
+ */
+export interface InterpreterExportResult {
+  audio: Buffer | null;
+  digest: { full: string; short: string };
+  fileNameStem: string;
+  pdf: Buffer | null;
+  word: Buffer | null;
+}
+
+/**
+ * Builds the files somebody asked to take away with them.
+ *
+ * Made on request rather than kept, because most summaries are never exported
+ * and storing a Word file and an MP3 for every one of them would cost a great
+ * deal to serve nobody. Both are signed for a short while and then expire.
+ *
+ * The audio is MP3 on purpose. A reading is played as HLS, which is right for
+ * playing and useless as a file — nothing outside this app opens a playlist of
+ * segments — so an export gets the one format every device and every mail
+ * client can already play.
+ */
+export async function exportInterpreterSummary(
+  decodedToken: DecodedIdToken,
+  input: {
+    formats: InterpreterExportFormat[];
+    languageCode: string;
+    meetingId: string;
+    summaryId: string;
+    voiceId?: string | null;
+  }
+): Promise<InterpreterExportResult> {
+  const context = await getAuthorizedInterpreterContext(decodedToken);
+  assertRateLimit(`interpreter:summary-export:${context.uid}`, 60_000, 20);
+
+  const meeting = await readAccessibleMeeting(context, input.meetingId);
+  const language = getSupportedLanguage(input.languageCode);
+  const voiceId = normalizeInterpreterVoiceId(input.voiceId, getMeetingInterpreterVoiceId(meeting));
+
+  const summarySnapshot = await context.organizationRef
+    .collection(INTERPRETER_MEETINGS_COLLECTION)
+    .doc(safeDocumentId(input.meetingId))
+    .collection(SUMMARY_COLLECTION)
+    .doc(safeDocumentId(input.summaryId))
+    .get();
+
+  const summary = summarySnapshot.exists
+    ? normalizeInterpreterSummaryRecord(summarySnapshot.data() as Partial<InterpreterSummaryRecord>)
+    : null;
+
+  if (!summary || summary.meetingId !== input.meetingId || summary.tenantId !== context.tenantId) {
+    throw notFoundError('Interpreter summary was not found.');
+  }
+
+  const summaryText = (summary.summaryTextByLanguage[language.code] || '').trim();
+
+  if (!summaryText) {
+    throw validationError('There is no summary in that language to export.');
+  }
+
+  await assertInterpreterExportAllowed({
+    context,
+    meetingId: input.meetingId,
+    ownerId: summary.summaryId
+  });
+
+  const result = await buildInterpreterExportFiles({
+    context,
+    createdAtIso: summary.createdAtIso,
+    formats: input.formats,
+    kind: 'summary',
+    language,
+    meeting,
+    meetingId: input.meetingId,
+    ownerId: summary.summaryId,
+    spokenLanguageLabel: null,
+    renderAudio: async () => {
+      const audio = await requestOpenAiSummarySpeechAudio({
+        context,
+        language,
+        meeting,
+        summary,
+        summaryText,
+        voiceId
+      });
+
+      return Buffer.from(audio.audioBase64, 'base64');
+    },
+    text: summaryText
+  });
+
+  await writeInterpreterAuditEvent({
+    context,
+    meetingId: input.meetingId,
+    metadata: {
+      // The digest is what makes a disputed document checkable later: recompute
+      // it from the text and compare against this entry.
+      contentDigest: result.digest.full,
+      formats: input.formats.join(','),
+      languageCode: language.code,
+      summaryId: summary.summaryId
+    },
+    summary: `Exported the meeting summary for "${meeting.meetingName}".`,
+    type: 'INTERPRETER_SUMMARY_EXPORTED'
+  });
+
+  return result;
+}
+
+/**
+ * Renders whichever files were asked for, at the same time.
+ *
+ * Shared by summaries and saved transcripts so the two can never look like they
+ * came from different products. Only the audio differs between them, which is
+ * why it is handed in rather than decided here.
+ */
+/**
+ * The same download, for a saved transcript.
+ *
+ * Deliberately identical to the summary export in everything but its content.
+ * Somebody who exports a transcript one day and a summary the next should get
+ * two documents that plainly came from the same system.
+ */
+export async function exportInterpreterTranscript(
+  decodedToken: DecodedIdToken,
+  input: {
+    formats: InterpreterExportFormat[];
+    languageCode: string;
+    meetingId: string;
+    segmentId: string;
+    voiceId?: string | null;
+  }
+): Promise<InterpreterExportResult> {
+  const context = await getAuthorizedInterpreterContext(decodedToken);
+  assertRateLimit(`interpreter:transcript-export:${context.uid}`, 60_000, 20);
+
+  await assertInterpreterExportAllowed({
+    context,
+    meetingId: input.meetingId,
+    ownerId: input.segmentId
+  });
+
+  const meeting = await readAccessibleMeeting(context, input.meetingId);
+  const transcript = await readInterpreterTranscriptRecord(context, meeting, input.segmentId);
+  const language = getSupportedLanguage(input.languageCode);
+  const voiceId = normalizeInterpreterVoiceId(input.voiceId, getMeetingInterpreterVoiceId(meeting));
+
+  const sourceText = getInterpreterTranscriptSourceText(transcript);
+  const text = (await getInterpreterTranscriptSpokenText({
+    context,
+    language,
+    meeting,
+    sourceLanguageCode: transcript.sourceLanguageCode || transcript.detectedLanguageCode || null,
+    sourceText
+  })).trim();
+
+  if (!text) {
+    throw validationError('There is no transcript text to export.');
+  }
+
+  const spokenLanguageCode = transcript.sourceLanguageCode || transcript.detectedLanguageCode || null;
+  const spokenLanguage = spokenLanguageCode ? LANGUAGE_BY_CODE.get(spokenLanguageCode) : null;
+
+  const result = await buildInterpreterExportFiles({
+    context,
+    createdAtIso: transcript.createdAtIso,
+    formats: input.formats,
+    kind: 'transcript',
+    language,
+    meeting,
+    meetingId: input.meetingId,
+    ownerId: input.segmentId,
+    // Named so the document can say plainly when it is a translation of what
+    // was said rather than a record of it.
+    spokenLanguageLabel: spokenLanguage?.label || null,
+    renderAudio: async () => {
+      const audio = await requestOpenAiSavedTranscriptSpeechAudio({
+        context,
+        language,
+        meeting,
+        spokenText: text,
+        voiceId
+      });
+
+      return audio.audioBuffer;
+    },
+    text
+  });
+
+  await writeInterpreterAuditEvent({
+    context,
+    meetingId: input.meetingId,
+    metadata: {
+      contentDigest: result.digest.full,
+      formats: input.formats.join(','),
+      languageCode: language.code,
+      segmentId: input.segmentId,
+      spokenLanguageCode: spokenLanguageCode || ''
+    },
+    summary: `Exported a saved transcript from "${meeting.meetingName}".`,
+    type: 'INTERPRETER_TRANSCRIPT_EXPORTED'
+  });
+
+  return result;
+}
+
+/**
+ * Refuses an export to anybody who has not been granted one.
+ *
+ * Reading a summary in the app and walking out with a file are different acts,
+ * and only the second is gated here. Administrators hold this inherently;
+ * everybody else is granted it deliberately, from admin.synzapp.com.
+ *
+ * **A refusal is audited too.** Denied attempts are the entries a reviewer
+ * actually looks for, and an audit trail that records only successes says
+ * nothing about who tried.
+ */
+async function assertInterpreterExportAllowed(input: {
+  context: AuthorizedInterpreterContext;
+  meetingId: string;
+  ownerId: string;
+}): Promise<void> {
+  const allowed =
+    input.context.role === 'SYSTEM_ADMIN' ||
+    input.context.role === 'ORG_ADMIN' ||
+    input.context.permissions.includes('interpreter.export');
+
+  if (allowed) {
+    return;
+  }
+
+  await writeInterpreterAuditEvent({
+    context: input.context,
+    meetingId: input.meetingId,
+    metadata: { ownerId: input.ownerId, outcome: 'denied' },
+    summary: 'Refused a meeting document export: the account does not hold interpreter.export.',
+    type: 'INTERPRETER_EXPORT_DENIED'
+  }).catch(() => undefined);
+
+  /**
+   * Names the permission and who can grant it.
+   *
+   * "You do not have permission" tells somebody they are stuck without telling
+   * them how to get unstuck, and the next thing that happens is a support call.
+   * The wording here matches the label in the role settings exactly, so an
+   * admin can find it without translating.
+   */
+  throw authorizationError(
+    'You do not have permission to download meeting documents. Ask your company admin to turn on "Export meeting documents" for your role in Settings, then try again.'
+  );
+}
+
+async function buildInterpreterExportFiles(input: {
+  context: AuthorizedInterpreterContext;
+  createdAtIso: string;
+  formats: InterpreterExportFormat[];
+  kind: InterpreterExportKind;
+  language: InterpreterLanguage;
+  meeting: InterpreterMeetingRecord;
+  meetingId: string;
+  ownerId: string;
+  renderAudio: () => Promise<Buffer>;
+  spokenLanguageLabel: string | null;
+  text: string;
+}): Promise<InterpreterExportResult> {
+  const expiresAtMs = Date.now() + TRANSCRIPT_AUDIO_SIGNED_URL_TTL_MS;
+  const fileNameStem = buildInterpreterExportFileNameStem(
+    input.meeting.meetingName,
+    input.kind,
+    input.language.code
+  );
+
+  // Read once, not once per format: both documents want the same two answers.
+  const [companyName, departmentAdminName] = await Promise.all([
+    readInterpreterCompanyName(input.context),
+    readInterpreterDepartmentAdminName(input.context)
+  ]);
+
+  const documentInput = {
+    companyName,
+    createdAtIso: input.createdAtIso,
+    createdByDisplayName: input.meeting.createdByDisplayName || 'a Synzapp user',
+    departmentAdminName,
+    kind: input.kind,
+    languageLabel: input.language.label,
+    meetingName: input.meeting.meetingName,
+    spokenLanguageLabel: input.spokenLanguageLabel,
+    text: input.text
+  };
+
+  const [word, pdf, audio] = await Promise.all([
+    input.formats.includes('word') ? buildInterpreterExportWord(documentInput) : Promise.resolve(null),
+    input.formats.includes('pdf') ? buildInterpreterExportPdf(documentInput) : Promise.resolve(null),
+    input.formats.includes('audio') ? input.renderAudio() : Promise.resolve(null)
+  ]);
+
+  return {
+    audio,
+    digest: buildExportDigest(input.text),
+    fileNameStem,
+    pdf,
+    word
+  };
+}
+
+function buildInterpreterExportFileNameStem(
+  meetingName: string,
+  kind: InterpreterExportKind,
+  languageCode: string
+): string {
+  const safeName = meetingName
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60) || 'meeting';
+
+  return `${safeName}-${kind}-${languageCode}`;
+}
+
+async function readInterpreterCompanyName(context: AuthorizedInterpreterContext): Promise<string> {
+  const snapshot = await context.organizationRef.get().catch(() => null);
+  const companyName = snapshot?.data()?.companyName;
+
+  return typeof companyName === 'string' && companyName.trim() ? companyName.trim() : 'Synzapp';
+}
+
+/**
+ * The reader's department admin, or nothing.
+ *
+ * Nothing is a perfectly good answer: a document that names no admin is honest,
+ * whereas one that names the wrong person is worse than one that names nobody.
+ * Any failure here returns null rather than losing the whole export.
+ */
+async function readInterpreterDepartmentAdminName(
+  context: AuthorizedInterpreterContext
+): Promise<string | null> {
+  try {
+    const snapshot = await context.organizationRef
+      .collection('users')
+      .where('role', 'in', ['DEPARTMENT_ADMIN', 'ORG_ADMIN'])
+      .limit(50)
+      .get();
+
+    const candidates = snapshot.docs.map((doc) => {
+      const data = doc.data();
+
+      return {
+        departmentId: typeof data.departmentId === 'string' ? data.departmentId : null,
+        displayName: typeof data.displayName === 'string' ? data.displayName : '',
+        role: (typeof data.role === 'string' ? data.role : undefined) as SynzappRole | undefined,
+        status: typeof data.status === 'string' ? data.status : 'ACTIVE',
+        uid: doc.id
+      };
+    });
+
+    const selected = selectProfileAdminContact({
+      candidates,
+      readerDepartmentId: context.user.departmentId || null,
+      readerUid: context.uid
+    });
+
+    return selected?.displayName || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function advanceInterpreterSummaryReading(
+  decodedToken: DecodedIdToken,
+  input: {
+    languageCode: string;
+    meetingId: string;
+    summaryId: string;
+    voiceId?: string | null;
+  }
+): Promise<InterpreterTranscriptReadingState> {
+  const context = await getAuthorizedInterpreterContext(decodedToken);
+  assertRateLimit(`interpreter:summary-reading:${context.uid}`, 60_000, 240);
+
+  if (!env.interpreterSummaryEnabled) {
+    throw validationError('Interpreter summaries are disabled for this organization.');
+  }
+
+  const meeting = await readAccessibleMeeting(context, input.meetingId);
+  const language = getSupportedLanguage(input.languageCode);
+  const voiceId = normalizeInterpreterVoiceId(input.voiceId, getMeetingInterpreterVoiceId(meeting));
+
+  const summarySnapshot = await context.organizationRef
+    .collection(INTERPRETER_MEETINGS_COLLECTION)
+    .doc(safeDocumentId(input.meetingId))
+    .collection(SUMMARY_COLLECTION)
+    .doc(safeDocumentId(input.summaryId))
+    .get();
+
+  const summary = summarySnapshot.exists
+    ? normalizeInterpreterSummaryRecord(summarySnapshot.data() as Partial<InterpreterSummaryRecord>)
+    : null;
+
+  if (!summary || summary.meetingId !== input.meetingId || summary.tenantId !== context.tenantId) {
+    throw notFoundError('Interpreter summary was not found.');
+  }
+
+  if (!summary.languageCodes.includes(language.code)) {
+    throw validationError('That summary language is not available for this meeting summary.');
+  }
+
+  const summaryText = (summary.summaryTextByLanguage[language.code] || '').trim();
+  const readAloudSegments = splitTranscriptIntoReadAloudSegments(summaryText);
+
+  if (!readAloudSegments.length) {
+    throw validationError('There is no summary text to read aloud.');
+  }
+
+  const readingId = getInterpreterReadingId(
+    summary.summaryId,
+    language.code,
+    voiceId,
+    createInterpreterTextFingerprint(summaryText)
+  );
+
+  return await advanceInterpreterReading({
+    context,
+    language,
+    meeting,
+    meetingId: input.meetingId,
+    ownerId: summary.summaryId,
+    readAloudSegments,
+    readingId,
+    readingRef: context.organizationRef
+      .collection(INTERPRETER_MEETINGS_COLLECTION)
+      .doc(safeDocumentId(input.meetingId))
+      .collection(SUMMARY_COLLECTION)
+      .doc(safeDocumentId(summary.summaryId))
+      .collection('summaryReadings')
+      .doc(safeDocumentId(readingId)),
+    // Already written in the language it was asked for.
+    resolveSpokenText: async (segment) => segment.text,
+    voiceId
+  });
+}
+
+/**
+ * The one implementation of "make the next piece of a reading".
+ *
+ * Shared by saved transcripts and by meeting summaries. They differ only in
+ * where their text comes from and whether it needs translating first, so they
+ * hand that in and everything else — segmenting, speaking, timing, storing and
+ * publishing the playlist — happens here once. Two copies of this would drift,
+ * and the half that drifted would be the half nobody was testing.
+ */
+async function advanceInterpreterReading(input: {
+  context: AuthorizedInterpreterContext;
+  language: InterpreterLanguage;
+  meeting: InterpreterMeetingRecord;
+  meetingId: string;
+  /** Whatever the reading belongs to: a transcript segment, or a summary. */
+  ownerId: string;
+  readAloudSegments: ReadAloudSegment[];
+  readingId: string;
+  readingRef: FirebaseFirestore.DocumentReference;
+  resolveSpokenText: (segment: ReadAloudSegment) => Promise<string>;
+  voiceId: string;
+}): Promise<InterpreterTranscriptReadingState> {
+  const stored = normalizeInterpreterTranscriptReading((await input.readingRef.get()).data());
+  const readySegments = stored?.segments || [];
+
+  const publish = (segments: InterpreterReadingSegmentRecord[], isComplete: boolean) =>
+    publishInterpreterReadingPlaylist({
+      context: input.context,
+      isComplete,
+      languageCode: input.language.code,
+      meetingId: input.meetingId,
+      readingId: input.readingId,
+      segmentId: input.ownerId,
+      segments,
+      segmentsTotal: input.readAloudSegments.length
+    });
+
+  if (readySegments.length >= input.readAloudSegments.length) {
+    return await publish(readySegments, true);
+  }
+
+  /**
+   * One passage first, then several at a time.
+   *
+   * The opening passage is the entire wait before anybody hears anything, so it
+   * is made alone and returned the moment it exists. After that nobody is
+   * waiting on any single passage — only on staying ahead of the playback — so
+   * the rest are made together. Producing them one after another is what made
+   * Prepare take minutes on a long transcript.
+   */
+  const batchSize = readySegments.length === 0 ? 1 : READ_ALOUD_BATCH_SIZE;
+  const pending = input.readAloudSegments.slice(
+    readySegments.length,
+    readySegments.length + batchSize
+  );
+
+  let startSeconds = readySegments.reduce((total, segment) => total + segment.durationSeconds, 0);
+
+  const produced = await mapWithConcurrency(pending, pending.length, async (segment) => {
+    const spokenText = await input.resolveSpokenText(segment);
+    const audio = await synthesizeInterpreterReadingSegment({
+      context: input.context,
+      language: input.language,
+      meeting: input.meeting,
+      neighbours: getReadAloudNeighbourText(input.readAloudSegments, segment.index),
+      spokenText,
+      voiceId: input.voiceId
+    });
+
+    return { audio, durationSeconds: measureAdtsDurationSeconds(audio), index: segment.index };
+  });
+
+  /**
+   * Timestamped and stored in order, however they finished.
+   *
+   * A passage's HLS timestamp is where it begins in the reading, which depends
+   * on everything before it. Stamping them as they came back would put the
+   * timeline out of step with the audio.
+   */
+  const newSegments: InterpreterReadingSegmentRecord[] = [];
+
+  for (const item of produced.sort((first, second) => first.index - second.index)) {
+    const storagePath = getInterpreterReadingStoragePath(
+      input.context.tenantId,
+      input.meetingId,
+      input.ownerId,
+      input.readingId,
+      `segment-${String(item.index).padStart(3, '0')}.aac`
+    );
+
+    await storageBucket.file(storagePath).save(withHlsTimestamp(item.audio, startSeconds), {
+      contentType: 'audio/aac',
+      metadata: { cacheControl: 'private, max-age=3600' },
+      resumable: false
+    });
+
+    newSegments.push({ durationSeconds: item.durationSeconds, index: item.index, storagePath });
+    startSeconds += item.durationSeconds;
+  }
+
+  const segments = [...readySegments, ...newSegments];
+  const isComplete = segments.length >= input.readAloudSegments.length;
+
+  await input.readingRef.set(stripUndefined({
+    isComplete,
+    languageCode: input.language.code,
+    readingId: input.readingId,
+    segments,
+    segmentsTotal: input.readAloudSegments.length,
+    updatedAt: fieldValue.serverTimestamp(),
+    updatedAtIso: new Date().toISOString(),
+    voice: input.voiceId
+  }), { merge: true });
+
+  return await publish(segments, isComplete);
+}
+
+interface InterpreterReadingSegmentRecord {
+  durationSeconds: number;
+  index: number;
+  storagePath: string;
+}
+
+/**
+ * Rewrites the playlist so the player can find what has just been added.
+ *
+ * Written with `no-cache` deliberately. The player re-reads this file to
+ * discover new segments, and a cached copy would leave it convinced the reading
+ * ended wherever it happened to be when it first looked.
+ */
+async function publishInterpreterReadingPlaylist(input: {
+  context: AuthorizedInterpreterContext;
+  isComplete: boolean;
+  languageCode: string;
+  meetingId: string;
+  readingId: string;
+  segmentId: string;
+  segments: InterpreterReadingSegmentRecord[];
+  segmentsTotal: number;
+}): Promise<InterpreterTranscriptReadingState> {
+  const expiresAtMs = Date.now() + TRANSCRIPT_AUDIO_SIGNED_URL_TTL_MS;
+  const ordered = [...input.segments].sort((first, second) => first.index - second.index);
+
+  const hlsSegments = await Promise.all(ordered.map(async (segment) => {
+    const [url] = await storageBucket.file(segment.storagePath).getSignedUrl({
+      action: 'read',
+      expires: expiresAtMs,
+      version: 'v4'
+    });
+
+    return { durationSeconds: segment.durationSeconds, url };
+  }));
+
+  const playlistPath = getInterpreterReadingStoragePath(
+    input.context.tenantId,
+    input.meetingId,
+    input.segmentId,
+    input.readingId,
+    'playlist.m3u8'
+  );
+
+  await storageBucket.file(playlistPath).save(
+    buildHlsEventPlaylist({ isComplete: input.isComplete, segments: hlsSegments }),
+    {
+      contentType: 'application/vnd.apple.mpegurl',
+      metadata: { cacheControl: 'no-cache, no-store, max-age=0' },
+      resumable: false
+    }
+  );
+
+  const [playlistUrl] = await storageBucket.file(playlistPath).getSignedUrl({
+    action: 'read',
+    expires: expiresAtMs,
+    version: 'v4'
+  });
+
+  return {
+    isComplete: input.isComplete,
+    languageCode: input.languageCode,
+    playlistUrl,
+    readingId: input.readingId,
+    segmentsReady: ordered.length,
+    segmentsTotal: input.segmentsTotal
+  };
+}
+
+/**
+ * Speaks one segment of a reading.
+ *
+ * **AAC, because HLS carries packed audio as AAC** — and because a segment has
+ * to be a self-contained playable file, which is what lets the player join them
+ * without a gap.
+ *
+ * The words either side are supplied and marked as not to be read. A segment
+ * rendered in ignorance of its neighbours opens cold and closes off, and a long
+ * reading arrives as a series of separate announcements rather than one person
+ * reading. This is the technique the long-form speech platforms document, and
+ * it is the difference between stitched and continuous.
+ */
+async function synthesizeInterpreterReadingSegment(input: {
+  context: AuthorizedInterpreterContext;
+  language: InterpreterLanguage;
+  meeting: InterpreterMeetingRecord;
+  neighbours: { nextText: string; previousText: string };
+  spokenText: string;
+  voiceId: string;
+}): Promise<Buffer> {
+  if (!env.openAiApiKey) {
+    throw serviceError('Interpreter spoken playback is not configured on the backend.');
+  }
+
+  const text = input.spokenText.trim();
+
+  if (!text) {
+    throw validationError('There is no saved transcript text to speak.');
+  }
+
+  const instructions = [
+    buildInterpreterSpeechInstructions({
+      context: `This is from the meeting "${input.meeting.meetingName}".`,
+      languageLabel: input.language.label
+    }),
+    'You are reading one passage of a longer document aloud, without pause, as one continuous reading.',
+    input.neighbours.previousText
+      ? `The words immediately before this passage were: "${input.neighbours.previousText}". Carry straight on from them in the same voice and at the same pace. Do not read them again.`
+      : 'This is the opening of the document.',
+    input.neighbours.nextText
+      ? `The words immediately after this passage will be: "${input.neighbours.nextText}". Leave the ending open so they follow naturally. Do not read them.`
+      : 'This is the end of the document, so let the ending settle.',
+    'Read only the passage given to you.'
+  ].join(' ');
+
+  const response = await fetch('https://api.openai.com/v1/audio/speech', {
+    body: JSON.stringify({
+      input: text,
+      instructions,
+      model: env.openAiInterpreterSegmentTtsModel,
+      response_format: 'aac',
+      voice: input.voiceId
+    }),
+    headers: {
+      Authorization: `Bearer ${env.openAiApiKey}`,
+      'Content-Type': 'application/json',
+      'OpenAI-Safety-Identifier': createSafetyIdentifier(input.context.tenantId, input.context.uid)
+    },
+    method: 'POST',
+    signal: AbortSignal.timeout(env.openAiRequestTimeoutMs)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+
+    console.warn('OpenAI interpreter reading segment failed:', {
+      characters: text.length,
+      error: errorText.slice(0, 300),
+      model: env.openAiInterpreterSegmentTtsModel,
+      status: response.status
+    });
+
+    throw serviceError('This part of the reading could not be created.');
+  }
+
+  return Buffer.from(await response.arrayBuffer());
+}
+
+function getInterpreterReadingId(
+  segmentId: string,
+  languageCode: string,
+  voiceId: string,
+  textFingerprint: string
+): string {
+  return `rdg_${createHash('sha256')
+    .update([segmentId, languageCode, voiceId, textFingerprint].join(':'))
+    .digest('hex')
+    .slice(0, 28)}`;
+}
+
+function getInterpreterTranscriptReadingRef(
+  context: AuthorizedInterpreterContext,
+  meetingId: string,
+  segmentId: string,
+  readingId: string
+): FirebaseFirestore.DocumentReference {
+  return context.organizationRef
+    .collection(INTERPRETER_MEETINGS_COLLECTION)
+    .doc(safeDocumentId(meetingId))
+    .collection(TRANSCRIPT_COLLECTION)
+    .doc(safeDocumentId(segmentId))
+    .collection('transcriptReadings')
+    .doc(safeDocumentId(readingId));
+}
+
+/**
+ * Keeps only segments that are complete and in order.
+ *
+ * A segment missing its path or its duration would put a hole in the playlist,
+ * and the player would either stall on it or skip past it. Dropping everything
+ * from the first bad one onwards means the reading is short and correct rather
+ * than long and wrong — and the next request simply makes it again.
+ */
+function normalizeInterpreterTranscriptReading(
+  data: FirebaseFirestore.DocumentData | undefined
+): { segments: InterpreterReadingSegmentRecord[] } | null {
+  if (!data || !Array.isArray(data.segments)) {
+    return null;
+  }
+
+  const segments: InterpreterReadingSegmentRecord[] = [];
+
+  for (const [index, raw] of [...data.segments]
+    .sort((first, second) => (first?.index ?? 0) - (second?.index ?? 0))
+    .entries()) {
+    if (
+      !raw ||
+      typeof raw.storagePath !== 'string' ||
+      typeof raw.durationSeconds !== 'number' ||
+      raw.index !== index
+    ) {
+      break;
+    }
+
+    segments.push({
+      durationSeconds: raw.durationSeconds,
+      index: raw.index,
+      storagePath: raw.storagePath
+    });
+  }
+
+  return { segments };
 }
 
 export async function prepareInterpreterTranscriptAudio(
@@ -2457,6 +3345,86 @@ async function deleteStorageFileIfExists(storagePath: string) {
   }
 }
 
+/**
+ * Translates one passage for reading aloud.
+ *
+ * **Deliberately not the live interpreter's translation.** That one carries
+ * fifteen lines of instruction and returns a JSON envelope, because it is
+ * interpreting a live conversation where getting the tone and the hedging right
+ * matters in the moment. Reading a saved transcript is a plain translation, and
+ * paying that cost per passage is what made Play sit there before saying
+ * anything.
+ *
+ * Short prompt, plain text back, and its own model setting so a faster one can
+ * be used here without going anywhere near the live room.
+ */
+async function requestInterpreterReadAloudTranslation(input: {
+  context: AuthorizedInterpreterContext;
+  sourceText: string;
+  targetLanguage: InterpreterLanguage;
+}): Promise<string> {
+  if (!env.openAiApiKey) {
+    throw serviceError('Interpreter translation is not configured on the backend.');
+  }
+
+  const response = await fetch('https://api.openai.com/v1/responses', {
+    body: JSON.stringify({
+      input: [
+        {
+          content: [
+            {
+              text: [
+                `Translate the passage below into ${input.targetLanguage.label}.`,
+                'Translate everything. Do not summarise, shorten, explain or answer it.',
+                'Keep names, numbers, dates and measurements exactly as they are.',
+                'Write it the way somebody would say it aloud.',
+                'Reply with the translation only, and nothing else.',
+                '',
+                input.sourceText
+              ].join('\n'),
+              type: 'input_text'
+            }
+          ],
+          role: 'user'
+        }
+      ],
+      model: env.openAiInterpreterReadAloudModel
+    }),
+    headers: {
+      Authorization: `Bearer ${env.openAiApiKey}`,
+      'Content-Type': 'application/json',
+      'OpenAI-Safety-Identifier': createSafetyIdentifier(input.context.tenantId, input.context.uid)
+    },
+    method: 'POST',
+    signal: AbortSignal.timeout(env.openAiRequestTimeoutMs)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+
+    console.warn('Interpreter read-aloud translation failed:', response.status, errorText.slice(0, 300));
+
+    throw serviceError('This part of the reading could not be translated.');
+  }
+
+  const body = await response.json() as {
+    output_text?: string;
+    output?: Array<{ content?: Array<{ text?: string }> }>;
+  };
+
+  const text = (
+    body.output_text ||
+    body.output?.flatMap((item) => item.content || []).map((content) => content.text).filter(Boolean).join('\n') ||
+    ''
+  ).trim();
+
+  if (!text) {
+    throw serviceError('This part of the reading could not be translated.');
+  }
+
+  return text;
+}
+
 async function getInterpreterTranscriptSpokenText({
   context,
   language,
@@ -2476,15 +3444,13 @@ async function getInterpreterTranscriptSpokenText({
     return sourceText;
   }
 
-  const result = await requestOpenAiInterpreterSegmentTranslation({
+  return await requestInterpreterReadAloudTranslation({
     context,
-    meeting,
     sourceText,
     targetLanguage: language
   });
-
-  return result.interpretedText;
 }
+
 
 function isSameInterpreterReadAloudLanguage(
   sourceLanguageCode?: string | null,
@@ -2511,6 +3477,16 @@ function getInterpreterTranscriptSourceText(transcript: InterpreterTranscriptRec
   return normalizeInterpreterLiveTranscriptForStorage(transcript.cleanedText || transcript.text || '');
 }
 
+/**
+ * Bumped when a change makes previously generated audio wrong.
+ *
+ * Audio is cached against the text it was made from, so a fix to how it is
+ * made does not reach anybody who already has a recording — they keep hearing
+ * the broken one for ever. Version 2 retires everything the part-stitching
+ * pipeline produced, which duplicated text across the seams.
+ */
+const INTERPRETER_TRANSCRIPT_AUDIO_PIPELINE_VERSION = 'v2';
+
 function getInterpreterTranscriptAudioArtifactId(
   segmentId: string,
   languageCode: string,
@@ -2518,7 +3494,13 @@ function getInterpreterTranscriptAudioArtifactId(
   textFingerprint: string
 ): string {
   return `ita_${createHash('sha256')
-    .update(`${segmentId}:${languageCode}:${voiceId}:${textFingerprint}`)
+    .update([
+      segmentId,
+      languageCode,
+      voiceId,
+      textFingerprint,
+      INTERPRETER_TRANSCRIPT_AUDIO_PIPELINE_VERSION
+    ].join(':'))
     .digest('hex')
     .slice(0, 28)}`;
 }
@@ -2552,6 +3534,26 @@ function getInterpreterTranscriptAudioStoragePath(
     'transcriptAudio',
     safeDocumentId(segmentId),
     `${safeDocumentId(artifactId)}.mp3`
+  ].join('/');
+}
+
+/** Where a reading's segments and its playlist live, side by side. */
+function getInterpreterReadingStoragePath(
+  tenantId: string,
+  meetingId: string,
+  segmentId: string,
+  readingId: string,
+  fileName: string
+): string {
+  return [
+    'organizations',
+    safeDocumentId(tenantId),
+    'interpreterMeetings',
+    safeDocumentId(meetingId),
+    'transcriptReadings',
+    safeDocumentId(segmentId),
+    safeDocumentId(readingId),
+    fileName
   ].join('/');
 }
 
@@ -3490,12 +4492,58 @@ function compactUniqueUids(uids: Array<string | null | undefined>): string[] {
     .filter(Boolean))];
 }
 
+/**
+ * Writes the summary, one request per language, at the same time.
+ *
+ * It used to ask for every language inside a single JSON reply, which meant the
+ * model wrote them **one after another** in one response — a two-language
+ * meeting waited for two full summaries before anything came back. Asking
+ * separately lets them be written at the same time, so the wait is one summary
+ * long however many languages are wanted.
+ *
+ * A language that fails is left out rather than taking the others down with it.
+ * A summary in two languages out of three is useful; an error is not.
+ */
 async function requestOpenAiMeetingSummary(
   meeting: InterpreterMeetingRecord,
   languageCodes: string[],
   transcriptText: string,
   context: AuthorizedInterpreterContext
 ): Promise<Record<string, string>> {
+  const results = await mapWithConcurrency(languageCodes, 4, async (languageCode) => {
+    try {
+      const text = await requestOpenAiMeetingSummaryForLanguage(
+        meeting,
+        languageCode,
+        transcriptText,
+        context
+      );
+
+      return text ? ([languageCode, text] as const) : null;
+    } catch (error) {
+      console.warn('Interpreter summary language failed:', {
+        error: error instanceof Error ? error.message : String(error),
+        languageCode,
+        meetingId: meeting.meetingId
+      });
+
+      return null;
+    }
+  });
+
+  return Object.fromEntries(
+    results.filter((entry): entry is readonly [string, string] => Boolean(entry))
+  );
+}
+
+async function requestOpenAiMeetingSummaryForLanguage(
+  meeting: InterpreterMeetingRecord,
+  languageCode: string,
+  transcriptText: string,
+  context: AuthorizedInterpreterContext
+): Promise<string> {
+  const language = LANGUAGE_BY_CODE.get(languageCode);
+
   const response = await fetch('https://api.openai.com/v1/responses', {
     body: JSON.stringify({
       input: [
@@ -3503,20 +4551,12 @@ async function requestOpenAiMeetingSummary(
           content: [
             {
               text: [
-                'You are Synzapp Interpreter, a professional human-style workplace interpreter and meeting facilitator.',
-                'Create a useful comprehensive spoken recap for people who need to understand everything important that happened after the meeting.',
-                'Use natural, simple, professional language that employees can understand easily.',
-                'Preserve the speaker meaning and business context, even when the original speech has grammar, vocabulary, or filler-word issues.',
-                'Include the important topics, decisions, action items, owners, dates, numbers, risks, blockers, open questions, and next steps only when they were actually discussed.',
-                'Cover the full captured conversation across all segments instead of focusing only on the latest segment.',
-                'Group related points cleanly so the spoken summary is easy to follow.',
-                'Do not make the summary so short that useful operational details are lost.',
-                'Do not add facts that were not discussed.',
-                `Meeting type: ${meeting.meetingType}.`,
-                `Return valid JSON keyed by these language codes: ${languageCodes.join(', ')}.`,
-                'Each value must be a detailed, practical spoken summary in that language.',
-                'Write each value as text that can be read aloud naturally by an interpreter voice.',
+                buildInterpreterSummaryInstructions({
+                  languageLabel: language?.label || languageCode,
+                  meetingType: meeting.meetingType
+                }),
                 '',
+                'The meeting, as captured:',
                 transcriptText
               ].join('\n'),
               type: 'input_text'
@@ -3525,12 +4565,7 @@ async function requestOpenAiMeetingSummary(
           role: 'user'
         }
       ],
-      model: env.openAiInterpreterSummaryModel,
-      text: {
-        format: {
-          type: 'json_object'
-        }
-      }
+      model: env.openAiInterpreterSummaryModel
     }),
     headers: {
       Authorization: `Bearer ${env.openAiApiKey}`,
@@ -3543,7 +4578,9 @@ async function requestOpenAiMeetingSummary(
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => '');
+
     console.warn('OpenAI interpreter summary failed:', response.status, errorText.slice(0, 300));
+
     throw serviceError('Interpreter summary could not be created.');
   }
 
@@ -3551,24 +4588,12 @@ async function requestOpenAiMeetingSummary(
     output_text?: string;
     output?: Array<{ content?: Array<{ text?: string }> }>;
   };
-  const outputText = body.output_text ||
-    body.output?.flatMap((item) => item.content || []).map((content) => content.text).filter(Boolean).join('\n') ||
-    '{}';
 
-  try {
-    const parsed = JSON.parse(outputText) as Record<string, unknown>;
-    return Object.fromEntries(languageCodes.map((languageCode) => [
-      languageCode,
-      typeof parsed[languageCode] === 'string' && parsed[languageCode].trim()
-        ? parsed[languageCode].trim()
-        : 'Summary is not available in this language yet.'
-    ]));
-  } catch {
-    return Object.fromEntries(languageCodes.map((languageCode, index) => [
-      languageCode,
-      index === 0 ? outputText.trim() : 'Summary is not available in this language yet.'
-    ]));
-  }
+  return (
+    body.output_text ||
+    body.output?.flatMap((item) => item.content || []).map((content) => content.text).filter(Boolean).join('\n') ||
+    ''
+  ).trim();
 }
 
 function combineInterpreterTranscriptText(
@@ -3802,6 +4827,7 @@ async function requestOpenAiSegmentSpeechAudio({
   introText,
   language,
   meeting,
+  positionInstruction = '',
   translatedText,
   voiceId = getMeetingInterpreterVoiceId(meeting)
 }: {
@@ -3810,6 +4836,8 @@ async function requestOpenAiSegmentSpeechAudio({
   introText: string;
   language: InterpreterLanguage;
   meeting: InterpreterMeetingRecord;
+  /** Where this passage sits in a longer reading, when it is one of several. */
+  positionInstruction?: string;
   translatedText: string;
   voiceId?: string;
 }): Promise<InterpreterSummaryAudio> {
@@ -3839,8 +4867,9 @@ async function requestOpenAiSegmentSpeechAudio({
           ? 'Read the opening line once, then continue with the interpretation.'
           : 'Continue straight into the interpretation with no opening line.',
         'Read nothing that is not spoken content: no labels, headings or formatting marks.',
-        `This is from the meeting "${meeting.meetingName}".`
-      ].join(' '),
+        `This is from the meeting "${meeting.meetingName}".`,
+        positionInstruction
+      ].filter(Boolean).join(' '),
       languageLabel: language.label
     }),
     model: env.openAiInterpreterSegmentTtsModel,
@@ -3863,12 +4892,15 @@ async function requestOpenAiSavedTranscriptSpeechAudio({
   context,
   language,
   meeting,
+  positionInstruction = '',
   spokenText,
   voiceId = getMeetingInterpreterVoiceId(meeting)
 }: {
   context: AuthorizedInterpreterContext;
   language: InterpreterLanguage;
   meeting: InterpreterMeetingRecord;
+  /** Where this passage sits in a longer reading, when it is one of several. */
+  positionInstruction?: string;
   spokenText: string;
   voiceId?: string;
 }): Promise<{
@@ -3896,6 +4928,7 @@ async function requestOpenAiSavedTranscriptSpeechAudio({
       introText: '',
       language,
       meeting,
+      positionInstruction,
       translatedText: chunk,
       voiceId
     });

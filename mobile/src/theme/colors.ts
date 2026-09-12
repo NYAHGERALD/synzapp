@@ -53,6 +53,14 @@ export interface AppColors {
   muted: string;
   mutedStrong: string;
   overlay: string;
+  /**
+   * A heavier scrim, for when something has to be genuinely out of focus.
+   *
+   * `overlay` is the dimming a modal uses to say "this is on top". This is for
+   * the reply focus, where the conversation behind must read as set aside
+   * rather than merely covered.
+   */
+  overlayStrong: string;
   primary: string;
   primaryDark: string;
   primarySoft: string;
@@ -82,7 +90,7 @@ export const lightColors: AppColors = {
   destructive: '#DC2626',
   divider: '#E5E7EB',
   footer: '#FFFFFF',
-  footerActive: '#EEF2FF',
+  footerActive: '#DBEAFE',
   groupedBackground: '#F2F2F6',
   groupedCard: '#FFFFFF',
   input: '#FBFCFE',
@@ -92,6 +100,7 @@ export const lightColors: AppColors = {
   muted: '#5D6675',
   mutedStrong: '#334155',
   overlay: 'rgba(15, 23, 42, 0.24)',
+  overlayStrong: 'rgba(15, 23, 42, 0.62)',
   primary: '#0F766E',
   primaryDark: '#134E4A',
   primarySoft: '#DDF6F1',
@@ -121,7 +130,7 @@ export const darkColors: AppColors = {
   footer: '#080808',
   groupedBackground: '#000000',
   groupedCard: '#1C1C1E',
-  footerActive: '#063B34',
+  footerActive: '#12304F',
   input: '#111111',
   ink: '#F8FAFC',
   link: '#0A84FF',
@@ -129,6 +138,7 @@ export const darkColors: AppColors = {
   muted: '#A1A1AA',
   mutedStrong: '#D4D4D8',
   overlay: 'rgba(0, 0, 0, 0.62)',
+  overlayStrong: 'rgba(0, 0, 0, 0.78)',
   primary: '#00A884',
   primaryDark: '#008069',
   primarySoft: '#063B34',

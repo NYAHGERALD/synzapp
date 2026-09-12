@@ -502,13 +502,29 @@
   opacity: 0.45;
 }
 
+/**
+ * With nothing to list, the message owns the whole area.
+ *
+ * The list is a grid of 188px columns, so a lone message was laid out as one
+ * narrow cell in the top-left corner, wrapping after three words with the icon
+ * squeezed beside it. There are no columns worth keeping when there is nothing
+ * to show, so the grid collapses to a single one and centres its only child.
+ */
+.shared-evidence-library-list.is-empty {
+  align-content: center;
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .shared-evidence-library-empty {
   align-items: center;
   color: #64748b;
   display: flex;
-  gap: 8px;
+  flex-direction: column;
+  gap: 10px;
+  justify-content: center;
   min-height: 96px;
-  padding: 10px;
+  padding: 24px 16px;
+  text-align: center;
 }
 
 .shared-evidence-library-upload-fab {
@@ -4748,8 +4764,15 @@ h1 {
 
 .rails-ai-assistant-prompts {
   display: grid;
-  gap: 7px;
-  padding: 10px 12px;
+  gap: 6px;
+  padding: 14px 14px 4px;
+}
+
+.rails-ai-prompts-title {
+  color: #94a3b8;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  margin: 0 0 2px;
 }
 
 .rails-ai-assistant-prompts button {
@@ -4788,11 +4811,12 @@ h1 {
 .rails-ai-message-list {
   height: 100%;
   display: grid;
-  gap: 9px;
+  align-content: start;
+  gap: 14px;
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
-  padding: 0 12px 12px;
+  padding: 14px 14px 16px;
   scroll-behavior: smooth;
 }
 
@@ -4825,52 +4849,79 @@ h1 {
   white-space: nowrap;
 }
 
-.rails-ai-message {
-  border: 1px solid rgba(148, 163, 184, 0.26);
-  border-radius: 8px;
-  padding: 10px;
-}
+/*
+  A conversation, not a stack of identical boxes.
 
-.rails-ai-message.is-assistant {
-  background: rgba(255, 255, 255, 0.92);
-}
-
-.rails-ai-message.is-user {
-  background: rgba(37, 99, 235, 0.08);
-  border-color: rgba(37, 99, 235, 0.18);
-}
-
-.rails-ai-message-meta {
-  align-items: center;
-  display: flex;
-  gap: 8px;
-  justify-content: space-between;
-  margin-bottom: 7px;
-}
-
-.rails-ai-message-meta span {
-  color: #0f172a;
-  font-size: 12px;
-  font-weight: 400;
-}
-
-.rails-ai-message-meta small {
-  color: #64748b;
-  font-size: 10px;
-  font-weight: 400;
-}
-
-.rails-ai-message-body {
+  Both sides used to be bordered cards differing only by tint, which reads as a
+  log rather than an exchange. What people recognise is asymmetry: the question
+  is a short bubble on the right, the answer is plain text across the panel.
+  The answer is the thing being read, so nothing is drawn around it.
+*/
+.rails-ai-turn {
   display: grid;
   gap: 6px;
 }
 
-.rails-ai-message-body p {
-  color: #334155;
-  font-size: 12px;
-  line-height: 1.45;
+.rails-ai-turn.is-user {
+  justify-items: end;
+}
+
+.rails-ai-turn.is-user .rails-ai-turn-body {
+  background: #2563eb;
+  border-radius: 14px 14px 4px 14px;
+  color: #ffffff;
+  max-width: 88%;
+  padding: 9px 12px;
+}
+
+.rails-ai-turn.is-user .rails-ai-turn-body p {
+  color: #ffffff;
+}
+
+.rails-ai-turn.is-assistant .rails-ai-turn-body {
+  padding: 0 2px;
+}
+
+.rails-ai-turn-meta {
+  align-items: center;
+  color: #475569;
+  display: flex;
+  font-size: 11.5px;
+  gap: 6px;
+}
+
+.rails-ai-turn-avatar {
+  align-items: center;
+  background: #eff6ff;
+  border-radius: 6px;
+  color: #2563eb;
+  display: inline-flex;
+  height: 20px;
+  justify-content: center;
+  width: 20px;
+}
+
+.rails-ai-turn-meta small {
+  color: #94a3b8;
+  font-size: 10px;
+}
+
+.rails-ai-turn-body {
+  display: grid;
+  gap: 8px;
+}
+
+.rails-ai-turn-body p {
+  color: #1e293b;
+  font-size: 12.5px;
+  line-height: 1.6;
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+/* A turn is a breath apart from the next, the way a transcript reads. */
+.rails-ai-turn + .rails-ai-turn {
+  margin-top: 6px;
 }
 
 .rails-ai-thinking-dots {
@@ -4909,48 +4960,72 @@ h1 {
   }
 }
 
+/*
+  One field with the button inside it.
+
+  A separate button beside a boxed textarea reads as a form. Enclosing them
+  makes it read as somewhere to say something, and it gives the panel a clear
+  bottom edge so the conversation never appears to run off the end of it.
+*/
 .rails-ai-composer {
   align-items: end;
-  background: rgba(248, 250, 252, 0.94);
-  border-top: 1px solid rgba(148, 163, 184, 0.22);
+  background: #ffffff;
+  border-top: 1px solid rgba(148, 163, 184, 0.2);
   display: grid;
   gap: 8px;
   grid-template-columns: minmax(0, 1fr) auto;
-  padding: 10px;
+  padding: 10px 12px 12px;
+}
+
+.rails-ai-composer:focus-within {
+  background: #ffffff;
 }
 
 .rails-ai-composer textarea {
-  background: #ffffff;
-  border: 1px solid rgba(148, 163, 184, 0.34);
-  border-radius: 8px;
+  background: #f8fafc;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 12px;
   color: #0f172a;
-  font: inherit;
-  font-size: 12px;
-  line-height: 1.4;
-  min-height: 64px;
-  outline: none;
-  padding: 9px 10px;
-  resize: vertical;
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.5;
+  padding: 10px 12px;
+  resize: none;
+  transition: border-color 140ms ease, box-shadow 140ms ease, background 140ms ease;
   width: 100%;
 }
 
+.rails-ai-composer textarea::placeholder {
+  color: #94a3b8;
+}
+
 .rails-ai-composer textarea:focus {
-  border-color: rgba(37, 99, 235, 0.52);
+  background: #ffffff;
+  border-color: #2563eb;
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+  outline: none;
 }
 
 .rails-ai-composer button {
   align-items: center;
   background: #2563eb;
   border: 0;
-  border-radius: 8px;
+  border-radius: 10px;
   color: #ffffff;
   cursor: pointer;
   display: inline-flex;
   height: 38px;
   justify-content: center;
-  padding: 0;
+  transition: background 140ms ease, transform 140ms ease;
   width: 38px;
+}
+
+.rails-ai-composer button:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+
+.rails-ai-composer button:active:not(:disabled) {
+  transform: scale(0.96);
 }
 
 .rails-ai-composer button:disabled {
@@ -22315,6 +22390,26 @@ h1 {
  * Both widths are fixed rather than draggable. A navigation every person has
  * sized differently is one nobody can be talked through over the phone.
  */
+
+/**
+ * The side panel's width, published on the body for overlays outside the grid.
+ *
+ * A portalled overlay renders on document.body, so it cannot read a value scoped
+ * to .workspace-page. Publishing it here lets a maximised panel stop short of the
+ * navigation, and follow it when it collapses. Pages with no side panel get zero
+ * so nothing is pushed off centre.
+ */
+body {
+  --workspace-side-panel-width: 264px;
+}
+
+body:has(.side-panel.is-collapsed) {
+  --workspace-side-panel-width: 72px;
+}
+
+body:not(:has(.side-panel)) {
+  --workspace-side-panel-width: 0px;
+}
 
 .workspace-page {
   background: var(--surface-ground);

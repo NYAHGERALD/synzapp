@@ -47,14 +47,6 @@ export function FooterTabButton({
     }).start();
   }, [active, activeProgress]);
 
-  const pillScale = activeProgress.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0.94, 1]
-  });
-  const pillOpacity = activeProgress.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0, 1]
-  });
   const contentScale = activeProgress.interpolate({
     inputRange: [0, 1],
     outputRange: [1, 1.04]
@@ -77,20 +69,10 @@ export function FooterTabButton({
         styles.footerTabContent,
         { transform: [{ scale: contentScale }] }
       ]}>
+        {/* No highlight of its own. One pill travels behind the whole bar, in
+            FooterTabIndicator, so the selection moves between tabs instead of
+            disappearing in one place and reappearing in another. */}
         <View style={styles.footerTabIconWrap}>
-          {/* Fills the icon's box exactly, so it reads as a ring around the
-              icon rather than a slab behind the whole tab. */}
-          <Animated.View
-            pointerEvents="none"
-            style={[
-              styles.footerTabActivePill,
-              {
-                backgroundColor: appTheme.colors.footerActive,
-                opacity: pillOpacity,
-                transform: [{ scale: pillScale }]
-              }
-            ]}
-          />
           <FooterIcon
             active={active}
             profile={profile}
@@ -116,7 +98,7 @@ export function FooterTabButton({
           style={[
             styles.footerTabText,
             active && styles.footerTabTextActive,
-            { color: active ? appTheme.colors.primary : appTheme.colors.ink }
+            { color: active ? appTheme.colors.link : appTheme.colors.ink }
           ]}
         >
           {getFooterTabLabel(tab)}
@@ -138,7 +120,7 @@ function FooterIcon({
   tab: FooterTab;
 }) {
   const appTheme = useAppTheme();
-  const iconColor = active ? appTheme.colors.primary : appTheme.colors.mutedStrong;
+  const iconColor = active ? appTheme.colors.link : appTheme.colors.mutedStrong;
 
   if (tab === 'You') {
     return (
@@ -146,14 +128,14 @@ function FooterIcon({
         styles.footerProfileAvatar,
         active && styles.footerProfileAvatarActive,
         active && {
-          backgroundColor: appTheme.colors.primarySoft,
-          borderColor: appTheme.colors.primary
+          backgroundColor: 'transparent',
+          borderColor: appTheme.colors.link
         }
       ]}>
         <ProfileAvatar
           headers={profilePhotoHeaders}
           name={profile?.displayName || 'You'}
-          size={24}
+          size={28}
           uri={profile?.profilePhotoUrl}
         />
       </View>
@@ -161,28 +143,28 @@ function FooterIcon({
   }
 
   if (tab === 'Employees') {
-    return <Ionicons color={iconColor} name={active ? 'people' : 'people-outline'} size={22} />;
+    return <Ionicons color={iconColor} name={active ? 'people' : 'people-outline'} size={26} />;
   }
 
   if (tab === 'Interpreter') {
-    return <Ionicons color={iconColor} name={active ? 'language' : 'language-outline'} size={22} />;
+    return <Ionicons color={iconColor} name={active ? 'language' : 'language-outline'} size={26} />;
   }
 
   if (tab === 'Calls') {
-    return <Ionicons color={iconColor} name={active ? 'call' : 'call-outline'} size={22} />;
+    return <Ionicons color={iconColor} name={active ? 'call' : 'call-outline'} size={26} />;
   }
 
   if (tab === 'Announcements') {
-    return <Ionicons color={iconColor} name={active ? 'megaphone' : 'megaphone-outline'} size={22} />;
+    return <Ionicons color={iconColor} name={active ? 'megaphone' : 'megaphone-outline'} size={26} />;
   }
 
   if (tab === 'Groups') {
-    return <Ionicons color={iconColor} name={active ? 'albums' : 'albums-outline'} size={22} />;
+    return <Ionicons color={iconColor} name={active ? 'albums' : 'albums-outline'} size={26} />;
   }
 
   if (tab === 'Settings') {
-    return <Ionicons color={iconColor} name={active ? 'settings' : 'settings-outline'} size={22} />;
+    return <Ionicons color={iconColor} name={active ? 'settings' : 'settings-outline'} size={26} />;
   }
 
-  return <Ionicons color={iconColor} name={active ? 'chatbubble-ellipses' : 'chatbubble-ellipses-outline'} size={22} />;
+  return <Ionicons color={iconColor} name={active ? 'chatbubble-ellipses' : 'chatbubble-ellipses-outline'} size={26} />;
 }

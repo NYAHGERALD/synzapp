@@ -1,4 +1,4 @@
-import { Router, text } from 'express';
+import { Router, type Response, text } from 'express';
 import { z } from 'zod';
 import { verifyAppCheck } from '../middleware/appCheck.js';
 import { verifyFirebaseSession } from '../services/authSessionService.js';
@@ -24,6 +24,10 @@ import {
   listInterpreterTranscriptLibrary,
   listInterpreterSupportedLanguages,
   listInterpreterVoiceProfiles,
+  advanceInterpreterSummaryReading,
+  exportInterpreterSummary,
+  exportInterpreterTranscript,
+  advanceInterpreterTranscriptReading,
   prepareInterpreterTranscriptAudio,
   runInterpreterRealtimeProviderDiagnostic,
   startInterpreterMeeting,
@@ -92,6 +96,55 @@ const transcriptAudioBodySchema = z.object({
   languageCode: languageCodeSchema,
   voiceId: interpreterVoiceIdSchema.nullable().optional()
 });
+
+/**
+ * One file per request, asked for by GET.
+ *
+ * A GET is what lets the phone's file system fetch this straight to disk with
+ * its own credentials, rather than loading a whole document into memory first.
+ * It is also the honest verb: this asks for a document, it does not change
+ * anything.
+ */
+const summaryExportQuerySchema = z.object({
+  format: z.enum(['audio', 'pdf', 'word']),
+  languageCode: languageCodeSchema,
+  voiceId: interpreterVoiceIdSchema.nullable().optional()
+});
+
+const EXPORT_CONTENT_TYPES = {
+  audio: 'audio/mpeg',
+  pdf: 'application/pdf',
+  word: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+} as const;
+
+const EXPORT_EXTENSIONS = { audio: 'mp3', pdf: 'pdf', word: 'docx' } as const;
+
+/**
+ * Sends the file back, named, and refuses to cache it anywhere.
+ *
+ * These documents are confidential by definition, so no proxy, CDN or browser
+ * is invited to keep a copy of one.
+ */
+function sendInterpreterExport(
+  res: Response,
+  format: 'audio' | 'pdf' | 'word',
+  result: { audio: Buffer | null; digest: { full: string }; fileNameStem: string; pdf: Buffer | null; word: Buffer | null }
+) {
+  const body = format === 'audio' ? result.audio : format === 'pdf' ? result.pdf : result.word;
+
+  if (!body) {
+    throw new Error('The requested document could not be produced.');
+  }
+
+  res.setHeader('Cache-Control', 'no-store, private');
+  res.setHeader('Content-Type', EXPORT_CONTENT_TYPES[format]);
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename="${result.fileNameStem}.${EXPORT_EXTENSIONS[format]}"`
+  );
+  res.setHeader('X-Synzapp-Content-Digest', result.digest.full);
+  res.send(body);
+}
 
 const deleteTranscriptsBodySchema = z.object({
   segmentIds: z.array(meetingIdSchema).min(1).max(50)
@@ -416,6 +469,92 @@ interpreterRouter.post('/meetings/:meetingId/transcripts/:segmentId/audio-artifa
     });
 
     res.status(201).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Makes one more piece of a reading and returns the playlist.
+ *
+ * Called repeatedly by the phone while it listens. Each call does a bounded
+ * amount of work inside the request, which is the only place Cloud Run
+ * guarantees CPU — see advanceInterpreterTranscriptReading.
+ */
+interpreterRouter.post('/meetings/:meetingId/transcripts/:segmentId/reading', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const meetingId = meetingIdSchema.parse(req.params.meetingId);
+    const segmentId = meetingIdSchema.parse(req.params.segmentId);
+    const body = transcriptAudioBodySchema.parse(req.body || {});
+    const result = await advanceInterpreterTranscriptReading(decodedToken, meetingId, segmentId, {
+      languageCode: body.languageCode,
+      voiceId: body.voiceId || null
+    });
+
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/** Makes one more piece of a spoken summary. Same shape as a transcript reading. */
+interpreterRouter.post('/meetings/:meetingId/summaries/:summaryId/reading', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const meetingId = meetingIdSchema.parse(req.params.meetingId);
+    const summaryId = meetingIdSchema.parse(req.params.summaryId);
+    const body = transcriptAudioBodySchema.parse(req.body || {});
+    const result = await advanceInterpreterSummaryReading(decodedToken, {
+      languageCode: body.languageCode,
+      meetingId,
+      summaryId,
+      voiceId: body.voiceId || null
+    });
+
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/** The same download for a saved transcript, in whichever formats were asked for. */
+interpreterRouter.get('/meetings/:meetingId/transcripts/:segmentId/export', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const meetingId = meetingIdSchema.parse(req.params.meetingId);
+    const segmentId = meetingIdSchema.parse(req.params.segmentId);
+    const body = summaryExportQuerySchema.parse(req.query || {});
+    const result = await exportInterpreterTranscript(decodedToken, {
+      formats: [body.format],
+      languageCode: body.languageCode,
+      meetingId,
+      segmentId,
+      voiceId: body.voiceId || null
+    });
+
+    sendInterpreterExport(res, body.format, result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/** Builds the documents and the MP3 somebody asked to take away. */
+interpreterRouter.get('/meetings/:meetingId/summaries/:summaryId/export', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const meetingId = meetingIdSchema.parse(req.params.meetingId);
+    const summaryId = meetingIdSchema.parse(req.params.summaryId);
+    const body = summaryExportQuerySchema.parse(req.query || {});
+    const result = await exportInterpreterSummary(decodedToken, {
+      formats: [body.format],
+      languageCode: body.languageCode,
+      meetingId,
+      summaryId,
+      voiceId: body.voiceId || null
+    });
+
+    sendInterpreterExport(res, body.format, result);
   } catch (error) {
     next(error);
   }

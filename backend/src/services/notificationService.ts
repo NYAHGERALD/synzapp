@@ -166,6 +166,14 @@ interface SendInterpreterPushNotificationInput {
 }
 
 interface ExpoPushMessage {
+  /**
+   * Asks iOS to wake the app when the push lands, as well as showing it.
+   *
+   * Expo maps this to the APNs `content-available` flag. Without it iOS draws
+   * the notification itself and runs none of our code until somebody taps it,
+   * so a background delivery receipt was impossible on that platform.
+   */
+  _contentAvailable?: boolean;
   badge?: number;
   body?: string;
   channelId?: string;
@@ -264,7 +272,7 @@ export async function registerCurrentUserPushToken(
     .doc(decodedToken.uid)
     .collection('devices')
     .doc(activeDevice.deviceId);
-  const duplicatePushTokenCleanup = deactivateDuplicatePushTokensForUser(
+  const duplicatePushTokenCleanup = deactivateDuplicatePushTokens(
     activeDevice.tenantId,
     decodedToken.uid,
     activeDevice.deviceId,
@@ -276,6 +284,21 @@ export async function registerCurrentUserPushToken(
     duplicatePushTokenCleanup,
     userPushTokenRef.set({
       ...tokenRecord,
+      /**
+       * A re-claimed record must not keep the marks of losing the last one.
+       *
+       * Claiming a token across the tenant makes ACTIVE to INACTIVE and back a
+       * routine thing: a phone handed between accounts, or somebody signing
+       * back in. Merging `status: 'ACTIVE'` over the top leaves the old
+       * `deactivatedAt` and `replacedByDeviceId` sitting on a live record, so
+       * it reads as both active and superseded. Anything that later decides
+       * what is stale by looking at those fields would retire somebody's
+       * working second phone.
+       */
+      deactivatedAt: fieldValue.delete(),
+      deactivationReason: fieldValue.delete(),
+      replacedByDeviceId: fieldValue.delete(),
+      replacedByPushTokenDocumentId: fieldValue.delete(),
       createdAt: fieldValue.serverTimestamp(),
       lastRegisteredAt: fieldValue.serverTimestamp(),
       updatedAt: fieldValue.serverTimestamp()
@@ -308,25 +331,65 @@ export async function registerCurrentUserPushToken(
   };
 }
 
-async function deactivateDuplicatePushTokensForUser(
+/**
+ * A push token names one app installation, so one account may hold it.
+ *
+ * This used to search only the registering user's own tokens, and that is the
+ * hole. Device identity is derived per account, so one phone signed into two
+ * accounts is issued two different device ids, and writes two records holding
+ * the **same token** — both ACTIVE, under different users. Nothing retired the
+ * first. Sending then looked up the recipient's active tokens, found the other
+ * person's handset, and delivered the message to the sender's own phone while
+ * the intended recipient got nothing.
+ *
+ * Searching the whole tenant makes the most recent registration the owner,
+ * which is what actually happened on the handset. Matching is on the **token
+ * value**, never on the user, so somebody's second phone keeps its own token
+ * and keeps working.
+ */
+async function deactivateDuplicatePushTokens(
   tenantId: string,
   uid: string,
   currentDeviceId: string,
   currentProvider: PushProvider,
   token: string
 ): Promise<void> {
-  const userRef = firestore
-    .collection('organizations')
-    .doc(tenantId)
-    .collection('users')
-    .doc(uid);
-  const snapshot = await userRef
-    .collection('pushTokens')
+  /**
+   * The tenant-wide search needs a composite index on the `pushTokens`
+   * collection group. If it has not finished building, fall back to the old
+   * per-user search rather than failing: a device that cannot register for
+   * push at all is a worse outcome than one whose duplicate is retired late,
+   * and the next registration cleans it up once the index is live.
+   */
+  const snapshot = await firestore
+    .collectionGroup('pushTokens')
+    .where('tenantId', '==', tenantId)
     .where('token', '==', token)
     .where('status', '==', 'ACTIVE')
-    .get();
+    .get()
+    .catch(async (indexError) => {
+      console.warn(
+        'Tenant-wide push token claim unavailable, falling back to this account only:',
+        indexError instanceof Error ? indexError.message : indexError
+      );
+
+      return firestore
+        .collection('organizations')
+        .doc(tenantId)
+        .collection('users')
+        .doc(uid)
+        .collection('pushTokens')
+        .where('token', '==', token)
+        .where('status', '==', 'ACTIVE')
+        .get();
+    });
   const currentTokenDocumentId = getPushTokenDocumentId(currentDeviceId, currentProvider);
-  const staleTokenDocs = snapshot.docs.filter((doc) => doc.id !== currentTokenDocumentId);
+  // Only the record about to be written is spared, and only for its own owner:
+  // the same document id under a different account is a different installation
+  // claim and must still be retired.
+  const staleTokenDocs = snapshot.docs.filter((doc) => !(
+    doc.id === currentTokenDocumentId && getPushTokenRecordUid(doc) === uid
+  ));
 
   if (!staleTokenDocs.length) {
     return;
@@ -342,6 +405,13 @@ async function deactivateDuplicatePushTokensForUser(
 
   await Promise.all(staleTokenDocs.flatMap((doc) => {
     const staleDeviceId = getPushTokenRecordDeviceId(doc);
+    // The stale record may belong to another account, so its device row is
+    // cleared under *its* owner rather than under whoever is registering.
+    const staleOwnerRef = firestore
+      .collection('organizations')
+      .doc(tenantId)
+      .collection('users')
+      .doc(getPushTokenRecordUid(doc));
 
     return [
       doc.ref.set(update, { merge: true }),
@@ -358,7 +428,7 @@ async function deactivateDuplicatePushTokensForUser(
           },
           updatedAt: fieldValue.serverTimestamp()
         }, { merge: true }),
-      userRef
+      staleOwnerRef
         .collection('devices')
         .doc(staleDeviceId)
         .set({
@@ -371,6 +441,15 @@ async function deactivateDuplicatePushTokensForUser(
         }, { merge: true })
     ];
   }));
+}
+
+/** Which account a push token record belongs to, from its field or its path. */
+function getPushTokenRecordUid(doc: FirebaseFirestore.QueryDocumentSnapshot): string {
+  const data = doc.data() as PushTokenRecord;
+
+  return typeof data.uid === 'string' && data.uid.trim()
+    ? data.uid.trim()
+    : doc.ref.parent.parent?.id || '';
 }
 
 export async function deactivateCurrentUserPushToken(
@@ -650,6 +729,23 @@ export async function sendChatMessagePushNotification(
     } else if (record.provider === 'expo') {
       expoTargets.push({
         message: {
+          /**
+           * The iOS half of "Delivered".
+           *
+           * Android gets a data-only message, which starts a bare JavaScript
+           * context and lets the delivery receipt task run with the app shut.
+           * iOS had no equivalent: the push carried an alert and nothing else,
+           * so the system drew it and ran none of our code until the person
+           * tapped it. The receipt was never sent, and a message to an iPhone
+           * could not leave "Sent" however well the push worked.
+           *
+           * This asks iOS to wake the app briefly alongside showing the alert.
+           * The app already declares the `remote-notification` background mode,
+           * so the task can run. iOS budgets these wakes and may delay one, which
+           * is why the app-open path still records delivery as a backstop — the
+           * tick is then late rather than wrong.
+           */
+          _contentAvailable: record.platform === 'ios',
           badge: unreadBadgeCount,
           body: notificationPreview ? 'New encrypted message' : 'New message',
           channelId: 'chat-messages',

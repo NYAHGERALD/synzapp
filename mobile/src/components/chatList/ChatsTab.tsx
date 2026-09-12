@@ -141,7 +141,19 @@ export function ChatsTab({
           !chats.length && styles.fixedListEmptyContent
         ]}
         data={chats}
+        /**
+         * Windowing, so a long chat list only ever mounts a screenful.
+         *
+         * Each row carries a PanResponder and an Animated value for its swipe
+         * actions, so a mounted row is not cheap. Without these the list uses
+         * the defaults, which keep far more rows alive than a phone screen can
+         * show and make a hundred conversations feel heavier than ten.
+         */
+        initialNumToRender={12}
         keyExtractor={(chat) => chat.id}
+        maxToRenderPerBatch={8}
+        updateCellsBatchingPeriod={50}
+        windowSize={7}
         // Pinned above every conversation. A notice sent to one person has no
         // group chat to sit in, and the top of the list is where a person's eye
         // lands when they open the app.

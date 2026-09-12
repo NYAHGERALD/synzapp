@@ -101,6 +101,13 @@ export const messageStyles = StyleSheet.create({
     marginTop: 0,
     position: 'relative'
   },
+  // Positioned, so the reply focus scrim can cover exactly the conversation
+  // and leave the composer live beneath it.
+  messageListWrap: {
+    flex: 1,
+    minHeight: 0,
+    position: 'relative'
+  },
   messageList: {
     flex: 1
   },

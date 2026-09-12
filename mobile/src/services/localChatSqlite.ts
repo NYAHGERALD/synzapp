@@ -669,8 +669,9 @@ export async function saveCachedChatConversationToSqlite(input: {
       await db.runAsync(
         `INSERT INTO local_messages (
           owner_uid, tenant_id, contact_id, message_id, sent_at_ms,
-          sender_uid, is_mine, delivery_status, payload, updated_at, content_signature
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          sender_uid, is_mine, delivery_status, payload, updated_at, content_signature,
+          reply_to_message_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(owner_uid, tenant_id, contact_id, message_id)
         DO UPDATE SET
           sent_at_ms = excluded.sent_at_ms,
@@ -679,7 +680,8 @@ export async function saveCachedChatConversationToSqlite(input: {
           delivery_status = excluded.delivery_status,
           payload = excluded.payload,
           updated_at = excluded.updated_at,
-          content_signature = excluded.content_signature`,
+          content_signature = excluded.content_signature,
+          reply_to_message_id = excluded.reply_to_message_id`,
         [
           scope.ownerUid,
           scope.tenantId,
@@ -691,7 +693,8 @@ export async function saveCachedChatConversationToSqlite(input: {
           message.deliveryStatus || null,
           payload,
           nowIso,
-          writePlan.signatures.get(message.messageId) || null
+          writePlan.signatures.get(message.messageId) || null,
+          message.replyTo?.messageId || null
         ]
       );
 
@@ -970,6 +973,7 @@ export async function getLocalChatSqliteDatabase(): Promise<SQLite.SQLiteDatabas
         delivery_status TEXT,
         payload TEXT NOT NULL,
         updated_at TEXT NOT NULL,
+        reply_to_message_id TEXT,
         PRIMARY KEY (owner_uid, tenant_id, contact_id, message_id)
       );
       CREATE TABLE IF NOT EXISTS local_chat_media (

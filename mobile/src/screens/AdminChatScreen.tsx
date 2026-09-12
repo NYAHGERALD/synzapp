@@ -312,9 +312,11 @@ import { MessageListModal, MessageListModalMode } from '../components/chatList/M
 import { ArchiveSelectionMap, ArchivedChatsScreen } from '../components/chatList/ArchivedChatsScreen';
 import { countAnnouncementsNeedingAttention } from '../services/announcementDisplay';
 import { FooterTabButton } from '../components/navigation/FooterTabButton';
+import { FooterTabIndicator } from '../components/navigation/FooterTabIndicator';
 import { HeaderActions } from '../components/chatHeader/HeaderActions';
 import { MESSAGE_HEADER_HEIGHT, MessageHeader } from '../components/chatHeader/MessageHeader';
 import { getFooterTabLabel } from '../services/footerTabLabels';
+import { collectReplyIdsInMessages, mergeReplyIds } from '../services/replyThreads';
 import { NoticesOptionsMenu, type NoticesView } from '../components/NoticesOptionsMenu';
 import { SpamChatStatusModal } from '../components/chatList/SpamChatStatusModal';
 import { ChatMoreActionsModal } from '../components/chatList/ChatMoreActionsModal';
@@ -432,6 +434,7 @@ import {
   CHAT_ROW_SWIPE_TRIGGER,
   CHAT_ROW_LEFT_ACTION_WIDTH,
   CHAT_ROW_RIGHT_ACTION_WIDTH,
+  FOOTER_BAR_HORIZONTAL_PADDING,
   KEY_RESULT_ROW_ACTION_WIDTH,
   LSW_DAILY_ROW_ACTION_WIDTH,
   MESSAGE_INPUT_MAX_HEIGHT,
@@ -462,6 +465,7 @@ import {
   toChatImageAttachment,
   uniqueChatMessages
 } from '../services/chatMessageReconciliation';
+import { createSerialTaskQueue } from '../services/serialTaskQueue';
 import {
   buildMissingLocalMediaState,
   buildUploadedMediaState,
@@ -535,6 +539,7 @@ import {
   listLocalChatMediaTransferQueue,
   listPendingChatMessages,
   loadCachedChatConversation,
+  loadCachedReplyIds,
   loadCachedChatConversationPage,
   loadLocalChatSyncState,
   loadHiddenChatMessageIds,
@@ -747,6 +752,16 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
   const [companyLibraryVideoPreview, setCompanyLibraryVideoPreview] = useState<CompanyLibraryItem | null>(null);
   // Guards against duplicate sends from taps buffered during a busy JS thread.
   const isEnqueueingChatMessageRef = useRef(false);
+  const chatRealtimeQueueRef = useRef(createSerialTaskQueue({
+    onError: (queueError) => {
+      console.warn('Synzapp chat realtime payload failed.', queueError);
+    },
+    onTimeout: () => {
+      // Loud on purpose. A payload overrunning means the conversation was one
+      // hung token fetch away from going silent, which is worth seeing in a log.
+      console.warn('Synzapp chat realtime payload timed out; letting the queue move on.');
+    }
+  }));
   const [isLoadingCompanyLibrary, setIsLoadingCompanyLibrary] = useState(false);
   const [lswActiveTab, setLswActiveTab] = useState<LswWorkspaceTab>('today');
   const [lswContext, setLswContext] = useState<LswWorkspaceContext | null>(null);
@@ -903,6 +918,14 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
   }, []);
   const [messageActionTarget, setMessageActionTarget] = useState<ChatMessage | null>(null);
   const [replyTarget, setReplyTarget] = useState<ChatMessage | null>(null);
+  /**
+   * How many replies each message has, from the device's own store.
+   *
+   * Counted in SQLite over the whole conversation, because a message and its
+   * replies are deliberately far apart here and counting what happens to be
+   * loaded is wrong exactly when the distance is greatest.
+   */
+  const [storedReplyIds, setStoredReplyIds] = useState<Record<string, string[]>>({});
   const [isForwardMode, setIsForwardMode] = useState(false);
   const [forwardSelectedMessageIds, setForwardSelectedMessageIds] = useState<Record<string, boolean>>({});
   const [forwardRecipientIds, setForwardRecipientIds] = useState<Record<string, boolean>>({});
@@ -1496,6 +1519,14 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
     () => chatContacts.filter((contact) => (contact.chatType || 'DIRECT') !== 'GROUP'),
     [chatContacts]
   );
+  // Joined by id, not by size. The store knows replies this session never
+  // loaded; the loaded messages know one just sent that has not been written
+  // yet. Neither is a superset of the other, so only identity can tell whether
+  // a loaded reply is new or already counted.
+  const replyCounts = useMemo(
+    () => mergeReplyIds(storedReplyIds, collectReplyIdsInMessages(messages)),
+    [messages, storedReplyIds]
+  );
   const startableDirectChatContacts = useMemo(
     () => buildStartableDirectChatContacts(
       [...directChatContacts, ...directoryChatContacts],
@@ -1696,9 +1727,10 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
     !isInterpreterSurfaceOpen &&
     !isLibrarySurfaceOpen &&
     !isLswSurfaceOpen;
+  const [footerBarWidth, setFooterBarWidth] = useState(0);
   const isCompactAndroid = Platform.OS === 'android' && height < 720;
-  const footerHeight = isCompactAndroid ? 64 : 68;
-  const footerTabHeight = isCompactAndroid ? 56 : 60;
+  const footerHeight = isCompactAndroid ? 68 : 72;
+  const footerTabHeight = isCompactAndroid ? 60 : 64;
   const androidStatusBarHeight = Platform.OS === 'android' ? RNStatusBar.currentHeight || 0 : 0;
   const androidBottomInset = Platform.OS === 'android'
     ? resolveAndroidNavigationInset({
@@ -1901,7 +1933,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
 
         socket.onmessage = (event) => {
           if (typeof event.data === 'string') {
-            void handleChatRealtimePayload(event.data);
+            enqueueChatRealtimePayload(event.data);
           }
         };
 
@@ -4771,6 +4803,47 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
     }
   }
 
+  /**
+   * Runs realtime payloads one at a time, in the order they arrived.
+   *
+   * Each payload used to be started with `void` and left to race. Handling one
+   * runs cache reads and writes, a token fetch, group key granting and envelope
+   * decryption, so how long it takes depends on the message. A later message
+   * whose handler was quick finished first, then an earlier, slower one finished
+   * last and wrote its own older snapshot over the newer list — and the message
+   * it had never seen disappeared from the thread until the next event repainted
+   * it. That is the message that vanishes for a few seconds on Android.
+   *
+   * Chaining makes arrival order the order they are applied. A payload that
+   * throws is caught here so it cannot break the chain for the ones behind it.
+   */
+  function enqueueChatRealtimePayload(payload: string) {
+    chatRealtimeQueueRef.current.push(() => handleChatRealtimePayload(payload));
+  }
+
+  /**
+   * Defers the id token until something actually asks for it.
+   *
+   * The token is only ever used to talk to the server about encrypted
+   * envelopes. It was being fetched at the top of every conversation event,
+   * including plain message events that never touch it and envelope events that
+   * carry none — and when the token needs refreshing that is a network round
+   * trip standing between a message arriving and it appearing on screen.
+   *
+   * Fetched at most once per event, and only if that event has envelope work.
+   */
+  function createDeferredIdToken(): () => Promise<string> {
+    let pending: Promise<string> | null = null;
+
+    return () => {
+      if (!pending) {
+        pending = getIdToken();
+      }
+
+      return pending;
+    };
+  }
+
   async function handleChatRealtimePayload(payload: string) {
     const event = parseChatRealtimeEvent(payload);
 
@@ -4840,20 +4913,35 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
       const baseContact = shouldMarkRead
         ? { ...event.contact, unreadCount: 0 }
         : event.contact;
-      const eventIdToken = await getIdToken();
+      const getEventIdToken = createDeferredIdToken();
+      /**
+       * Uploading history keys must not stand in front of the message.
+       *
+       * This POST grants the other members' devices access to read this stretch
+       * of the conversation back later. Nothing below reads its result, failures
+       * are already tolerated, and our own decryption uses a private key that is
+       * on this device — so it never needed to finish first. Awaited, it put a
+       * full network round trip between a group message arriving and it being
+       * shown, which is why group chats lagged while direct chats were instant.
+       *
+       * Started here and left to finish on its own. It still runs, and still
+       * runs once per event.
+       */
       if (event.contact.chatType === 'GROUP' && event.envelopes.length) {
-        await grantGroupChatHistoryKeys({
-          contactId: event.contact.contactId,
-          envelopes: event.envelopes,
-          idToken: eventIdToken
-        }).catch(() => undefined);
+        void getEventIdToken()
+          .then((idToken) => grantGroupChatHistoryKeys({
+            contactId: event.contact.contactId,
+            envelopes: event.envelopes,
+            idToken
+          }))
+          .catch(() => undefined);
       }
       const decryptStartedAtMs = Date.now();
       const deliveredMessages = event.envelopes.length
         ? await decryptRealtimeEncryptedEnvelopes({
             currentUid,
             envelopes: event.envelopes,
-            idToken: eventIdToken
+            idToken: await getEventIdToken()
           })
         : [];
       const decryptMs = Date.now() - decryptStartedAtMs;
@@ -4977,19 +5065,34 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
           ...getLocalChatScope()
         })
       ]);
-      const eventIdToken = await getIdToken();
+      const getEventIdToken = createDeferredIdToken();
+      /**
+       * Uploading history keys must not stand in front of the message.
+       *
+       * This POST grants the other members' devices access to read this stretch
+       * of the conversation back later. Nothing below reads its result, failures
+       * are already tolerated, and our own decryption uses a private key that is
+       * on this device — so it never needed to finish first. Awaited, it put a
+       * full network round trip between a group message arriving and it being
+       * shown, which is why group chats lagged while direct chats were instant.
+       *
+       * Started here and left to finish on its own. It still runs, and still
+       * runs once per event.
+       */
       if (event.type === 'conversationEncryptedEnvelopes' && event.contact.chatType === 'GROUP') {
-        await grantGroupChatHistoryKeys({
-          contactId: event.contactId,
-          envelopes: event.envelopes,
-          idToken: eventIdToken
-        }).catch(() => undefined);
+        void getEventIdToken()
+          .then((idToken) => grantGroupChatHistoryKeys({
+            contactId: event.contactId,
+            envelopes: event.envelopes,
+            idToken
+          }))
+          .catch(() => undefined);
       }
       const serverMessages = uniqueChatMessages(event.type === 'conversationEncryptedEnvelopes'
         ? await decryptRealtimeEncryptedEnvelopes({
             currentUid,
             envelopes: event.envelopes,
-            idToken: eventIdToken
+            idToken: await getEventIdToken()
           })
         : event.messages);
       const eventReactionMap = event.type === 'conversationEncryptedEnvelopes'
@@ -5018,17 +5121,67 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
         setSelectedChat(mapChatContactToChatItem(contactWithLocalPreview));
       }
       setChatContacts((currentContacts) => upsertChatContact(currentContacts, contactWithLocalPreview));
+      const persistedMessagesToSave = await keepMessagesCommittedDuringThisPass(
+        event.contactId,
+        cachedConversation?.messages || [],
+        visiblePersistedMessages
+      );
+
       await saveCachedChatConversation({
         contact: contactWithLocalPreview,
         contactId: event.contactId,
-        messages: visiblePersistedMessages,
+        messages: persistedMessagesToSave,
         ...getLocalChatScope()
       });
-      await persistLocalChatSyncStateForMessages(event.contactId, visiblePersistedMessages);
+      await persistLocalChatSyncStateForMessages(event.contactId, persistedMessagesToSave);
       queueEncryptedChatBackup();
       queueMediaDownloadsForMessages(event.contactId, nextMessages, event.contact.chatType || 'DIRECT', true);
       void syncPendingMessagesForChat(event.contactId);
     }
+  }
+
+  /**
+   * Keeps anything the send path committed while this pass was still working.
+   *
+   * Both paths read the conversation cache, do work that awaits — decryption, a
+   * hidden-message filter — and then write back a list assembled from their own
+   * earlier read. A message the send path committed during that gap was simply
+   * overwritten, and because the outbox record had already been dropped the
+   * bubble had nowhere left to live: it vanished from the sender's own thread
+   * while the recipient had it perfectly well.
+   *
+   * Re-reading immediately before the write closes that gap. Only messages that
+   * were absent from **both** the original read and the list being written are
+   * carried over — so something deliberately filtered out (hidden, deleted,
+   * cleared) stays out, because it was present in the original read. Membership
+   * still belongs to the caller; this only restores what arrived behind its
+   * back.
+   */
+  async function keepMessagesCommittedDuringThisPass(
+    contactId: string,
+    messagesReadAtStart: ChatMessage[],
+    messagesToWrite: ChatMessage[]
+  ): Promise<ChatMessage[]> {
+    const current = await loadCachedChatConversation({
+      contactId,
+      ...getLocalChatScope()
+    }).catch(() => null);
+
+    if (!current?.messages?.length) {
+      return messagesToWrite;
+    }
+
+    const knownAtStart = new Set(messagesReadAtStart.map((message) => message.messageId));
+    const beingWritten = new Set(messagesToWrite.map((message) => message.messageId));
+    const arrivedBehindOurBack = current.messages.filter((message) => (
+      !knownAtStart.has(message.messageId) && !beingWritten.has(message.messageId)
+    ));
+
+    if (!arrivedBehindOurBack.length) {
+      return messagesToWrite;
+    }
+
+    return uniqueChatMessages([...messagesToWrite, ...arrivedBehindOurBack]);
   }
 
   /**
@@ -6135,6 +6288,36 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
       void loadEmployees();
     }
   }
+
+  /**
+   * Reads the reply counts for the open conversation out of the local store.
+   *
+   * Cheap: a grouped count over an indexed column, with nothing decrypted. It
+   * runs when a chat opens and after its messages change, because a reply just
+   * sent is in memory before it has been written.
+   */
+  useEffect(() => {
+    const contactId = selectedChat?.contactId;
+
+    if (!contactId) {
+      setStoredReplyIds({});
+      return;
+    }
+
+    let isCurrent = true;
+
+    void loadCachedReplyIds({ contactId, ...getLocalChatScope() })
+      .then((idsByParent) => {
+        if (isCurrent) {
+          setStoredReplyIds(idsByParent);
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [messages.length, selectedChat?.contactId]);
 
   function handleOpenMainNavigation() {
     setIsMainNavigationOpen(true);
@@ -9649,6 +9832,18 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
       return;
     }
 
+    // Every reason to refuse the send is settled before the guard is taken.
+    //
+    // This check used to sit after it, and returned without releasing it. One
+    // tap while the device was not registered left the guard raised for the
+    // life of the screen, and every later tap returned at the check below. The
+    // button was not slow, it was dead. Nothing may return between raising the
+    // guard and the try/finally that lowers it.
+    if (!activeChat.hasActiveDevice) {
+      setError(getChatDeviceNotReadyMessage(activeChat));
+      return;
+    }
+
     // Taps that arrive while the JS thread is busy are delivered together the
     // moment it frees, and each one used to enqueue its own copy of the
     // message. A ref is checked and set synchronously, so the extra taps are
@@ -9659,12 +9854,6 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
     }
 
     isEnqueueingChatMessageRef.current = true;
-
-    if (!activeChat.hasActiveDevice) {
-      setError(getChatDeviceNotReadyMessage(activeChat));
-      return;
-    }
-
     setError(null);
     const replyReference = replyTarget ? buildReplyReference(replyTarget) : null;
 
@@ -10090,7 +10279,10 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
     if (clearDraft) {
       setMessageDraft('');
     }
-    setReplyTarget(null);
+    // The reply target is kept, not cleared. Answering a message is usually
+    // more than one sentence, and clearing it after the first sent somebody
+    // back to the message to start again. The focus overlay stays until it is
+    // closed, which is the gesture that says "done".
     addVisibleLocalMessage(activeChat, optimisticMessage);
 
     const dispatchSend = () => {
@@ -13649,6 +13841,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
           // The header floats over the thread, so the thread owes it the room
           // back. Nothing is owed while the search header has replaced it.
           topInset={isConversationSearchOpen ? 0 : MESSAGE_HEADER_HEIGHT + 10}
+          replyCounts={replyCounts}
           hasBannerAboveMessages={Boolean(pinnedChatAnnouncement)
             || actionCounts.pending > 0
             || actionCounts.unverified > 0}
@@ -14287,16 +14480,27 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
       ) : null}
 
       {shouldShowBottomNavigation ? (
-        <View style={[
-        styles.footer,
-        {
-          backgroundColor: appTheme.colors.footer,
-          borderColor: appTheme.colors.border,
-          borderRadius: isCompactAndroid ? 32 : 34,
-          bottom: footerBottom,
-          minHeight: footerHeight
-        }
-      ]}>
+        <View
+          onLayout={(event) => setFooterBarWidth(event.nativeEvent.layout.width)}
+          style={[
+          styles.footer,
+          {
+            backgroundColor: appTheme.colors.footer,
+            borderColor: appTheme.colors.border,
+            borderRadius: isCompactAndroid ? 32 : 34,
+            bottom: footerBottom,
+            minHeight: footerHeight
+          }
+        ]}
+      >
+          {/* First, so every tab paints over it. */}
+          <FooterTabIndicator
+            activeIndex={visibleFooterTabs.indexOf(activeTab)}
+            barWidth={footerBarWidth}
+            horizontalPadding={FOOTER_BAR_HORIZONTAL_PADDING}
+            radius={isCompactAndroid ? 29 : 31}
+            tabCount={visibleFooterTabs.length}
+          />
 	        {visibleFooterTabs.map((tab) => (
 	          <FooterTabButton
 	            active={activeTab === tab}

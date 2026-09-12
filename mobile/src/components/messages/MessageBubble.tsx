@@ -61,6 +61,7 @@ export function MessageBubble({
   contactName,
   contactProfilePhotoUrl,
   currentUid,
+  hideReplyPreview = false,
   highlighted = false,
   isGroupChat = false,
   isSelectable = false,
@@ -102,7 +103,19 @@ export function MessageBubble({
   const isDark = appTheme.isDark;
   const sentBubbleColor = isDark ? '#005C4B' : '#D9FDD3';
   const receivedBubbleColor = isDark ? '#1F1F1F' : appTheme.colors.surfaceElevated;
-  const bubbleColor = message.isMine ? sentBubbleColor : receivedBubbleColor;
+  /**
+   * A reply wears the same colour, dimmed.
+   *
+   * Not a second shade picked by eye — the ordinary bubble colour with
+   * transparency, so the chat background shows through and the bubble reads as
+   * a quieter version of itself. A group of answers is then plainly its own
+   * run, while staying obviously yours or theirs.
+   */
+  const sentReplyBubbleColor = isDark ? 'rgba(0, 92, 75, 0.55)' : 'rgba(217, 253, 211, 0.55)';
+  const receivedReplyBubbleColor = isDark ? 'rgba(31, 31, 31, 0.72)' : 'rgba(255, 255, 255, 0.72)';
+  const bubbleColor = message.isMine
+    ? (hideReplyPreview ? sentReplyBubbleColor : sentBubbleColor)
+    : (hideReplyPreview ? receivedReplyBubbleColor : receivedBubbleColor);
   const isLightMineBubble = message.isMine && !isDark;
   const bubbleTextColor = isLightMineBubble ? '#111827' : message.isMine || isDark ? '#FFFFFF' : appTheme.colors.ink;
   const bubbleMetaColor = isLightMineBubble ? 'rgba(17, 24, 39, 0.56)' : message.isMine || isDark ? 'rgba(255, 255, 255, 0.68)' : appTheme.colors.muted;
@@ -281,7 +294,7 @@ export function MessageBubble({
                 <Text style={[styles.forwardedMessageLabel, { color: bubbleForwardedColor }]}>Forwarded</Text>
               </View>
             ) : null}
-            {message.replyTo ? (
+            {message.replyTo && !hideReplyPreview ? (
               <BubbleReplyPreview
                 contactName={contactName || ''}
                 currentUid={currentUid || ''}
@@ -1073,6 +1086,7 @@ export function areMessageBubblePropsEqual(
     previousProps.contactName === nextProps.contactName &&
     previousProps.contactProfilePhotoUrl === nextProps.contactProfilePhotoUrl &&
     previousProps.currentUid === nextProps.currentUid &&
+    previousProps.hideReplyPreview === nextProps.hideReplyPreview &&
     previousProps.highlighted === nextProps.highlighted &&
     previousProps.isGroupChat === nextProps.isGroupChat &&
     previousProps.isSelectable === nextProps.isSelectable &&
@@ -1090,6 +1104,15 @@ export type MessageBubbleProps = {
   contactName?: string;
   contactProfilePhotoUrl?: string | null;
   currentUid?: string;
+  /**
+   * Drops the quoted parent from inside the bubble.
+   *
+   * Set for every bubble in a reply group: the group already carries one
+   * wireframe copy of the message being answered at its head, and repeating it
+   * inside each reply made four answers four times as tall and buried the
+   * answers themselves.
+   */
+  hideReplyPreview?: boolean;
   highlighted?: boolean;
   isGroupChat?: boolean;
   isSelectable?: boolean;

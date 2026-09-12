@@ -71,6 +71,13 @@ what the platform does.
   inside a tab would land at 25. The settings tab cancels it with
   `styles.groupedTabContent`. Cancel the page padding that way; never shrink a
   card's own margin to compensate
+
+  **Every card says `marginHorizontal: 15`, everywhere, with no arithmetic.**
+  A card written as `5` because its parent happens to pay `10` is right until
+  somebody changes the parent, and then every card on that screen moves and
+  nothing says why. If a surface pays horizontal padding and holds cards, set
+  that padding to `0` and let the header, the search field and the cards each
+  state their own 15 — as `workspaceScreen` does on the interpreter list
 - Row padding inside a card: **16** horizontal
 - Divider: **1px**, `separator`, inset **16 on both sides** so it never touches
   the card edge
@@ -137,6 +144,38 @@ Use `mobile/src/components/ui/CircleIconButton.tsx`:
 A word has to be read and translated. A chevron is understood at a glance,
 which matters when the person holding the phone is wearing gloves.
 
+### The options button is the same circle
+
+A screen's `•••` or menu button takes the identical treatment: **44 across,
+`groupedCard` white, and the same shadow** — offset 2, opacity 0.16, radius 6,
+elevation 4. It is a round icon button like the others and belongs to the same
+family, so it is built the same way and never as a flat tinted disc.
+
+It needs the shadow for the same reason the back button does: it sits over a
+list that scrolls, and a disc with no lift disappears the moment something pale
+passes beneath it.
+
+**Where it goes:** opposite the screen's action. Where a screen has a back
+button on the left, the options button is on the right; where a screen has no
+back button, the options go left and the action right — as Calls and Notices
+do. Two controls crowded into one corner read as one control with a spare
+part.
+
+### The heading sits on its own row
+
+**Controls on one row, the name of the screen on the next.** 26pt, regular
+weight, left aligned, 15 from the edge — as Chats, Calls and Notices already
+do.
+
+Never centred between the buttons. A title in the middle of a control row has
+to shrink to fit whatever is beside it, is pushed off centre the moment one
+side gains a button, and stops reading as the heading of the page — it becomes
+a label on a toolbar.
+
+**A sheet is the exception.** A bottom sheet's title is centred between its
+close button and its action, because a sheet is one thing and its title names
+that thing rather than heading a page of them.
+
 ## 6. Settings and choices
 
 **A setting is a switch.** `mobile/src/components/ui/AppSwitch.tsx`, on
@@ -157,8 +196,52 @@ because turning one off plainly means the other; among three it says nothing —
 turning *Light* off does not say whether *System* or *Dark* was meant. Draw them
 as rows in a card with a `check` in `colors.link` against the one in force.
 
+**There are no checkboxes in this app.** Not for a setting, not for choosing
+one thing, not for choosing several. A chosen row is marked with a **tick** —
+a bare `checkmark` in `colors.link` — and an unchosen row is marked with
+nothing.
+
+**The tick sits at the end of the row**, never at the start. A mark of what is
+chosen belongs after the thing it marks: the eye reads the name first and the
+answer second, and every list in the app — the pickers, the audience list, the
+appearance choices — already puts it there. A marker on the left indents the
+whole list to make room for something that is usually not shown.
+
+**Selecting several** works the same way: tick the ones chosen, and keep the
+tick's slot at its width so rows do not jump sideways one at a time as somebody
+works down a list. Entering selection mode moves them all at once, which reads
+as a change of mode; a row shifting on its own reads as a glitch.
+
+**Select all is a link**, not a box with a label. Blue text that ticks
+everything, and reads "Clear selection" once everything is ticked, so the one
+control says what it will do next rather than what state it is in.
+
 **A picker list keeps its tick too.** A tick against a row marks what somebody
 chose from many; that is a selection, not a setting.
+
+**A date is chosen with the platform's own picker.** `DateTimePickerAndroid`
+opens the calendar dialog on Android, and `ScheduleDateTimePickerModal` shows the
+inline picker in a sheet on iOS. Never a wheel, a grid or a set of fields built
+by hand: a lookalike is close enough for years and then wrong for anybody using
+large text, another calendar or a screen reader.
+
+The row that opens it carries the chosen date as its value, at the end beside
+the tick, so the card says which day is in force without opening anything. And
+**the row opens the picker on the first tap.** Choosing "a day" and then hunting
+for where to say *which* day is two taps for one decision.
+
+A date that has been picked is **kept while another choice is in force**, so
+switching to "Last 7 days" and back does not quietly throw it away.
+
+**A flag stands for a region, never for a language.** `getLanguageFlagEmoji` in
+`mobile/src/services/languageFlags.ts` reads the region out of the language code
+— `es-MX` is Mexican Spanish and gets Mexico's flag — and answers **nothing**
+where the code names no country. A globe is drawn instead.
+
+Never pick a country for a language spoken across borders. Swahili is not
+Tanzania to somebody in Kenya, and people read a flag as a fact rather than as
+decoration. The same goes for "Auto detect": nothing has been heard yet, so
+there is no country to show.
 
 ## 7. The search field
 
@@ -205,6 +288,28 @@ status bar on Android, so it adds `getFullScreenModalTopPadding(insets.top)`;
 iOS insets the sheet itself and reports 0, so one number is right on both. **An
 absolutely positioned child does not inherit its parent's padding** — it has to
 be given the offset, or it lands at the very top of the window.
+
+**Every full-height surface asks that helper, never `insets.top` directly.**
+Android under edge to edge can report `insets.top` as **0**, and the helper is
+the only thing that knows to fall back to the measured status bar height. A
+screen that adds its own small number to `insets.top` looks correct on the
+phone it was written on and puts its buttons under the clock on the next one.
+
+**A `Modal` is not covered by the app root's `SafeAreaView`.** It is its own
+window on both platforms, so the rule above — paid once at the root, nothing
+added on iOS — does not hold inside one, and `resolveScreenBottomInset` is the
+wrong helper there. A modal asks the safe area directly on iOS, and on Android
+falls back to a measurement, because **a Modal reports no safe area at all**:
+`insets.bottom` is 0 in one even on a phone with a navigation bar. Both
+mistakes have shipped — content on the iPhone home indicator, and a panel
+running under the Android navigation bar.
+
+**A bottom sheet is capped, and what is capped scrolls.** A sheet sized by its
+content grows until it covers the status bar, so one extra row is enough to put
+its close button behind the clock. Cap it — 92% — and put the body in a
+`ScrollView`, because **padding cannot rescue content taller than the box
+holding it**: a cap with no scroll simply makes the last rows unreachable. Both
+halves are needed; each on its own has shipped a broken sheet.
 
 ## 9. Movement
 

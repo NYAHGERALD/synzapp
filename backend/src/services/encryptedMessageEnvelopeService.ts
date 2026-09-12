@@ -396,6 +396,24 @@ export async function listEncryptedDirectEnvelopesForDevice(
       },
       updatedAt: fieldValue.serverTimestamp()
     }, { merge: true });
+  } else if (hasBatchUpdates) {
+    /**
+     * Touch the conversation so the sender hears about the delivery.
+     *
+     * The marks above are written onto the envelope documents, but the sender's
+     * realtime socket watches this conversation document — not the envelopes
+     * under it. Marking read already touches it, which is why "Seen" arrived
+     * live while "Delivered" did not: the tick sat on "Sent" until the sender
+     * happened to reopen the chat and refetch.
+     *
+     * This settles rather than loops. The snapshot reaches both parties, and
+     * the recipient's own refresh marks only devices that are not marked
+     * already — so the second pass finds nothing to write, commits nothing, and
+     * touches nothing.
+     */
+    await context.chatRef.set({
+      updatedAt: fieldValue.serverTimestamp()
+    }, { merge: true });
   }
 
   return envelopes;

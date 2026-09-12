@@ -57,7 +57,6 @@ import {
   Bold,
   BookOpen,
   Bot,
-  BoxSelect,
   Camera,
   CalendarDays,
   CheckCircle2,
@@ -69,7 +68,6 @@ import {
   ClipboardCopy,
   ClipboardPaste,
   Clock3,
-  Crosshair,
   Download,
   Eye,
   FileDown,
@@ -82,12 +80,11 @@ import {
   GitBranch,
   Gauge,
   Grid2X2,
-  HandGrab,
+  Hand,
   Italic,
   ListChecks,
   Link2,
   Lock,
-  Magnet,
   Maximize2,
   MessageSquareText,
   Minimize2,
@@ -572,15 +569,32 @@ const RCA_STICKY_NOTE_MIN_WIDTH = 196;
 const RCA_STICKY_NOTE_MAX_WIDTH = 440;
 const RCA_STICKY_NOTE_MIN_HEIGHT = 88;
 const RCA_STICKY_NOTE_MAX_HEIGHT = 520;
+/**
+ * How many lines a node shows before it stops growing.
+ *
+ * The card reserves exactly this much room and the text is clamped to the same
+ * number, so a long label is trimmed rather than stretching the node. Change
+ * one of these and the other follows automatically, because the reserved height
+ * is calculated from them.
+ */
+/**
+ * How long to wait after the last edit before saving on somebody's behalf.
+ *
+ * Long enough that moving between fields in a burst produces one write rather
+ * than one per field; short enough that the work is safe before attention moves
+ * elsewhere.
+ */
+const RCA_AUTO_SAVE_DELAY_MS = 1200;
+
+const RCA_CAUSE_LABEL_MAX_LINES = 3;
+const RCA_CAUSE_VERIFICATION_MAX_LINES = 2;
+
 const RCA_CAUSE_NODE_HEIGHT = 132;
 const RCA_CATEGORY_NODE_HEIGHT = 76;
 const RCA_FAULT_GATE_NODE_HEIGHT = 112;
 const RCA_CAUSE_VERTICAL_GAP = 42;
 const RCA_CAUSE_TALL_VERTICAL_GAP = 54;
 const RCA_CAUSE_EXTRA_TALL_VERTICAL_GAP = 68;
-const RCA_CAUSE_LABEL_CHARS_PER_LINE = 34;
-const RCA_CAUSE_DETAIL_CHARS_PER_LINE = 42;
-const RCA_FAULT_GATE_LABEL_CHARS_PER_LINE = 34;
 const RCA_BRANCH_HORIZONTAL_GAP = 220;
 const RCA_BRANCH_CATEGORY_GAP = 58;
 const RCA_CAUSE_CATEGORY_HORIZONTAL_GAP = 116;
@@ -3013,7 +3027,7 @@ function arrangeFishboneCanvasNodes(
     allChildrenByParent,
     nodeDetails
   );
-  restoreFreeformAnnotationCoordinates(coordinatesById, nodes);
+  restoreManuallyPlacedRcaCoordinates(coordinatesById, nodes);
   syncArrangedRcaConnectionHandles(coordinatesById, layoutPatchByNodeId, nodes, nodeDetails);
 
   return nodes.map((node) => {
@@ -5178,12 +5192,31 @@ function finalizeFishboneBranchSupportRows(
   });
 }
 
-function restoreFreeformAnnotationCoordinates(
+function restoreManuallyPlacedRcaCoordinates(
   coordinatesById: Map<string, { x: number; y: number }>,
   nodes: RcaNode[]
 ) {
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+
   nodes.forEach((node) => {
-    if (node.status === 'DELETED' || !isFreeformRcaAnnotationNode(node)) {
+    if (node.status === 'DELETED') {
+      return;
+    }
+
+    /**
+     * Evidence hanging off Containment stays wherever somebody dragged it.
+     *
+     * The intake chain is centred at RCA_MAIN_INTAKE_CHAIN_CENTER_X, which leaves
+     * Containment at x 376 — too little room for the layout to put a 288 wide
+     * Evidence node on its left without colliding with it. So the position is the
+     * investigator's to choose and Rearrange leaves it alone, the same deal
+     * sticky notes and comments already get. Evidence on any other parent is
+     * untouched and still laid out automatically.
+     */
+    const parentNode = node.parentNodeId ? nodeById.get(node.parentNodeId) : undefined;
+    const isPinnedContainmentEvidence = isEvidenceRoleNode(node) && isContainmentRoleNode(parentNode);
+
+    if (!isFreeformRcaAnnotationNode(node) && !isPinnedContainmentEvidence) {
       return;
     }
 
@@ -6059,6 +6092,27 @@ function RcaWorkspaceInner() {
     };
   }, [activeNodeDetails, reactFlow]);
   const openNodeHintFromCanvasControl = React.useCallback((nodeId: string) => {
+    /**
+     * Measured from the button, not guessed from the corner.
+     *
+     * This used to be a fixed offset — 190 across and 42 down from the
+     * workspace corner — which was only ever right for the window it was
+     * written on. Reading the button's own position is what lets the guide's
+     * tail actually meet it.
+     */
+    const trigger = document.querySelector('[data-rca-node-hint-trigger="true"]');
+    const triggerBounds = trigger?.getBoundingClientRect();
+
+    if (triggerBounds) {
+      setNodeHintAnchor({
+        nodeId,
+        x: triggerBounds.left + (triggerBounds.width / 2),
+        y: triggerBounds.bottom
+      });
+
+      return;
+    }
+
     const rootBounds = workspaceRootRef.current?.getBoundingClientRect();
 
     setNodeHintAnchor({
@@ -11453,6 +11507,7 @@ function RcaWorkspaceInner() {
   return (
     <section
       className={`relative h-[calc(100svh-52px)] w-full overflow-hidden ${canvasThemeStyles.sectionClassName}`}
+      data-workspace-surface="true"
       ref={workspaceRootRef}
       style={{ backgroundColor: canvasThemeStyles.backgroundColor }}
     >
@@ -13176,6 +13231,9 @@ function RcaCanvasBackButton({
       <button
         aria-label="Open selected node guide"
         aria-pressed={isNodeHintOpen}
+        /* Named so the guide can measure it and put its tail under the button
+           that opened it, rather than under a guessed offset. */
+        data-rca-node-hint-trigger="true"
         className={`grid h-8 w-8 place-items-center rounded-full transition hover:-translate-y-0.5 hover:bg-white hover:text-cyan-700 active:scale-95 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:translate-y-0 disabled:hover:bg-transparent disabled:hover:text-slate-600 ${
           isNodeHintOpen ? 'bg-cyan-50 text-cyan-700' : ''
         }`}
@@ -14232,6 +14290,12 @@ const RCA_KNOWLEDGE_SECTIONS = [
 
 type RcaKnowledgePanelMode = 'answer' | 'guide' | 'selection';
 
+type RcaKnowledgeTurn = {
+  answer: RcaKnowledgeAskResponse | null;
+  id: string;
+  question: string;
+};
+
 function RcaKnowledgeBasePanel({
   incident,
   isOpen,
@@ -14253,11 +14317,37 @@ function RcaKnowledgeBasePanel({
 }) {
   const [question, setQuestion] = React.useState('');
   const [answer, setAnswer] = React.useState<RcaKnowledgeAskResponse | null>(null);
+  /**
+   * Everything asked and answered, in order.
+   *
+   * The panel used to hold one answer and replace it with the next, so the
+   * question that produced it was gone the moment it arrived — leaving an
+   * answer with nothing to read it against.
+   */
+  const [turns, setTurns] = React.useState<RcaKnowledgeTurn[]>([]);
+  const conversationRef = React.useRef<HTMLDivElement | null>(null);
+
   const [panelMode, setPanelMode] = React.useState<RcaKnowledgePanelMode>('guide');
   const [panelWidth, setPanelWidth] = React.useState(RCA_KNOWLEDGE_PANEL_DEFAULT_WIDTH);
   const [isAsking, setIsAsking] = React.useState(false);
   const [askError, setAskError] = React.useState('');
   const canAsk = question.trim().length >= 3 && !isAsking;
+  /**
+   * Follows the conversation down as it grows.
+   *
+   * Without this a new question is added below the fold and the panel looks as
+   * though nothing happened. Keyed on the turn count and the asking state, so
+   * it moves when a question is added and again when its answer lands.
+   */
+  React.useEffect(() => {
+    const container = conversationRef.current;
+
+    if (!container || panelMode !== 'answer') {
+      return;
+    }
+
+    container.scrollTo({ behavior: 'smooth', top: container.scrollHeight });
+  }, [isAsking, panelMode, turns.length]);
   const selectedItemSummary = selectedNode
     ? getRcaKnowledgeSelectedNodeSummary(selectedNode, nodes)
     : selectedSplineCount > 0
@@ -14301,18 +14391,27 @@ function RcaKnowledgeBasePanel({
     }
 
     const submittedQuestion = question.trim();
+    const turnId = `turn_${Date.now()}`;
 
     setQuestion('');
     setIsAsking(true);
     setAskError('');
+    // The question appears the moment it is asked, rather than only once an
+    // answer arrives. Waiting makes the panel look as though it missed it.
+    setTurns((current) => [...current, { answer: null, id: turnId, question: submittedQuestion }]);
+    setPanelMode('answer');
 
     try {
       const result = await onAsk(submittedQuestion);
 
       setAnswer(result);
-      setPanelMode('answer');
+      setTurns((current) => current.map((turn) => (
+        turn.id === turnId ? { ...turn, answer: result } : turn
+      )));
     } catch (error) {
       setAskError(error instanceof Error ? error.message : 'RCA guidance is temporarily unavailable.');
+      // A question with no answer is not left sitting there for ever.
+      setTurns((current) => current.filter((turn) => turn.id !== turnId));
     } finally {
       setIsAsking(false);
     }
@@ -14357,7 +14456,16 @@ function RcaKnowledgeBasePanel({
 
       <aside
         aria-label="RCA knowledge base"
-        className={`rca-knowledge-drawer fixed bottom-0 left-0 top-16 z-[69] flex max-w-[calc(100vw-20px)] flex-col overflow-hidden rounded-r-3xl border-r border-slate-200/80 bg-white/96 shadow-2xl shadow-slate-950/20 ring-1 ring-slate-900/5 backdrop-blur-2xl ${
+        /*
+          Anchored to the canvas, not to the window.
+
+          It was `fixed`, so `left-0` meant the left edge of the screen and the
+          panel opened straight over the workspace's own sidebar. It sits inside
+          the canvas container, so `absolute` puts it where it belongs — beside
+          the canvas — and the top and bottom insets keep it clear of the
+          toolbars floating at either end.
+        */
+        className={`rca-knowledge-drawer absolute bottom-24 left-3 top-24 z-[69] flex max-w-[calc(100%-24px)] flex-col overflow-hidden rounded-3xl border border-slate-200/70 bg-white/96 shadow-2xl shadow-slate-950/15 ring-1 ring-slate-900/5 backdrop-blur-2xl max-lg:bottom-20 ${
           isOpen
             ? 'rca-knowledge-drawer-open pointer-events-auto'
             : 'rca-knowledge-drawer-closed pointer-events-none'
@@ -14399,8 +14507,10 @@ function RcaKnowledgeBasePanel({
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col">
-          <div className="min-h-0 flex-1 overflow-auto px-4 py-4">
-            {panelMode === 'answer' && answer ? (
+          <div className="min-h-0 flex-1 overflow-auto px-4 py-4" ref={conversationRef}>
+            {panelMode === 'answer' && turns.length ? (
+              <RcaKnowledgeConversation isAsking={isAsking} turns={turns} />
+            ) : panelMode === 'answer' && answer ? (
               <RcaKnowledgeAnswerView answer={answer} />
             ) : panelMode === 'selection' && selectedItemSummary ? (
               <RcaKnowledgeSelectionView summary={selectedItemSummary} />
@@ -14416,24 +14526,25 @@ function RcaKnowledgeBasePanel({
             )}
           </div>
 
-          <section className="border-t border-slate-200/80 bg-white/95 p-4 shadow-[0_-14px_34px_rgba(15,23,42,0.08)]">
-            <div className="flex items-center gap-2">
-              <Bot aria-hidden="true" className="text-cyan-700" size={18} />
-              <h3 className="text-sm font-bold text-slate-950">Ask RCA AI</h3>
-            </div>
-            <p className="mt-2 text-xs leading-5 text-slate-500">
-              Ask about RCA flow, node usage, evidence gaps, containment, cause logic, CAPA, or closure readiness.
-            </p>
-            <form className="mt-3 flex items-end gap-2" onSubmit={handleSubmit}>
+          <section className="px-4 pb-4 pt-2">
+            {/*
+              One floating field, curved all the way round.
+              The button sits inside it rather than beside it, so the composer
+              reads as somewhere to say something rather than as a form.
+            */}
+            <form
+              className="flex items-end gap-2 rounded-[24px] border border-slate-200/70 bg-white p-2 shadow-[0_10px_30px_rgba(15,23,42,0.10)] transition focus-within:border-cyan-300 focus-within:shadow-[0_12px_34px_rgba(8,145,178,0.16)]"
+              onSubmit={handleSubmit}
+            >
               <textarea
-                className="min-h-24 flex-1 resize-none rounded-2xl border border-slate-200 bg-slate-50/80 px-3 py-3 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-cyan-300 focus:bg-white focus:ring-4 focus:ring-cyan-100"
+                className="min-h-20 flex-1 resize-none rounded-[18px] border-0 bg-transparent px-3 py-2.5 text-sm text-slate-800 outline-none placeholder:text-slate-400"
                 onChange={(event) => setQuestion(event.target.value)}
                 placeholder="Ask how to structure this RCA, what evidence is missing, or how to close CAPA."
                 value={question}
               />
               <button
                 aria-label={isAsking ? 'Asking RCA AI' : 'Ask RCA AI'}
-                className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-slate-950 text-white shadow-lg shadow-slate-950/16 transition hover:bg-cyan-700 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:shadow-none active:scale-95"
+                className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-cyan-600 text-white shadow-md shadow-cyan-950/20 transition hover:bg-cyan-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none active:scale-95"
                 disabled={!canAsk}
                 title={isAsking ? 'Asking RCA AI' : 'Ask RCA AI'}
                 type="submit"
@@ -14512,6 +14623,59 @@ function RcaKnowledgeGuideView({
         ))}
       </div>
     </>
+  );
+}
+
+/**
+ * The exchange, in the order it happened.
+ *
+ * Asymmetric on purpose, which is what makes a transcript read as a
+ * conversation: the question is a short bubble on the right, the answer is
+ * plain text across the panel. Boxing both sides identically — which is what
+ * this did before — reads as a log of records instead.
+ */
+function RcaKnowledgeConversation({
+  isAsking,
+  turns
+}: {
+  isAsking: boolean;
+  turns: RcaKnowledgeTurn[];
+}) {
+  return (
+    <div className="flex flex-col gap-6">
+      {turns.map((turn) => (
+        <article className="flex flex-col gap-3" key={turn.id}>
+          <div className="flex justify-end">
+            <p className="max-w-[85%] whitespace-pre-wrap rounded-[16px] rounded-br-[4px] bg-cyan-600 px-3.5 py-2.5 text-[13px] leading-6 text-white shadow-sm shadow-cyan-950/15">
+              {turn.question}
+            </p>
+          </div>
+
+          {turn.answer ? (
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2 text-[11px] font-semibold text-slate-500">
+                <span className="grid h-5 w-5 place-items-center rounded-md bg-cyan-50 text-cyan-700">
+                  <Bot aria-hidden="true" size={12} />
+                </span>
+                RCA AI
+                <span className="font-normal text-slate-400">
+                  {turn.answer.source === 'AI' ? 'AI guidance' : 'System guide'}
+                </span>
+              </div>
+              {/* No container around the answer. It is the thing being read. */}
+              <p className="whitespace-pre-wrap px-0.5 text-[13px] leading-7 text-slate-700">
+                {turn.answer.answer}
+              </p>
+            </div>
+          ) : isAsking ? (
+            <div className="flex items-center gap-2 px-0.5 text-[12px] text-slate-400">
+              <RefreshCw aria-hidden="true" className="animate-spin" size={13} />
+              Reading the canvas...
+            </div>
+          ) : null}
+        </article>
+      ))}
+    </div>
   );
 }
 
@@ -14872,7 +15036,13 @@ function RcaActivityLogPanel({
   return (
     <>
       <aside
-        className={`rca-activity-log-drawer fixed bottom-0 right-0 top-16 z-[72] flex max-w-[calc(100vw-20px)] flex-col overflow-hidden rounded-l-3xl border-l border-slate-200/80 bg-white/96 shadow-2xl shadow-slate-950/20 ring-1 ring-slate-900/5 backdrop-blur-2xl ${
+        /*
+          Anchored to the canvas, and clear of the toolbars at either end.
+          Same fault as the knowledge panel: `fixed` meant the edges of the
+          window rather than the edges of the canvas, so it ran the full height
+          and covered the controls at the foot of it.
+        */
+        className={`rca-activity-log-drawer absolute bottom-24 right-3 top-24 z-[72] flex max-w-[calc(100%-24px)] flex-col overflow-hidden rounded-3xl border border-slate-200/70 bg-white/96 shadow-2xl shadow-slate-950/15 ring-1 ring-slate-900/5 backdrop-blur-2xl max-lg:bottom-20 ${
           isOpen
             ? 'rca-activity-log-drawer-open pointer-events-auto'
             : 'rca-activity-log-drawer-closed pointer-events-none'
@@ -16211,56 +16381,72 @@ function RcaCanvasToolbar({
     );
   }
 
+  /**
+   * One button, three states.
+   *
+   * The bar had grown four different button treatments — borderless, outlined,
+   * solid cyan and a tinted variant — so nothing on it read as belonging to
+   * anything else, and "selected" meant two different things depending on which
+   * button you were looking at. A control bar is a row of peers; they should
+   * differ by what they say, not by how they are drawn.
+   */
   const toolbarButtonClass =
-    'inline-flex min-h-[34px] shrink-0 items-center justify-center gap-1.5 rounded-[12px] px-2.5 text-[12px] font-medium leading-none text-slate-600 transition hover:bg-white hover:text-slate-950 hover:shadow-sm active:scale-95 disabled:cursor-not-allowed disabled:opacity-45';
-  const toolbarPanelButtonClass =
-    'inline-flex min-h-[34px] shrink-0 items-center justify-center gap-1.5 rounded-[12px] border border-slate-200/80 bg-white/72 px-2.5 text-[12px] font-medium leading-none text-slate-600 shadow-[0_1px_0_rgba(255,255,255,0.9)_inset] transition hover:border-cyan-200 hover:bg-white hover:text-cyan-700 hover:shadow-sm active:scale-95 disabled:cursor-not-allowed disabled:opacity-45';
+    'inline-flex min-h-[32px] shrink-0 items-center justify-center gap-1.5 rounded-[10px] px-3 text-[12.5px] font-medium leading-none text-slate-600 transition-colors duration-150 hover:bg-slate-900/[0.06] hover:text-slate-900 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent';
+  const toolbarPanelButtonClass = toolbarButtonClass;
+  /**
+   * The selected state is a filled pill, and it is the only filled thing on the
+   * bar. A tint plus a ring reads as a hover on a light background, which is
+   * why the previously selected panel buttons were easy to miss.
+   */
   const toolbarActiveButtonClass =
-    'border-cyan-200 bg-cyan-50/95 text-cyan-800 shadow-sm shadow-cyan-950/10 ring-1 ring-cyan-100/80';
-  const toolbarDividerClass = 'h-6 w-px shrink-0 bg-gradient-to-b from-transparent via-slate-200 to-transparent';
+    'bg-cyan-600 text-white shadow-[0_6px_16px_rgba(8,145,178,0.30)] hover:bg-cyan-600 hover:text-white';
+  const toolbarIconButtonClass =
+    'grid h-[32px] w-[32px] shrink-0 place-items-center rounded-[10px] text-slate-500 transition-colors duration-150 hover:bg-slate-900/[0.06] hover:text-slate-900 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent';
+  const toolbarDividerClass = 'h-5 w-px shrink-0 bg-slate-900/10';
 
+  /**
+   * The bar scrolls when it must, rather than losing its own controls.
+   *
+   * The report, activity log and minimise buttons sit at the end, and on a
+   * narrower window they were pushed out with no way to reach them — which is
+   * why they looked missing. It now stays inside the viewport and scrolls
+   * sideways instead of hiding what it cannot fit.
+   */
   return (
-    <div className="absolute bottom-6 left-1/2 z-50 flex -translate-x-1/2 items-center gap-1.5 rounded-[20px] border border-white/75 bg-white/88 p-1.5 shadow-[0_22px_64px_rgba(15,23,42,0.18),0_8px_22px_rgba(14,165,233,0.10)] ring-1 ring-slate-900/5 backdrop-blur-2xl max-lg:bottom-4 max-lg:w-[calc(100%-24px)] max-lg:overflow-x-auto">
+    <div className="absolute bottom-6 left-1/2 z-50 flex max-w-[calc(100vw-32px)] -translate-x-1/2 items-center gap-0.5 overflow-x-auto rounded-[16px] border border-slate-900/[0.06] bg-white/90 p-1.5 shadow-[0_18px_50px_rgba(15,23,42,0.16)] ring-1 ring-white/60 backdrop-blur-2xl max-lg:bottom-4 max-lg:w-[calc(100%-24px)]">
       <button
-        className={`${toolbarButtonClass} bg-white/40`}
+        className={toolbarButtonClass}
         onClick={onOpenIncidentLauncher}
         type="button"
       >
-        <FilePlus2 aria-hidden="true" size={13} strokeWidth={1.85} />
         Incident
       </button>
       <span className={toolbarDividerClass} />
       {methodologyOptions.map((option) => {
-        const MethodIcon = option.icon;
         const isSelected = option.value === methodology;
 
         return (
           <button
-            className={`inline-flex min-h-[34px] shrink-0 items-center justify-center gap-1.5 rounded-[13px] px-3 text-[12px] font-semibold leading-none transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-45 ${
-              isSelected
-                ? 'bg-cyan-600 text-white shadow-[0_10px_22px_rgba(8,145,178,0.24)] ring-1 ring-cyan-500/30'
-                : 'text-slate-600 hover:bg-white hover:text-slate-950 hover:shadow-sm'
-            }`}
+            aria-pressed={isSelected}
+            className={`${toolbarButtonClass} ${isSelected ? toolbarActiveButtonClass : ''}`}
             disabled={!session || isWorking}
             key={option.value}
             onClick={() => onMethodologyChange(option.value)}
             title={`${option.shortcut} - ${option.label}`}
             type="button"
           >
-            <MethodIcon aria-hidden="true" size={15} strokeWidth={2.05} />
             {option.label}
           </button>
         );
       })}
       <span className={toolbarDividerClass} />
       <button
-        className="inline-flex min-h-[34px] shrink-0 items-center justify-center gap-1.5 rounded-[13px] border border-cyan-200/80 bg-cyan-50/82 px-3 text-[12px] font-semibold leading-none text-cyan-750 shadow-[0_1px_0_rgba(255,255,255,0.9)_inset] transition hover:border-cyan-300 hover:bg-cyan-100/85 hover:text-cyan-900 hover:shadow-sm active:scale-95 disabled:cursor-not-allowed disabled:opacity-45"
+        className={toolbarButtonClass}
         disabled={!session || isWorking}
         onClick={onAutoArrange}
         title="R - Rearrange canvas"
         type="button"
       >
-        <AlignHorizontalSpaceBetween aria-hidden="true" size={15} strokeWidth={2.05} />
         Rearrange Canvas
       </button>
       {isReferenceProject ? (
@@ -16293,7 +16479,6 @@ function RcaCanvasToolbar({
         title="Start Presentation Mode"
         type="button"
       >
-        <Presentation aria-hidden="true" size={15} strokeWidth={2.05} />
         Present
       </button>
       <button
@@ -16307,7 +16492,6 @@ function RcaCanvasToolbar({
         title={canWalkBranches ? 'Walk through Ishikawa branches' : 'Add the Fishbone branch structure first'}
         type="button"
       >
-        <GitBranch aria-hidden="true" size={15} strokeWidth={2.05} />
         Branches
       </button>
       <button
@@ -16321,7 +16505,6 @@ function RcaCanvasToolbar({
         title="Validate selected node"
         type="button"
       >
-        <ShieldCheck aria-hidden="true" size={15} strokeWidth={2.05} />
         Validate
         {recommendationCount > 0 ? (
           <span className="ml-0.5 rounded-full bg-cyan-100 px-1.5 py-0.5 text-[10px] font-bold text-cyan-800 shadow-sm ring-1 ring-cyan-200/70">
@@ -16340,7 +16523,6 @@ function RcaCanvasToolbar({
         title="Open Connection Recommendations"
         type="button"
       >
-        <Link2 aria-hidden="true" size={15} strokeWidth={2.05} />
         Connect
         {connectionRecommendationCount > 0 ? (
           <span className="ml-0.5 rounded-full bg-cyan-100 px-1.5 py-0.5 text-[10px] font-bold text-cyan-800 shadow-sm ring-1 ring-cyan-200/70">
@@ -16350,31 +16532,22 @@ function RcaCanvasToolbar({
       </button>
       <button
         aria-pressed={isAutoFocusSelectionEnabled}
-        className={`inline-flex min-h-[34px] shrink-0 items-center justify-center gap-2 rounded-[13px] border px-2.5 text-[12px] font-semibold leading-none shadow-[0_1px_0_rgba(255,255,255,0.9)_inset] transition hover:shadow-sm active:scale-95 disabled:cursor-not-allowed disabled:opacity-45 ${
-          isAutoFocusSelectionEnabled
-            ? 'border-cyan-200 bg-cyan-50/95 text-cyan-800 ring-1 ring-cyan-100/80'
-            : 'border-slate-200/80 bg-white/72 text-slate-600 hover:border-cyan-200 hover:bg-white hover:text-cyan-700'
-        }`}
+        className={`${toolbarButtonClass} gap-2 ${isAutoFocusSelectionEnabled ? toolbarActiveButtonClass : ''}`}
         disabled={!session}
         onClick={onToggleAutoFocusSelection}
         title={`Auto-focus selected node family is ${isAutoFocusSelectionEnabled ? 'on' : 'off'}`}
         type="button"
       >
-        <span className="inline-flex items-center gap-1.5">
-          <Crosshair aria-hidden="true" size={14} strokeWidth={2.05} />
-          Focus
-        </span>
+        Focus
         <span
           aria-hidden="true"
-          className={`relative inline-flex h-[18px] w-[34px] shrink-0 items-center rounded-full border transition ${
-            isAutoFocusSelectionEnabled
-              ? 'border-cyan-600 bg-cyan-600 shadow-inner shadow-cyan-950/10'
-              : 'border-slate-300 bg-slate-200'
+          className={`relative inline-flex h-[16px] w-[28px] shrink-0 items-center rounded-full transition ${
+            isAutoFocusSelectionEnabled ? 'bg-white/30' : 'bg-slate-300/80'
           }`}
         >
           <span
-            className={`absolute top-1/2 h-[14px] w-[14px] -translate-y-1/2 rounded-full bg-white shadow-sm ring-1 ring-slate-900/5 transition-transform ${
-              isAutoFocusSelectionEnabled ? 'translate-x-[17px]' : 'translate-x-[2px]'
+            className={`absolute top-1/2 h-[12px] w-[12px] -translate-y-1/2 rounded-full bg-white shadow-sm transition-transform ${
+              isAutoFocusSelectionEnabled ? 'translate-x-[14px]' : 'translate-x-[2px]'
             }`}
           />
         </span>
@@ -16382,11 +16555,7 @@ function RcaCanvasToolbar({
       <span className={toolbarDividerClass} />
       <button
         aria-label="Generate RCA report"
-        className={`grid h-[34px] w-[34px] shrink-0 place-items-center rounded-[12px] transition active:scale-95 ${
-          canGenerateReport
-            ? 'bg-white/72 text-cyan-700 ring-1 ring-cyan-100 hover:bg-cyan-50 hover:text-cyan-800 hover:shadow-sm'
-            : 'text-slate-300'
-        } disabled:cursor-not-allowed disabled:opacity-55`}
+        className={toolbarIconButtonClass}
         disabled={isWorking || !session || !canGenerateReport}
         onClick={onGenerateReport}
         title={canGenerateReport ? 'Generate RCA report' : 'Select the parent Incident node to generate an RCA report'}
@@ -16398,9 +16567,7 @@ function RcaCanvasToolbar({
       <button
         aria-expanded={isActivityLogOpen}
         aria-label="Open RCA activity log"
-        className={`relative grid h-[34px] w-[34px] shrink-0 place-items-center rounded-[12px] text-slate-500 transition hover:bg-white hover:text-cyan-700 hover:shadow-sm active:scale-95 ${
-          isActivityLogOpen ? 'bg-cyan-50 text-cyan-700 ring-1 ring-cyan-100/80' : ''
-        }`}
+        className={`relative ${toolbarIconButtonClass} ${isActivityLogOpen ? toolbarActiveButtonClass : ''}`}
         onClick={onToggleActivityLog}
         title="RCA activity log"
         type="button"
@@ -16415,7 +16582,7 @@ function RcaCanvasToolbar({
       <span className={toolbarDividerClass} />
       <button
         aria-label="Minimize RCA toolbar"
-        className="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-[12px] text-slate-500 transition hover:bg-white hover:text-slate-950 hover:shadow-sm active:scale-95"
+        className={toolbarIconButtonClass}
         onClick={() => setIsToolbarMinimized(true)}
         title="Minimize toolbar"
         type="button"
@@ -16450,6 +16617,15 @@ function getRcaReportModalMaxSize(): { height: number; width: number } {
     width: Math.max(520, window.innerWidth - RCA_REPORT_MODAL_MARGIN * 2)
   };
 }
+
+/**
+ * Clearances the maximised report keeps, in pixels.
+ *
+ * Only a fallback, for when the canvas element cannot be found. Normally the
+ * canvas is measured and the report is laid over exactly that area.
+ */
+const RCA_REPORT_MAXIMIZED_TOP_GAP = 64;
+const RCA_REPORT_MAXIMIZED_FOOTER_GAP = 96;
 
 function getInitialRcaReportModalGeometry(): {
   position: { x: number; y: number };
@@ -16511,6 +16687,9 @@ function RcaIncidentReportModal({
   sessionId: string;
 }) {
   const [isMaximized, setIsMaximized] = React.useState(false);
+  const [maximizedRect, setMaximizedRect] = React.useState<{ height: number; left: number; top: number; width: number } | null>(null);
+  const [pageIndex, setPageIndex] = React.useState(0);
+  const contentRef = React.useRef<HTMLDivElement | null>(null);
   const [exportStatus, setExportStatus] = React.useState<RcaReportExportFormat | null>(null);
   const [previewUrls, setPreviewUrls] = React.useState<Map<string, string>>(() => new Map());
   const objectUrlsRef = React.useRef<Set<string>>(new Set());
@@ -16732,14 +16911,79 @@ function RcaIncidentReportModal({
     }
   }
 
+  /**
+   * Maximised means the canvas area, measured — not the viewport.
+   *
+   * The canvas already stops short of the side panel on one side and the app
+   * footer on the other, so covering it exactly is the whole requirement. The
+   * floating control bar sits inside the canvas and is covered along with it;
+   * it is not a boundary. Measuring rather than working from constants keeps
+   * this right when the side panel collapses or the window is resized.
+   */
   const modalStyle = isMaximized
-    ? undefined
+    ? maximizedRect || {
+        bottom: RCA_REPORT_MAXIMIZED_FOOTER_GAP,
+        left: 'calc(var(--workspace-side-panel-width, 264px) + 12px)',
+        right: 12,
+        top: RCA_REPORT_MAXIMIZED_TOP_GAP
+      }
     : {
         height: size.height,
         left: position.x,
         top: position.y,
         width: size.width
       };
+  React.useLayoutEffect(() => {
+    if (!isMaximized) {
+      setMaximizedRect(null);
+
+      return undefined;
+    }
+
+    const canvasArea = document.querySelector('[data-workspace-surface="true"]');
+
+    if (!canvasArea) {
+      setMaximizedRect(null);
+
+      return undefined;
+    }
+
+    const measure = () => {
+      const area = canvasArea.getBoundingClientRect();
+
+      setMaximizedRect({
+        height: area.height,
+        left: area.left,
+        top: area.top,
+        width: area.width
+      });
+    };
+
+    measure();
+
+    const observer = new ResizeObserver(measure);
+
+    observer.observe(canvasArea);
+    window.addEventListener('resize', measure);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', measure);
+    };
+  }, [isMaximized]);
+
+  const pageCount = reportSections.length;
+  const activeSection = reportSections[pageIndex] || null;
+
+  React.useEffect(() => {
+    setPageIndex((currentIndex) => Math.min(currentIndex, Math.max(0, pageCount - 1)));
+  }, [pageCount]);
+
+  // A new page starts at its heading, not wherever the last one was left scrolled.
+  React.useEffect(() => {
+    contentRef.current?.scrollTo({ top: 0 });
+  }, [pageIndex]);
+
   const title = incidentNode.label.trim() || incident.title || 'RCA incident report';
   const exportPayload = React.useMemo(
     () => buildRcaReportExportPayload({
@@ -16781,7 +17025,7 @@ function RcaIncidentReportModal({
     <section
       aria-label="RCA report preview"
       className={`fixed z-[130] flex flex-col overflow-hidden border border-slate-200 bg-white text-slate-950 shadow-[0_28px_90px_rgba(15,23,42,0.28),0_8px_28px_rgba(14,165,233,0.12)] ring-1 ring-slate-950/5 ${
-        isMaximized ? 'inset-4 rounded-3xl' : 'rounded-3xl'
+        isMaximized ? 'rounded-lg' : 'rounded-lg'
       }`}
       role="dialog"
       style={modalStyle}
@@ -16824,8 +17068,8 @@ function RcaIncidentReportModal({
         }}
       >
         <div className="min-w-0">
-          <p className="text-[10px] font-medium uppercase tracking-[0.28em] text-cyan-700">RCA Report</p>
-          <h2 className="mt-1 truncate text-lg font-semibold tracking-tight text-slate-950">{title}</h2>
+          <p className="text-[10px] font-medium uppercase tracking-[0.12em] text-cyan-700">RCA Report</p>
+          <h2 className="mt-1 truncate text-lg font-medium tracking-tight text-slate-900">{title}</h2>
           <p className="mt-1 truncate text-xs text-slate-500">
             {incident.displayId || buildFriendlyRcaDisplayId('RCA', incident.id, incident.createdAtIso)} • {reportNodes.length} node{reportNodes.length === 1 ? '' : 's'} • {evidenceCount} evidence item{evidenceCount === 1 ? '' : 's'}
           </p>
@@ -16834,7 +17078,7 @@ function RcaIncidentReportModal({
           <Popover.Root>
             <Popover.Trigger asChild>
               <button
-                className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 shadow-sm transition hover:border-cyan-200 hover:text-cyan-700 active:scale-95 disabled:cursor-not-allowed disabled:opacity-55"
+                className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-xs font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 active:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-55"
                 disabled={Boolean(exportStatus)}
                 onMouseDown={(event) => event.stopPropagation()}
                 title="Export RCA report"
@@ -16847,7 +17091,7 @@ function RcaIncidentReportModal({
             <Popover.Portal>
               <Popover.Content
                 align="end"
-                className="z-[160] w-56 rounded-2xl border border-slate-200/90 bg-white/95 p-1.5 text-slate-700 shadow-[0_24px_64px_rgba(15,23,42,0.22)] ring-1 ring-slate-950/5 backdrop-blur-xl"
+                className="z-[160] w-56 rounded-lg border border-slate-200 bg-white p-1 text-slate-700 shadow-[0_8px_16px_rgba(0,0,0,0.14),0_0_2px_rgba(0,0,0,0.12)]"
                 onMouseDown={(event) => event.stopPropagation()}
                 sideOffset={8}
               >
@@ -16884,7 +17128,7 @@ function RcaIncidentReportModal({
             </Popover.Portal>
           </Popover.Root>
           <button
-            className="grid h-10 w-10 place-items-center rounded-2xl border border-slate-200 bg-white text-slate-600 shadow-sm transition hover:border-cyan-200 hover:text-cyan-700 active:scale-95"
+            className="grid h-9 w-9 place-items-center rounded-md border border-slate-300 bg-white text-slate-600 transition hover:border-slate-400 hover:bg-slate-50 active:bg-slate-100"
             onClick={() => setIsMaximized((currentValue) => !currentValue)}
             title={isMaximized ? 'Restore report' : 'Maximize report'}
             type="button"
@@ -16892,7 +17136,7 @@ function RcaIncidentReportModal({
             {isMaximized ? <Minimize2 aria-hidden="true" size={17} /> : <Maximize2 aria-hidden="true" size={17} />}
           </button>
           <button
-            className="grid h-10 w-10 place-items-center rounded-2xl border border-slate-200 bg-white text-slate-600 shadow-sm transition hover:border-red-200 hover:text-red-600 active:scale-95"
+            className="grid h-9 w-9 place-items-center rounded-md border border-slate-300 bg-white text-slate-600 transition hover:border-red-300 hover:bg-red-50 hover:text-red-600"
             onClick={onClose}
             title="Close report"
             type="button"
@@ -16902,55 +17146,78 @@ function RcaIncidentReportModal({
         </div>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto bg-[linear-gradient(180deg,#f8fafc_0%,#ffffff_34%,#f8fafc_100%)] px-5 py-5">
-        <div className="mb-4 grid gap-3 md:grid-cols-3">
-          <div className="rounded-2xl border border-slate-200/90 bg-white p-4 shadow-[0_10px_26px_rgba(15,23,42,0.06)]">
-            <p className="text-[10px] font-medium uppercase tracking-[0.2em] text-slate-500">Project</p>
-            <p className="mt-2 text-sm font-medium text-slate-950">{incident.title || 'Untitled RCA project'}</p>
+      <div className="min-h-0 flex-1 overflow-y-auto bg-white px-8 py-6" ref={contentRef}>
+        <dl className="grid grid-cols-1 gap-x-10 gap-y-4 border-b border-slate-300 pb-5 sm:grid-cols-3">
+          <div>
+            <dt className="text-[11px] font-medium uppercase tracking-[0.08em] text-slate-500">Project</dt>
+            <dd className="mt-1.5 text-sm leading-6 text-slate-900">{incident.title || 'Untitled RCA project'}</dd>
           </div>
-          <div className="rounded-2xl border border-slate-200/90 bg-white p-4 shadow-[0_10px_26px_rgba(15,23,42,0.06)]">
-            <p className="text-[10px] font-medium uppercase tracking-[0.2em] text-slate-500">Status</p>
-            <p className="mt-2 text-sm font-medium text-slate-950">{formatStatus(incident.status || 'ACTIVE')}</p>
+          <div>
+            <dt className="text-[11px] font-medium uppercase tracking-[0.08em] text-slate-500">Status</dt>
+            <dd className="mt-1.5 text-sm leading-6 text-slate-900">{formatStatus(incident.status || 'ACTIVE')}</dd>
           </div>
-          <div className="rounded-2xl border border-slate-200/90 bg-white p-4 shadow-[0_10px_26px_rgba(15,23,42,0.06)]">
-            <p className="text-[10px] font-medium uppercase tracking-[0.2em] text-slate-500">Generated</p>
-            <p className="mt-2 text-sm font-medium text-slate-950">{formatAuditDate(generatedAt)}</p>
+          <div>
+            <dt className="text-[11px] font-medium uppercase tracking-[0.08em] text-slate-500">Generated</dt>
+            <dd className="mt-1.5 text-sm leading-6 text-slate-900">{formatAuditDate(generatedAt)}</dd>
           </div>
-        </div>
+        </dl>
 
-        <div className="space-y-4">
-          {reportSections.map((section) => (
-            <section className="overflow-hidden rounded-3xl border border-slate-200/90 bg-white shadow-[0_16px_44px_rgba(15,23,42,0.07)]" key={section.id}>
-              <div className="border-b border-slate-100 bg-slate-50/70 px-5 py-4">
-                <p className="text-[10px] font-medium uppercase tracking-[0.24em] text-cyan-700">{section.title}</p>
-                <p className="mt-1 text-xs leading-5 text-slate-500">{section.subtitle}</p>
-              </div>
-              <div className="space-y-3 p-5">
-                {section.nodes.map((node) => (
-                  <RcaIncidentReportNodeCard
-                    key={node.id}
-                    node={node}
-                    onOpenEvidence={handleOpenEvidence}
-                    previewUrls={previewUrls}
-                  />
-                ))}
-              </div>
-            </section>
-          ))}
-        </div>
+        {activeSection ? (
+          <section className="pt-6" key={activeSection.id}>
+            <div className="border-b border-slate-300 pb-3">
+              <h3 className="text-sm font-medium uppercase tracking-[0.08em] text-slate-900">{activeSection.title}</h3>
+              <p className="mt-1 text-xs leading-5 text-slate-500">{activeSection.subtitle}</p>
+            </div>
+            <div className="divide-y divide-slate-200">
+              {activeSection.nodes.map((node) => (
+                <RcaIncidentReportNodeCard
+                  key={node.id}
+                  node={node}
+                  onOpenEvidence={handleOpenEvidence}
+                  previewUrls={previewUrls}
+                />
+              ))}
+            </div>
+          </section>
+        ) : (
+          <p className="py-16 text-center text-sm text-slate-500">This report has no sections yet.</p>
+        )}
       </div>
 
-      <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-slate-200 bg-white px-5 py-4">
-        <p className="text-xs font-medium text-slate-500">
-          Preview only. Export and approval workflows can be added after the RCA report structure is approved.
+      <footer className="flex shrink-0 items-center justify-between gap-4 border-t border-slate-200 bg-white px-6 py-3">
+        <p className="min-w-0 truncate text-xs text-slate-500">
+          {activeSection ? activeSection.title : 'Preview only.'}
         </p>
-        <button
-          className="inline-flex min-h-[38px] items-center justify-center rounded-2xl bg-slate-950 px-4 text-sm font-semibold text-white shadow-lg shadow-slate-950/15 transition hover:bg-slate-800 active:scale-95"
-          onClick={onClose}
-          type="button"
-        >
-          Close
-        </button>
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            className="inline-flex h-9 items-center gap-1 rounded-md border border-slate-300 bg-white px-3 text-xs font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={pageIndex <= 0}
+            onClick={() => setPageIndex((currentIndex) => Math.max(0, currentIndex - 1))}
+            type="button"
+          >
+            <ChevronLeft aria-hidden="true" size={15} strokeWidth={1.75} />
+            Previous
+          </button>
+          <p aria-live="polite" className="px-3 text-xs tabular-nums text-slate-600">
+            Page {pageCount ? pageIndex + 1 : 0} of {pageCount}
+          </p>
+          <button
+            className="inline-flex h-9 items-center gap-1 rounded-md border border-slate-300 bg-white px-3 text-xs font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={pageIndex >= pageCount - 1}
+            onClick={() => setPageIndex((currentIndex) => Math.min(pageCount - 1, currentIndex + 1))}
+            type="button"
+          >
+            Next
+            <ChevronRight aria-hidden="true" size={15} strokeWidth={1.75} />
+          </button>
+          <button
+            className="ml-2 inline-flex h-9 items-center justify-center rounded-md bg-slate-900 px-4 text-sm font-medium text-white transition hover:bg-slate-700 active:bg-slate-800"
+            onClick={onClose}
+            type="button"
+          >
+            Close
+          </button>
+        </div>
       </footer>
     </section>,
     document.body
@@ -17551,6 +17818,21 @@ function getPdfImageFormat(dataUrl: string): 'JPEG' | 'PNG' | 'WEBP' {
   return 'JPEG';
 }
 
+/**
+ * A long answer takes the full width of the report.
+ *
+ * Descriptions and impact statements run to several lines. Held in one half of a
+ * two column grid they wrap into a narrow ribbon while the cell beside them sits
+ * empty, which is what stranded the incident description. Past this length, or
+ * once the text carries its own line breaks, the field takes the whole row and
+ * reads as a paragraph.
+ */
+const RCA_REPORT_WIDE_FIELD_CHARACTERS = 110;
+
+function isWideRcaReportFieldValue(value: string): boolean {
+  return value.length > RCA_REPORT_WIDE_FIELD_CHARACTERS || value.includes('\n');
+}
+
 function RcaIncidentReportNodeCard({
   node,
   onOpenEvidence,
@@ -17565,31 +17847,34 @@ function RcaIncidentReportNodeCard({
   const title = getRcaReportNodeTitle(node);
 
   return (
-    <article className="rounded-2xl border border-slate-200/90 bg-white p-4 shadow-[0_8px_26px_rgba(15,23,42,0.055)]">
-      <div className="flex items-start justify-between gap-3 border-b border-slate-100 pb-3">
+    <article className="py-5">
+      <div className="flex items-start justify-between gap-3 border-b border-slate-200 pb-3">
         <div className="min-w-0">
-          <span className="inline-flex rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.18em] text-slate-600">
+          <span className="inline-flex rounded bg-slate-100 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.08em] text-slate-600">
             {role ? getFiveWhysRoleLabel(role) : formatNodeType(node.nodeType)}
           </span>
-          <h3 className="mt-2 whitespace-pre-wrap text-sm font-medium leading-5 text-slate-950">{title}</h3>
+          <h3 className="mt-2 whitespace-pre-wrap text-[15px] font-medium leading-6 text-slate-900">{title}</h3>
         </div>
         {node.isRootCause ? (
-          <span className="shrink-0 rounded-full border border-red-200 bg-red-50 px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide text-red-700">
+          <span className="shrink-0 rounded border border-red-200 bg-red-50 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.08em] text-red-700">
             Cause
           </span>
         ) : node.isSuspectedCause ? (
-          <span className="shrink-0 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide text-amber-700">
+          <span className="shrink-0 rounded border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.08em] text-amber-700">
             Suspect
           </span>
         ) : null}
       </div>
 
       {fieldEntries.length ? (
-        <dl className="mt-3 grid gap-2 md:grid-cols-2">
+        <dl className="mt-1 grid grid-cols-1 gap-x-10 md:grid-cols-2">
           {fieldEntries.map((entry) => (
-            <div className="rounded-xl border border-slate-100 bg-slate-50/80 px-3 py-2.5" key={entry.key}>
-              <dt className="text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500">{entry.label}</dt>
-              <dd className="mt-1 whitespace-pre-wrap text-xs leading-5 text-slate-800">{entry.value}</dd>
+            <div
+              className={`border-b border-slate-100 py-2.5 ${isWideRcaReportFieldValue(entry.value) ? 'md:col-span-2' : ''}`}
+              key={entry.key}
+            >
+              <dt className="text-[11px] font-medium uppercase tracking-[0.08em] text-slate-500">{entry.label}</dt>
+              <dd className="mt-1 whitespace-pre-wrap text-sm leading-6 text-slate-900">{entry.value}</dd>
             </div>
           ))}
         </dl>
@@ -17597,14 +17882,14 @@ function RcaIncidentReportNodeCard({
 
       {node.attachedEvidence.length ? (
         <div className="mt-4">
-          <p className="mb-2 text-[10px] font-medium uppercase tracking-[0.2em] text-cyan-700">Evidence</p>
+          <p className="mb-2 text-[10px] font-medium uppercase tracking-[0.1em] text-slate-500">Evidence</p>
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {node.attachedEvidence.map((item) => {
               const previewUrl = getEvidencePreviewUrl(item, previewUrls);
 
               return (
                 <button
-                  className="overflow-hidden rounded-2xl border border-slate-200 bg-white text-left shadow-[0_6px_18px_rgba(15,23,42,0.06)] transition hover:-translate-y-0.5 hover:border-cyan-200 hover:shadow-md active:scale-[0.99]"
+                  className="overflow-hidden rounded-md border border-slate-200 bg-white text-left transition hover:border-slate-400 hover:bg-slate-50"
                   key={getEvidenceKey(item)}
                   onClick={() => onOpenEvidence(item)}
                   type="button"
@@ -17617,7 +17902,7 @@ function RcaIncidentReportNodeCard({
                     </div>
                   )}
                   <div className="p-2">
-                    <p className="truncate text-xs font-medium text-slate-950">{item.fileName || 'Evidence file'}</p>
+                    <p className="truncate text-xs text-slate-900">{item.fileName || 'Evidence file'}</p>
                     <p className="mt-1 text-[11px] text-slate-500">
                       {item.uploadedAtIso ? formatAuditDate(item.uploadedAtIso) : 'Attached evidence'}
                     </p>
@@ -17655,7 +17940,7 @@ function RcaCanvasControlButtons({
         title="V - Select nodes"
         type="button"
       >
-        <BoxSelect aria-hidden="true" size={20} strokeWidth={2.15} />
+        <MousePointer2 aria-hidden="true" size={20} strokeWidth={1.75} />
       </ControlButton>
       <ControlButton
         aria-label="Pan canvas"
@@ -17665,7 +17950,7 @@ function RcaCanvasControlButtons({
         title="H - Pan canvas"
         type="button"
       >
-        <HandGrab aria-hidden="true" size={20} strokeWidth={2.15} />
+        <Hand aria-hidden="true" size={20} strokeWidth={1.75} />
       </ControlButton>
       <ControlButton
         aria-label={isSnapEnabled ? 'Turn snapping off' : 'Turn snapping on'}
@@ -17675,7 +17960,7 @@ function RcaCanvasControlButtons({
         title={`S - ${isSnapEnabled ? 'Turn grid snap off' : 'Turn grid snap on'}`}
         type="button"
       >
-        <Magnet aria-hidden="true" size={20} strokeWidth={2.15} />
+        <Grid2X2 aria-hidden="true" size={20} strokeWidth={1.75} />
       </ControlButton>
     </>
   );
@@ -18247,7 +18532,7 @@ function RcaCanvasContextMenu({
               </div>
               <RcaContextMenuItem
                 active={isSnapEnabled}
-                icon={Magnet}
+                icon={Grid2X2}
                 label={isSnapEnabled ? 'Grid snap On' : 'Grid snap Off'}
                 onClick={onSnapToggle}
                 shortcut="S"
@@ -18939,7 +19224,22 @@ function RcaNodeCard(props: NodeProps) {
     backgroundColor: isMisclassifiedFishboneCause ? RCA_DEFAULT_CAUSE_VISUAL_STYLE.backgroundColor : node.visualStyle?.backgroundColor || undefined,
     borderColor: isMisclassifiedFishboneCause ? RCA_DEFAULT_CAUSE_VISUAL_STYLE.borderColor : node.visualStyle?.borderColor || undefined,
     height: nodeSize.height,
-    minHeight: nodeSize.height,
+    /**
+     * Capped, but never clipped.
+     *
+     * The height is pinned so contents cannot stretch the card — the line
+     * clamps on the label and the verification note are what keep the text
+     * inside it. Clipping the card itself is deliberately *not* done: the
+     * selected badge, the collaborator chip and the root-cause tag are all
+     * positioned to sit outside the corner on purpose, and hiding overflow cut
+     * every one of them in half.
+     *
+     * Sticky notes and comments keep no cap at all — they are free-form and
+     * resizable by hand.
+     */
+    ...(isFreeformAnnotation
+      ? {}
+      : { maxHeight: nodeSize.height, minHeight: nodeSize.height }),
     width: nodeSize.width
   };
   const labelVisualStyle: React.CSSProperties = {
@@ -19478,17 +19778,34 @@ function RcaNodeCard(props: NodeProps) {
         />
       ) : (
         <p
-          className={`whitespace-pre-wrap break-words text-sm text-slate-900 ${
+          className={`overflow-hidden break-words text-sm text-slate-900 ${
             canInlineEditLabel ? 'cursor-text rounded-lg transition hover:bg-cyan-50/70' : ''
           }`}
           onDoubleClick={startInlineEditing}
-          style={labelVisualStyle}
+          /* Clamped to the same number of lines the card reserves room for, so
+             a long label is trimmed instead of stretching the node. The full
+             text is always readable in the details panel. */
+          style={{
+            ...labelVisualStyle,
+            display: '-webkit-box',
+            WebkitBoxOrient: 'vertical',
+            WebkitLineClamp: RCA_CAUSE_LABEL_MAX_LINES
+          }}
+          title={displayNodeLabel || undefined}
         >
           {displayNodeLabel || 'Click to describe this cause'}
         </p>
       )}
       {detail?.verification ? (
-        <p className="mt-3 whitespace-pre-wrap break-words rounded-xl bg-white/72 px-3 py-2 text-xs leading-4 text-slate-600 ring-1 ring-slate-200/70">
+        <p
+          className="mt-3 overflow-hidden break-words rounded-xl bg-white/72 px-3 py-2 text-xs leading-4 text-slate-600 ring-1 ring-slate-200/70"
+          style={{
+            display: '-webkit-box',
+            WebkitBoxOrient: 'vertical',
+            WebkitLineClamp: RCA_CAUSE_VERIFICATION_MAX_LINES
+          }}
+          title={detail.verification}
+        >
           {detail.verification}
         </p>
       ) : null}
@@ -19617,7 +19934,7 @@ function RcaNodeHintPopover({
   onToggleAutoOpen: () => void;
 }) {
   const popoverRef = React.useRef<HTMLDivElement | null>(null);
-  const [position, setPosition] = React.useState({ left: 24, top: 84 });
+  const [position, setPosition] = React.useState({ left: 24, tailLeft: 40, top: 84 });
 
   const nodeIndex = node ? Math.max(0, nodes.findIndex((candidateNode) => candidateNode.id === node.id)) : 0;
   const displayRole = node?.nodeType === 'WHY'
@@ -19640,30 +19957,69 @@ function RcaNodeHintPopover({
     const anchorPoint = anchor;
 
     function positionPopover() {
-      const viewportWidth = window.innerWidth;
       const viewportHeight = window.innerHeight;
-      const fallbackWidth = Math.min(760, Math.max(340, viewportWidth - 24));
       const fallbackHeight = Math.min(680, Math.max(280, viewportHeight - 84));
       const rect = popoverRef.current?.getBoundingClientRect();
-      const popoverWidth = rect?.width || fallbackWidth;
+      // Width is settled by the class, which caps it against the viewport, so
+      // only the height is measured — it decides how far down the box can go.
       const popoverHeight = rect?.height || fallbackHeight;
-      const margin = 14;
-      const minimumTop = 58;
-      let left = anchorPoint.x + margin;
-      let top = anchorPoint.y + margin;
+      const margin = 16;
+      /** Below the floating toolbar at the top of the canvas. */
+      const minimumTop = 64;
+      /** Above the control bar at the foot of it. */
+      const bottomReserve = 104;
 
-      if (left + popoverWidth > viewportWidth - margin) {
-        left = anchorPoint.x - popoverWidth - margin;
-      }
+      /**
+       * Docked to the left, at a settled top edge.
+       *
+       * It used to be placed beside whatever was clicked, flipping to the other
+       * side when it would not fit — so the same guide appeared somewhere
+       * different each time, often across the middle of the canvas somebody was
+       * reading. It is reference material rather than a tooltip, so it belongs
+       * in one predictable place, out of the way of the work.
+       */
+      /**
+       * The canvas's left edge, not the window's.
+       *
+       * This is `fixed`, so a plain margin meant the edge of the screen and the
+       * guide opened straight over the workspace's own sidebar rail. Measuring
+       * the canvas puts it beside the work instead of on top of the navigation.
+       */
+      const canvasLeft = document.querySelector('.react-flow')?.getBoundingClientRect().left ?? 0;
+      const left = canvasLeft + margin;
+      /**
+       * Follows the node down the page, but never above the toolbar or below
+       * the controls. Staying roughly level with what was clicked keeps the
+       * connection between the two without chasing it across the canvas.
+       */
+      /**
+       * Just under what opened it, so the tail can reach.
+       *
+       * The gap is the tail's own height. Any more and the pointer floats in
+       * the space between the two, which reads as a mistake rather than as a
+       * connection.
+       */
+      const tailGap = 8;
+      const preferredTop = anchorPoint.y + tailGap;
+      const lowestTop = Math.max(minimumTop, viewportHeight - popoverHeight - bottomReserve);
+      const top = Math.min(Math.max(minimumTop, preferredTop), lowestTop);
 
-      if (top + popoverHeight > viewportHeight - margin) {
-        top = anchorPoint.y - popoverHeight - margin;
-      }
+      /**
+       * Where the tail meets the box.
+       *
+       * The guide opens from the control above it, so the pointer sits on the
+       * top edge, lined up under whatever opened it. Held a little inside the
+       * corners, because a pointer on a rounded edge reads as a rendering fault
+       * rather than as a tail.
+       */
+      const tailInset = 24;
+      const popoverWidth = rect?.width || Math.min(420, window.innerWidth - 32);
+      const tailLeft = Math.min(
+        Math.max(tailInset, anchorPoint.x - left),
+        Math.max(tailInset, popoverWidth - tailInset)
+      );
 
-      setPosition({
-        left: Math.min(Math.max(margin, left), Math.max(margin, viewportWidth - popoverWidth - margin)),
-        top: Math.min(Math.max(minimumTop, top), Math.max(minimumTop, viewportHeight - popoverHeight - margin))
-      });
+      setPosition({ left, tailLeft, top });
     }
 
     positionPopover();
@@ -19713,18 +20069,18 @@ function RcaNodeHintPopover({
           @keyframes rcaNodeHintDrop {
             from {
               opacity: 0;
-              transform: translateY(-14px) scale(0.975);
+              transform: translateX(-10px) scale(0.985);
             }
             to {
               opacity: 1;
-              transform: translateY(0) scale(1);
+              transform: translateX(0) scale(1);
             }
           }
         `}
       </style>
       <section
         aria-label={`Guide for ${nodeGuide?.title || roleLabel}`}
-        className="rca-node-hint-popover fixed z-[2600] flex w-[min(460px,calc(100vw-24px))] max-w-[calc(100vw-24px)] origin-top-left flex-col overflow-hidden rounded-2xl border border-cyan-100/80 bg-white/96 shadow-[0_18px_48px_rgba(15,23,42,0.18),0_0_0_1px_rgba(14,165,233,0.10)] ring-1 ring-cyan-200/24 backdrop-blur-xl"
+        className="rca-node-hint-popover fixed z-[2600] flex w-[min(380px,calc(100vw-32px))] max-w-[calc(100vw-32px)] origin-top-left flex-col rounded-lg border border-slate-200 bg-white shadow-[0_8px_16px_rgba(0,0,0,0.14),0_0_2px_rgba(0,0,0,0.12)]"
         ref={popoverRef}
         role="dialog"
         style={{
@@ -19734,24 +20090,41 @@ function RcaNodeHintPopover({
           top: position.top
         }}
       >
-        <div className="flex items-start justify-between gap-3 border-b border-cyan-100/80 bg-cyan-50/50 px-4 py-3">
-          <div className="min-w-0">
-            <p className="text-[9px] font-semibold uppercase tracking-[0.26em] text-cyan-700">Node guide</p>
-            <h3 className="mt-1 text-[15px] font-semibold leading-5 text-slate-950">
-              {nodeGuide?.title || roleLabel}
-            </h3>
-            <p className="mt-1 text-xs leading-5 text-slate-600">
-              {nodeGuide?.description || 'Use this guide to understand the purpose and connection rules for this RCA node type.'}
-            </p>
+        {/*
+          The tail, on the top edge, under whatever opened the guide.
+          Two squares rotated 45 degrees: the back one carries the border, and
+          the front one — in the header's own colour — covers the seam. That is
+          how a pointer keeps the box's outline without drawing a line across
+          the middle of itself.
+        */}
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute top-0 z-10 h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rotate-45 border border-slate-200 bg-white"
+          style={{ left: position.tailLeft }}
+        />
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute top-0 z-20 h-2.5 w-2.5 -translate-x-1/2 translate-y-[2px] bg-white"
+          style={{ left: position.tailLeft }}
+        />
+        <div className="relative z-30 flex items-start justify-between gap-3 rounded-t-lg border-b border-slate-200 bg-white px-4 pb-2.5 pt-3">
+          <div className="flex min-w-0 items-start gap-2.5">
+            {/* One accent, carrying the meaning. The rest of the surface stays
+                neutral so the words are what the eye lands on. */}
+            <span aria-hidden="true" className="mt-0.5 h-8 w-[3px] shrink-0 rounded-full bg-cyan-600" />
+            <div className="min-w-0">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-500">Node guide</p>
+              <h3 className="mt-0.5 truncate text-[15px] font-semibold leading-5 text-slate-900">
+                {nodeGuide?.title || roleLabel}
+              </h3>
+            </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <button
               aria-label={autoOpenEnabled ? 'Turn node guide auto-open off' : 'Turn node guide auto-open on'}
               aria-pressed={autoOpenEnabled}
-              className={`relative h-5 w-9 rounded-full p-0.5 transition focus:outline-none focus:ring-3 focus:ring-cyan-500/15 active:scale-95 ${
-                autoOpenEnabled
-                  ? 'bg-cyan-600'
-                  : 'bg-slate-300'
+              className={`relative h-5 w-9 rounded-full p-0.5 transition-colors focus:outline-none focus:ring-2 focus:ring-cyan-600/30 ${
+                autoOpenEnabled ? 'bg-cyan-600' : 'bg-slate-300'
               }`}
               onClick={onToggleAutoOpen}
               title="Open guide after adding a node"
@@ -19764,7 +20137,7 @@ function RcaNodeHintPopover({
               />
             </button>
             <button
-              className="grid h-7 w-7 place-items-center rounded-full border border-slate-200/80 bg-white/80 text-slate-600 shadow-sm backdrop-blur transition hover:bg-white hover:text-slate-950 active:scale-95"
+              className="grid h-7 w-7 place-items-center rounded text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900"
               onClick={onClose}
               type="button"
             >
@@ -19773,7 +20146,7 @@ function RcaNodeHintPopover({
           </div>
         </div>
 
-        <div className="rca-node-hint-scroll min-h-0 flex-1 overflow-y-auto px-4 py-3.5">
+        <div className="rca-node-hint-scroll relative z-30 min-h-0 flex-1 overflow-y-auto rounded-b-2xl px-4 py-3.5">
           {nodeGuide ? (
             <section className="text-[13px] leading-5 text-slate-700">
               <p>{nodeGuide.guidance}</p>
@@ -20156,6 +20529,9 @@ function RcaInspectorDrawer({
   onSave: (input: RcaNodeEditInput) => void;
   sessionId: string | null;
 }) {
+  const autoSaveTimerRef = React.useRef<number | null>(null);
+  const lastAutoSavedSignatureRef = React.useRef<string>('');
+  const [autoSaveState, setAutoSaveState] = React.useState<'idle' | 'pending' | 'saved'>('idle');
   const [draft, setDraft] = React.useState<RcaInspectorDraft>({
     attachedEvidence: [],
     detailFields: {},
@@ -20356,6 +20732,9 @@ function RcaInspectorDrawer({
     setEvidenceLinkDraft('');
     setSelectedEvidencePhotoKey(null);
     setRevealedFiveWhysCount(getInitialFiveWhysRevealCount(displayNode.whyChain));
+    // The baseline auto-save compares against. Seeded here so simply opening a
+    // node is never mistaken for an edit.
+    lastAutoSavedSignatureRef.current = '';
   }, [displayNode]);
 
   const updateDraft = React.useCallback((nextDraft: RcaInspectorDraft) => {
@@ -20469,6 +20848,89 @@ function RcaInspectorDrawer({
       isCurrent = false;
     };
   }, [displayNode, draft, evidencePreviewUrls, incidentId, persistDraft, sessionId]);
+
+  /**
+   * Saves what somebody typed, shortly after they stop typing.
+   *
+   * Not on every field blur: one save runs the validation gates, disables the
+   * canvas, writes to the collaborative session and cascades into child 5 Whys
+   * nodes. Doing that per field would fire a round trip for every tab press.
+   * A pause of `RCA_AUTO_SAVE_DELAY_MS` collects a burst of edits into one
+   * write, which is the same work the Save button did, at the same moment
+   * somebody would have reached for it.
+   *
+   * **Two things are deliberately left to the button.**
+   *
+   * Approval & Closure is excluded because saving it can close the RCA — a case
+   * must not close because somebody filled in the last field and looked away.
+   * Confirming a root cause is excluded for the same reason: it runs the
+   * completed-5-Whys gate and would raise an error mid-form.
+   *
+   * Everything else saves on its own, and the button still works exactly as it
+   * did for anybody who prefers it.
+   */
+  React.useEffect(() => {
+    if (autoSaveTimerRef.current) {
+      window.clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+
+    const isGovernedTransition =
+      (draft.nodeType === 'WHY' && draft.fiveWhysNodeRole === 'APPROVAL_CLOSURE') ||
+      Boolean(draft.isRootCause && !displayNode?.isRootCause);
+
+    if (isCaseClosed || isWorking || !displayNode || isGovernedTransition) {
+      return undefined;
+    }
+
+    const signature = JSON.stringify({
+      attachedEvidence: draft.attachedEvidence,
+      detailFields: draft.detailFields,
+      fiveWhysNodeRole: draft.fiveWhysNodeRole,
+      isRootCause: draft.isRootCause,
+      isSuspectedCause: draft.isSuspectedCause,
+      label: draft.label,
+      nodeType: draft.nodeType,
+      parentNodeId: draft.parentNodeId,
+      whyChain: draft.whyChain
+    });
+
+    // First pass after opening a node records the baseline and saves nothing.
+    if (!lastAutoSavedSignatureRef.current) {
+      lastAutoSavedSignatureRef.current = signature;
+
+      return undefined;
+    }
+
+    if (signature === lastAutoSavedSignatureRef.current) {
+      return undefined;
+    }
+
+    setAutoSaveState('pending');
+
+    autoSaveTimerRef.current = window.setTimeout(() => {
+      lastAutoSavedSignatureRef.current = signature;
+      setAutoSaveState('saved');
+      onSave({
+        attachedEvidence: draft.attachedEvidence,
+        detailFields: draft.detailFields,
+        fiveWhysNodeRole: draft.fiveWhysNodeRole,
+        isRootCause: draft.isRootCause,
+        isSuspectedCause: draft.isSuspectedCause,
+        label: draft.label,
+        nodeType: draft.nodeType,
+        parentNodeId: draft.parentNodeId || null,
+        whyChain: draft.whyChain
+      });
+    }, RCA_AUTO_SAVE_DELAY_MS);
+
+    return () => {
+      if (autoSaveTimerRef.current) {
+        window.clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
+      }
+    };
+  }, [displayNode, draft, isCaseClosed, isWorking, onSave]);
 
   if (!displayNode) {
     return null;
@@ -20930,8 +21392,16 @@ function RcaInspectorDrawer({
     .filter((entry) => Boolean(entry.previewUrl));
   const selectedEvidencePhotoIndex = evidencePhotoItems.findIndex((entry) => getEvidenceKey(entry.item) === selectedEvidencePhotoKey);
   const selectedEvidencePhoto = selectedEvidencePhotoIndex >= 0 ? evidencePhotoItems[selectedEvidencePhotoIndex] : null;
-  const panelClassName = `fixed right-0 top-[52px] z-50 flex h-[calc(100svh-52px)] max-w-[calc(100vw-20px)] will-change-transform flex-col border-l border-slate-200 bg-white shadow-2xl shadow-slate-950/12 transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none max-lg:w-full ${
-    isPanelOpen ? 'translate-x-0' : 'translate-x-[calc(100%+24px)]'
+  /**
+   * Anchored to the canvas, and clear of the controls at the foot of it.
+   *
+   * It was `fixed` and a full viewport tall, so it ran over the control bar at
+   * the bottom of the canvas — the same fault the knowledge panel and the
+   * activity log had. It sits inside the canvas container, so `absolute` puts
+   * it where it belongs and the insets keep the toolbars reachable.
+   */
+  const panelClassName = `absolute bottom-24 right-3 top-3 z-50 flex max-w-[calc(100%-24px)] will-change-transform flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-[0_8px_16px_rgba(0,0,0,0.14),0_0_2px_rgba(0,0,0,0.12)] transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none max-lg:bottom-20 max-lg:w-[calc(100%-24px)] ${
+    isPanelOpen ? 'translate-x-0' : 'translate-x-[calc(100%+32px)]'
   }`;
 
   function handlePanelResizeStart(event: React.PointerEvent<HTMLButtonElement>) {
@@ -20986,23 +21456,29 @@ function RcaInspectorDrawer({
           onPointerDown={handlePanelResizeStart}
           type="button"
         />
-        <div className="border-b border-slate-200 px-5 py-4">
+        <div className="border-b border-slate-200 px-5 pb-3.5 pt-3.5">
           <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0">
-              <p className="text-xs font-semibold uppercase tracking-[0.22em] text-cyan-700">Node details</p>
-              <h2 className="mt-1 text-lg font-semibold leading-6 text-slate-950">
-                {getRcaNodePanelTitle(inspectedNode)}
-              </h2>
+            <div className="flex min-w-0 items-start gap-2.5">
+              {/* One accent, carrying the meaning. Everything else stays
+                  neutral so the node's name is what the eye lands on. */}
+              <span aria-hidden="true" className="mt-0.5 h-9 w-[3px] shrink-0 rounded-full bg-cyan-600" />
+              <div className="min-w-0">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-500">Node details</p>
+                <h2 className="mt-0.5 truncate text-[17px] font-semibold leading-6 text-slate-900">
+                  {getRcaNodePanelTitle(inspectedNode)}
+                </h2>
+              </div>
             </div>
             <button
-              className="inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 transition hover:bg-slate-50 hover:text-slate-950 active:scale-95"
+              aria-label="Close node details"
+              className="grid h-8 w-8 shrink-0 place-items-center rounded text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900"
               onClick={onClose}
               type="button"
             >
-              <X aria-hidden="true" size={18} />
+              <X aria-hidden="true" size={17} />
             </button>
           </div>
-          <p className="mt-3 whitespace-pre-wrap rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-5 text-slate-800">
+          <p className="mt-3 whitespace-pre-wrap rounded border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-[13px] leading-5 text-slate-700">
             {inspectedNode.label || 'No description added yet.'}
           </p>
           <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
@@ -21612,18 +22088,29 @@ function RcaInspectorDrawer({
 
       </fieldset>
 
+      {/* One filled accent action, and a quiet destructive one. A black slab
+          beside a red outline gave two loud buttons and no clear primary. */}
       {!isDetailReadOnly ? (
-      <div className="flex items-center justify-between gap-3 border-t border-slate-200 px-5 py-4">
+      <div className="flex items-center justify-between gap-3 border-t border-slate-200 bg-slate-50/60 px-5 py-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <button
+            className="inline-flex min-h-[36px] items-center justify-center rounded px-3 text-[13px] font-semibold text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-45"
+            disabled={isWorking}
+            onClick={onDelete}
+            type="button"
+          >
+            Delete node
+          </button>
+          {/* Says what is happening, so saving on somebody's behalf is never
+              something they have to take on trust. */}
+          {autoSaveState !== 'idle' ? (
+            <span className="truncate text-[12px] text-slate-500">
+              {autoSaveState === 'pending' ? 'Saving...' : 'Saved'}
+            </span>
+          ) : null}
+        </div>
         <button
-          className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-red-200 px-4 text-sm font-semibold text-red-600 transition hover:bg-red-50 active:scale-95"
-          disabled={isWorking}
-          onClick={onDelete}
-          type="button"
-        >
-          Delete node
-        </button>
-        <button
-          className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl bg-slate-950 px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
+          className="inline-flex min-h-[36px] items-center justify-center gap-2 rounded bg-cyan-600 px-4 text-[13px] font-semibold text-white transition-colors hover:bg-cyan-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
           disabled={!canSubmitNodeDetail}
           onClick={() => onSave({
             attachedEvidence: draft.attachedEvidence,
@@ -21638,7 +22125,7 @@ function RcaInspectorDrawer({
           })}
           type="button"
         >
-          <CheckCircle2 aria-hidden="true" size={17} />
+          <CheckCircle2 aria-hidden="true" size={15} />
           {isApprovalClosureDetails ? 'Approve & Close RCA' : 'Save node'}
         </button>
       </div>
@@ -24546,20 +25033,6 @@ function getRcaNodeBox(
   };
 }
 
-function estimateWrappedLineCount(text: string, charsPerLine: number): number {
-  const trimmedLines = text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  if (!trimmedLines.length) {
-    return 1;
-  }
-
-  return trimmedLines.reduce((lineCount, line) => (
-    lineCount + Math.max(1, Math.ceil(line.length / charsPerLine))
-  ), 0);
-}
 
 function getRcaCauseFooterRows(node: RcaNode, detail?: ReferenceRcaNodeDetail): number {
   const evidenceBadgeWidth = node.attachedEvidence.length >= 10 ? 88 : 76;
@@ -24595,15 +25068,19 @@ function getRcaNodeSize(node: RcaNode, detail?: ReferenceRcaNodeDetail): { heigh
       : stickySize;
   }
 
+  /**
+   * Every branch is the same size, whatever its name says.
+   *
+   * The height used to be derived from the label, so a two-word branch and a
+   * six-word branch were different heights and the row never lined up. Sticky
+   * notes and comments are the exception and are handled above — they are meant
+   * to grow with what somebody writes in them.
+   */
   if (node.nodeType === 'ISHIKAWA_CATEGORY') {
-    const categoryLabelLines = estimateWrappedLineCount(node.label || 'Branch', 18);
-    const categoryHeight = 16 + 14 + Math.max(1, categoryLabelLines) * 20 + 16;
-    const estimatedSize = {
-      height: Math.max(RCA_CATEGORY_NODE_HEIGHT, categoryHeight),
+    return {
+      height: RCA_CATEGORY_NODE_HEIGHT,
       width: RCA_CATEGORY_NODE_WIDTH
     };
-
-    return estimatedSize;
   }
 
   const minimumHeight = node.nodeType === 'FAULT_GATE'
@@ -24612,28 +25089,32 @@ function getRcaNodeSize(node: RcaNode, detail?: ReferenceRcaNodeDetail): { heigh
   const width = node.nodeType === 'FAULT_GATE'
     ? RCA_FAULT_GATE_NODE_WIDTH
     : RCA_CAUSE_NODE_WIDTH;
-  const labelCharsPerLine = node.nodeType === 'FAULT_GATE'
-    ? RCA_FAULT_GATE_LABEL_CHARS_PER_LINE
-    : RCA_CAUSE_LABEL_CHARS_PER_LINE;
-
-  const labelLineCount = Math.max(
-    node.nodeType === 'FAULT_GATE' ? 1 : 2,
-    estimateWrappedLineCount(node.label || 'Click to describe this cause', labelCharsPerLine)
-  );
-  const labelHeight = labelLineCount * 20;
-  const verificationHeight = detail?.verification
-    ? 12 + estimateWrappedLineCount(detail.verification, RCA_CAUSE_DETAIL_CHARS_PER_LINE) * 16 + 16
-    : 0;
+  /**
+   * One height for every node of a kind, regardless of how much is written in
+   * it.
+   *
+   * The height used to be computed from the length of the label and the
+   * verification note, so a node grew as somebody typed and the whole row
+   * shifted around it. The card is now a fixed box and the text is clamped to
+   * fit — see `RCA_CAUSE_LABEL_MAX_LINES`, which is what the reserved space
+   * below is calculated from, so the two can never disagree.
+   *
+   * Only the footer still varies, because a second row of status pills is
+   * structural rather than typed: it appears because of what the node *is*, not
+   * because of what somebody wrote.
+   */
   const footerRows = getRcaCauseFooterRows(node, detail);
   const footerHeight = 16 + (footerRows - 1) * 22;
-  const estimatedCardHeight = 32 + 36 + labelHeight + verificationHeight + 16 + footerHeight;
+  const labelHeight = (node.nodeType === 'FAULT_GATE' ? 2 : RCA_CAUSE_LABEL_MAX_LINES) * 20;
+  const verificationHeight = detail?.verification
+    ? 12 + RCA_CAUSE_VERIFICATION_MAX_LINES * 16 + 16
+    : 0;
+  const fixedCardHeight = 32 + 36 + labelHeight + verificationHeight + 16 + footerHeight;
 
-  const estimatedSize = {
-    height: Math.max(minimumHeight, estimatedCardHeight),
+  return {
+    height: Math.max(minimumHeight, fixedCardHeight),
     width
   };
-
-  return estimatedSize;
 }
 
 function getRcaNodeBoundsForViewport(
@@ -24698,8 +25179,17 @@ function getRcaAutoFocusSelectionNodes(
 
     focusNodeIds.add(selectedNode.id);
 
-    if (selectedNode.parentNodeId && nodeById.has(selectedNode.parentNodeId)) {
-      focusNodeIds.add(selectedNode.parentNodeId);
+    const parentNode = selectedNode.parentNodeId ? nodeById.get(selectedNode.parentNodeId) : undefined;
+
+    /**
+     * The Fault Gate is the fishbone hub: every branch hangs off it, and it sits
+     * at the far right of the spine, a board's width away from them. Pulling it
+     * in as a neighbour stretched the frame across the whole canvas, so focusing
+     * a branch framed the same area as focusing nothing. It is still framed
+     * properly, together with its branches, when it is the selected node.
+     */
+    if (parentNode && parentNode.nodeType !== 'FAULT_GATE') {
+      focusNodeIds.add(parentNode.id);
     }
 
     normalizeRcaLinkedNodeIds(selectedNode.linkedNodeIds).forEach((linkedNodeId) => {
@@ -24709,13 +25199,25 @@ function getRcaAutoFocusSelectionNodes(
     });
   });
 
+  /**
+   * Pull in one ring around the selection: direct children and linked nodes.
+   *
+   * The test reads a snapshot rather than the set being filled. Adding to a set
+   * while sweeping the array lets a child that was just added admit its own
+   * children further down the sweep, so the ring became an unbounded walk that
+   * also depended on array order. On a fishbone that walked Containment to
+   * Problem to Fault Gate to every branch, and focusing any node in the intake
+   * chain framed the whole board instead of the selection.
+   */
+  const selectionFocusNodeIds = new Set(focusNodeIds);
+
   activeNodes.forEach((node) => {
-    if (node.parentNodeId && focusNodeIds.has(node.parentNodeId)) {
+    if (node.parentNodeId && selectionFocusNodeIds.has(node.parentNodeId)) {
       focusNodeIds.add(node.id);
     }
 
     normalizeRcaLinkedNodeIds(node.linkedNodeIds).forEach((linkedNodeId) => {
-      if (focusNodeIds.has(linkedNodeId)) {
+      if (selectionFocusNodeIds.has(linkedNodeId)) {
         focusNodeIds.add(node.id);
       }
     });
@@ -27204,8 +27706,13 @@ function buildRcaConnectionCreateRecommendations(
     if (!nodes.some(isContainmentRoleNode) && !childNodes.some(isProblemRoleNode)) {
       addRoleAction('PROBLEM', 'selected-to-new');
     }
-  } else if (isContainmentRoleNode(selectedNode) && !childNodes.some(isProblemRoleNode)) {
-    addRoleAction('PROBLEM', 'selected-to-new');
+  } else if (isContainmentRoleNode(selectedNode)) {
+    if (!childNodes.some(isProblemRoleNode)) {
+      addRoleAction('PROBLEM', 'selected-to-new');
+    }
+    if (!childNodes.some(isEvidenceRoleNode)) {
+      addRoleAction('EVIDENCE', 'new-to-selected');
+    }
   } else if (isProblemRoleNode(selectedNode)) {
     if (shouldEnsureDefaultFishboneScaffold(nodes)) {
       actions.push({

@@ -80,6 +80,10 @@ row that has to stay a single Pressable.
   background
 - **A screen's one action goes in its header**, as blue text beside the round
   back button. Not floating over the content
+- **The heading is on its own row, below the controls.** 26pt, regular, left
+  aligned, 15 from the edge. Never centred between the buttons: it shrinks to
+  fit them and reads as a toolbar label rather than the page's name. A bottom
+  sheet is the exception — its title is centred between close and action
 - **Check what is painted *behind* a card.** A swipe wrapper, a shell or a
   parent that fills its width with a colour will hide the card's margin and
   corners completely, and the card will look edge to edge no matter what its
@@ -89,13 +93,35 @@ row that has to stay a single Pressable.
 - **A setting is a switch. Never a checkbox, never a radio button.** Two
   choices that exclude each other become two switches that are always opposite,
   so turning either off turns the other on and no gesture can leave the setting
-  with no answer. The exception is a **picker list**, where a tick marks the row
-  somebody chose — that is a selection, not a setting
+  with no answer
+- **There are no checkboxes anywhere, for anything.** A chosen row carries a
+  bare tick in `colors.link`; an unchosen row carries nothing. **The tick goes
+  at the end of the row**, never the start — a mark of what is chosen belongs
+  after the thing it marks. Keep its slot at its width so rows do not jump
+  sideways one at a time. **Select all is a blue text link**, not a box with a
+  label, and it reads "Clear selection" once everything is ticked
+- **A date is chosen with the platform's own picker** — `DateTimePickerAndroid`
+  on Android, `ScheduleDateTimePickerModal` on iOS. Never a hand-built wheel or
+  grid. The row that opens it shows the chosen date as its value and opens the
+  picker on the first tap
+- **A flag stands for a region, never for a language.** `getLanguageFlagEmoji`
+  reads the region out of the code (`es-MX` → Mexico) and answers nothing when
+  the code names no country, where a globe is drawn instead. Never guess a
+  country for a language spoken across borders
 - Never a raw hex in a component. Always a token from `src/theme/colors.ts`
 - **A `presentationStyle="pageSheet"` modal is full screen on Android**, so its
   header sits under the status bar unless it adds `insets.top`. iOS insets the
   sheet itself and reports `insets.top` as 0, so the same padding is right on
   both. Every full-height sheet needs it
+- **A `Modal` is not covered by the app root's `SafeAreaView`** — it is its own
+  window, so `resolveScreenBottomInset` is the wrong helper inside one. On
+  Android a Modal reports **no safe area at all** (`insets.bottom` is 0 even
+  with a navigation bar), so it needs the measured fallback; on iOS it needs
+  the real inset. Both mistakes have shipped
+- **A bottom sheet is capped, and what is capped scrolls.** A sheet sized by
+  its content grows until it covers the status bar — one extra row put a close
+  button behind the clock. Cap it at 92% *and* put the body in a `ScrollView`;
+  a cap with no scroll just makes the last rows unreachable
 
 ### Building blocks, use them rather than restyling by hand
 

@@ -10,6 +10,12 @@ import { colors } from '../../theme/colors';
 const FOOTER_ICON_SLOT = 38;
 
 /**
+ * The bar's own side padding, shared with the moving highlight so both are
+ * placed against one number rather than two that have to be kept in step.
+ */
+export const FOOTER_BAR_HORIZONTAL_PADDING = 7;
+
+/**
  * Shared surfaces, layout scaffolding and anything used across more than one area.
  *
  * Part of the Admin chat stylesheet, split by area. The pieces are plain
@@ -1842,7 +1848,7 @@ export const coreStyles = StyleSheet.create({
     justifyContent: 'space-between',
     left: 8,
     minHeight: 68,
-    paddingHorizontal: 7,
+    paddingHorizontal: FOOTER_BAR_HORIZONTAL_PADDING,
     paddingVertical: 6,
     position: 'absolute',
     right: 8,
@@ -1871,22 +1877,26 @@ export const coreStyles = StyleSheet.create({
     position: 'relative',
     width: FOOTER_ICON_SLOT
   },
-  // A circle around the icon rather than a pill around the whole tab. Sized to
-  // the icon slot, so it fits whatever the icon is and never crowds the label.
-  footerTabActivePill: {
-    backgroundColor: '#EEF0F5',
-    borderRadius: FOOTER_ICON_SLOT / 2,
-    bottom: 0,
+  // One highlight for the bar, placed and moved by FooterTabIndicator. It sits
+  // between the bar's own vertical padding so it encloses the icon and the
+  // label together, and it is the first child so every tab paints over it.
+  footerTabIndicator: {
+    // Almost to the edge of the bar, top and bottom. At the bar's own padding
+    // it read as a small shape floating inside the bar rather than as the tab
+    // itself being lit.
+    bottom: 3,
     left: 0,
     position: 'absolute',
-    right: 0,
-    top: 0
+    top: 3
   },
   footerTabContent: {
     alignItems: 'center',
     gap: 3,
     justifyContent: 'center',
     minWidth: 0,
+    // Lifts the pair a little inside the tab, so the label has room beneath it
+    // and does not sit on the bottom edge of the highlight.
+    paddingBottom: 3,
     position: 'relative'
   },
   footerTabBadge: {
@@ -1923,12 +1933,12 @@ export const coreStyles = StyleSheet.create({
   footerProfileAvatar: {
     alignItems: 'center',
     borderColor: 'transparent',
-    borderRadius: 15,
+    borderRadius: 17,
     borderWidth: 2,
-    height: 30,
+    height: 34,
     justifyContent: 'center',
     overflow: 'hidden',
-    width: 30
+    width: 34
   },
   footerProfileAvatarActive: {
     backgroundColor: '#EEF2FF',

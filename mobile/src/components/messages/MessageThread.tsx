@@ -9,6 +9,8 @@ import DateTimePicker, {
 } from '@react-native-community/datetimepicker';
 import Feather from '@expo/vector-icons/Feather';
 import { ANDROID_MAX_NAVIGATION_INSET } from '../../services/androidNavigationInset';
+import { ReplyCountBadge, ReplyFocusOverlay, ReplyGroupFrame } from './ReplyGroup';
+import { markReplyGroups, getReplyAuthorName } from '../../services/replyThreads';
 import { resolveScreenBottomInset } from '../../services/rootSafeArea';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
@@ -147,6 +149,7 @@ export function MessageThread({
   isSending,
   messageReactions,
   messages,
+  replyCounts,
   onCancelReply,
   onCopyMessage,
   onCreateAction,
@@ -224,6 +227,11 @@ export function MessageThread({
   isSending: boolean;
   messageReactions: ChatMessageReactionMap;
   messages: ChatMessage[];
+  /**
+   * How many replies each message has, counted over the whole local store
+   * rather than the page in memory. See `loadCachedReplyCounts`.
+   */
+  replyCounts?: Record<string, number>;
   onCancelReply: () => void;
   onCopyMessage: (message: ChatMessage) => void;
   onDeleteMessage: (message: ChatMessage) => void;
@@ -310,6 +318,36 @@ export function MessageThread({
     () => buildMessageThreadItems(threadMessages, actions),
     [actions, threadMessages]
   );
+  /**
+   * Where each run of replies starts and ends, and where a parent's replies
+   * begin. Computed once for the whole list rather than per row, because a
+   * row cannot see its neighbours.
+   */
+  const replyGroupMarks = useMemo(() => {
+    const marks = new Map<string, { isGroupEnd: boolean; isGroupStart: boolean }>();
+
+    markReplyGroups(threadMessages).forEach((item) => {
+      marks.set(item.message.messageId, {
+        isGroupEnd: item.isGroupEnd,
+        isGroupStart: item.isGroupStart
+      });
+    });
+
+    return marks;
+  }, [threadMessages]);
+  const firstReplyByParentId = useMemo(() => {
+    const firstReply = new Map<string, string>();
+
+    threadMessages.forEach((message) => {
+      const parentId = message.replyTo?.messageId;
+
+      if (parentId && !firstReply.has(parentId)) {
+        firstReply.set(parentId, message.messageId);
+      }
+    });
+
+    return firstReply;
+  }, [threadMessages]);
   const groupMemberByUid = useMemo(() => new Map(groupMembers.map((member) => [member.uid, member])), [groupMembers]);
   const searchMatches = useMemo(() => getChatSearchMatches({
     dateKey: searchDateKey,
@@ -922,9 +960,13 @@ export function MessageThread({
       );
     }
 
-    return (
+    const marks = replyGroupMarks.get(item.message.messageId);
+    const replyCount = replyCounts?.[item.message.messageId] || 0;
+    const firstReplyId = firstReplyByParentId.get(item.message.messageId);
+    const bubble = (
       <MemoizedMessageBubble
         contactName={contactName}
+        hideReplyPreview={Boolean(marks && item.message.replyTo)}
         contactProfilePhotoUrl={contactProfilePhotoUrl}
         currentUid={currentUid}
         highlighted={highlightedMessageId === item.message.messageId}
@@ -951,9 +993,55 @@ export function MessageThread({
         starred={Boolean(starredMessageIds[item.message.messageId])}
       />
     );
+    // The count sits under the message it belongs to, where that message still
+    // is. It is a link only when the replies are on this device; a row that
+    // offers to take somebody somewhere and then does nothing is worse than
+    // one that does not offer.
+    const withCount = replyCount > 0 ? (
+      <View>
+        {bubble}
+        <ReplyCountBadge
+          alignEnd={item.message.isMine}
+          onPress={firstReplyId ? () => scrollToMessage(firstReplyId, true) : undefined}
+          replyCount={replyCount}
+        />
+      </View>
+    ) : bubble;
+
+    if (!marks || !item.message.replyTo) {
+      return withCount;
+    }
+
+    return (
+      <ReplyGroupFrame
+        isGroupEnd={marks.isGroupEnd}
+        isGroupStart={marks.isGroupStart}
+        isMine={item.message.isMine}
+        isReplyToMine={item.message.replyTo.senderUid === currentUid}
+        onOpenParent={handleReplyPreviewPress}
+        replyCount={replyCounts?.[item.message.replyTo.messageId] || 0}
+        replyTo={item.message.replyTo}
+        /**
+         * In a group the contact is the group itself, so the member has to be
+         * looked up by uid or the quotation would be attributed to the room.
+         */
+        senderName={getReplyAuthorName({
+          contactName,
+          currentUid,
+          groupMemberByUid,
+          isGroupChat,
+          senderUid: item.message.replyTo.senderUid
+        })}
+      >
+        {withCount}
+      </ReplyGroupFrame>
+    );
   }, [
     activeAudioPlaybackId,
     contactName,
+    firstReplyByParentId,
+    replyCounts,
+    replyGroupMarks,
     contactProfilePhotoUrl,
     currentUid,
     groupMemberByUid,
@@ -1027,6 +1115,7 @@ export function MessageThread({
         <View style={{ paddingTop: topInset }}>{bannerAboveMessages}</View>
       ) : null}
 
+      <View style={styles.messageListWrap}>
       <FlatList
         contentContainerStyle={[
           styles.messageListContent,
@@ -1051,6 +1140,26 @@ export function MessageThread({
             requestScrollToLatest(false);
           } else {
             setShowScrollToLatest(true);
+          }
+        }}
+        onLayout={() => {
+          /**
+           * Re-anchor whenever the viewport changes height.
+           *
+           * The keyboard opening does not change the content, only the room the
+           * list has to draw it in, and a FlatList keeps its scroll offset when
+           * it is resized. So the thread stayed where it was and the newest
+           * messages ended up behind the keyboard. There is already a scroll
+           * when the keyboard flag flips, but that runs before this resize
+           * lands, so it scrolls to a bottom that is about to move.
+           *
+           * This fires after the layout settles, which also covers the composer
+           * growing as somebody types a long message, and the keyboard closing
+           * again. Only for somebody already at the latest message — anybody
+           * reading further up keeps their place.
+           */
+          if (!isSearchOpen && isAtLatestRef.current) {
+            requestScrollToLatest(false);
           }
         }}
         onScroll={(event) => {
@@ -1078,6 +1187,28 @@ export function MessageThread({
         updateCellsBatchingPeriod={50}
         windowSize={9}
       />
+
+      {/*
+        * Focus, not a separate screen.
+        *
+        * The conversation dims and the message being answered stays sharp above
+        * it, with whatever has been replied so far beneath. The real composer
+        * is below this and untouched, so replying here is the same send path as
+        * replying anywhere — there is no second composer to keep correct.
+        */}
+      {replyTarget && canChat && !isSearchOpen ? (
+        <ReplyFocusOverlay
+          contactName={contactName}
+          currentUid={currentUid}
+          onClose={onCancelReply}
+          parent={replyTarget}
+          replies={messages.filter(
+            (message) => message.replyTo?.messageId === replyTarget.messageId
+          )}
+          topInset={topInset + 8}
+        />
+      ) : null}
+      </View>
 
       {showScrollToLatest && !isForwardMode && !isDeleteMode && !isSearchOpen ? (
         <Pressable
@@ -1301,7 +1432,9 @@ export function MessageThread({
         </Pressable>
 
         <View style={styles.messageComposerMain}>
-          {replyTarget ? (
+          {/* Only when the focus overlay is not already showing the message
+              being answered, which would say the same thing twice. */}
+          {replyTarget && (!canChat || isSearchOpen) ? (
             <ComposerReplyPreview
               contactName={contactName}
               currentUid={currentUid}
