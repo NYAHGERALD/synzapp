@@ -1,7 +1,10 @@
 import React, { useEffect, useMemo, useRef } from 'react';
 import { Animated, Image, StyleSheet, View } from 'react-native';
-import Svg, { Defs, LinearGradient, Rect, Stop } from 'react-native-svg';
 
+import {
+  BRAND_GRADIENT_BASE_COLOR,
+  BrandGradientBackground
+} from '../components/BrandGradientBackground';
 import {
   APP_INTRO_FADE_IN_MS,
   APP_INTRO_FADE_OUT_MS,
@@ -13,17 +16,11 @@ import {
   getAppIntroLogoSize,
   getAppIntroTotalDurationMs
 } from '../services/appIntroAnimation';
-import { lightColors } from '../theme/colors';
 
 const LOGO_SOURCE = require('../../assets/Synzapp-Nav.png');
 
 /**
  * The first thing drawn on a cold start, before anything else is ready.
- *
- * Deliberately light in both themes. It is the brand's own ground rather than
- * the app's, the way an opening screen is fixed everywhere else, so it does not
- * read as two different products depending on a phone setting. That is why the
- * colours come from `lightColors` directly instead of the active theme.
  *
  * It covers the screen rather than replacing it, so everything behind mounts
  * and loads while the logo is still animating.
@@ -81,16 +78,7 @@ export function AppIntroScreen({ onFinished }: { onFinished: () => void }) {
 
   return (
     <Animated.View style={[styles.screen, { opacity: screenOpacity }]}>
-      <Svg height="100%" style={StyleSheet.absoluteFill} width="100%">
-        <Defs>
-          <LinearGradient id="synzappIntroWash" x1="0" x2="0.35" y1="0" y2="1">
-            <Stop offset="0" stopColor={lightColors.groupedCard} stopOpacity="1" />
-            <Stop offset="0.52" stopColor={lightColors.blueSoft} stopOpacity="0.55" />
-            <Stop offset="1" stopColor={lightColors.link} stopOpacity="0.18" />
-          </LinearGradient>
-        </Defs>
-        <Rect fill="url(#synzappIntroWash)" height="100%" width="100%" x="0" y="0" />
-      </Svg>
+      <BrandGradientBackground />
 
       <View style={styles.logoWrap}>
         <Animated.View style={{ opacity: logoOpacity, transform: [{ scale: logoScale }] }}>
@@ -109,7 +97,7 @@ export function AppIntroScreen({ onFinished }: { onFinished: () => void }) {
 const styles = StyleSheet.create({
   screen: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: lightColors.groupedCard
+    backgroundColor: BRAND_GRADIENT_BASE_COLOR
   },
   logoWrap: {
     alignItems: 'center',

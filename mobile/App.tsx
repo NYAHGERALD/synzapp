@@ -12,10 +12,8 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { AdminChatScreen } from './src/screens/AdminChatScreen';
 import { AppIntroScreen } from './src/screens/AppIntroScreen';
-import {
-  AppOnboardingScreen,
-  SecureLoginPreparationScreen
-} from './src/screens/AppOnboardingScreen';
+import { AppOnboardingScreen } from './src/screens/AppOnboardingScreen';
+import { AppPreparingScreen } from './src/screens/AppPreparingScreen';
 import { EmployeeOnboardingScreen } from './src/screens/EmployeeOnboardingScreen';
 import { OrgAdminCodeScreen } from './src/screens/OrgAdminCodeScreen';
 import { OrgAdminOnboardingScreen } from './src/screens/OrgAdminOnboardingScreen';
@@ -104,6 +102,16 @@ function SynzappApp() {
    */
   const [isChatReady, setIsChatReady] = useState(false);
   const [restoreError, setRestoreError] = useState<string | null>(null);
+  /**
+   * Whether one of the light brand screens is covering the app.
+   *
+   * Only the status bar asks. The screens themselves are chosen by the branches
+   * below; this mirrors their conditions so the text over them stays readable.
+   */
+  const isBrandScreenVisible = isIntroVisible ||
+    isOnboardingComplete === null ||
+    isRestoringSession ||
+    (step === 'chat' && Boolean(verifiedAdmin) && !isChatReady);
 
   useEffect(() => {
     // Point media storage at a directory the OS will not reclaim, and migrate
@@ -291,12 +299,17 @@ function SynzappApp() {
     <SafeAreaProvider style={styles.safeAreaProvider}>
       <KeyboardProvider>
       <SafeAreaView style={styles.safeArea}>
-        <StatusBar style={isIntroVisible || !theme.isDark ? 'dark' : 'light'} />
+        {/*
+          * The brand screens are light whatever the theme is, so dark text is
+          * the only readable choice while one is up. Following the theme here
+          * would paint white on white for a dark-mode launch.
+          */}
+        <StatusBar style={isBrandScreenVisible || !theme.isDark ? 'dark' : 'light'} />
 
         {isOnboardingComplete === false ? (
           <AppOnboardingScreen onComplete={handleAppOnboardingComplete} />
         ) : isOnboardingComplete === null || isRestoringSession ? (
-          <SecureLoginPreparationScreen />
+          <AppPreparingScreen />
         ) : (
         <View style={styles.keyboardView}>
           {!isRestoringSession && step === 'chat' && verifiedAdmin ? (
@@ -312,7 +325,7 @@ function SynzappApp() {
                 // only load once it is mounted, and this way the first thing the
                 // user touches is a screen that is already populated.
                 <View style={styles.readinessOverlay}>
-                  <SecureLoginPreparationScreen />
+                  <AppPreparingScreen />
                 </View>
               ) : null}
             </View>
