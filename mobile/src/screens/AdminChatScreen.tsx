@@ -3412,7 +3412,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
       // Cloud KMS. Without this it exists only on this handset, so reinstalling
       // the app would leave the backup that was just uploaded permanently
       // unreadable — which is exactly what used to happen.
-      const storedRecoveryKey = await getStoredChatBackupRecoveryKey();
+      const storedRecoveryKey = await getStoredChatBackupRecoveryKey(currentUid);
 
       if (storedRecoveryKey) {
         await escrowChatBackupKey({
@@ -3502,7 +3502,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
       const deviceId = await getRegisteredDeviceId(idToken);
       // This device may still hold its own key, in which case nobody needs to
       // be asked. A reinstalled one holds nothing, and asking is all it can do.
-      const storedRecoveryKey = await getStoredChatBackupRecoveryKey() ||
+      const storedRecoveryKey = await getStoredChatBackupRecoveryKey(currentUid) ||
         await claimChatBackupRestore({ deviceId, idToken }).catch(() => null);
 
       if (!storedRecoveryKey) {

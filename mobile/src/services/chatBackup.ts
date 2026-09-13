@@ -7,6 +7,12 @@ import { toPortableChatMediaUri } from './chatMediaPaths';
 import type { ChatMessage } from './chatApi';
 import { getRegisteredDeviceHeaders } from './deviceIdentity';
 import {
+  clearScopedRecoveryKey,
+  getChatBackupRecoveryKeyStorageKey,
+  readScopedRecoveryKey,
+  type RecoveryKeyStore
+} from './chatBackupRecoveryKeyScope';
+import {
   listCachedChatConversations,
   LocalConversationRecord,
   restoreCachedChatConversations
@@ -59,7 +65,6 @@ export interface EncryptedChatRestoreResult {
   uploadedAt: string;
 }
 
-const CHAT_BACKUP_RECOVERY_KEY_STORAGE_KEY = 'synzapp.chatBackupRecoveryKey.v1';
 const chatBackupSecureStoreOptions: SecureStore.SecureStoreOptions = {
   keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
   keychainService: 'synzapp.chat.backup.v1'
@@ -73,7 +78,7 @@ export async function createEncryptedChatBackup(input: {
   ownerUid: string;
   tenantId: string;
 }): Promise<EncryptedChatBackupResult> {
-  const recoveryKeyResult = await getOrCreateChatBackupRecoveryKey();
+  const recoveryKeyResult = await getOrCreateChatBackupRecoveryKey(input.ownerUid);
   const conversations = await listCachedChatConversations({
     ownerUid: input.ownerUid,
     tenantId: input.tenantId
@@ -160,7 +165,7 @@ export async function restoreLatestEncryptedChatBackup(input: {
 }): Promise<EncryptedChatRestoreResult | null> {
   const recoveryKey = input.recoveryKey
     ? normalizeRecoveryKey(input.recoveryKey)
-    : await getStoredChatBackupRecoveryKey();
+    : await getStoredChatBackupRecoveryKey(input.ownerUid);
 
   if (!recoveryKey) {
     throw new Error('Enter your encrypted backup recovery key to restore chats.');
@@ -221,7 +226,7 @@ export async function restoreLatestEncryptedChatBackup(input: {
     tenantId: input.tenantId
   });
 
-  await storeChatBackupRecoveryKey(recoveryKey);
+  await storeChatBackupRecoveryKey(input.ownerUid, recoveryKey);
 
   return {
     backupCreatedAt: backup.backupCreatedAt,
@@ -231,49 +236,55 @@ export async function restoreLatestEncryptedChatBackup(input: {
   };
 }
 
-export async function getStoredChatBackupRecoveryKey(): Promise<string | null> {
+const recoveryKeyStore: RecoveryKeyStore = {
+  read: (storageKey) => SecureStore.getItemAsync(storageKey, chatBackupSecureStoreOptions),
+  remove: async (storageKey) => {
+    await SecureStore.deleteItemAsync(storageKey, chatBackupSecureStoreOptions)
+      .catch(() => undefined);
+  },
+  write: (storageKey, value) =>
+    SecureStore.setItemAsync(storageKey, value, chatBackupSecureStoreOptions)
+};
+
+export async function getStoredChatBackupRecoveryKey(ownerUid: string): Promise<string | null> {
   const secureStoreAvailable = await SecureStore.isAvailableAsync();
 
   if (!secureStoreAvailable) {
     throw new Error('Secure device storage is not available.');
   }
 
-  return SecureStore.getItemAsync(
-    CHAT_BACKUP_RECOVERY_KEY_STORAGE_KEY,
-    chatBackupSecureStoreOptions
-  );
+  return readScopedRecoveryKey(recoveryKeyStore, ownerUid);
 }
 
-export async function storeChatBackupRecoveryKey(recoveryKey: string): Promise<void> {
+export async function storeChatBackupRecoveryKey(
+  ownerUid: string,
+  recoveryKey: string
+): Promise<void> {
   const normalizedRecoveryKey = normalizeRecoveryKey(recoveryKey);
   decodeRecoveryKey(normalizedRecoveryKey);
 
-  await SecureStore.setItemAsync(
-    CHAT_BACKUP_RECOVERY_KEY_STORAGE_KEY,
-    normalizedRecoveryKey,
-    chatBackupSecureStoreOptions
+  await recoveryKeyStore.write(
+    getChatBackupRecoveryKeyStorageKey(ownerUid),
+    normalizedRecoveryKey
   );
 }
 
-export async function clearStoredChatBackupRecoveryKey(): Promise<void> {
+export async function clearStoredChatBackupRecoveryKey(ownerUid: string): Promise<void> {
   const secureStoreAvailable = await SecureStore.isAvailableAsync();
 
   if (!secureStoreAvailable) {
     return;
   }
 
-  await SecureStore.deleteItemAsync(
-    CHAT_BACKUP_RECOVERY_KEY_STORAGE_KEY,
-    chatBackupSecureStoreOptions
-  ).catch(() => undefined);
+  await clearScopedRecoveryKey(recoveryKeyStore, ownerUid);
 }
 
-async function getOrCreateChatBackupRecoveryKey(): Promise<{
+async function getOrCreateChatBackupRecoveryKey(ownerUid: string): Promise<{
   created: boolean;
   keyBytes: Uint8Array;
   recoveryKey: string;
 }> {
-  const existingRecoveryKey = await getStoredChatBackupRecoveryKey();
+  const existingRecoveryKey = await getStoredChatBackupRecoveryKey(ownerUid);
 
   if (existingRecoveryKey) {
     return {
@@ -286,7 +297,7 @@ async function getOrCreateChatBackupRecoveryKey(): Promise<{
   const keyBytes = Crypto.getRandomBytes(nacl.secretbox.keyLength);
   const recoveryKey = fromByteArray(keyBytes);
 
-  await storeChatBackupRecoveryKey(recoveryKey);
+  await storeChatBackupRecoveryKey(ownerUid, recoveryKey);
 
   return {
     created: true,

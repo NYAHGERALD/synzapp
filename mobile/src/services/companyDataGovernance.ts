@@ -85,7 +85,7 @@ export async function purgeTenantCompanyData(input: CompanyDataPurgeInput): Prom
   if (input.clearBackupRecoveryKey) {
     steps.push([
       'chat-backup-recovery-key',
-      () => clearStoredChatBackupRecoveryKey()
+      () => clearStoredChatBackupRecoveryKey(input.ownerUid)
     ]);
   }
 
