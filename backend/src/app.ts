@@ -79,7 +79,18 @@ export const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
   }
 
   if (error?.name === 'ConflictError') {
-    res.status(409).json({ error: error.message });
+    /**
+     * A conflict may need answering, not just reporting.
+     *
+     * Matching on the wording of an error is how a revoked device ended up not
+     * recognising itself, so a conflict the app has to act on carries a code and
+     * whatever the person needs to see before deciding.
+     */
+    res.status(409).json({
+      error: error.message,
+      ...(error.code ? { code: error.code } : {}),
+      ...(error.details ? { details: error.details } : {})
+    });
     return;
   }
 

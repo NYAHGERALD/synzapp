@@ -2,6 +2,7 @@ import { DecodedIdToken } from 'firebase-admin/auth';
 import { fieldValue, firestore } from '../config/firebaseAdmin.js';
 import { SynzappRole } from '../types/auth.js';
 import { buildAuthSession } from './authSessionService.js';
+import { assertRateLimit } from '../middleware/rateLimit.js';
 import { createDeviceWipeCommand } from './companyDataWipeService.js';
 import {
   DormancyCandidate,
@@ -14,6 +15,15 @@ export type DevicePlatform = 'android' | 'ios' | 'unknown' | 'web';
 
 export interface RegisterDeviceIdentityInput {
   appInstallationId: string;
+  /**
+   * The phone this one is replacing, sent only after somebody confirmed it.
+   *
+   * Compared against the seat recorded on the caller's own identity document and
+   * never used to address a document. Any active member of a tenant can read
+   * `deviceKeys` and learn a colleague's device id, so resolving this into a path
+   * would let one employee sign out and wipe another's phone.
+   */
+  claimFromMobileDeviceId?: string;
   /**
    * The clock this phone is on.
    *
@@ -128,22 +138,40 @@ export async function registerDeviceIdentity(
     throw authorizationError('Your profile is not active.');
   }
 
+  /**
+   * Displacing a phone is destructive, so it needs a fresh sign-in.
+   *
+   * Registration is otherwise reachable with nothing but a valid id token, and a
+   * token lives in the keychain far longer than a session does. Without this,
+   * anyone holding a lifted one could evict the real user and order their handset
+   * wiped, over and over. Checked before the transaction: it costs nothing and
+   * only a claim is destructive.
+   */
+  if (input.claimFromMobileDeviceId) {
+    assertRecentMobileSeatAuthentication(decodedToken);
+    assertRateLimit(`mobile-seat-claim:${decodedToken.uid}`, MOBILE_SEAT_CLAIM_WINDOW_MS, MOBILE_SEAT_CLAIM_MAX);
+  }
+
   const organizationRef = firestore.collection('organizations').doc(tenantId);
   const userRef = organizationRef.collection('users').doc(decodedToken.uid);
   const userDeviceRef = userRef.collection('devices').doc(input.deviceId);
   const tenantDeviceKeyRef = organizationRef.collection('deviceKeys').doc(input.deviceId);
+  const identityRef = firestore.collection('identityDirectory').doc(decodedToken.uid);
+  let displacedDeviceId: string | null = null;
 
   await firestore.runTransaction(async (transaction) => {
     const [
       organizationSnapshot,
       userSnapshot,
       userDeviceSnapshot,
-      tenantDeviceKeySnapshot
+      tenantDeviceKeySnapshot,
+      identitySnapshot
     ] = await Promise.all([
       transaction.get(organizationRef),
       transaction.get(userRef),
       transaction.get(userDeviceRef),
-      transaction.get(tenantDeviceKeyRef)
+      transaction.get(tenantDeviceKeyRef),
+      transaction.get(identityRef)
     ]);
 
     if (!organizationSnapshot.exists || !userSnapshot.exists) {
@@ -174,6 +202,59 @@ export async function registerDeviceIdentity(
     ) {
       throw authorizationError('This device is not authorized.');
     }
+
+    /**
+     * One phone holds chat for an account.
+     *
+     * The seat lives on `identityDirectory/{uid}` — the document `buildAuthSession`
+     * already reads on every gated request, so checking it costs nothing, and one
+     * shared document is what makes two phones registering at the same moment
+     * serialise. Querying for other active devices would not: they write different
+     * documents, so nothing collides and both could succeed.
+     *
+     * The web never reaches this function and registers no device, so it is
+     * excluded by construction rather than by a flag. Deliberately not keyed on
+     * `platform`, which the client asserts — a second phone could otherwise call
+     * itself web and opt out of the rule.
+     */
+    const identity = identitySnapshot.exists
+      ? (identitySnapshot.data() as { activeMobileSeat?: MobileSeatRecord })
+      : null;
+    const currentSeat = identity?.activeMobileSeat || null;
+
+    if (currentSeat?.deviceId && currentSeat.deviceId !== input.deviceId) {
+      if (input.claimFromMobileDeviceId !== currentSeat.deviceId) {
+        throw mobileSeatConflictError(currentSeat);
+      }
+
+      // Only ever the seat's own device id, read from this account's identity
+      // document. `claimFromMobileDeviceId` is matched against it and never used
+      // to build a path, so naming somebody else's device cannot revoke anything.
+      displacedDeviceId = currentSeat.deviceId;
+
+      const displacedUserDeviceRef = userRef.collection('devices').doc(currentSeat.deviceId);
+      const displacedTenantDeviceRef = organizationRef
+        .collection('deviceKeys')
+        .doc(currentSeat.deviceId);
+      const displacedFields = {
+        revocationReason: 'Chat moved to another phone',
+        revokedAt: fieldValue.serverTimestamp(),
+        revokedByUid: decodedToken.uid,
+        status: 'REVOKED',
+        updatedAt: fieldValue.serverTimestamp()
+      };
+
+      transaction.set(displacedUserDeviceRef, displacedFields, { merge: true });
+      transaction.set(displacedTenantDeviceRef, displacedFields, { merge: true });
+    }
+
+    transaction.set(identityRef, {
+      activeMobileSeat: {
+        claimedAt: fieldValue.serverTimestamp(),
+        deviceId: input.deviceId,
+        platform: input.platform
+      }
+    }, { merge: true });
 
     const createFields = userDeviceSnapshot.exists ? {} : {
       createdAt: fieldValue.serverTimestamp(),
@@ -233,6 +314,24 @@ export async function registerDeviceIdentity(
       ...sharedDeviceRecord
     }, { merge: true });
   });
+
+  if (displacedDeviceId) {
+    /**
+     * Not awaited into the caller's failure. The seat has already moved, and a
+     * wipe order that could not be written is made again the next time the
+     * displaced device is revoked — undoing a claim somebody confirmed would be
+     * worse than a late wipe.
+     */
+    await createDeviceWipeCommand({
+      deviceId: displacedDeviceId,
+      reason: 'DEVICE_REVOKED',
+      requestedByUid: decodedToken.uid,
+      tenantId,
+      uid: decodedToken.uid
+    }).catch((error) => {
+      console.warn('Unable to order a wipe for the displaced phone:', error);
+    });
+  }
 
   return {
     cryptoProvider: input.cryptoProvider,
@@ -835,6 +934,44 @@ function authorizationError(message: string): Error {
   const error = new Error(message);
   error.name = 'AuthorizationError';
   return error;
+}
+
+/** How long a sign-in counts as fresh enough to displace another phone. */
+const MOBILE_SEAT_CLAIM_AUTH_WINDOW_MS = 10 * 60 * 1000;
+const MOBILE_SEAT_CLAIM_WINDOW_MS = 60 * 60 * 1000;
+const MOBILE_SEAT_CLAIM_MAX = 5;
+
+interface MobileSeatRecord {
+  claimedAt?: FirebaseDateLike;
+  deviceId?: string;
+  platform?: string;
+}
+
+function assertRecentMobileSeatAuthentication(decodedToken: DecodedIdToken): void {
+  const authTimeMs = (decodedToken.auth_time || 0) * 1000;
+
+  if (!authTimeMs || Date.now() - authTimeMs > MOBILE_SEAT_CLAIM_AUTH_WINDOW_MS) {
+    throw authorizationError('Verify your phone number again before moving chat to this phone.');
+  }
+}
+
+/**
+ * Says which phone holds chat, so the app can name it before anybody confirms.
+ *
+ * Carries a code rather than prose: the app already learned once that matching on
+ * the wording of an error is how a revoked device ends up not recognising itself.
+ */
+function mobileSeatConflictError(seat: MobileSeatRecord): Error {
+  const error = conflictError('Chat is signed in on another phone.');
+
+  return Object.assign(error, {
+    code: 'MOBILE_SEAT_HELD',
+    details: {
+      claimedAt: dateLikeToIso(seat.claimedAt),
+      deviceId: seat.deviceId || null,
+      platform: seat.platform || null
+    }
+  });
 }
 
 function conflictError(message: string): Error {

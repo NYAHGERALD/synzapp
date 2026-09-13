@@ -165,6 +165,8 @@ const devicePlatformSchema = z.enum(['android', 'ios', 'unknown', 'web']);
 
 const deviceIdentityBodySchema = z.object({
   appInstallationId: z.string().trim().min(12).max(128),
+  /** Sent only on the retry, after somebody confirmed the other phone goes. */
+  claimFromMobileDeviceId: safeDeviceIdSchema.optional(),
   deviceTimeZone: z.string().trim().min(1).max(64).optional(),
   cryptoProvider: z.string().trim().min(2).max(40),
   deviceId: safeDeviceIdSchema,
