@@ -224,6 +224,7 @@ import {
   getStoredChatBackupRecoveryKey,
   restoreLatestEncryptedChatBackup
 } from '../services/chatBackup';
+import { markCompanyDataScopeActive } from '../services/companyDataManifest';
 import { purgeTenantCompanyData } from '../services/companyDataGovernance';
 import { clearCompanyDataSessionScope } from '../services/companyDataSessionScope';
 import {
@@ -3157,6 +3158,32 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
     return userProfile?.tenantId || verifiedAdmin.session.user.tenantId || '';
   }
 
+  /**
+   * A device the server has just authorised is not a blocked one.
+   *
+   * The local block outlives what caused it. A phone chat was moved away from
+   * purges with reason `device-revoked`, which counts as a standing block, and
+   * it is still set when the person signs back in on that same phone. Signing in
+   * does try to clear it — but it records the scope from the session's tenant,
+   * while every check here reads `getLocalChatScope()`. Where those two differ
+   * the mark lands under one key and the check reads another, so the block
+   * survives and the session ends seconds after the chats are restored.
+   *
+   * Cleared here instead, keyed by the very scope the checks use, at the moment
+   * registration succeeds — which is the server saying this device may hold the
+   * data. A first-time phone has no manifest entry at all, which is why only
+   * returning ones were caught by this.
+   */
+  async function clearStaleCompanyDataBlock(): Promise<void> {
+    const scope = getLocalChatScope();
+
+    if (!scope.ownerUid || !scope.tenantId) {
+      return;
+    }
+
+    await markCompanyDataScopeActive(scope).catch(() => undefined);
+  }
+
   function getLocalChatScope(): { ownerUid: string; tenantId: string } {
     return {
       ownerUid: currentUid,
@@ -3828,6 +3855,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
 
       isMobileSeatPromptPendingRef.current = false;
       setRegisteredDeviceId(device.deviceId);
+      void clearStaleCompanyDataBlock();
       void registerCurrentDevicePushToken(registrationToken);
       setErrorState(null);
       void offerToBringChatHistoryOver();
@@ -3854,6 +3882,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
       const device = await ensureRegisteredDeviceIdentity(registrationToken);
 
       setRegisteredDeviceId(device.deviceId);
+      void clearStaleCompanyDataBlock();
       void registerCurrentDevicePushToken(registrationToken);
     } catch (nextError) {
       deviceIdentityRegistrationStartedRef.current = false;

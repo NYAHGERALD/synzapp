@@ -131,3 +131,55 @@ describe('companyDataManifest', () => {
     });
   });
 });
+
+describe('a phone that had chat moved away, signing in again', () => {
+  it('is blocked while the revocation purge stands', async () => {
+    // This is what a returning phone carries: chat moved away, it purged itself
+    // with reason device-revoked, and that counts as a standing block.
+    await markCompanyDataScopePurged({
+      ...scope,
+      purgedAt: new Date().toISOString(),
+      reason: 'device-revoked'
+    });
+
+    expect(await isCompanyDataScopeBlocked(scope)).toBe(true);
+  });
+
+  it('is let back in once the scope is marked active again', async () => {
+    // The server authorising the device is what clears it. Marking active has to
+    // use the same scope the check reads, or the mark lands under one key and
+    // the check reads another — which is how the session ended seconds after
+    // the chats were restored.
+    await markCompanyDataScopePurged({
+      ...scope,
+      purgedAt: new Date().toISOString(),
+      reason: 'device-revoked'
+    });
+    await markCompanyDataScopeActive(scope);
+
+    expect(await isCompanyDataScopeBlocked(scope)).toBe(false);
+  });
+
+  it('does not clear a block recorded for a different tenant', async () => {
+    // The mismatch that caused this, pinned: clearing one scope must not be
+    // mistaken for clearing another.
+    await markCompanyDataScopePurged({
+      ...scope,
+      purgedAt: new Date().toISOString(),
+      reason: 'device-revoked'
+    });
+    await markCompanyDataScopeActive({ ownerUid: scope.ownerUid, tenantId: 'tenant-elsewhere' });
+
+    expect(await isCompanyDataScopeBlocked(scope)).toBe(true);
+  });
+
+  it('leaves an ordinary sign-out unblocked', async () => {
+    await markCompanyDataScopePurged({
+      ...scope,
+      purgedAt: new Date().toISOString(),
+      reason: 'sign-out'
+    });
+
+    expect(await isCompanyDataScopeBlocked(scope)).toBe(false);
+  });
+});
