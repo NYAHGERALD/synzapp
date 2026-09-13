@@ -172,6 +172,7 @@ import {
 import { useAppLoading } from './appLoading';
 import { EvidenceLibraryWindow } from './EvidenceLibraryWindow';
 import { RcaAnswerText } from './RcaAnswerText';
+import { combineIncidentDateAndTime, isUnwrittenField } from './rcaIncidentCarryOver';
 import { downloadRailsEvidenceBlob, type RailsEvidence } from './railsApi';
 import {
   decodeRcaRealtimeUpdate,
@@ -20946,15 +20947,15 @@ function RcaInspectorDrawer({
      * apply path returns early when nothing about it changed. Opening the node
      * is the next time it matters, and it fills the same field by the same rule.
      */
-    const carriedIncidentAccount = getRcaIncidentAccountToCarryOver(
+    const carriedIncidentFields = getRcaIncidentCarryOverFields(
       syncedDisplayNode,
       syncedDisplayNode.parentNodeId
         ? nodes.find((candidateNode) => candidateNode.id === syncedDisplayNode.parentNodeId)
         : null
     );
 
-    if (carriedIncidentAccount) {
-      syncedDetailFields.whatHappened = carriedIncidentAccount;
+    if (carriedIncidentFields) {
+      Object.assign(syncedDetailFields, carriedIncidentFields);
     }
     const primaryLabelFieldKey = syncedDisplayNode.nodeType === 'ISHIKAWA_CATEGORY' || syncedDisplayNode.nodeType !== 'WHY'
       ? null
@@ -24198,53 +24199,69 @@ function isValidHexColor(color: string | null | undefined): color is string {
 }
 
 /**
- * The incident's own account, when Incident Details has none of its own.
+ * What the Incident node can lend to Incident Details.
  *
- * The two fields describe the same event, and retyping is how they drift apart.
- * Returns null when there is nothing to copy or when somebody has already
- * written there.
+ * The pairs describe the same event, and retyping is how they drift apart.
+ * Returns only the fields worth writing: nothing is carried where there is
+ * nothing to copy, or where somebody has already written.
  *
  * "What Happened?" is never truly empty — it mirrors the node's title, so a
- * fresh node holds the default "Incident details". A placeholder has to be
- * recognised rather than treated as content, or this would never fire.
+ * fresh node holds the default "Incident details". That placeholder has to be
+ * recognised rather than treated as content, or the copy would never fire.
+ * "When Did It Happen?" mirrors nothing, so empty is the only placeholder.
  */
-function getRcaIncidentAccountToCarryOver(
+function getRcaIncidentCarryOverFields(
   childNode: RcaNode,
   parentNode: RcaNode | null | undefined
-): string | null {
+): { whatHappened?: string; whenDidItHappen?: string } | null {
   if (!isIncidentDetailsRoleNode(childNode) || !parentNode || !isIncidentRoleNode(parentNode)) {
     return null;
   }
 
-  const incidentDescription = (parentNode.detailFields?.incidentDescription || '').trim();
+  const incidentFields = parentNode.detailFields || {};
+  const existingFields = childNode.detailFields || {};
+  const carried: { whatHappened?: string; whenDidItHappen?: string } = {};
+  const incidentDescription = (incidentFields.incidentDescription || '').trim();
 
-  if (!incidentDescription) {
-    return null;
+  if (incidentDescription && isUnwrittenField(existingFields.whatHappened, [
+    getDefaultRcaNodeRoleLabel('INCIDENT_DETAILS'),
+    childNode.label || ''
+  ])) {
+    carried.whatHappened = incidentDescription;
   }
 
-  const existingAccount = (childNode.detailFields?.whatHappened || '').trim();
-  const isUnwritten = !existingAccount ||
-    existingAccount === getDefaultRcaNodeRoleLabel('INCIDENT_DETAILS') ||
-    existingAccount === (childNode.label || '').trim();
+  /**
+   * The date and the time together, because the two fields are not the same
+   * kind: the incident records a date and a clock time separately, and this
+   * one field holds both. A bare date would be refused by the input.
+   */
+  const incidentMoment = combineIncidentDateAndTime(
+    incidentFields.dateOfIncident,
+    incidentFields.timeOfIncident
+  );
 
-  return isUnwritten ? incidentDescription : null;
+  if (incidentMoment && isUnwrittenField(existingFields.whenDidItHappen, [])) {
+    carried.whenDidItHappen = incidentMoment;
+  }
+
+  return Object.keys(carried).length ? carried : null;
 }
 
 function applyRcaConnectionDetailFieldUpdates(childNode: RcaNode, parentNode: RcaNode | null | undefined): RcaNode {
-  const carriedAccount = getRcaIncidentAccountToCarryOver(childNode, parentNode);
+  const carriedFields = getRcaIncidentCarryOverFields(childNode, parentNode);
 
-  /**
-   * Because that field mirrors the title, the node is renamed to match. Typing
-   * the same text by hand does this too, so the copy behaves no differently.
-   */
-  if (carriedAccount) {
+  if (carriedFields) {
     return {
       ...childNode,
       detailFields: {
         ...(childNode.detailFields || {}),
-        whatHappened: carriedAccount
+        ...carriedFields
       },
-      label: carriedAccount
+      /**
+       * Renamed only when the account came across, because that field mirrors
+       * the title. The date does not, so carrying it alone leaves the name be.
+       */
+      label: carriedFields.whatHappened || childNode.label
     };
   }
 
