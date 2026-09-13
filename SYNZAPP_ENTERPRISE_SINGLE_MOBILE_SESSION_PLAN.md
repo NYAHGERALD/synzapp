@@ -48,8 +48,9 @@ MDM instead. Synzapp is in the first camp.
 
 ## Order of work
 
-Steps 1 to 4 are worth doing on their own merits and should each ship separately.
-Step 5 is the feature, and it should not start until 3 and 4 are done.
+Steps 1 to 3 are worth doing on their own merits and should each ship separately.
+Step 4 turned out to be already built — see the correction there. Step 5 is the
+feature, and it should not start until step 3 has shipped.
 
 Step 1 is a live exposure and step 2 a live compliance failure. Neither needs this
 feature to justify it, and neither should wait for it.
@@ -156,22 +157,39 @@ crypto round-trip test that does not exist — seal, transmit, open.
 **Do this before deciding what the confirmation screen is allowed to promise.** It
 is a few hours and it changes the answer.
 
-### Step 4 — Make backup automatic (independent)
+### Step 4 — ~~Make backup automatic~~ — already built (corrected 2026-09-13)
 
-`createEncryptedChatBackup` is reachable only from a settings action, so in
-practice almost nobody has a backup. There is also a live disagreement about
-whether backups are even enabled — the mobile default says no, the server's
-mapping says otherwise (**verified**). Settle that first, or you cannot trust what
-you are reading.
+**This step was written on a false premise and needs no work.** Checked against
+the source rather than the audit that produced it:
 
-Once phones are swapped routinely, backup stops being a nice-to-have and becomes
-the only thing between a swap and total history loss.
+- Backup **is** automatic. `queueEncryptedChatBackup()` is called from nine places
+  across the message paths — after receiving, after saving, after sending — and
+  debounces at 1800ms. The claim that `createEncryptedChatBackup` is "only reached
+  from a settings action" was wrong.
+- It is **gated on the tenant policy**, read from the server, and says so plainly
+  when a tenant has backups switched off.
+- The recovery key **is escrowed** to the organization, wrapped by Cloud KMS, at
+  the moment a backup is made — so a reinstalled handset can recover it rather
+  than holding the only copy.
+- Restore already handles the hard case: it tries the local key, then a release an
+  administrator has approved, and otherwise raises a request. An employee is never
+  asked to type a key they were never given.
 
-**Direct chat history is the part with no safety net at all.** The envelope listing
-does a bare `if (!fallbackEncryptedKeyForDevice) return null`
-(`encryptedMessageEnvelopeService.ts:296-316`, **verified**). A brand-new device id
-appears in no historical envelope, so old direct messages are not shown as
-unreadable — they are dropped from the response and not shown at all.
+**The defaults do not contradict each other either**, which the audit also
+claimed. `DEFAULT_CHAT_BACKUP_POLICY` is `false` on both the client and the
+server. What differs is `mapChatBackupPolicy`, which reads an *unconfigured*
+tenant as enabled (`policy?.encryptedBackupsEnabled !== false`). That is a
+separate question from the constant, which is the fallback used when the policy
+cannot be read at all — and refusing to upload when you do not know the policy is
+the right answer there.
+
+Worth a decision at some point, but not a blocker and not a contradiction:
+should a tenant that never configured backup have it on by default?
+
+**What is genuinely missing** belongs to step 5, not here: nothing offers to
+restore on a **fresh** device. Somebody moving to a new phone has to find it in
+settings. That matters only once phone-swap is routine, which is exactly what
+step 5 makes it.
 
 ### Step 5 — Bind chat to one phone
 
@@ -307,6 +325,15 @@ Nothing is left open. The plan is ready to build against.
 
 ## Status
 
-Not started. Steps 1 and 2 are independent of the feature and of each other, and
-both can begin immediately. Step 1's recovery key is the single most urgent item
-in this document.
+- **Step 1 — done.** Both the backup recovery key and the local chat key are
+  stored per account, sharing one tested implementation, and the purge destroys
+  the account's chat key so a wipe is actually a wipe.
+- **Step 2 — done, deployed.** The wipe endpoints check ownership rather than
+  authorisation, self-revoke writes a wipe order, and the revoke is idempotent
+  per document so drift no longer strands a device.
+- **Step 3 — done, deployed.** Grants carry the sealer's public key and are opened
+  against it, and a fixed grant may replace a broken one that was holding its
+  slot.
+- **Step 4 — nothing to do.** Already built; the step was written on a false
+  premise. See the correction above.
+- **Step 5 — not started.** Ready to build. Nothing blocks it.
