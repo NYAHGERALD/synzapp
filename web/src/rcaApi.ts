@@ -277,6 +277,117 @@ export interface RcaKnowledgeAskResponse {
   source: 'AI' | 'SYSTEM_GUIDE';
 }
 
+/**
+ * Asks the guide and reports the answer as it is written.
+ *
+ * Not `requestRcaJson`: that waits for a complete body and times out on a
+ * fixed clock, and neither suits a response arriving over many seconds. A
+ * stream is instead judged by whether it keeps producing text.
+ *
+ * `onDelta` is called with each new piece. The resolved value is the finished
+ * answer, which is also what the server sends at the end — the fallback guide
+ * arrives only that way, since nothing streamed it.
+ */
+export async function streamRcaKnowledgeBase(
+  input: RcaKnowledgeAskInput,
+  onDelta: (delta: string) => void
+): Promise<RcaKnowledgeAskResponse> {
+  const user = getSynzappFirebaseAuth().currentUser;
+
+  if (!user) {
+    throw new Error('You are not signed in.');
+  }
+
+  const idToken = await user.getIdToken();
+  const response = await fetch(`${getSynzappApiBaseUrl()}/api/rca/knowledge/ask/stream`, {
+    body: JSON.stringify(stripUndefinedValues(input)),
+    headers: {
+      Accept: 'text/event-stream',
+      Authorization: `Bearer ${idToken}`,
+      'Content-Type': 'application/json',
+      ...await getAppCheckHeader()
+    },
+    method: 'POST'
+  });
+
+  if (!response.ok || !response.body) {
+    throw new Error(await getResponseErrorMessage(response, 'RCA AI guidance could not be reached.'));
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffered = '';
+  let streamedAnswer = '';
+  let result: RcaKnowledgeAskResponse | null = null;
+
+  for (;;) {
+    const { done, value } = await reader.read();
+
+    if (done) {
+      break;
+    }
+
+    buffered += decoder.decode(value, { stream: true });
+
+    // Anything after the last blank line is an event still in transit.
+    const events = buffered.split('\n\n');
+
+    buffered = events.pop() || '';
+
+    for (const event of events) {
+      for (const line of event.split('\n')) {
+        if (!line.startsWith('data:')) {
+          continue;
+        }
+
+        const payload = line.slice(5).trim();
+
+        if (!payload) {
+          continue;
+        }
+
+        let parsed: {
+          answer?: string;
+          delta?: string;
+          done?: boolean;
+          error?: string;
+          model?: string;
+          source?: 'AI' | 'SYSTEM_GUIDE';
+        };
+
+        try {
+          parsed = JSON.parse(payload);
+        } catch {
+          continue;
+        }
+
+        if (parsed.error) {
+          throw new Error(parsed.error);
+        }
+
+        if (parsed.delta) {
+          streamedAnswer += parsed.delta;
+          onDelta(parsed.delta);
+        }
+
+        if (parsed.done) {
+          result = {
+            answer: parsed.answer || streamedAnswer,
+            model: parsed.model || 'system-guide',
+            source: parsed.source || 'SYSTEM_GUIDE'
+          };
+        }
+      }
+    }
+  }
+
+  if (!result) {
+    throw new Error('RCA AI guidance ended before it finished.');
+  }
+
+  return result;
+}
+
 export async function listRcaIncidents(): Promise<RcaWorkspaceResponse> {
   return requestRcaJson<RcaWorkspaceResponse>('/api/rca/incidents');
 }

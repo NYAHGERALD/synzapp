@@ -128,7 +128,7 @@ import {
   type LucideIcon
 } from 'lucide-react';
 import {
-  askRcaKnowledgeBase,
+  streamRcaKnowledgeBase,
   buildRcaNodeTree,
   createRcaIncident,
   createRcaNode as createRcaNodeHttp,
@@ -12080,11 +12080,11 @@ function RcaWorkspaceInner() {
             incident={isReferenceProjectActive ? null : selectedIncident}
             isOpen={isKnowledgeBaseOpen}
             nodes={visibleNodes}
-            onAsk={(question) => askRcaKnowledgeBase({
+            onAsk={(question, onDelta) => streamRcaKnowledgeBase({
               incidentId: !isReferenceProjectActive && selectedIncident ? selectedIncident.id : undefined,
               question,
               sessionId: !isReferenceProjectActive && selectedSession ? selectedSession.id : undefined
-            })}
+            }, onDelta)}
             onToggle={() => setIsKnowledgeBaseOpen((isOpen) => !isOpen)}
             selectedNode={selectedNode}
             selectedSplineCount={selectedFlowEdgeIds.size}
@@ -14294,6 +14294,8 @@ type RcaKnowledgePanelMode = 'answer' | 'guide' | 'selection';
 
 type RcaKnowledgeTurn = {
   answer: RcaKnowledgeAskResponse | null;
+  /** What has arrived so far, while the answer is still being written. */
+  streamingText?: string;
   id: string;
   question: string;
 };
@@ -14311,7 +14313,7 @@ function RcaKnowledgeBasePanel({
   incident: RcaIncident | null;
   isOpen: boolean;
   nodes: RcaNode[];
-  onAsk: (question: string) => Promise<RcaKnowledgeAskResponse>;
+  onAsk: (question: string, onDelta: (delta: string) => void) => Promise<RcaKnowledgeAskResponse>;
   onToggle: () => void;
   selectedNode: RcaNode | null;
   selectedSplineCount: number;
@@ -14404,7 +14406,13 @@ function RcaKnowledgeBasePanel({
     setPanelMode('answer');
 
     try {
-      const result = await onAsk(submittedQuestion);
+      const result = await onAsk(submittedQuestion, (delta) => {
+        setTurns((current) => current.map((turn) => (
+          turn.id === turnId
+            ? { ...turn, streamingText: (turn.streamingText || '') + delta }
+            : turn
+        )));
+      });
 
       setAnswer(result);
       setTurns((current) => current.map((turn) => (
@@ -14667,6 +14675,21 @@ function RcaKnowledgeConversation({
               {/* No container around the answer. It is the thing being read. */}
               <p className="whitespace-pre-wrap px-0.5 text-[13px] leading-7 text-slate-700">
                 {turn.answer.answer}
+              </p>
+            </div>
+          ) : turn.streamingText ? (
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2 text-[11px] font-semibold text-slate-500">
+                <span className="grid h-5 w-5 place-items-center rounded-md bg-cyan-50 text-cyan-700">
+                  <Bot aria-hidden="true" size={12} />
+                </span>
+                RCA AI
+                <span className="font-normal text-slate-400">Writing…</span>
+              </div>
+              <p className="whitespace-pre-wrap px-0.5 text-[13px] leading-7 text-slate-700">
+                {turn.streamingText}
+                {/* A caret, so a pause reads as thinking rather than finished. */}
+                <span className="ml-0.5 inline-block h-4 w-[2px] animate-pulse bg-cyan-600 align-[-2px]" />
               </p>
             </div>
           ) : isAsking ? (

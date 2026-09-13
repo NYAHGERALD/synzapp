@@ -134,6 +134,105 @@ export async function askRcaKnowledgeBase(
   }
 }
 
+/**
+ * Asks the same question, delivering the answer as it is written.
+ *
+ * Every guard `askRcaKnowledgeBase` applies applies here too — rate limit,
+ * tenant AI policy, usage accounting — because a different route must not be a
+ * way around any of them.
+ *
+ * If the model cannot be reached the deterministic guide is returned instead,
+ * exactly as before. `onDelta` is told nothing in that case: the caller sends
+ * the whole fallback at once rather than pretending it was generated.
+ */
+export async function streamRcaKnowledgeBase(
+  decodedToken: DecodedIdToken,
+  input: RcaKnowledgeAskInput,
+  onDelta: (delta: string) => void
+): Promise<RcaKnowledgeAskResponse> {
+  const question = normalizeQuestion(input.question);
+
+  assertRateLimit(`rca-knowledge:${decodedToken.uid}`, 60_000, 12);
+
+  const context = await buildAuthorizedRcaKnowledgeContext(decodedToken, input);
+
+  if (!env.openAiApiKey) {
+    return {
+      answer: buildDeterministicKnowledgeAnswer(question, context),
+      model: 'system-guide',
+      source: 'SYSTEM_GUIDE'
+    };
+  }
+
+  await assertTenantAiAllowed(decodedToken, {
+    featureId: 'rca_ai',
+    operationId: 'rca.knowledge.ask',
+    operationLabel: 'Ask RCA guide',
+    resourceId: input.incidentId || null,
+    resourceType: input.incidentId ? 'rca_incident' : 'rca_workspace'
+  });
+
+  const usageContext = await getAiUsageContext(decodedToken, { requireAdmin: false });
+  const startedAt = Date.now();
+  let deliveredCharacters = 0;
+
+  try {
+    const answer = await requestOpenAiRcaGuidanceStream(question, context, (delta) => {
+      deliveredCharacters += delta.length;
+      onDelta(delta);
+    });
+    const inputTokens = estimateTokenCount(RCA_KNOWLEDGE_SYSTEM_PROMPT.length + context.length + question.length);
+    const outputTokens = estimateTokenCount(answer.length);
+
+    await writeAiUsageEvent({
+      ...usageContext,
+      durationMs: Date.now() - startedAt,
+      estimatedCostUsd: estimateOpenAiCostUsd({ inputTokens, outputTokens }),
+      featureId: 'rca_ai',
+      inputTokens,
+      model: env.openAiModel,
+      operationId: 'rca.knowledge.ask',
+      operationLabel: 'Ask RCA guide',
+      outputTokens,
+      resourceId: input.incidentId || null,
+      resourceType: input.incidentId ? 'rca_incident' : 'rca_workspace',
+      status: 'succeeded'
+    }).catch(() => undefined);
+
+    return { answer, model: env.openAiModel, source: 'AI' };
+  } catch (error) {
+    console.warn('RCA knowledge AI stream fallback:', error instanceof Error ? error.message : error);
+    await writeAiUsageEvent({
+      ...usageContext,
+      durationMs: Date.now() - startedAt,
+      errorCategory: getAiKnowledgeErrorCategory(error),
+      featureId: 'rca_ai',
+      model: env.openAiModel,
+      operationId: 'rca.knowledge.ask',
+      operationLabel: 'Ask RCA guide',
+      resourceId: input.incidentId || null,
+      resourceType: input.incidentId ? 'rca_incident' : 'rca_workspace',
+      status: 'failed'
+    }).catch(() => undefined);
+
+    /**
+     * Only safe to replace an answer nobody has read yet.
+     *
+     * Once words have gone out, swapping in the guide would rewrite what is
+     * already on screen. A stream that broke part way keeps what it delivered.
+     */
+    if (deliveredCharacters > 0) {
+      throw error;
+    }
+
+    return {
+      answer: buildDeterministicKnowledgeAnswer(question, context),
+      model: 'system-guide',
+      source: 'SYSTEM_GUIDE'
+    };
+  }
+}
+
 async function buildAuthorizedRcaKnowledgeContext(
   decodedToken: DecodedIdToken,
   input: RcaKnowledgeAskInput
@@ -148,6 +247,115 @@ async function buildAuthorizedRcaKnowledgeContext(
   ]);
 
   return summarizeRcaCanvasForAi(incident, nodesResult.nodes);
+}
+
+/**
+ * The same request, relayed a piece at a time.
+ *
+ * Worth the separate path rather than revealing a finished answer gradually:
+ * the first words arrive while the rest is still being written, so the wait is
+ * spent reading. A typewriter over a completed answer only adds delay.
+ */
+async function requestOpenAiRcaGuidanceStream(
+  question: string,
+  context: string,
+  onDelta: (delta: string) => void
+): Promise<string> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), env.openAiRequestTimeoutMs);
+
+  try {
+    const response = await fetch('https://api.openai.com/v1/responses', {
+      body: JSON.stringify({
+        input: [
+          { content: RCA_KNOWLEDGE_SYSTEM_PROMPT, role: 'system' },
+          {
+            content: [`RCA context:\n${context}`, `User question:\n${question}`].join('\n\n'),
+            role: 'user'
+          }
+        ],
+        max_output_tokens: 650,
+        model: env.openAiModel,
+        stream: true
+      }),
+      headers: {
+        Authorization: `Bearer ${env.openAiApiKey}`,
+        'Content-Type': 'application/json'
+      },
+      method: 'POST',
+      signal: controller.signal
+    });
+
+    if (!response.ok || !response.body) {
+      const failureBody = await response.text().catch(() => '');
+
+      throw new Error(
+        `OpenAI stream failed with status ${response.status}. ${failureBody.slice(0, 300)}`.trim()
+      );
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffered = '';
+    let answer = '';
+
+    for (;;) {
+      const { done, value } = await reader.read();
+
+      if (done) {
+        break;
+      }
+
+      buffered += decoder.decode(value, { stream: true });
+
+      /**
+       * Split on the blank line that ends an event, and keep the remainder.
+       *
+       * A chunk boundary falls wherever the network puts it, routinely through
+       * the middle of a JSON payload, so anything after the last complete event
+       * is held back rather than parsed.
+       */
+      const events = buffered.split('\n\n');
+
+      buffered = events.pop() || '';
+
+      for (const event of events) {
+        for (const line of event.split('\n')) {
+          if (!line.startsWith('data:')) {
+            continue;
+          }
+
+          const payload = line.slice(5).trim();
+
+          if (!payload || payload === '[DONE]') {
+            continue;
+          }
+
+          try {
+            const parsed = JSON.parse(payload) as { delta?: string; type?: string };
+
+            if (parsed.type === 'response.output_text.delta' && parsed.delta) {
+              answer += parsed.delta;
+              onDelta(parsed.delta);
+            }
+          } catch {
+            // A payload that will not parse is skipped rather than ending the
+            // answer somebody is already reading.
+          }
+        }
+      }
+    }
+
+    const trimmedAnswer = answer.trim();
+
+    if (!trimmedAnswer) {
+      throw new Error('OpenAI stream produced no text.');
+    }
+
+    return trimmedAnswer;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function requestOpenAiRcaGuidance(question: string, context: string): Promise<string> {
@@ -171,8 +379,15 @@ async function requestOpenAiRcaGuidance(question: string, context: string): Prom
           }
         ],
         max_output_tokens: 650,
-        model: env.openAiModel,
-        temperature: 0.2
+        model: env.openAiModel
+        /**
+         * No `temperature`.
+         *
+         * The configured model rejects it outright — "Unsupported parameter:
+         * 'temperature' is not supported with this model" — so every request
+         * returned 400 and every answer users saw was the deterministic
+         * fallback, labelled "System guide". Style is set by the system prompt.
+         */
       }),
       headers: {
         Authorization: `Bearer ${env.openAiApiKey}`,
@@ -183,7 +398,18 @@ async function requestOpenAiRcaGuidance(question: string, context: string): Prom
     });
 
     if (!response.ok) {
-      throw new Error(`OpenAI request failed with status ${response.status}.`);
+      /**
+       * The body, not just the status.
+       *
+       * A bare "failed with status 400" took a live reproduction to explain,
+       * while OpenAI had been naming the offending parameter in the body all
+       * along. Truncated because it is going into a log line.
+       */
+      const failureBody = await response.text().catch(() => '');
+
+      throw new Error(
+        `OpenAI request failed with status ${response.status}. ${failureBody.slice(0, 300)}`.trim()
+      );
     }
 
     const body = await response.json() as {

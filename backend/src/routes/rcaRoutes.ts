@@ -3,7 +3,10 @@ import { getDecodedTokenFromHeader as getDecodedToken } from '../middleware/requ
 import { z } from 'zod';
 import { verifyAppCheck } from '../middleware/appCheck.js';
 import { buildAuthSession } from '../services/authSessionService.js';
-import { askRcaKnowledgeBase } from '../services/rcaKnowledgeService.js';
+import {
+  askRcaKnowledgeBase,
+  streamRcaKnowledgeBase
+} from '../services/rcaKnowledgeService.js';
 import {
   createRcaIncident,
   createRcaNode,
@@ -185,6 +188,69 @@ rcaRouter.get('/context', verifyAppCheck, async (req, res, next) => {
     res.json({ context });
   } catch (error) {
     next(error);
+  }
+});
+
+/**
+ * The same answer, sent as it is written.
+ *
+ * Everything that can refuse the request — the token, the body, the tenant's AI
+ * policy — is settled before a single header goes out, because once a response
+ * has begun there is no status code left to send. After that point a failure
+ * can only be described inside the stream.
+ */
+rcaRouter.post('/knowledge/ask/stream', verifyAppCheck, async (req, res, next) => {
+  let hasStarted = false;
+
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const body = knowledgeAskBodySchema.parse(req.body);
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    // Cloud Run's proxy holds a response back until it looks finished unless it
+    // is told not to, which would collect the whole answer and defeat this.
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+    hasStarted = true;
+
+    const send = (payload: Record<string, unknown>) => {
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    };
+    let isClientGone = false;
+
+    // A caller who walks away should not leave the model running.
+    req.on('close', () => {
+      isClientGone = true;
+    });
+
+    const result = await streamRcaKnowledgeBase(decodedToken, body, (delta) => {
+      if (!isClientGone) {
+        send({ delta });
+      }
+    });
+
+    /**
+     * The whole answer again at the end.
+     *
+     * The fallback path streams nothing, so this is the only place its text
+     * arrives; for a streamed answer it lets the client check what it assembled
+     * against what the server sent.
+     */
+    send({ answer: result.answer, done: true, model: result.model, source: result.source });
+    res.end();
+  } catch (error) {
+    if (!hasStarted) {
+      next(error);
+
+      return;
+    }
+
+    res.write(`data: ${JSON.stringify({
+      error: error instanceof Error ? error.message : 'That answer could not be finished.'
+    })}\n\n`);
+    res.end();
   }
 });
 
