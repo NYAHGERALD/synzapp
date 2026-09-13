@@ -411,7 +411,29 @@ export function EvidenceLibraryWindow({
       return;
     }
 
-    setDraftFiles((currentFiles) => [...currentFiles, ...nextFiles]);
+    /**
+     * Said here rather than after the upload.
+     *
+     * The server has the same limit, but reaching it means encoding the file
+     * and sending several megabytes first, only to be turned away. Checking the
+     * size the browser already knows costs nothing and names the file, which
+     * the server's answer cannot do once several were sent together.
+     */
+    const oversized = nextFiles.filter((file) => file.size > MAX_EVIDENCE_FILE_BYTES);
+
+    if (oversized.length) {
+      setErrorMessage(oversized.length === 1
+        ? `${oversized[0].name} is ${formatFileSize(oversized[0].size)}. Evidence files must be under ${MAX_EVIDENCE_FILE_LABEL}.`
+        : `${oversized.length} files are over ${MAX_EVIDENCE_FILE_LABEL} and were not added.`);
+    }
+
+    const acceptedFiles = nextFiles.filter((file) => file.size <= MAX_EVIDENCE_FILE_BYTES);
+
+    if (!acceptedFiles.length) {
+      return;
+    }
+
+    setDraftFiles((currentFiles) => [...currentFiles, ...acceptedFiles]);
   }
 
   function handleUploadPaste(event: React.ClipboardEvent<HTMLElement>) {
@@ -1477,6 +1499,16 @@ function shouldShowEvidenceFileName(label: string, fileName?: string | null): bo
 
   return Boolean(safeFileName && safeFileName.toLowerCase() !== label.trim().toLowerCase());
 }
+
+/**
+ * The same ceiling rcaService and railsService enforce.
+ *
+ * Kept in step with MAX_RCA_EVIDENCE_BYTES and MAX_RAILS_EVIDENCE_BYTES. It is
+ * the raw file size, not what it costs encoded — the body limit is set to cover
+ * the base64 expansion so this number is the one people actually meet.
+ */
+const MAX_EVIDENCE_FILE_BYTES = 4 * 1024 * 1024;
+const MAX_EVIDENCE_FILE_LABEL = '4 MB';
 
 function formatFileSize(sizeBytes?: number | null): string {
   if (!sizeBytes || sizeBytes <= 0) {

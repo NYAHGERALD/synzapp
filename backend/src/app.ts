@@ -28,7 +28,16 @@ export function createSynzappApp() {
     exposedHeaders: ['Content-Disposition'],
     origin: env.corsOrigin === '*' ? true : env.corsOrigin
   }));
-  app.use(express.json({ limit: '5mb' }));
+  /**
+   * Sized for what the evidence limit actually costs on the wire.
+   *
+   * Evidence is sent as a base64 data URL inside JSON, and base64 is four
+   * thirds of the file. So the 4 MB that rcaService and railsService both
+   * advertise arrives as 5.33 MB, and a 5 MB cap rejected it before either
+   * check could run — the advertised limit was unreachable, and anything over
+   * 3.75 MB failed with a body-parser 413 that does not mention a limit.
+   */
+  app.use(express.json({ limit: '8mb' }));
 
   app.get('/health', (_req, res) => {
     res.json({ ok: true, service: 'synzapp-backend' });
