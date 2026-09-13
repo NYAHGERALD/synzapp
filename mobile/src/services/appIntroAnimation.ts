@@ -28,8 +28,13 @@ export const APP_INTRO_HOLD_MS = 380;
 
 export const APP_INTRO_FADE_OUT_MS = 240;
 
-/** The logo file is 150x132. Whatever width is chosen, keep that shape. */
-export const APP_INTRO_LOGO_WIDTH = 180;
+/**
+ * The logo file is 150x132. Whatever width is chosen, keep that shape.
+ *
+ * Drawn below the file's own 150 so it is downscaled rather than stretched —
+ * an opening screen is the one place a soft edge on the mark is obvious.
+ */
+export const APP_INTRO_LOGO_WIDTH = 140;
 const LOGO_SOURCE_WIDTH = 150;
 const LOGO_SOURCE_HEIGHT = 132;
 

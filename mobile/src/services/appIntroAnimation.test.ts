@@ -16,7 +16,7 @@ describe('the opening animation', () => {
   it('keeps the logo file shape at the width it is drawn', () => {
     // The file is 150x132. A width that ignored that would stretch the mark.
     expect(getAppIntroLogoSize(150)).toEqual({ height: 132, width: 150 });
-    expect(getAppIntroLogoSize(APP_INTRO_LOGO_WIDTH)).toEqual({ height: 158, width: 180 });
+    expect(getAppIntroLogoSize(APP_INTRO_LOGO_WIDTH)).toEqual({ height: 123, width: 140 });
   });
 
   it('never returns a size that would collapse the logo', () => {
