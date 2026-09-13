@@ -366,6 +366,8 @@ export interface RailsActionPatch {
 }
 
 export interface RailsEvidenceInput {
+  /** A file already sent to storage, from `uploadRailsEvidenceFile`. */
+  uploadId?: string;
   dataUrl?: string;
   evidenceId?: string;
   fileName?: string;
@@ -649,6 +651,141 @@ export async function addRailsEvidenceLibrary(input: RailsEvidenceInput): Promis
   }
 
   return body.evidence;
+}
+
+export interface RailsEvidenceSizePolicy {
+  maxAllowedFileBytes: number;
+  maxAllowedUpdatedAt: string | null;
+  maxFileBytes: number;
+  updatedAt: string | null;
+  updatedByUid: string | null;
+}
+
+export async function getRailsEvidenceSizePolicy(): Promise<RailsEvidenceSizePolicy> {
+  const body = await requestRailsJson<{ policy?: RailsEvidenceSizePolicy }>(
+    '/api/rails/evidence-library/size-policy'
+  );
+
+  if (!body.policy) {
+    throw new Error('The evidence size limit could not be read.');
+  }
+
+  return body.policy;
+}
+
+export async function updateRailsEvidenceSizePolicy(maxFileBytes: number): Promise<RailsEvidenceSizePolicy> {
+  const body = await requestRailsJson<{ policy?: RailsEvidenceSizePolicy }>(
+    '/api/rails/evidence-library/size-policy',
+    {
+      body: JSON.stringify({ maxFileBytes }),
+      headers: { 'Content-Type': 'application/json' },
+      method: 'PATCH'
+    }
+  );
+
+  if (!body.policy) {
+    throw new Error('The evidence size limit could not be saved.');
+  }
+
+  return body.policy;
+}
+
+interface RailsEvidenceUploadTicket {
+  contentType: string;
+  evidenceId: string;
+  expiresAtMs: number;
+  uploadUrl: string;
+}
+
+/**
+ * Sends a file to storage directly, then records it.
+ *
+ * Three steps: ask for somewhere to put it, put it there, tell the API it
+ * arrived. The bytes never pass through the API, which is what lets a file be
+ * far larger than any request body — and why this does not use
+ * `requestRailsJson`, whose fifteen-second timeout is sized for JSON.
+ *
+ * `onProgress` reports the upload itself, which is all of the wait worth
+ * showing; the two calls either side are small.
+ */
+export async function uploadRailsEvidenceFile(input: {
+  file: File;
+  label?: string;
+  note?: string;
+  onProgress?: (fraction: number) => void;
+  purpose?: RailsEvidence['purpose'];
+  status?: RailsEvidence['status'];
+  visibility?: RailsEvidence['visibility'];
+}): Promise<RailsEvidence> {
+  const ticket = await requestRailsJson<RailsEvidenceUploadTicket>(
+    '/api/rails/evidence-library/uploads',
+    {
+      body: JSON.stringify({
+        contentType: input.file.type || 'application/octet-stream',
+        fileName: input.file.name,
+        sizeBytes: input.file.size
+      }),
+      headers: { 'Content-Type': 'application/json' },
+      method: 'POST'
+    }
+  );
+
+  await putFileToSignedUrl({
+    // The type the server signed, never the browser's own guess.
+    contentType: ticket.contentType,
+    file: input.file,
+    onProgress: input.onProgress,
+    uploadUrl: ticket.uploadUrl
+  });
+
+  return addRailsEvidenceLibrary({
+    fileName: input.file.name,
+    label: input.label,
+    note: input.note,
+    purpose: input.purpose,
+    status: input.status,
+    uploadId: ticket.evidenceId,
+    visibility: input.visibility
+  });
+}
+
+/**
+ * XMLHttpRequest rather than fetch, only because it can report progress.
+ *
+ * A hundred megabytes over a weak connection with no sign of movement reads as
+ * a hang, and somebody will close the tab.
+ */
+function putFileToSignedUrl(input: {
+  contentType: string;
+  file: File;
+  onProgress?: (fraction: number) => void;
+  uploadUrl: string;
+}): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+
+    request.open('PUT', input.uploadUrl, true);
+    request.setRequestHeader('Content-Type', input.contentType);
+
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable && input.onProgress) {
+        input.onProgress(event.loaded / event.total);
+      }
+    };
+
+    request.onload = () => {
+      if (request.status >= 200 && request.status < 300) {
+        resolve();
+        return;
+      }
+
+      reject(new Error('That file could not be uploaded. Please try again.'));
+    };
+
+    request.onerror = () => reject(new Error('That file could not be uploaded. Please check your connection.'));
+    request.onabort = () => reject(new Error('That upload was stopped.'));
+    request.send(input.file);
+  });
 }
 
 export async function updateRailsEvidenceLibrary(evidenceId: string, input: RailsEvidenceInput): Promise<RailsEvidence> {

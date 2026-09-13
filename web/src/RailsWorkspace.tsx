@@ -67,7 +67,7 @@ import {
   addRailsCollaborator,
   addRailsComment,
   addRailsEvidence,
-  addRailsEvidenceLibrary,
+  uploadRailsEvidenceFile,
   askRailsKnowledge,
   bulkUpdateRailsItems,
   createRailsItem,
@@ -1770,10 +1770,12 @@ export function RailsWorkspace() {
 
       for (const [index, file] of draftEvidenceFiles.entries()) {
         setEvidenceUploadProgress(Math.round((index / draftEvidenceFiles.length) * 100));
-        await addRailsEvidenceLibrary({
-          dataUrl: await fileToDataUrl(file),
-          fileName: file.name,
+        await uploadRailsEvidenceFile({
+          file,
           label: draftEvidenceLabel.trim() && draftEvidenceFiles.length === 1 ? draftEvidenceLabel.trim() : file.name,
+          onProgress: (fraction) => setEvidenceUploadProgress(
+            Math.round(((index + fraction) / draftEvidenceFiles.length) * 100)
+          ),
           status: 'Attached'
         });
         setEvidenceUploadProgress(Math.round(((index + 1) / draftEvidenceFiles.length) * 100));

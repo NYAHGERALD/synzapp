@@ -19,10 +19,10 @@ import {
   X
 } from 'lucide-react';
 import {
-  addRailsEvidenceLibrary,
+  getRailsEvidenceSizePolicy,
+  uploadRailsEvidenceFile,
   deleteRailsEvidenceLibrary,
   downloadRailsEvidenceBlob,
-  fileToDataUrl,
   listRailsEvidenceLibrary,
   updateRailsEvidenceLibrary,
   type RailsEvidence,
@@ -118,6 +118,14 @@ export function EvidenceLibraryWindow({
   const [selectedEvidenceIds, setSelectedEvidenceIds] = React.useState<Set<string>>(() => new Set());
   const [isUploadModalOpen, setIsUploadModalOpen] = React.useState(false);
   const [isUploadDragActive, setIsUploadDragActive] = React.useState(false);
+  /**
+   * The organization's own limit, read when the library opens.
+   *
+   * Held rather than assumed: it is set per organization and may be raised or
+   * lowered while somebody has this window open. Until it arrives the old
+   * constant stands in, so a file is never waved through by an empty value.
+   */
+  const [maxFileBytes, setMaxFileBytes] = React.useState(FALLBACK_MAX_EVIDENCE_FILE_BYTES);
   const [isWindowDragActive, setIsWindowDragActive] = React.useState(false);
   /**
    * Depth, not a boolean.
@@ -405,6 +413,28 @@ export function EvidenceLibraryWindow({
     handleUploadFiles(event.dataTransfer.files);
   }
 
+  React.useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    let isCurrent = true;
+
+    getRailsEvidenceSizePolicy()
+      .then((policy) => {
+        if (isCurrent) {
+          setMaxFileBytes(policy.maxFileBytes);
+        }
+      })
+      // Left at the fallback. The server checks again on every upload, so a
+      // failed read here costs a clear message, never a file getting through.
+      .catch(() => undefined);
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [isOpen]);
+
   function handleUploadFiles(files: FileList | File[]) {
     const nextFiles = Array.from(files);
     if (!nextFiles.length) {
@@ -419,15 +449,16 @@ export function EvidenceLibraryWindow({
      * size the browser already knows costs nothing and names the file, which
      * the server's answer cannot do once several were sent together.
      */
-    const oversized = nextFiles.filter((file) => file.size > MAX_EVIDENCE_FILE_BYTES);
+    const limitLabel = formatFileSize(maxFileBytes);
+    const oversized = nextFiles.filter((file) => file.size > maxFileBytes);
 
     if (oversized.length) {
       setErrorMessage(oversized.length === 1
-        ? `${oversized[0].name} is ${formatFileSize(oversized[0].size)}. Evidence files must be under ${MAX_EVIDENCE_FILE_LABEL}.`
-        : `${oversized.length} files are over ${MAX_EVIDENCE_FILE_LABEL} and were not added.`);
+        ? `${oversized[0].name} is ${formatFileSize(oversized[0].size)}. Evidence files must be under ${limitLabel}.`
+        : `${oversized.length} files are over ${limitLabel} and were not added.`);
     }
 
-    const acceptedFiles = nextFiles.filter((file) => file.size <= MAX_EVIDENCE_FILE_BYTES);
+    const acceptedFiles = nextFiles.filter((file) => file.size <= maxFileBytes);
 
     if (!acceptedFiles.length) {
       return;
@@ -457,11 +488,14 @@ export function EvidenceLibraryWindow({
       setErrorMessage('');
 
       for (const [index, file] of draftFiles.entries()) {
-        setUploadProgress(Math.round((index / draftFiles.length) * 100));
-        await addRailsEvidenceLibrary({
-          dataUrl: await fileToDataUrl(file),
-          fileName: file.name,
+        // Each file's own progress, folded into its share of the whole, so the
+        // bar moves during a large upload instead of once per file.
+        await uploadRailsEvidenceFile({
+          file,
           label: file.name,
+          onProgress: (fraction) => setUploadProgress(
+            Math.round(((index + fraction) / draftFiles.length) * 100)
+          ),
           status: 'Attached',
           visibility: 'public'
         });
@@ -1507,8 +1541,9 @@ function shouldShowEvidenceFileName(label: string, fileName?: string | null): bo
  * the raw file size, not what it costs encoded — the body limit is set to cover
  * the base64 expansion so this number is the one people actually meet.
  */
-const MAX_EVIDENCE_FILE_BYTES = 4 * 1024 * 1024;
-const MAX_EVIDENCE_FILE_LABEL = '4 MB';
+
+/** Stands in only until the organization's real limit has been read. */
+const FALLBACK_MAX_EVIDENCE_FILE_BYTES = 4 * 1024 * 1024;
 
 function formatFileSize(sizeBytes?: number | null): string {
   if (!sizeBytes || sizeBytes <= 0) {

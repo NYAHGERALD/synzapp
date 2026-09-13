@@ -2402,6 +2402,14 @@ export async function getRailsEvidenceLibraryThumbnail(
 }
 
 export interface RailsEvidenceUploadTicket {
+  /**
+   * The type that was signed, which the browser must send back exactly.
+   *
+   * Returned rather than assumed: the type is narrowed before signing, so a
+   * client echoing its own `file.type` would sign one thing and send another,
+   * and Cloud Storage would refuse it with no explanation worth reading.
+   */
+  contentType: string;
   evidenceId: string;
   expiresAtMs: number;
   uploadUrl: string;
@@ -2458,7 +2466,7 @@ export async function createRailsEvidenceUploadTicket(
     version: 'v4'
   });
 
-  return { evidenceId, expiresAtMs, uploadUrl };
+  return { contentType, evidenceId, expiresAtMs, uploadUrl };
 }
 
 /**
