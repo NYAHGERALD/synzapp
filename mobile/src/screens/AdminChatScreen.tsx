@@ -510,7 +510,8 @@ import {
 import {
   clearRegisteredDeviceIdentityCache,
   ensureRegisteredDeviceIdentity,
-  getRegisteredDeviceId
+  getRegisteredDeviceId,
+  setMobileSeatConflictHandler
 } from '../services/deviceIdentity';
 import { processPendingCompanyDataWipeCommands } from '../services/companyDataWipeApi';
 import {
@@ -1035,7 +1036,24 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
   const [isRequestingOrganizationDeletion, setIsRequestingOrganizationDeletion] = useState(false);
   const [isVerifyingOrganizationDeletionOtp, setIsVerifyingOrganizationDeletionOtp] = useState(false);
   const [isDeletingOrganization, setIsDeletingOrganization] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setErrorState] = useState<string | null>(null);
+  const isMobileSeatPromptPendingRef = useRef(false);
+  /**
+   * While chat is being claimed, the banner stays out of the way.
+   *
+   * Every API call asks for device headers, so a held seat fails all of them and
+   * each failure reached one of the seventy places that raise the banner. The
+   * person saw a generic "something needs attention" instead of the question,
+   * and it came back the moment they dismissed it. The question is asked by its
+   * own prompt; nothing else needs to speak until it is answered.
+   */
+  const setError = useCallback((message: string | null) => {
+    if (message && isMobileSeatPromptPendingRef.current) {
+      return;
+    }
+
+    setErrorState(message);
+  }, []);
   const [mediaPreparationProgress, setMediaPreparationProgress] = useState<IPhonePhotoPreparationProgress | null>(null);
   const backupSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isBackupSyncingRef = useRef(false);
@@ -3652,14 +3670,46 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
     }
   }
 
+  /**
+   * Raised wherever the refusal first surfaces, not only where it was expected.
+   *
+   * Registration is reached from every API call, so the first request to be
+   * turned away is rarely the one the screen made on purpose.
+   */
+  useEffect(() => {
+    setMobileSeatConflictHandler((seatError) => {
+      if (!seatError.seat.deviceId) {
+        return;
+      }
+
+      promptToMoveChatToThisPhone(
+        seatError.seat.deviceId,
+        describeMobileSeatHolder(seatError.seat, Date.now())
+      );
+    });
+
+    return () => setMobileSeatConflictHandler(null);
+  }, []);
+
   function promptToMoveChatToThisPhone(displacedDeviceId: string, otherPhone: string) {
+    if (isMobileSeatPromptPendingRef.current) {
+      return;
+    }
+
+    isMobileSeatPromptPendingRef.current = true;
+    setErrorState(null);
+
     Alert.alert(
       'Chat is on another phone',
       `${otherPhone} is signed in to chat for this account. Chat can only be on one phone, so moving it here will sign that one out and remove its copy of your messages.`,
       [
         {
+          onPress: () => {
+            isMobileSeatPromptPendingRef.current = false;
+            setErrorState('Chat is signed in on another phone. Sign out there, or move chat to this phone.');
+          },
           style: 'cancel',
-          text: 'Cancel'
+          text: 'Not now'
         },
         {
           onPress: () => {
@@ -3725,14 +3775,16 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
         claimFromMobileDeviceId: displacedDeviceId
       });
 
+      isMobileSeatPromptPendingRef.current = false;
       setRegisteredDeviceId(device.deviceId);
       void registerCurrentDevicePushToken(registrationToken);
-      setError(null);
+      setErrorState(null);
       void offerToBringChatHistoryOver();
     } catch (nextError) {
+      isMobileSeatPromptPendingRef.current = false;
       // The claim needs a recent sign-in, so the most likely refusal here is a
       // session that has been open too long. Say what to do about it.
-      setError(getErrorMessage(
+      setErrorState(getErrorMessage(
         nextError,
         'Chat could not be moved to this phone. Sign in again and try once more.'
       ));
@@ -3755,21 +3807,9 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
     } catch (nextError) {
       deviceIdentityRegistrationStartedRef.current = false;
 
-      /**
-       * Chat lives on one phone, and this one is not it — yet.
-       *
-       * Asked before anything is destroyed, and the other phone is described by
-       * what it is and when it was last used. There is no honest way to say "this
-       * is the handset you just reinstalled": the identifier that would prove it
-       * is minted in the same blob the reinstall destroyed. So the facts are
-       * offered and the person decides.
-       */
-      if (isMobileSeatHeldError(nextError) && nextError.seat.deviceId) {
-        promptToMoveChatToThisPhone(nextError.seat.deviceId, describeMobileSeatHolder(
-          nextError.seat,
-          Date.now()
-        ));
-
+      // A held seat is raised by the handler above, wherever it first surfaces.
+      // Nothing to add here beyond not reporting it twice.
+      if (isMobileSeatHeldError(nextError)) {
         return;
       }
 

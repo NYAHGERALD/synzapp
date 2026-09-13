@@ -9,7 +9,11 @@ import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 import nacl from 'tweetnacl';
 import { getSynzappApiBaseUrl } from './apiConfig';
-import { isMobileSeatHeldError, readMobileSeatHeldError } from './mobileSeatConflict';
+import {
+  isMobileSeatHeldError,
+  readMobileSeatHeldError,
+  type MobileSeatHeldError
+} from './mobileSeatConflict';
 
 type DevicePlatform = 'android' | 'ios' | 'unknown' | 'web';
 
@@ -91,12 +95,45 @@ export async function ensureRegisteredDeviceIdentity(
   }
 
   const nextPromise = registerDeviceIdentity(idToken, storageKey, options).catch((error) => {
-    registeredDeviceIdentityPromises.delete(storageKey);
+    /**
+     * A held seat is a standing answer, so it stays cached.
+     *
+     * Every API call asks for device headers, so clearing this would send each
+     * one back to the server to be told the same thing — and raise the question
+     * again every time. That is what made the prompt reappear the moment it was
+     * dismissed. A claim passes `claimFromMobileDeviceId` and skips the cache,
+     * so answering still works.
+     */
+    if (isMobileSeatHeldError(error)) {
+      notifyMobileSeatConflict(error);
+    } else {
+      registeredDeviceIdentityPromises.delete(storageKey);
+    }
+
     throw error;
   });
   registeredDeviceIdentityPromises.set(storageKey, nextPromise);
 
   return nextPromise;
+}
+
+/**
+ * Told once when another phone holds chat, wherever the refusal first surfaces.
+ *
+ * Registration is reached from every API call, not only from the screen that
+ * asks for it, so the question cannot be raised at one call site. The screen
+ * registers a handler and decides how to ask.
+ */
+type MobileSeatConflictHandler = (error: MobileSeatHeldError) => void;
+
+let mobileSeatConflictHandler: MobileSeatConflictHandler | null = null;
+
+export function setMobileSeatConflictHandler(handler: MobileSeatConflictHandler | null): void {
+  mobileSeatConflictHandler = handler;
+}
+
+function notifyMobileSeatConflict(error: MobileSeatHeldError): void {
+  mobileSeatConflictHandler?.(error);
 }
 
 export async function getRegisteredDeviceHeaders(idToken: string): Promise<Record<string, string>> {
