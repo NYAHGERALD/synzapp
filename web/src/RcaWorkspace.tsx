@@ -22844,7 +22844,7 @@ function RcaEvidencePhotoViewer({
 
   const viewer = (
     <div
-      className={`fixed z-[130] flex flex-col overflow-hidden border border-white/15 bg-slate-950 shadow-2xl shadow-slate-950/50 ${
+      className={`fixed z-[130] flex flex-col overflow-hidden border border-slate-200 bg-white shadow-2xl shadow-slate-900/15 ${
         isMaximized
           ? 'rounded-2xl'
           : 'rounded-xl'
@@ -22854,7 +22854,7 @@ function RcaEvidencePhotoViewer({
       style={viewerStyle}
     >
         <div
-          className={`flex items-center justify-between gap-3 border-b border-white/10 bg-white/5 px-4 py-3 text-white ${
+          className={`flex items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3 text-slate-900 ${
             isMaximized ? '' : 'cursor-move'
           }`}
           onMouseDown={(event) => {
@@ -22871,15 +22871,15 @@ function RcaEvidencePhotoViewer({
           }}
         >
           <div className="min-w-0">
-            <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-cyan-200">Evidence photo</p>
-            <h3 className="mt-1 truncate text-sm font-semibold">{item.fileName}</h3>
+            <p className="text-[10px] uppercase tracking-[0.22em] text-cyan-700">Evidence photo</p>
+            <h3 className="mt-1 truncate text-sm font-normal text-slate-900">{item.fileName}</h3>
           </div>
           <div className="flex items-center gap-2">
-            <span className="rounded-full bg-white/10 px-3 py-1 text-xs font-semibold text-white/80">
+            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-600">
               {currentIndex + 1} / {photoCount}
             </span>
             <button
-              className="grid h-9 w-9 place-items-center rounded-full border border-white/15 bg-white/10 text-white transition hover:bg-white/20 active:scale-95"
+              className="grid h-9 w-9 place-items-center rounded-full border border-slate-200 bg-white text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 active:scale-95"
               onClick={() => setIsMaximized((currentValue) => !currentValue)}
               title={isMaximized ? 'Restore viewer' : 'Maximize viewer'}
               type="button"
@@ -22887,7 +22887,7 @@ function RcaEvidencePhotoViewer({
               {isMaximized ? <Minimize2 aria-hidden="true" size={17} /> : <Maximize2 aria-hidden="true" size={17} />}
             </button>
             <button
-              className="grid h-9 w-9 place-items-center rounded-full border border-white/15 bg-white/10 text-white transition hover:bg-white/20 active:scale-95"
+              className="grid h-9 w-9 place-items-center rounded-full border border-slate-200 bg-white text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 active:scale-95"
               onClick={onClose}
               type="button"
             >
@@ -22895,29 +22895,29 @@ function RcaEvidencePhotoViewer({
             </button>
           </div>
         </div>
-        <div className="relative min-h-0 flex-1">
+        <div className="relative min-h-0 flex-1 bg-slate-100">
           {previewUrl ? (
             <img alt="" className="h-full w-full object-contain" src={previewUrl} />
           ) : (
-            <div className="grid h-full w-full place-items-center bg-slate-950 text-center">
+            <div className="grid h-full w-full place-items-center bg-slate-100 text-center">
               <div>
-                <div className="mx-auto h-10 w-10 animate-spin rounded-full border-2 border-white/20 border-t-cyan-300" />
-                <p className="mt-4 text-sm font-semibold text-white">Preparing secure preview</p>
-                <p className="mt-1 text-xs text-white/55">The original file remains available from the detail panel.</p>
+                <div className="mx-auto h-10 w-10 animate-spin rounded-full border-2 border-slate-300 border-t-cyan-600" />
+                <p className="mt-4 text-sm font-normal text-slate-900">Preparing secure preview</p>
+                <p className="mt-1 text-xs text-slate-500">The original file remains available from the detail panel.</p>
               </div>
             </div>
           )}
           {photoCount > 1 ? (
             <>
               <button
-                className="absolute left-4 top-1/2 grid h-12 w-12 -translate-y-1/2 place-items-center rounded-full border border-white/45 bg-slate-950/78 text-white shadow-[0_18px_38px_rgba(15,23,42,0.42),0_0_0_1px_rgba(15,23,42,0.2)] ring-1 ring-slate-950/20 backdrop-blur-md transition hover:bg-slate-900/90 active:scale-95"
+                className="absolute left-4 top-1/2 grid h-12 w-12 -translate-y-1/2 place-items-center rounded-full border border-slate-200 bg-white/92 text-slate-700 shadow-[0_12px_28px_rgba(15,23,42,0.18)] ring-1 ring-white/70 backdrop-blur-md transition hover:bg-white active:scale-95"
                 onClick={onPrevious}
                 type="button"
               >
                 <ChevronLeft aria-hidden="true" size={25} strokeWidth={2.8} />
               </button>
               <button
-                className="absolute right-4 top-1/2 grid h-12 w-12 -translate-y-1/2 place-items-center rounded-full border border-white/45 bg-slate-950/78 text-white shadow-[0_18px_38px_rgba(15,23,42,0.42),0_0_0_1px_rgba(15,23,42,0.2)] ring-1 ring-slate-950/20 backdrop-blur-md transition hover:bg-slate-900/90 active:scale-95"
+                className="absolute right-4 top-1/2 grid h-12 w-12 -translate-y-1/2 place-items-center rounded-full border border-slate-200 bg-white/92 text-slate-700 shadow-[0_12px_28px_rgba(15,23,42,0.18)] ring-1 ring-white/70 backdrop-blur-md transition hover:bg-white active:scale-95"
                 onClick={onNext}
                 type="button"
               >
@@ -22926,10 +22926,10 @@ function RcaEvidencePhotoViewer({
             </>
           ) : null}
         </div>
-        <div className="flex items-center justify-between gap-3 border-t border-white/10 bg-white/5 px-4 py-3 text-xs text-white/70">
+        <div className="flex items-center justify-between gap-3 border-t border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-500">
           <span className="truncate">{item.fileName}</span>
           <button
-            className="shrink-0 font-semibold text-cyan-200 transition hover:text-cyan-100 active:scale-95"
+            className="shrink-0 text-cyan-700 transition hover:text-cyan-800 active:scale-95"
             onClick={() => onOpenOriginal(item)}
             type="button"
           >
