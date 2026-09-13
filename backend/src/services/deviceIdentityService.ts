@@ -3,7 +3,10 @@ import { fieldValue, firestore } from '../config/firebaseAdmin.js';
 import { SynzappRole } from '../types/auth.js';
 import { buildAuthSession } from './authSessionService.js';
 import { assertRateLimit } from '../middleware/rateLimit.js';
-import { createDeviceWipeCommand } from './companyDataWipeService.js';
+import {
+  cancelPendingDeviceWipeCommands,
+  createDeviceWipeCommand
+} from './companyDataWipeService.js';
 import {
   DormancyCandidate,
   RETIRED_DEVICE_STATUS,
@@ -323,6 +326,22 @@ export async function registerDeviceIdentity(
       }),
       ...sharedDeviceRecord
     }, { merge: true });
+  });
+
+  /**
+   * This device is authorised again, so any wipe order still aimed at it goes.
+   *
+   * Chat moving away writes one; chat moving back leaves it sitting there. The
+   * phone would sign in, collect its own stale order, and destroy the data it
+   * had just been re-authorised to hold — signing the person out seconds after
+   * their chats came back.
+   */
+  await cancelPendingDeviceWipeCommands({
+    deviceId: input.deviceId,
+    tenantId,
+    uid: decodedToken.uid
+  }).catch((error) => {
+    console.warn('Unable to withdraw wipe orders for a re-authorized device:', error);
   });
 
   if (displacedDeviceId) {

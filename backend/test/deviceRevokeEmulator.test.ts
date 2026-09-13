@@ -493,3 +493,127 @@ describe('coming back to a phone chat was moved away from', { skip: !process.env
     );
   });
 });
+
+/**
+ * A phone that comes back must not carry out the order to wipe itself.
+ *
+ * Proven from production logs: the handset signed in at 12:21:03, collected a
+ * wipe order left over from when chat moved away, carried it out one second
+ * later, took chat back at 12:21:30, restored its messages at 12:21:50 — and was
+ * signed out at 12:21:51, because executing that order had blocked its own data.
+ * Nothing had failed. The order was simply stale.
+ */
+describe('wipe orders left behind when chat moves back', { skip: !process.env.FIRESTORE_EMULATOR_HOST }, () => {
+  const SECOND_PHONE = 'device_replacement';
+
+  function registrationInput(deviceId: string, claimFrom?: string) {
+    return {
+      appInstallationId: `install_${deviceId}`,
+      ...(claimFrom ? { claimFromMobileDeviceId: claimFrom } : {}),
+      cryptoProvider: 'nacl',
+      deviceId,
+      identityPublicKey: 'a'.repeat(44),
+      keyAgreementPublicKey: 'b'.repeat(44),
+      keyVersion: 1,
+      platform: 'android' as const,
+      protocolVersion: '1.0',
+      signingPublicKey: 'c'.repeat(44)
+    };
+  }
+
+  function freshToken(uid: string) {
+    return {
+      auth_time: Math.floor(Date.now() / 1000),
+      tenantId: TENANT,
+      uid
+    } as unknown as import('firebase-admin/auth').DecodedIdToken;
+  }
+
+  async function pendingWipeOrders(deviceId: string) {
+    const snapshot = await firestore
+      .collection('organizations').doc(TENANT)
+      .collection('users').doc(OWNER)
+      .collection('devices').doc(deviceId)
+      .collection('wipeCommands')
+      .where('status', '==', 'REQUESTED')
+      .get();
+
+    return snapshot.size;
+  }
+
+  beforeEach(async () => {
+    process.env.FIREBASE_PROJECT_ID ||= EMULATOR_PROJECT_ID;
+    process.env.FIREBASE_STORAGE_BUCKET ||= `${EMULATOR_PROJECT_ID}.appspot.com`;
+
+    const admin = await import('../src/config/firebaseAdmin.js');
+    firestore = admin.firestore;
+    devices = await import('../src/services/deviceIdentityService.js');
+
+    const organizationRef = firestore.collection('organizations').doc(TENANT);
+
+    await organizationRef.set({ status: 'ACTIVE' }, { merge: true });
+    await firestore.collection('identityDirectory').doc(OWNER).set({
+      permissions: [],
+      profileComplete: true,
+      role: 'EMPLOYEE',
+      status: 'ACTIVE',
+      tenantId: TENANT
+    });
+    await organizationRef.collection('users').doc(OWNER).set({
+      displayName: 'Device Owner',
+      role: 'EMPLOYEE',
+      status: 'ACTIVE',
+      tenantId: TENANT
+    });
+
+    const [ownedDevices, tenantDevices] = await Promise.all([
+      organizationRef.collection('users').doc(OWNER).collection('devices').listDocuments(),
+      organizationRef.collection('deviceKeys').listDocuments()
+    ]);
+
+    await Promise.all([
+      ...ownedDevices.map((doc) => firestore.recursiveDelete(doc)),
+      ...tenantDevices.map((doc) => doc.delete())
+    ]);
+  });
+
+  it('withdraws the order when the phone takes chat back', async () => {
+    await devices.registerDeviceIdentity(freshToken(OWNER), registrationInput(CURRENT_DEVICE));
+    await devices.registerDeviceIdentity(
+      freshToken(OWNER),
+      registrationInput(SECOND_PHONE, CURRENT_DEVICE)
+    );
+
+    assert.equal(
+      await pendingWipeOrders(CURRENT_DEVICE),
+      1,
+      'Moving chat away should order the old phone to wipe itself.'
+    );
+
+    await devices.registerDeviceIdentity(
+      freshToken(OWNER),
+      registrationInput(CURRENT_DEVICE, SECOND_PHONE)
+    );
+
+    assert.equal(
+      await pendingWipeOrders(CURRENT_DEVICE),
+      0,
+      'Taking chat back must withdraw the order, or the phone wipes what it just got.'
+    );
+  });
+
+  it('still leaves the order standing for the phone chat moved away from', async () => {
+    await devices.registerDeviceIdentity(freshToken(OWNER), registrationInput(CURRENT_DEVICE));
+    await devices.registerDeviceIdentity(
+      freshToken(OWNER),
+      registrationInput(SECOND_PHONE, CURRENT_DEVICE)
+    );
+    await devices.registerDeviceIdentity(
+      freshToken(OWNER),
+      registrationInput(CURRENT_DEVICE, SECOND_PHONE)
+    );
+
+    // The replacement has now been left behind in its turn, and must still wipe.
+    assert.equal(await pendingWipeOrders(SECOND_PHONE), 1);
+  });
+});

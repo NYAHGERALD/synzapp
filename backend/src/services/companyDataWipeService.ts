@@ -142,6 +142,56 @@ export async function listPendingDeviceWipeCommands(input: {
     .sort((first, second) => (first.createdAt || '').localeCompare(second.createdAt || ''));
 }
 
+/**
+ * Drops wipe orders aimed at a device that has come back.
+ *
+ * A wipe order is addressed to a handset that is leaving. When chat moves away
+ * and then moves back, the order written on the way out is still sitting there —
+ * so the phone signed in, collected its own stale order, and destroyed the data
+ * it had just been re-authorised to hold. The person was signed out seconds
+ * after their chats were restored, having done nothing wrong.
+ *
+ * Called when a device registers successfully, which is the moment it is
+ * authorised again. Orders already carried out are untouched; only ones still
+ * waiting are withdrawn, and the reason says who withdrew them.
+ */
+export async function cancelPendingDeviceWipeCommands(input: {
+  deviceId: string;
+  tenantId: string;
+  uid: string;
+}): Promise<number> {
+  const snapshot = await firestore
+    .collection('organizations')
+    .doc(input.tenantId)
+    .collection('users')
+    .doc(input.uid)
+    .collection('devices')
+    .doc(input.deviceId)
+    .collection('wipeCommands')
+    .where('status', '==', 'REQUESTED')
+    .limit(50)
+    .get();
+
+  if (snapshot.empty) {
+    return 0;
+  }
+
+  const batch = firestore.batch();
+
+  snapshot.docs.forEach((doc) => {
+    batch.set(doc.ref, {
+      cancellationReason: 'DEVICE_REAUTHORIZED',
+      cancelledAt: fieldValue.serverTimestamp(),
+      status: 'CANCELLED',
+      updatedAt: fieldValue.serverTimestamp()
+    }, { merge: true });
+  });
+
+  await batch.commit();
+
+  return snapshot.size;
+}
+
 export async function completeDeviceWipeCommand(input: {
   commandId: string;
   deviceId: string;
