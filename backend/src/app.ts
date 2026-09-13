@@ -129,7 +129,12 @@ export const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
   }
 
   if (error?.name === 'AuthorizationError') {
-    res.status(403).json({ error: error.message });
+    // Same reason as the conflict above: a refusal the app must act on carries a
+    // code, so it is never left matching on the wording.
+    res.status(403).json({
+      error: error.message,
+      ...(error.code ? { code: error.code } : {})
+    });
     return;
   }
 

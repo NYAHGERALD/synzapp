@@ -69,7 +69,7 @@ async function listPendingCompanyDataWipeCommands(
   });
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 
   const body = await response.json() as { commands?: PendingCompanyDataWipeCommand[] };
@@ -95,20 +95,29 @@ async function completeCompanyDataWipeCommand(input: {
   );
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 }
 
-async function getResponseErrorMessage(response: Response): Promise<string> {
+/**
+ * The server's refusal, with its code kept.
+ *
+ * A refusal the app has to act on — a handset signed out of chat, for one —
+ * carries a code, and flattening it to a message is how a revoked device ended
+ * up not recognising itself and never wiping.
+ */
+async function buildResponseError(response: Response): Promise<Error> {
+  const fallback = 'Unable to process company data cleanup.';
+
   try {
-    const body = await response.json();
+    const body = await response.json() as { code?: unknown; error?: unknown } | null;
+    const message = typeof body?.error === 'string' && body.error.trim() ? body.error : fallback;
+    const error = new Error(message);
 
-    if (typeof body?.error === 'string') {
-      return body.error;
-    }
+    return typeof body?.code === 'string' && body.code
+      ? Object.assign(error, { code: body.code })
+      : error;
   } catch {
-    return 'Unable to process company data cleanup.';
+    return new Error(fallback);
   }
-
-  return 'Unable to process company data cleanup.';
 }

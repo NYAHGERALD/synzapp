@@ -556,16 +556,3 @@ function isStoredDeviceIdentity(value: unknown): value is StoredDeviceIdentity {
     typeof record.signingPublicKey === 'string';
 }
 
-async function getResponseErrorMessage(response: Response): Promise<string> {
-  try {
-    const body = await response.json();
-
-    if (typeof body?.error === 'string') {
-      return body.error;
-    }
-  } catch {
-    return 'Unable to register this device.';
-  }
-
-  return 'Unable to register this device.';
-}

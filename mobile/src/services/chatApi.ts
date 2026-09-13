@@ -363,7 +363,7 @@ export async function listChatContacts(
   });
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 
   const body = await response.json() as { contacts?: ChatContact[] };
@@ -383,7 +383,7 @@ export async function listGroupChatContacts(idToken: string): Promise<ChatContac
   });
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 
   const body = await response.json() as { contacts?: ChatContact[] };
@@ -414,7 +414,7 @@ export async function createGroupChat(input: {
   });
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 
   const body = await response.json() as { contact: ChatContact };
@@ -445,7 +445,7 @@ export async function updateGroupChatPhoto(input: {
   );
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 
   const body = await response.json() as { contact: ChatContact };
@@ -487,7 +487,7 @@ export async function updateChatPreference(input: {
   });
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 
   const body = await response.json() as { contact: ChatContact };
@@ -517,7 +517,7 @@ export async function getChatNotificationSettings(input: {
   );
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 
   const body = await response.json() as { settings?: ChatNotificationSettings };
@@ -554,7 +554,7 @@ export async function updateChatNotificationSettings(input: {
   );
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 
   const body = await response.json() as { settings?: ChatNotificationSettings };
@@ -580,7 +580,7 @@ export async function getDirectChatContactDetails(input: {
   );
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 
   const body = await response.json() as { details?: DirectChatContactDetails };
@@ -606,7 +606,7 @@ export async function listAddableGroupsForContact(input: {
   );
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 
   const body = await response.json() as { groups?: AddableChatGroup[] };
@@ -635,7 +635,7 @@ export async function addContactToGroupChat(input: {
   );
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 
   const body = await response.json() as AddContactToGroupResult;
@@ -671,7 +671,7 @@ export async function exitGroupChat(input: {
   );
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 
   const body = await response.json() as {
@@ -699,7 +699,7 @@ export async function getChatArchiveSettings(idToken: string): Promise<ChatArchi
   });
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 
   const body = await response.json() as { archiveSettings?: ChatArchiveSettings };
@@ -724,7 +724,7 @@ export async function updateChatArchiveSettings(input: {
   });
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 
   const body = await response.json() as { archiveSettings?: ChatArchiveSettings };
@@ -750,7 +750,7 @@ export async function getChatTranscriptLanguage(input: {
   );
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 
   const body = await response.json() as { transcriptLanguage?: ChatTranscriptLanguageSetting };
@@ -779,7 +779,7 @@ export async function updateChatTranscriptLanguage(input: {
   );
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 
   const body = await response.json() as { transcriptLanguage?: ChatTranscriptLanguageSetting };
@@ -829,7 +829,7 @@ export async function getChatMessages(input: {
   );
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 
   const body = await response.json() as {
@@ -891,7 +891,7 @@ export async function updateChatMessageReaction(input: {
   );
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 
   const body = await response.json() as {
@@ -935,7 +935,7 @@ export async function deleteChatMessageForMe(input: {
   );
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 
   const body = await response.json() as {
@@ -1017,7 +1017,7 @@ export async function scheduleChatMessage(input: {
     // may on an ordinary send. Drop the cached context so a retry seals to
     // current keys rather than repeating the failure.
     clearChatEncryptionContextCache(input.contactId);
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 
   const body = await response.json() as { scheduledMessage: RawScheduledChatMessage };
@@ -1044,7 +1044,7 @@ export async function getScheduledChatMessages(input: {
   );
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 
   const body = await response.json() as { scheduledMessages?: RawScheduledChatMessage[] };
@@ -1094,7 +1094,7 @@ async function postScheduledChatMessageAction(
   );
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 }
 
@@ -1282,7 +1282,7 @@ export async function sendChatMessage(input: {
     // The recipient's devices may have changed underneath us. Drop the cached
     // context so a retry fetches current keys rather than repeating the failure.
     clearChatEncryptionContextCache(input.contactId);
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 
   const body = await response.json() as {
@@ -1556,7 +1556,7 @@ async function getChatEncryptionContext(input: {
   );
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 
   const body = await response.json() as { context: ChatEncryptionContext };
@@ -1601,7 +1601,7 @@ export async function grantGroupChatHistoryKeys(input: {
   );
 
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    throw await buildResponseError(response);
   }
 }
 
@@ -2289,16 +2289,25 @@ function normalizeEncryptionDevicePublicKey(device: EncryptionDevicePublicKey): 
   };
 }
 
-async function getResponseErrorMessage(response: Response): Promise<string> {
+/**
+ * The server's refusal, with its code kept.
+ *
+ * A refusal the app has to act on — a handset signed out of chat, for one —
+ * carries a code, and flattening it to a message is how a revoked device ended
+ * up not recognising itself and never wiping.
+ */
+async function buildResponseError(response: Response): Promise<Error> {
+  const fallback = 'Unable to load chats. Please try again.';
+
   try {
-    const body = await response.json();
+    const body = await response.json() as { code?: unknown; error?: unknown } | null;
+    const message = typeof body?.error === 'string' && body.error.trim() ? body.error : fallback;
+    const error = new Error(message);
 
-    if (typeof body?.error === 'string') {
-      return body.error;
-    }
+    return typeof body?.code === 'string' && body.code
+      ? Object.assign(error, { code: body.code })
+      : error;
   } catch {
-    return 'Unable to load chats. Please try again.';
+    return new Error(fallback);
   }
-
-  return 'Unable to load chats. Please try again.';
 }

@@ -441,7 +441,23 @@ export async function verifyActiveRegisteredDevice(
     tenantDevice.status !== 'ACTIVE' ||
     userDevice.status !== 'ACTIVE'
   ) {
-    throw authorizationError('This device is not authorized.');
+    /**
+     * A revoked device has to be able to tell that is what happened to it.
+     *
+     * The app decided a session was dead by matching the wording of the error,
+     * and this message contains none of the words it looks for — so a revoked
+     * handset failed every request, showed a generic error, and never destroyed
+     * its copy of company data. Said in a code instead, and only when the device
+     * really is this account's and really was revoked; an unknown device is a
+     * different situation and must not trigger a wipe.
+     */
+    const isRevokedOwnDevice = tenantDevice.tenantId === tenantId &&
+      tenantDevice.uid === decodedToken.uid &&
+      (tenantDevice.status === 'REVOKED' || userDevice.status === 'REVOKED');
+
+    throw isRevokedOwnDevice
+      ? deviceRevokedError()
+      : authorizationError('This device is not authorized.');
   }
 
   const seenFields = {
@@ -972,6 +988,14 @@ function mobileSeatConflictError(seat: MobileSeatRecord): Error {
       platform: seat.platform || null
     }
   });
+}
+
+/** Told apart from any other refusal by a code, never by its wording. */
+function deviceRevokedError(): Error {
+  return Object.assign(
+    authorizationError('This device was signed out of chat.'),
+    { code: 'DEVICE_REVOKED' }
+  );
 }
 
 function conflictError(message: string): Error {
