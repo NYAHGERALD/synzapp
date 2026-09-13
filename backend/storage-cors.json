@@ -1,0 +1,14 @@
+[
+  {
+    "origin": [
+      "https://synzapp-a7ee3.web.app",
+      "https://synzapp-a7ee3.firebaseapp.com",
+      "https://synzapp-admin.web.app",
+      "https://admin.synzapp.com",
+      "http://localhost:5173"
+    ],
+    "method": ["PUT", "OPTIONS"],
+    "responseHeader": ["Content-Type", "Content-Length"],
+    "maxAgeSeconds": 3600
+  }
+]
