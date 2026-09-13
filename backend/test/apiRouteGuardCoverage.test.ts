@@ -32,6 +32,24 @@ describe('API route guard coverage foundation', () => {
       assert.match(block.header, /verifyAppCheck/, `${block.header} must require App Check middleware.`);
       assert.match(block.body, /getDecodedToken/, `${block.header} must verify the Firebase session.`);
 
+      if (requiresOwnedDevice(block.header)) {
+        // A revoked device is precisely the one that must read these, so they
+        // check ownership rather than authorisation. Asserted so the weaker gate
+        // stays deliberate and cannot spread to any other route.
+        assert.match(
+          block.body,
+          /requireOwnedRegisteredDevice/,
+          `${block.header} must require a device owned by the caller.`
+        );
+        assert.doesNotMatch(
+          block.body,
+          /requireActiveRegisteredDevice/,
+          `${block.header} must not require an ACTIVE device — a revoked device has to collect its own wipe order.`
+        );
+
+        return;
+      }
+
       if (requiresRegisteredDevice(block.header)) {
         assert.match(block.body, /requireActiveRegisteredDevice/, `${block.header} must require an active registered device.`);
       }
@@ -44,6 +62,18 @@ describe('API route guard coverage foundation', () => {
     assert.match(authRoutes, /const decodedToken = await verifyFirebaseSession\(idToken\)/);
   });
 });
+
+/**
+ * The company-data wipe endpoints, and nothing else.
+ *
+ * Revocation marks a device REVOKED and then writes its wipe order, so gating
+ * these on the device still being ACTIVE addressed the order to a device already
+ * blocked from reading it — wiping a lost phone did nothing at all.
+ */
+function requiresOwnedDevice(header: string): boolean {
+  return header.includes("profileRouter.get('/me/company-data-wipe-commands'") ||
+    header.includes("profileRouter.post('/me/company-data-wipe-commands/:commandId/complete'");
+}
 
 function requiresRegisteredDevice(header: string): boolean {
   return ![

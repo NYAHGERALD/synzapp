@@ -2,6 +2,7 @@ import { DecodedIdToken } from 'firebase-admin/auth';
 import { fieldValue, firestore } from '../config/firebaseAdmin.js';
 import { SynzappRole } from '../types/auth.js';
 import { buildAuthSession } from './authSessionService.js';
+import { createDeviceWipeCommand } from './companyDataWipeService.js';
 import {
   DormancyCandidate,
   RETIRED_DEVICE_STATUS,
@@ -249,6 +250,62 @@ export async function registerDeviceIdentity(
   };
 }
 
+/**
+ * A device this account owns, whether or not it is still authorised.
+ *
+ * For the one thing a revoked device must still be able to do: collect the order
+ * telling it to wipe itself, and report that it did.
+ *
+ * Revocation marks the device REVOKED and *then* writes the wipe command, so
+ * gating that command on the device still being ACTIVE addressed it to a device
+ * already blocked from reading it. Wiping a lost phone therefore did nothing at
+ * all, silently, while the console reported success.
+ *
+ * Ownership is the whole check: a signed-in account, and a device registered to
+ * that account in this tenant. It deliberately does not refresh `lastSeenAt` —
+ * a revoked handset collecting its own wipe order is not a device in use, and
+ * recording it as one would misreport which devices are live.
+ */
+export async function verifyOwnedRegisteredDevice(
+  decodedToken: DecodedIdToken,
+  deviceId: string
+): Promise<{ deviceId: string; status: string; tenantId: string; uid: string }> {
+  const session = await buildAuthSession(decodedToken);
+  const { tenantId } = session.user;
+
+  if (!tenantId) {
+    throw authorizationError('Your profile is not active.');
+  }
+
+  const organizationRef = firestore.collection('organizations').doc(tenantId);
+  const [tenantDeviceKeySnapshot, userDeviceSnapshot] = await Promise.all([
+    organizationRef.collection('deviceKeys').doc(deviceId).get(),
+    organizationRef
+      .collection('users')
+      .doc(decodedToken.uid)
+      .collection('devices')
+      .doc(deviceId)
+      .get()
+  ]);
+
+  if (!tenantDeviceKeySnapshot.exists || !userDeviceSnapshot.exists) {
+    throw authorizationError('This device is not authorized.');
+  }
+
+  const tenantDevice = tenantDeviceKeySnapshot.data() as DeviceRecord;
+
+  if (tenantDevice.tenantId !== tenantId || tenantDevice.uid !== decodedToken.uid) {
+    throw authorizationError('This device is not authorized.');
+  }
+
+  return {
+    deviceId: tenantDevice.deviceId || deviceId,
+    status: tenantDevice.status || 'UNKNOWN',
+    tenantId,
+    uid: decodedToken.uid
+  };
+}
+
 export async function verifyActiveRegisteredDevice(
   decodedToken: DecodedIdToken,
   deviceId: string
@@ -465,10 +522,15 @@ export async function revokeCurrentUserDevice(
       throw notFoundError('Device was not found.');
     }
 
-    if (userDevice.status === 'REVOKED' || tenantDevice.status === 'REVOKED') {
-      return;
-    }
-
+    /**
+     * Idempotent per document, not per pair.
+     *
+     * This used to return if *either* copy was already REVOKED. The two copies
+     * do drift — dormancy retirement and push-token cleanup write them
+     * separately and unatomically — so a device revoked in one and active in the
+     * other could never be finished off, and went on passing the device gate
+     * that reads them both.
+     */
     const revokedFields = {
       revocationReason: cleanReason,
       revokedAt: fieldValue.serverTimestamp(),
@@ -477,8 +539,32 @@ export async function revokeCurrentUserDevice(
       updatedAt: fieldValue.serverTimestamp()
     };
 
-    transaction.set(userDeviceRef, revokedFields, { merge: true });
-    transaction.set(tenantDeviceKeyRef, revokedFields, { merge: true });
+    if (userDevice.status !== 'REVOKED') {
+      transaction.set(userDeviceRef, revokedFields, { merge: true });
+    }
+
+    if (tenantDevice.status !== 'REVOKED') {
+      transaction.set(tenantDeviceKeyRef, revokedFields, { merge: true });
+    }
+  });
+
+  /**
+   * Tell the handset to destroy its copy of company data.
+   *
+   * Only the admin path ever wrote one of these, so revoking your own lost phone
+   * marked it revoked and left everything on it readable. Not awaited into the
+   * caller's failure: the revoke itself has already committed, and a wipe order
+   * that could not be written is retried the next time the device is revoked
+   * rather than undoing a revocation somebody asked for.
+   */
+  await createDeviceWipeCommand({
+    deviceId: safeTargetDeviceId,
+    reason: 'DEVICE_REVOKED',
+    requestedByUid: decodedToken.uid,
+    tenantId,
+    uid: decodedToken.uid
+  }).catch((error) => {
+    console.warn('Unable to create company data wipe command for revoked device:', error);
   });
 
   const refreshedDeviceSnapshot = await userDeviceRef.get();

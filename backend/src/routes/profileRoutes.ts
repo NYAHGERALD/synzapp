@@ -33,7 +33,8 @@ import {
   registerDeviceIdentity,
   revokeCurrentUserDevice,
   updateCurrentDeviceSynzappAiStatus,
-  verifyActiveRegisteredDevice
+  verifyActiveRegisteredDevice,
+  verifyOwnedRegisteredDevice
 } from '../services/deviceIdentityService.js';
 import type {
   DevicePlatform,
@@ -381,9 +382,15 @@ const encryptedChatBackupBodySchema = z.object({
 profileRouter.get('/me/company-data-wipe-commands', verifyAppCheck, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
-    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
+    /**
+     * Ownership, not authorisation. A revoked device is exactly the device that
+     * needs to read this: revocation marks it REVOKED and then writes its wipe
+     * order, so requiring ACTIVE here addressed the order to a device already
+     * blocked from collecting it, and wiping a lost phone did nothing at all.
+     */
+    const ownedDevice = await requireOwnedRegisteredDevice(req, decodedToken);
     const commands = await listPendingDeviceWipeCommands({
-      deviceId: activeDevice.deviceId,
+      deviceId: ownedDevice.deviceId,
       tenantId: getTenantIdClaim(decodedToken),
       uid: decodedToken.uid
     });
@@ -400,8 +407,10 @@ profileRouter.post('/me/company-data-wipe-commands/:commandId/complete', verifyA
 
   try {
     decodedToken = await getDecodedToken(req.header('Authorization') || '');
-    const activeDevice = await requireActiveRegisteredDevice(req, decodedToken);
-    deviceId = activeDevice.deviceId;
+    // Same reason as the listing above: the device reporting a completed wipe
+    // has, by definition, just been revoked.
+    const ownedDevice = await requireOwnedRegisteredDevice(req, decodedToken);
+    deviceId = ownedDevice.deviceId;
     const commandId = safeCommandIdSchema.parse(req.params.commandId);
     const tenantId = getTenantIdClaim(decodedToken);
 
@@ -2351,6 +2360,13 @@ async function requireActiveRegisteredDevice(req: Request, decodedToken: Decoded
   const deviceId = getDeviceIdFromHeader(req);
 
   return verifyActiveRegisteredDevice(decodedToken, deviceId);
+}
+
+/** For the wipe endpoints only: a device this account owns, revoked or not. */
+async function requireOwnedRegisteredDevice(req: Request, decodedToken: DecodedIdToken) {
+  const deviceId = getDeviceIdFromHeader(req);
+
+  return verifyOwnedRegisteredDevice(decodedToken, deviceId);
 }
 
 function getDeviceIdFromHeader(req: Request): string {
