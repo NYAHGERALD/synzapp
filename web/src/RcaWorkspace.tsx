@@ -22865,6 +22865,17 @@ function RcaEvidencePhotoViewer({
   previewUrl: string | null;
 }) {
   const [isMaximized, setIsMaximized] = React.useState(false);
+  /**
+   * The canvas the viewer fills when maximized, measured rather than guessed.
+   *
+   * Viewport insets covered the app header, the detail panel and the control bar
+   * at the foot of the canvas, because the viewport is not the content area. The
+   * canvas publishes its own rect, so the viewer asks it — the same way the
+   * report modal and the evidence library do.
+   */
+  const [maximizedRect, setMaximizedRect] = React.useState<
+    { height: number; left: number; top: number; width: number } | null
+  >(null);
   const appHeaderClearance = 42;
   const [position, setPosition] = React.useState(() => ({
     x: typeof window === 'undefined' ? 80 : Math.max(16, window.innerWidth - 900),
@@ -22934,13 +22945,63 @@ function RcaEvidencePhotoViewer({
     };
   }, [isMaximized]);
 
+  React.useLayoutEffect(() => {
+    if (!isMaximized) {
+      setMaximizedRect(null);
+
+      return undefined;
+    }
+
+    const canvasArea = document.querySelector('[data-workspace-surface="true"]');
+
+    if (!canvasArea) {
+      setMaximizedRect(null);
+
+      return undefined;
+    }
+
+    const measure = () => {
+      const area = canvasArea.getBoundingClientRect();
+
+      setMaximizedRect({
+        height: area.height,
+        left: area.left,
+        top: area.top,
+        width: area.width
+      });
+    };
+
+    measure();
+
+    // The canvas resizes when the detail panel opens or the window changes, and
+    // the viewer has to follow it rather than keep a rect from when it opened.
+    const observer = new ResizeObserver(measure);
+
+    observer.observe(canvasArea);
+    window.addEventListener('resize', measure);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', measure);
+    };
+  }, [isMaximized]);
+
   const viewerStyle = isMaximized
-    ? {
-        bottom: '12px',
-        left: '12px',
-        right: '12px',
-        top: `calc(env(safe-area-inset-top, 0px) + ${appHeaderClearance}px)`
-      }
+    ? maximizedRect
+      ? {
+          height: maximizedRect.height,
+          left: maximizedRect.left,
+          top: maximizedRect.top,
+          width: maximizedRect.width
+        }
+      : {
+          // Only until the first measurement lands, or on a surface that
+          // publishes no rect at all.
+          bottom: '12px',
+          left: '12px',
+          right: '12px',
+          top: `calc(env(safe-area-inset-top, 0px) + ${appHeaderClearance}px)`
+        }
     : {
         height: 'min(720px, calc(100svh - 112px))',
         left: position.x,
