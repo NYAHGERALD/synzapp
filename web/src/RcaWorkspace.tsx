@@ -55,7 +55,6 @@ import {
   BadgeCheck,
   Bell,
   Bold,
-  BookOpen,
   Bot,
   Camera,
   CalendarDays,
@@ -87,6 +86,7 @@ import {
   Lock,
   Maximize2,
   MessageSquareText,
+  SquarePen,
   Minimize2,
   Moon,
   MousePointer2,
@@ -14435,6 +14435,26 @@ function RcaKnowledgeBasePanel({
     return () => window.clearInterval(timer);
   }, [streamingTurnId]);
 
+  /**
+   * Starts again, and lands on the overview.
+   *
+   * Nothing is stored — the conversation is state and no more — so this resets
+   * what is on screen rather than deleting anything, and asks for no
+   * confirmation. The streaming refs go too: a clear part way through would
+   * otherwise leave the reveal loop writing into a turn that no longer exists.
+   */
+  function handleClearConversation() {
+    pendingAnswerRef.current = '';
+    finishedAnswerRef.current = null;
+    setStreamingTurnId(null);
+    setTurns([]);
+    setAnswer(null);
+    setAskError('');
+    setCanJumpToLatest(false);
+    isPinnedToBottomRef.current = true;
+    setPanelMode('guide');
+  }
+
   function handleConversationScroll() {
     const container = conversationRef.current;
 
@@ -14610,17 +14630,20 @@ function RcaKnowledgeBasePanel({
             <h2 className="mt-1 text-sm font-semibold text-slate-950">Node-based RCA guidance</h2>
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            {/*
+              * Replaces the Guide button, which only switched back to this
+              * panel's empty state. Clearing lands in the same place, so one
+              * control does both jobs.
+              */}
             <button
-              className={`inline-flex h-8 items-center gap-1.5 rounded-xl border px-3 text-xs font-bold transition active:scale-95 ${
-                panelMode === 'guide'
-                  ? 'border-cyan-200 bg-cyan-50 text-cyan-700'
-                  : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 hover:text-slate-950'
-              }`}
-              onClick={() => setPanelMode('guide')}
+              className="inline-flex h-8 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 hover:text-slate-950 active:scale-95 disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-white disabled:hover:text-slate-600"
+              disabled={!turns.length && panelMode === 'guide'}
+              onClick={handleClearConversation}
+              title="Clear this conversation and start a new one"
               type="button"
             >
-              <BookOpen aria-hidden="true" size={14} />
-              Guide
+              <SquarePen aria-hidden="true" size={14} />
+              Clear Chat
             </button>
             <button
               className="grid h-8 w-8 place-items-center rounded-xl border border-slate-200 bg-white text-slate-500 transition hover:bg-slate-50 hover:text-slate-950 active:scale-95"
