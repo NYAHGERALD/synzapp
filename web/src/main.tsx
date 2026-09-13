@@ -1,5 +1,6 @@
 import React from 'react';
 import { getSynzappApiBaseUrl } from './config';
+import { EvidenceSizePanel } from './EvidenceSizePanel';
 import { TenantDevicesPanel } from './TenantDevicesPanel';
 import { PRIVACY_POLICY, SUBPROCESSORS, TERMS_OF_SERVICE } from './policyContent';
 import { SUPPORTED_COUNTRIES, formatPostalCode, getCountryFormat } from './addressFormats';
@@ -23,6 +24,7 @@ import {
   BarChart3,
   BriefcaseBusiness,
   Building2,
+  HardDriveUpload,
   ChevronDown,
   DatabaseBackup,
   KeyRound,
@@ -1158,6 +1160,7 @@ function SettingsPage({
   const isOrgAdmin = roleCode === 'ORG_ADMIN' || roleCode === 'SYSTEM_ADMIN';
   const isDepartmentAdmin = roleCode === 'DEPT_ADMIN';
   const [isDevicesPanelOpen, setIsDevicesPanelOpen] = React.useState(false);
+  const [isEvidenceSizePanelOpen, setIsEvidenceSizePanelOpen] = React.useState(false);
   const settingsSections = getAccountSettingsSections({
     isDepartmentAdmin,
     isOrgAdmin,
@@ -1205,6 +1208,10 @@ function SettingsPage({
           </div>
         </section>
 
+        {isEvidenceSizePanelOpen ? (
+          <EvidenceSizePanel onClose={() => setIsEvidenceSizePanelOpen(false)} />
+        ) : null}
+
         {isDevicesPanelOpen ? (
           <TenantDevicesPanel onClose={() => setIsDevicesPanelOpen(false)} />
         ) : null}
@@ -1223,7 +1230,9 @@ function SettingsPage({
                   // is gone, so it cannot live only on a phone.
                   onOpen={section.title === 'Organization security'
                     ? () => setIsDevicesPanelOpen(true)
-                    : undefined}
+                    : section.title === 'Evidence uploads'
+                      ? () => setIsEvidenceSizePanelOpen(true)
+                      : undefined}
                   icon={section.icon}
                   key={section.title}
                   status={section.status}
@@ -1351,6 +1360,15 @@ function getAccountSettingsSections({
     subtitle: string;
     title: string;
   }> = [];
+
+  if (isOrgAdmin || hasPermission('security.manage')) {
+    sections.push({
+      icon: HardDriveUpload,
+      status: 'Org Admin',
+      subtitle: 'The largest evidence file RCA and RAILS will accept',
+      title: 'Evidence uploads'
+    });
+  }
 
   if (isOrgAdmin || hasPermission('tenant.update')) {
     sections.push(

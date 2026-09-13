@@ -64,6 +64,48 @@ export interface PolicyVersion {
 
 export class StaffAccessError extends Error {}
 
+export interface TenantEvidenceSizeRow {
+  companyName: string;
+  maxAllowedFileBytes: number;
+  maxAllowedUpdatedAt: string | null;
+  maxFileBytes: number;
+  tenantId: string;
+  updatedAt: string | null;
+}
+
+/**
+ * Every organization and the evidence size each is allowed.
+ *
+ * The only tenant listing in the console. The other cross-tenant staff routes
+ * each take an id the caller has to know already, which is why none of them has
+ * a screen anybody can use.
+ */
+export async function listTenantEvidenceSizes(): Promise<TenantEvidenceSizeRow[]> {
+  const body = await request<{ tenants?: TenantEvidenceSizeRow[] }>('/api/staff/tenants/evidence-size-policies');
+
+  return body.tenants || [];
+}
+
+export async function setTenantEvidenceMaxAllowed(input: {
+  maxAllowedFileBytes: number;
+  tenantId: string;
+}): Promise<TenantEvidenceSizeRow> {
+  const body = await request<{ policy?: TenantEvidenceSizeRow }>(
+    `/api/staff/tenants/${encodeURIComponent(input.tenantId)}/evidence-size-policy`,
+    {
+      body: JSON.stringify({ maxAllowedFileBytes: input.maxAllowedFileBytes }),
+      headers: { 'Content-Type': 'application/json' },
+      method: 'POST'
+    }
+  );
+
+  if (!body.policy) {
+    throw new Error('That maximum could not be saved.');
+  }
+
+  return body.policy;
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const user = getSynzappFirebaseAuth().currentUser;
 

@@ -1,22 +1,25 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
-import { AlertTriangle, Inbox, LogOut, ScrollText } from 'lucide-react';
+import { AlertTriangle, Building2, Inbox, LogOut, ScrollText } from 'lucide-react';
 import { getSynzappFirebaseAuth } from './firebase';
 import { formatPostalAddress } from './addressFormats';
 import {
   loadInbox,
   loadPolicy,
+  listTenantEvidenceSizes,
   loadReplies,
   loadStaffContext,
   publishPolicy,
   savePolicyDraft,
   sendReply,
   setSubmissionState,
+  setTenantEvidenceMaxAllowed,
   type ContactReply,
   type ContactSubmission,
   type PolicyVersion,
-  type StaffContext
+  type StaffContext,
+  type TenantEvidenceSizeRow
 } from './staffApi';
 import './styles.css';
 
@@ -34,7 +37,7 @@ import './styles.css';
  * their messages.
  */
 
-type StaffView = 'inbox' | 'policies';
+type StaffView = 'inbox' | 'policies' | 'tenants';
 
 function StaffConsole() {
   const [staff, setStaff] = React.useState<StaffContext | null>(null);
@@ -135,6 +138,13 @@ function StaffConsole() {
           >
             <ScrollText aria-hidden size={15} /> Policies
           </button>
+          <button
+            className={view === 'tenants' ? 'staff-tab is-active' : 'staff-tab'}
+            onClick={() => setView('tenants')}
+            type="button"
+          >
+            <Building2 aria-hidden size={15} /> Organizations
+          </button>
         </nav>
 
         <div className="staff-bar-right">
@@ -153,10 +163,124 @@ function StaffConsole() {
       </header>
 
       <main className="staff-main">
-        {view === 'inbox' ? <InboxView /> : <PoliciesView staff={staff} />}
+        {view === 'inbox' ? <InboxView /> : null}
+        {view === 'policies' ? <PoliciesView staff={staff} /> : null}
+        {view === 'tenants' ? <TenantsView /> : null}
       </main>
     </div>
   );
+}
+
+/* ---- Organizations ------------------------------------------------------- */
+
+const MB = 1024 * 1024;
+
+/** What a company may be allowed to reach. 100 MB is the hard stop in the API. */
+const ALLOWANCE_CHOICES = [4, 10, 25, 50, 100];
+
+/**
+ * How large an evidence file each organization is allowed.
+ *
+ * The ceiling only. What a company actually sets within it is theirs, and is
+ * shown here so raising a ceiling nobody asked for is visibly pointless — a
+ * company sitting at 4 of an allowed 25 does not need 50.
+ */
+function TenantsView() {
+  const [tenants, setTenants] = React.useState<TenantEvidenceSizeRow[]>([]);
+  const [error, setError] = React.useState<string | null>(null);
+  const [isLoading, setIsLoading] = React.useState(true);
+  const [pendingTenantId, setPendingTenantId] = React.useState<string | null>(null);
+
+  const refresh = React.useCallback(async () => {
+    setIsLoading(true);
+
+    try {
+      setTenants(await listTenantEvidenceSizes());
+      setError(null);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Organizations could not be loaded.');
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  async function setAllowance(tenant: TenantEvidenceSizeRow, maxAllowedFileBytes: number) {
+    setPendingTenantId(tenant.tenantId);
+
+    try {
+      const saved = await setTenantEvidenceMaxAllowed({
+        maxAllowedFileBytes,
+        tenantId: tenant.tenantId
+      });
+
+      setTenants((current) => current.map((row) => (
+        row.tenantId === saved.tenantId ? { ...row, ...saved } : row
+      )));
+      setError(null);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : 'That maximum could not be saved.');
+    } finally {
+      setPendingTenantId(null);
+    }
+  }
+
+  return (
+    <section className="staff-panel">
+      <header className="staff-panel-head">
+        <h2>Evidence upload allowance</h2>
+        <p>
+          The largest evidence file each organization may be allowed. Their own admin
+          then chooses any limit up to what is set here.
+        </p>
+      </header>
+
+      {error ? <p className="staff-error">{error}</p> : null}
+      {isLoading && !tenants.length ? <p className="staff-empty">Loading organizations…</p> : null}
+      {!isLoading && !tenants.length && !error ? <p className="staff-empty">No organizations yet.</p> : null}
+
+      <div className="staff-tenant-list">
+        {tenants.map((tenant) => (
+          <article className="staff-tenant" key={tenant.tenantId}>
+            <div className="staff-tenant-text">
+              <h3>{tenant.companyName}</h3>
+              <p>
+                Using {describeMegabytes(tenant.maxFileBytes)} of {describeMegabytes(tenant.maxAllowedFileBytes)} allowed
+              </p>
+            </div>
+            <div className="staff-tenant-choices">
+              {ALLOWANCE_CHOICES.map((megabytes) => {
+                const bytes = megabytes * MB;
+
+                return (
+                  <button
+                    aria-pressed={tenant.maxAllowedFileBytes === bytes}
+                    className={tenant.maxAllowedFileBytes === bytes ? 'staff-chip is-active' : 'staff-chip'}
+                    disabled={pendingTenantId === tenant.tenantId}
+                    key={megabytes}
+                    onClick={() => void setAllowance(tenant, bytes)}
+                    type="button"
+                  >
+                    {megabytes}
+                  </button>
+                );
+              })}
+              <span className="staff-chip-unit">MB</span>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function describeMegabytes(bytes: number): string {
+  const megabytes = bytes / MB;
+
+  return `${Number.isInteger(megabytes) ? megabytes : megabytes.toFixed(1)} MB`;
 }
 
 /* ---- Support inbox ------------------------------------------------------- */

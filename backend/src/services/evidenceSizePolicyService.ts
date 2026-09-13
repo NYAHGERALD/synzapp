@@ -126,6 +126,38 @@ export async function updateEvidenceMaxAllowedForTenant(input: {
   return readEvidenceSizePolicy(input.tenantId);
 }
 
+export interface TenantEvidenceSizeRow extends EvidenceSizePolicyResponse {
+  companyName: string;
+  tenantId: string;
+}
+
+/**
+ * Every organization and what each is allowed, for the staff console.
+ *
+ * Staff only. There is no tenant listing anywhere else in the product — the
+ * other cross-tenant staff routes each take an id the caller must already know,
+ * which is why none of them has a usable screen. A ceiling nobody can find the
+ * organization for is a ceiling nobody will set.
+ */
+export async function listTenantEvidenceSizePolicies(): Promise<TenantEvidenceSizeRow[]> {
+  const snapshot = await firestore.collection('organizations').get();
+  const rows = snapshot.docs.map((doc) => {
+    const organization = doc.data() as OrganizationRecord & { companyName?: string };
+    const stored = organization?.evidenceSizePolicy;
+
+    return {
+      ...normalizeEvidenceSizePolicy(stored),
+      companyName: organization?.companyName || 'Unnamed organization',
+      maxAllowedUpdatedAt: dateLikeToIso(stored?.maxAllowedUpdatedAt),
+      tenantId: doc.id,
+      updatedAt: dateLikeToIso(stored?.updatedAt),
+      updatedByUid: stored?.updatedByUid || null
+    };
+  });
+
+  return rows.sort((first, second) => first.companyName.localeCompare(second.companyName));
+}
+
 async function readEvidenceSizePolicy(tenantId: string): Promise<EvidenceSizePolicyResponse> {
   const snapshot = await firestore.collection('organizations').doc(tenantId).get();
   const organization = snapshot.data() as OrganizationRecord | undefined;

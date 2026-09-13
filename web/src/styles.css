@@ -22963,3 +22963,127 @@ body:not(:has(.side-panel)) {
     position: relative;
   }
 }
+
+.evidence-size-body {
+  display: grid;
+  gap: 14px;
+  padding: 4px 0 2px;
+}
+
+.evidence-size-lead {
+  color: #475569;
+  font-size: 14px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.evidence-size-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.evidence-size-choice {
+  background: #ffffff;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  border-radius: 999px;
+  color: #334155;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 8px 18px;
+}
+
+.evidence-size-choice:hover:not(:disabled) {
+  background: #eff6ff;
+  border-color: rgba(37, 99, 235, 0.4);
+  color: #2563eb;
+}
+
+.evidence-size-choice.is-active {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: #ffffff;
+}
+
+.evidence-size-choice:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.evidence-size-note,
+.evidence-size-saved {
+  color: #64748b;
+  font-size: 13px;
+  margin: 0;
+}
+
+.evidence-size-saved {
+  color: #15803d;
+}
+
+.staff-tenant-list {
+  display: grid;
+  gap: 8px;
+}
+
+.staff-tenant {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 10px;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  padding: 12px 14px;
+}
+
+.staff-tenant-text h3 {
+  font-size: 14px;
+  font-weight: 500;
+  margin: 0;
+}
+
+.staff-tenant-text p {
+  color: #64748b;
+  font-size: 12px;
+  margin: 2px 0 0;
+}
+
+.staff-tenant-choices {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+}
+
+.staff-chip {
+  background: #f8fafc;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  border-radius: 6px;
+  color: #334155;
+  cursor: pointer;
+  font-size: 12px;
+  min-width: 34px;
+  padding: 5px 0;
+}
+
+.staff-chip:hover:not(:disabled) {
+  border-color: rgba(37, 99, 235, 0.45);
+  color: #2563eb;
+}
+
+.staff-chip.is-active {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: #ffffff;
+}
+
+.staff-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.staff-chip-unit {
+  color: #94a3b8;
+  font-size: 12px;
+  margin-left: 2px;
+}

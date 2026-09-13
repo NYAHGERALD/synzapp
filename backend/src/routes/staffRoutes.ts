@@ -8,6 +8,7 @@ import { getDecodedTokenFromHeader as getDecodedToken } from '../middleware/requ
 import { z } from 'zod';
 import {
   getEvidenceSizePolicyForTenant,
+  listTenantEvidenceSizePolicies,
   updateEvidenceMaxAllowedForTenant
 } from '../services/evidenceSizePolicyService.js';
 import { writeAuditEvent } from '../services/auditService.js';
@@ -264,6 +265,16 @@ staffRouter.get('/retention-templates', async (req, res, next) => {
 /** Every set of bounds ever published for one tenant. None of them editable. */
 const evidenceMaxAllowedSchema = z.object({
   maxAllowedFileBytes: z.number().int().positive()
+});
+
+staffRouter.get('/tenants/evidence-size-policies', async (req, res, next) => {
+  try {
+    await requireStaff(await getDecodedToken(req.header('Authorization') || ''));
+
+    res.json({ tenants: await listTenantEvidenceSizePolicies() });
+  } catch (error) {
+    next(error);
+  }
 });
 
 staffRouter.get('/tenants/:tenantId/evidence-size-policy', async (req, res, next) => {
