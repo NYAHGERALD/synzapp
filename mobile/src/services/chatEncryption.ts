@@ -3,6 +3,11 @@ import { gcm } from '@noble/ciphers/aes.js';
 import * as Crypto from 'expo-crypto';
 import nacl from 'tweetnacl';
 import {
+  openSealedMessageKey,
+  sealMessageKeyForDevice,
+  type EncryptedKeyPayload
+} from './messageKeySealing';
+import {
   getCachedEnvelopePayload,
   isKnownUndecryptableEnvelope,
   markUndecryptableEnvelope,
@@ -18,12 +23,6 @@ import type {
   EncryptedChatEnvelope
 } from './chatApi';
 import { getLocalDeviceKeyMaterial } from './deviceIdentity';
-
-interface EncryptedKeyPayload {
-  ciphertext: string;
-  nonce: string;
-  version: 1;
-}
 
 interface EncryptedTextPayload {
   forwarded?: boolean;
@@ -193,20 +192,12 @@ export async function encryptChatMessage(input: {
   const encryptedKeysByDevice: Record<string, string> = {};
 
   devicesById.forEach((device) => {
-    const keyNonce = Crypto.getRandomBytes(nacl.box.nonceLength);
-    const encryptedKey = nacl.box(
+    encryptedKeysByDevice[device.deviceId] = sealMessageKeyForDevice({
       messageKey,
-      keyNonce,
-      toByteArray(device.keyAgreementPublicKey),
-      localDevice.keyAgreementPrivateKey
-    );
-    const payload: EncryptedKeyPayload = {
-      ciphertext: fromByteArray(encryptedKey),
-      nonce: fromByteArray(keyNonce),
-      version: 1
-    };
-
-    encryptedKeysByDevice[device.deviceId] = JSON.stringify(payload);
+      nonce: Crypto.getRandomBytes(nacl.box.nonceLength),
+      recipientKeyAgreementPublicKey: device.keyAgreementPublicKey,
+      sealerKeyAgreementPrivateKey: localDevice.keyAgreementPrivateKey
+    });
   });
 
   const notificationPreviewByDevice = await encryptNotificationPreviewsForDevices({
@@ -333,20 +324,21 @@ export async function buildGroupHistoryKeyGrants(input: {
         return;
       }
 
-      const keyNonce = Crypto.getRandomBytes(nacl.box.nonceLength);
-      const encryptedKey = nacl.box(
+      /**
+       * The granter is not the sender, so the payload has to say who sealed it.
+       *
+       * Opening used the original sender's public key, which only matches when
+       * the granter happens to be that sender — never true of a backfill. Group
+       * history therefore never arrived, and the failed grant occupied the slot
+       * so the device never got a second chance at the message.
+       */
+      encryptedKeysByDevice[device.deviceId] = sealMessageKeyForDevice({
         messageKey,
-        keyNonce,
-        toByteArray(device.keyAgreementPublicKey),
-        localDevice.keyAgreementPrivateKey
-      );
-      const payload: EncryptedKeyPayload = {
-        ciphertext: fromByteArray(encryptedKey),
-        nonce: fromByteArray(keyNonce),
-        version: 1
-      };
-
-      encryptedKeysByDevice[device.deviceId] = JSON.stringify(payload);
+        nonce: Crypto.getRandomBytes(nacl.box.nonceLength),
+        recipientKeyAgreementPublicKey: device.keyAgreementPublicKey,
+        sealerKeyAgreementPrivateKey: localDevice.keyAgreementPrivateKey,
+        sealerKeyAgreementPublicKey: localDevice.keyAgreementPublicKey
+      });
     });
 
     if (!Object.keys(encryptedKeysByDevice).length) {
@@ -411,22 +403,11 @@ function decryptMessageKeyCandidate(
   encryptedKeyForDevice: string,
   localDevicePrivateKey: Uint8Array
 ): Uint8Array | null {
-  try {
-    const keyPayload = JSON.parse(encryptedKeyForDevice) as Partial<EncryptedKeyPayload>;
-
-    if (keyPayload.version !== 1 || !keyPayload.ciphertext || !keyPayload.nonce) {
-      return null;
-    }
-
-    return nacl.box.open(
-      toByteArray(keyPayload.ciphertext),
-      toByteArray(keyPayload.nonce),
-      toByteArray(envelope.senderKeyAgreementPublicKey),
-      localDevicePrivateKey
-    );
-  } catch {
-    return null;
-  }
+  return openSealedMessageKey({
+    encryptedKeyForDevice,
+    fallbackSealerKeyAgreementPublicKey: envelope.senderKeyAgreementPublicKey,
+    localDeviceKeyAgreementPrivateKey: localDevicePrivateKey
+  });
 }
 
 function getEnvelopeEncryptedKeyCandidates(envelope: EncryptedChatEnvelope): string[] {

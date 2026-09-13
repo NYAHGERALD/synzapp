@@ -1020,11 +1020,16 @@ export async function grantGroupChatHistoryKeys(
         .forEach(([deviceId, encryptedKey]) => {
           const targetDevice = activeGroupDevicesById.get(deviceId);
 
+          const existingKeyForDevice = existingKeysByDevice[deviceId];
+
           if (
             !targetDevice ||
-            existingKeysByDevice[deviceId] ||
             deviceId === grantingDeviceId ||
-            !isEncryptedGroupHistoryKeyGrantPayload(encryptedKey)
+            !isEncryptedGroupHistoryKeyGrantPayload(encryptedKey) ||
+            (
+              existingKeyForDevice &&
+              !canReplaceGroupHistoryKeyGrantPayload(existingKeyForDevice, encryptedKey)
+            )
           ) {
             return;
           }
@@ -2581,6 +2586,38 @@ function normalizeGroupHistoryKeyGrant(
     encryptedKeysByDevice,
     envelopeId
   };
+}
+
+/**
+ * Whether a good grant may take a slot a broken one is sitting in.
+ *
+ * Grants used to be sealed with the granter's private key while the reading side
+ * opened against the original *sender's* public key — which agree only when the
+ * granter is the sender, never true of a backfill. Every such grant was
+ * unopenable, and because a filled slot is skipped it also blocked the device
+ * from ever being granted that message again.
+ *
+ * A fixed grant names whoever sealed it. So a payload carrying that may replace
+ * one that does not, and nothing else may be replaced: a working grant is never
+ * overwritten, and one broken grant cannot be swapped for another.
+ */
+export function canReplaceGroupHistoryKeyGrantPayload(
+  existingValue: string,
+  incomingValue: string
+): boolean {
+  return !hasGroupHistoryKeyGrantSealer(existingValue) &&
+    hasGroupHistoryKeyGrantSealer(incomingValue);
+}
+
+function hasGroupHistoryKeyGrantSealer(value: string): boolean {
+  try {
+    const payload = JSON.parse(value) as Partial<{ sealedByKeyAgreementPublicKey: unknown }>;
+
+    return typeof payload.sealedByKeyAgreementPublicKey === 'string' &&
+      payload.sealedByKeyAgreementPublicKey.trim().length > 0;
+  } catch {
+    return false;
+  }
 }
 
 export function isEncryptedGroupHistoryKeyGrantPayload(value: string): boolean {
