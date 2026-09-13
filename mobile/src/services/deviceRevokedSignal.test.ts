@@ -14,9 +14,11 @@ vi.mock('./backendAuth', () => ({
 }));
 
 import {
+  DEVICE_NEEDS_RECLAIM_CODE,
   DEVICE_REVOKED_CODE,
   isCompanyAccessDeniedError,
   isCompanyAccessDeniedMessage,
+  isDeviceNeedsReclaimError,
   isDeviceRevokedError
 } from './companyDataAccessGuard';
 
@@ -58,5 +60,30 @@ describe('recognising a handset that has been signed out of chat', () => {
   it('still recognises the older wordings it always did', () => {
     expect(isCompanyAccessDeniedError(new Error('Your access was revoked.'))).toBe(true);
     expect(isCompanyAccessDeniedError(new Error('This account is suspended.'))).toBe(true);
+  });
+});
+
+describe('a phone being asked to take chat back', () => {
+  const needsReclaim = Object.assign(new Error('Chat is signed in on another phone.'), {
+    code: DEVICE_NEEDS_RECLAIM_CODE
+  });
+
+  it('is never treated as being shut out', () => {
+    // Treating it as a denial made the app wipe itself and drop the session,
+    // racing the registration that was raising the prompt to move chat here.
+    // The person was signed out on their first attempt and it only worked on the
+    // second, once the wipe had cleared the record away.
+    expect(isDeviceNeedsReclaimError(needsReclaim)).toBe(true);
+    expect(isCompanyAccessDeniedError(needsReclaim)).toBe(false);
+    expect(isDeviceRevokedError(needsReclaim)).toBe(false);
+  });
+
+  it('does not stop a real revocation from wiping', () => {
+    const revoked = Object.assign(new Error('This device was signed out of chat.'), {
+      code: DEVICE_REVOKED_CODE
+    });
+
+    expect(isDeviceNeedsReclaimError(revoked)).toBe(false);
+    expect(isCompanyAccessDeniedError(revoked)).toBe(true);
   });
 });

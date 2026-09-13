@@ -465,9 +465,28 @@ export async function verifyActiveRegisteredDevice(
       tenantDevice.uid === decodedToken.uid &&
       (tenantDevice.status === 'REVOKED' || userDevice.status === 'REVOKED');
 
-    throw isRevokedOwnDevice
-      ? deviceRevokedError()
-      : authorizationError('This device is not authorized.');
+    if (!isRevokedOwnDevice) {
+      throw authorizationError('This device is not authorized.');
+    }
+
+    /**
+     * Being asked to take chat back is not the same as being shut out.
+     *
+     * A phone chat was moved away from still carries a revoked record, and it is
+     * signed in on again precisely to take chat back. Answering those requests
+     * with "you were signed out" made the app wipe itself and drop the session —
+     * racing the registration that was, at that moment, raising the prompt to
+     * move chat here. The person was signed out on their first attempt and it
+     * only worked on the second, once the wipe had cleared the record away.
+     *
+     * A separate code, so the app knows to wait for that prompt rather than
+     * tear itself down. Every other revocation still says the device was signed
+     * out, and still wipes.
+     */
+    const isReclaimable = isReclaimableRevokedDevice(tenantDevice) ||
+      isReclaimableRevokedDevice(userDevice);
+
+    throw isReclaimable ? deviceNeedsReclaimError() : deviceRevokedError();
   }
 
   const seenFields = {
@@ -1046,6 +1065,14 @@ export async function releaseMobileSeatIfHeldBy(uid: string, deviceId: string): 
       activeMobileSeat: fieldValue.delete()
     }, { merge: true });
   });
+}
+
+/** Chat is elsewhere and this phone may ask for it back. Not a shut-out. */
+function deviceNeedsReclaimError(): Error {
+  return Object.assign(
+    authorizationError('Chat is signed in on another phone.'),
+    { code: 'DEVICE_NEEDS_RECLAIM' }
+  );
 }
 
 /** Told apart from any other refusal by a code, never by its wording. */
