@@ -66,6 +66,7 @@ import Svg, { Circle, Path } from 'react-native-svg';
 import { captureRef } from 'react-native-view-shot';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { DismissibleError } from '../components/DismissibleError';
+import { MobileSeatNotice } from '../components/MobileSeatNotice';
 import {
   ApprovedEmployee,
   CompanyProfile,
@@ -558,7 +559,8 @@ import {
 } from '../services/localChatStore';
 import {
   describeMobileSeatHolder,
-  isMobileSeatHeldError
+  isMobileSeatHeldError,
+  type MobileSeatHolder
 } from '../services/mobileSeatConflict';
 import type {
   LocalConversationRecord,
@@ -1043,6 +1045,23 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
   const [error, setErrorState] = useState<string | null>(null);
   const isMobileSeatPromptPendingRef = useRef(false);
   /**
+   * Chat is on another phone and this one has not taken it.
+   *
+   * Kept because declining is a state, not a dismissal. Registration stays
+   * refused, and fifty-five calls across chat, profile, the interpreter and the
+   * company library need the device it would have registered — so without this
+   * the person sat behind a popup they could not answer, raised from any of
+   * seventy places, with no way back but restarting the app.
+   */
+  const heldMobileSeatRef = useRef<MobileSeatHolder | null>(null);
+  const [heldMobileSeat, setHeldMobileSeatState] = useState<MobileSeatHolder | null>(null);
+  const setHeldMobileSeat = useCallback((seat: MobileSeatHolder | null) => {
+    // The ref is read by `setError`, which runs outside render and cannot wait
+    // for one; the state is what draws the notice. They are set together.
+    heldMobileSeatRef.current = seat;
+    setHeldMobileSeatState(seat);
+  }, []);
+  /**
    * While chat is being claimed, the banner stays out of the way.
    *
    * Every API call asks for device headers, so a held seat fails all of them and
@@ -1052,7 +1071,9 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
    * own prompt; nothing else needs to speak until it is answered.
    */
   const setError = useCallback((message: string | null) => {
-    if (message && isMobileSeatPromptPendingRef.current) {
+    // Everything failing while chat is on another phone has one cause, and it is
+    // already being explained. Reporting each failure separately buries that.
+    if (message && (isMobileSeatPromptPendingRef.current || heldMobileSeatRef.current)) {
       return;
     }
 
@@ -3760,6 +3781,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
         return;
       }
 
+      setHeldMobileSeat(seatError.seat);
       promptToMoveChatToThisPhone(
         seatError.seat.deviceId,
         describeMobileSeatHolder(seatError.seat, Date.now())
@@ -3769,6 +3791,13 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
     return () => setMobileSeatConflictHandler(null);
   }, []);
 
+  /**
+   * Asks again when somebody opens Chats, having said not now.
+   *
+   * The refusal is cached so registration is not retried, which means nothing
+   * would raise the question a second time. Opening the tab that does not work
+   * is the moment it is worth asking.
+   */
   function promptToMoveChatToThisPhone(displacedDeviceId: string, otherPhone: string) {
     if (isMobileSeatPromptPendingRef.current) {
       return;
@@ -3783,8 +3812,15 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
       [
         {
           onPress: () => {
+            /**
+             * Declining keeps the person signed in and asks again later.
+             *
+             * Their account is fine; only chat is elsewhere. The offer returns
+             * when they next open Chats, so changing their mind does not mean
+             * restarting the app — and nothing else nags them in the meantime.
+             */
             isMobileSeatPromptPendingRef.current = false;
-            setErrorState('Chat is signed in on another phone. Sign out there, or move chat to this phone.');
+            setErrorState(null);
           },
           style: 'cancel',
           text: 'Not now'
@@ -3854,6 +3890,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
       });
 
       isMobileSeatPromptPendingRef.current = false;
+      setHeldMobileSeat(null);
       setRegisteredDeviceId(device.deviceId);
       void clearStaleCompanyDataBlock();
       void registerCurrentDevicePushToken(registrationToken);
@@ -14057,6 +14094,24 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
 
       {activeTab === 'Settings' && settingsScreen === 'directory' ? (
         <Text style={styles.directoryTitle}>{directoryFilter}</Text>
+      ) : null}
+
+      {heldMobileSeat && !selectedChat ? (
+        <View style={styles.noticeWrap}>
+          <MobileSeatNotice
+            onMoveChatHere={() => {
+              if (!heldMobileSeat.deviceId) {
+                return;
+              }
+
+              promptToMoveChatToThisPhone(
+                heldMobileSeat.deviceId,
+                describeMobileSeatHolder(heldMobileSeat, Date.now())
+              );
+            }}
+            seat={heldMobileSeat}
+          />
+        </View>
       ) : null}
 
       {error ? (

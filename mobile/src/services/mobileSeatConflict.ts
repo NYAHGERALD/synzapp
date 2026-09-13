@@ -134,3 +134,25 @@ function describeClaimedAt(claimedAt: string | null, nowMs: number): string | nu
 function readText(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
+
+/**
+ * What the standing notice says once somebody has said not now.
+ *
+ * Declining is a state, not a dismissal: chat stays on the other phone and the
+ * rest of the app carries on. So this has to say which phone holds it, that
+ * everything else still works, and how to change their mind — a notice that only
+ * reports a problem leaves somebody stuck looking at it.
+ *
+ * Separated from the component so the wording can be tested.
+ */
+export function describeHeldMobileSeatNotice(seat: MobileSeatHolder, nowMs: number): {
+  action: string;
+  body: string;
+  title: string;
+} {
+  return {
+    action: 'Move chat here',
+    body: `${describeMobileSeatHolder(seat, nowMs)} has it. Everything else on your account still works.`,
+    title: 'Chat is on your other phone'
+  };
+}

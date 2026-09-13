@@ -342,6 +342,40 @@ export const coreStyles = StyleSheet.create({
     marginBottom: 8,
     marginHorizontal: 15
   },
+  /**
+   * Where chat being on another phone is stated and undone.
+   *
+   * A rounded card, so white is allowed here. It sits in `noticeWrap`, which
+   * already holds the 15 from the edge, so it adds none of its own.
+   */
+  mobileSeatNotice: {
+    alignItems: 'center',
+    backgroundColor: colors.groupedCard,
+    borderRadius: 22,
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 14
+  },
+  mobileSeatNoticeText: {
+    flex: 1,
+    gap: 3
+  },
+  mobileSeatNoticeTitle: {
+    fontSize: 15,
+    fontWeight: '400',
+    lineHeight: 20
+  },
+  mobileSeatNoticeBody: {
+    fontSize: 13,
+    fontWeight: '400',
+    lineHeight: 18
+  },
+  mobileSeatNoticeAction: {
+    fontSize: 15,
+    fontWeight: '400'
+  },
   tabScroll: {
     flex: 1,
     marginTop: 4
