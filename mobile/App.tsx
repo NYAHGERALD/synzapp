@@ -291,7 +291,8 @@ function SynzappApp() {
     <SafeAreaProvider style={styles.safeAreaProvider}>
       <KeyboardProvider>
       <SafeAreaView style={styles.safeArea}>
-        <StatusBar style={isIntroVisible || !theme.isDark ? 'dark' : 'light'} />
+        {/* White text while the intro is up: its red ground is too dark for the other. */}
+        <StatusBar style={isIntroVisible || theme.isDark ? 'light' : 'dark'} />
 
         {isOnboardingComplete === false ? (
           <AppOnboardingScreen onComplete={handleAppOnboardingComplete} />
