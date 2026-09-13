@@ -19208,6 +19208,13 @@ function RcaNodeCard(props: NodeProps) {
    * when the evidence is right there on the canvas beside it.
    */
   const linkedEvidence = data.linkedEvidence || [];
+  /**
+   * Its own attachments plus anything a connected Evidence node holds.
+   *
+   * Shown only when there is something to report, or when this node is the one
+   * that can add it. A node that accepts no evidence and reaches none was
+   * announcing "0 evidence" about a thing it has nothing to do with.
+   */
   const reachableEvidenceCount = node.attachedEvidence.length + linkedEvidence.length;
   const activeActivity = data.activities[0] || null;
   const canInlineEditLabel = Boolean(
@@ -19843,12 +19850,12 @@ function RcaNodeCard(props: NodeProps) {
             <FileLock2 aria-hidden="true" size={13} />
             {reachableEvidenceCount} evidence
           </button>
-        ) : (
+        ) : reachableEvidenceCount > 0 ? (
           <span className="inline-flex items-center gap-1">
             <FileLock2 aria-hidden="true" size={13} />
             {reachableEvidenceCount} evidence
           </span>
-        )}
+        ) : null}
         {detail?.actions.length ? (
           <span className="inline-flex items-center gap-1 text-emerald-700">
             <Wrench aria-hidden="true" size={13} />
