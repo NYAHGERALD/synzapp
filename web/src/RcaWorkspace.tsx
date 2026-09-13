@@ -20938,6 +20938,24 @@ function RcaInspectorDrawer({
 
     const syncedDisplayNode = syncRootCauseTypeWithParentCategory(displayNode, nodes);
     const syncedDetailFields = { ...(syncedDisplayNode.detailFields || {}) };
+    /**
+     * Also seeded when the panel is opened, not only when the spline is drawn.
+     *
+     * Connecting is where this belongs, but a canvas wired before the rule
+     * existed never sees that moment — the connection is already there and the
+     * apply path returns early when nothing about it changed. Opening the node
+     * is the next time it matters, and it fills the same field by the same rule.
+     */
+    const carriedIncidentAccount = getRcaIncidentAccountToCarryOver(
+      syncedDisplayNode,
+      syncedDisplayNode.parentNodeId
+        ? nodes.find((candidateNode) => candidateNode.id === syncedDisplayNode.parentNodeId)
+        : null
+    );
+
+    if (carriedIncidentAccount) {
+      syncedDetailFields.whatHappened = carriedIncidentAccount;
+    }
     const primaryLabelFieldKey = syncedDisplayNode.nodeType === 'ISHIKAWA_CATEGORY' || syncedDisplayNode.nodeType !== 'WHY'
       ? null
       : getRcaPrimaryLabelFieldKey(fiveWhysNodeRole);
@@ -24179,42 +24197,55 @@ function isValidHexColor(color: string | null | undefined): color is string {
   return typeof color === 'string' && /^#[0-9A-Fa-f]{6}$/.test(color);
 }
 
-function applyRcaConnectionDetailFieldUpdates(childNode: RcaNode, parentNode: RcaNode | null | undefined): RcaNode {
-  /**
-   * Carries the incident's description into Incident Details on connection.
-   *
-   * The two fields are the same account of the same event, and retyping it is
-   * how they drift apart. Connecting the nodes is the moment the user says they
-   * belong together, so that is when it is copied.
-   *
-   * Only into a field nobody has written in. "What Happened?" is never truly
-   * empty — it mirrors the node's title, so a fresh node holds the default
-   * "Incident details" — and anything else there is somebody's own words and is
-   * left alone.
-   *
-   * Because it mirrors the title, the node is retitled to match. That is the
-   * existing design and the same thing happens when the field is typed by hand,
-   * so the copy behaves no differently from doing it manually.
-   */
-  if (isIncidentDetailsRoleNode(childNode) && parentNode && isIncidentRoleNode(parentNode)) {
-    const incidentDescription = (parentNode.detailFields?.incidentDescription || '').trim();
-    const existingFields = childNode.detailFields || {};
-    const existingAccount = (existingFields.whatHappened || '').trim();
-    const defaultLabel = getDefaultRcaNodeRoleLabel('INCIDENT_DETAILS');
-    const isUnwritten = !existingAccount ||
-      existingAccount === defaultLabel ||
-      existingAccount === (childNode.label || '').trim();
+/**
+ * The incident's own account, when Incident Details has none of its own.
+ *
+ * The two fields describe the same event, and retyping is how they drift apart.
+ * Returns null when there is nothing to copy or when somebody has already
+ * written there.
+ *
+ * "What Happened?" is never truly empty — it mirrors the node's title, so a
+ * fresh node holds the default "Incident details". A placeholder has to be
+ * recognised rather than treated as content, or this would never fire.
+ */
+function getRcaIncidentAccountToCarryOver(
+  childNode: RcaNode,
+  parentNode: RcaNode | null | undefined
+): string | null {
+  if (!isIncidentDetailsRoleNode(childNode) || !parentNode || !isIncidentRoleNode(parentNode)) {
+    return null;
+  }
 
-    if (incidentDescription && isUnwritten) {
-      return {
-        ...childNode,
-        detailFields: {
-          ...existingFields,
-          whatHappened: incidentDescription
-        },
-        label: incidentDescription
-      };
-    }
+  const incidentDescription = (parentNode.detailFields?.incidentDescription || '').trim();
+
+  if (!incidentDescription) {
+    return null;
+  }
+
+  const existingAccount = (childNode.detailFields?.whatHappened || '').trim();
+  const isUnwritten = !existingAccount ||
+    existingAccount === getDefaultRcaNodeRoleLabel('INCIDENT_DETAILS') ||
+    existingAccount === (childNode.label || '').trim();
+
+  return isUnwritten ? incidentDescription : null;
+}
+
+function applyRcaConnectionDetailFieldUpdates(childNode: RcaNode, parentNode: RcaNode | null | undefined): RcaNode {
+  const carriedAccount = getRcaIncidentAccountToCarryOver(childNode, parentNode);
+
+  /**
+   * Because that field mirrors the title, the node is renamed to match. Typing
+   * the same text by hand does this too, so the copy behaves no differently.
+   */
+  if (carriedAccount) {
+    return {
+      ...childNode,
+      detailFields: {
+        ...(childNode.detailFields || {}),
+        whatHappened: carriedAccount
+      },
+      label: carriedAccount
+    };
   }
 
   if (isRootCauseRoleNode(childNode) && parentNode && isFiveWhysInvestigationRoleNode(parentNode)) {
