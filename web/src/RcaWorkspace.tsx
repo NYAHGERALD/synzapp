@@ -185,6 +185,8 @@ interface RcaNodeCardData extends Record<string, unknown> {
   incidentId: string | null;
   isReferenceProject?: boolean;
   isRealtimeReady: boolean;
+  /** Evidence reached through a connected Evidence node, not held by this one. */
+  linkedEvidence: RcaAttachedEvidence[];
   methodology: RcaMethodology;
   missingDataBadges: RcaMissingDataBadge[];
   node: RcaNode;
@@ -14770,7 +14772,14 @@ function getRcaKnowledgeSelectedNodeSummary(
         ? 'Fault Gate'
         : getFiveWhysRoleLabel(role);
   const childCount = nodes.filter((candidateNode) => candidateNode.parentNodeId === node.id).length;
-  const evidenceCount = node.attachedEvidence.length;
+  /**
+   * What this node can show, matching the card rather than contradicting it.
+   *
+   * A Cause reading "3 evidence" on the canvas while this panel said it had
+   * none was the same number described two ways.
+   */
+  const evidenceCount = node.attachedEvidence.length +
+    (buildRcaLinkedEvidenceByNodeId(nodes).get(node.id) || []).length;
 
   if (isFreeformRcaAnnotationNode(node)) {
     return {
@@ -14848,7 +14857,7 @@ function getRcaKnowledgeSelectedNodeSummary(
     return {
       details: [
         'Evidence nodes hold objective proof for facts, causes, containment, or verification.',
-        `This node has ${evidenceCount} attachment${evidenceCount === 1 ? '' : 's'}.`,
+        `This node has ${evidenceCount} evidence item${evidenceCount === 1 ? '' : 's'} available.`,
         'Evidence can include photos, links, records, interviews, measurements, SOPs, logs, and verification documents.'
       ],
       guidance: [
@@ -14866,7 +14875,7 @@ function getRcaKnowledgeSelectedNodeSummary(
       details: [
         `${roleLabel} captures the action plan that addresses RCA findings.`,
         'CAPA work should define ownership, due dates, verification, and completion evidence.',
-        `This node has ${evidenceCount} attachment${evidenceCount === 1 ? '' : 's'}.`
+        `This node has ${evidenceCount} evidence item${evidenceCount === 1 ? '' : 's'} available.`
       ],
       guidance: [
         'Separate corrective action from preventive action.',
@@ -14881,7 +14890,7 @@ function getRcaKnowledgeSelectedNodeSummary(
   return {
     details: [
       `${roleLabel} is part of the RCA logic trail on the canvas.`,
-      `It has ${childCount} connected child item${childCount === 1 ? '' : 's'} and ${evidenceCount} attachment${evidenceCount === 1 ? '' : 's'}.`,
+      `It has ${childCount} connected child item${childCount === 1 ? '' : 's'} and ${evidenceCount} evidence item${evidenceCount === 1 ? '' : 's'} available.`,
       'Use the Node Details panel for structured fields and the canvas label for readable investigation flow.'
     ],
     guidance: [
@@ -19191,6 +19200,15 @@ function RcaNodeCard(props: NodeProps) {
   const fiveWhysBadgeLabel = fiveWhysNodeRole
     ? getFiveWhysNodeBadgeLabel(node, data.nodes, nodeIndex, fiveWhysNodeRole)
     : null;
+  /**
+   * What this card says it has.
+   *
+   * Its own attachments plus anything a connected Evidence node holds. A Cause
+   * wired to an Evidence node showing "0 evidence" reads as an empty Cause,
+   * when the evidence is right there on the canvas beside it.
+   */
+  const linkedEvidence = data.linkedEvidence || [];
+  const reachableEvidenceCount = node.attachedEvidence.length + linkedEvidence.length;
   const activeActivity = data.activities[0] || null;
   const canInlineEditLabel = Boolean(
     !data.isReferenceProject &&
@@ -19823,12 +19841,12 @@ function RcaNodeCard(props: NodeProps) {
             type="button"
           >
             <FileLock2 aria-hidden="true" size={13} />
-            {node.attachedEvidence.length} evidence
+            {reachableEvidenceCount} evidence
           </button>
         ) : (
           <span className="inline-flex items-center gap-1">
             <FileLock2 aria-hidden="true" size={13} />
-            {node.attachedEvidence.length} evidence
+            {reachableEvidenceCount} evidence
           </span>
         )}
         {detail?.actions.length ? (
@@ -20580,11 +20598,33 @@ function RcaInspectorDrawer({
     evidenceObjectUrlsRef.current.clear();
   }, []);
 
+  /**
+   * Evidence held by a connected Evidence node.
+   *
+   * Shown here so somebody reading a Cause can see what supports it without
+   * hunting the canvas, but never editable from here: the records belong to the
+   * Evidence node, and that is the one place they are removed or renamed.
+   */
+  const linkedEvidence = React.useMemo(
+    () => (displayNode ? buildRcaLinkedEvidenceByNodeId(nodes).get(displayNode.id) || [] : []),
+    [displayNode, nodes]
+  );
+  /**
+   * A stable stand-in for that array in effect dependencies.
+   *
+   * The memo yields a new array on every `nodes` change — a keystroke, a drag, a
+   * realtime label edit — and the hydration effect below would re-issue the
+   * download for anything not yet cached each time. The contents are what
+   * matter, so the effect watches those instead of the identity.
+   */
+  const linkedEvidenceKey = linkedEvidence.map(getEvidenceKey).join('|');
+
   React.useEffect(() => {
     let isCurrent = true;
 
     async function hydrateStoredEvidencePreviews() {
-      const missingEvidence = draft.attachedEvidence.filter((item) => (
+      // Linked evidence needs its thumbnail fetched exactly like the node's own.
+      const missingEvidence = [...draft.attachedEvidence, ...linkedEvidence].filter((item) => (
         isImageEvidence(item) &&
         !evidencePreviewUrls.has(getEvidenceKey(item)) &&
         (!isBrowserDisplayableImageUrl(item.fileUrl) || isRcaLibraryAttachedEvidence(item))
@@ -20657,7 +20697,7 @@ function RcaInspectorDrawer({
     return () => {
       isCurrent = false;
     };
-  }, [draft.attachedEvidence, evidencePreviewUrls, incidentId, sessionId]);
+  }, [draft.attachedEvidence, evidencePreviewUrls, incidentId, linkedEvidenceKey, sessionId]);
 
   React.useEffect(() => {
     if (node) {
@@ -21384,7 +21424,14 @@ function RcaInspectorDrawer({
     }
   }
 
-  const evidencePhotoItems = draft.attachedEvidence
+  /**
+   * Everything the viewer can page through, linked records included.
+   *
+   * Built from the node's own attachments alone, a linked thumbnail set a key
+   * this list did not contain, `findIndex` answered -1, and the click did
+   * nothing at all with no error to explain it.
+   */
+  const evidencePhotoItems = [...draft.attachedEvidence, ...linkedEvidence]
     .map((item) => ({
       item,
       previewUrl: getEvidencePreviewUrl(item, evidencePreviewUrls)
@@ -21986,7 +22033,7 @@ function RcaInspectorDrawer({
           </section>
         ) : null}
 
-        {shouldShowEvidenceSection ? (
+        {shouldShowEvidenceSection || linkedEvidence.length ? (
         <section
           className="rounded-2xl border border-slate-200 bg-white p-3"
           tabIndex={0}
@@ -21996,26 +22043,30 @@ function RcaInspectorDrawer({
               <FileLock2 aria-hidden="true" className="text-cyan-700" size={17} />
               <h3 className="text-sm font-semibold text-slate-950">Evidence</h3>
             </div>
-            <button
-              className="inline-flex min-h-[34px] items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 shadow-sm transition hover:border-cyan-200 hover:text-cyan-700 active:scale-95"
-              disabled={isDetailReadOnly}
-              onClick={() => {
-                if (inspectedNode) {
-                  onOpenEvidenceLibrary(inspectedNode.id);
-                }
-              }}
-              type="button"
-            >
-              <FileStack aria-hidden="true" size={15} />
-              Add from Library
-            </button>
+            {shouldShowEvidenceSection ? (
+              <button
+                className="inline-flex min-h-[34px] items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 shadow-sm transition hover:border-cyan-200 hover:text-cyan-700 active:scale-95"
+                disabled={isDetailReadOnly}
+                onClick={() => {
+                  if (inspectedNode) {
+                    onOpenEvidenceLibrary(inspectedNode.id);
+                  }
+                }}
+                type="button"
+              >
+                <FileStack aria-hidden="true" size={15} />
+                Add from Library
+              </button>
+            ) : null}
           </div>
-          <div className="mb-3 rounded-2xl border border-cyan-100 bg-cyan-50/45 px-3 py-3 text-sm text-slate-600 outline-none ring-cyan-500/20 transition focus:ring-4">
-            <p className="font-semibold text-slate-800">Attach evidence from the shared library.</p>
-            <p className="mt-1 text-xs leading-4 text-slate-500">
-              Select one or more approved evidence records from the library, then add them to this node. Upload new files from the library window when needed.
-            </p>
-          </div>
+          {shouldShowEvidenceSection ? (
+            <div className="mb-3 rounded-2xl border border-cyan-100 bg-cyan-50/45 px-3 py-3 text-sm text-slate-600 outline-none ring-cyan-500/20 transition focus:ring-4">
+              <p className="font-semibold text-slate-800">Attach evidence from the shared library.</p>
+              <p className="mt-1 text-xs leading-4 text-slate-500">
+                Select one or more approved evidence records from the library, then add them to this node. Upload new files from the library window when needed.
+              </p>
+            </div>
+          ) : null}
           {draft.attachedEvidence.length ? (
             <div className="grid grid-cols-2 gap-2">
               {draft.attachedEvidence.map((item) => (
@@ -22030,11 +22081,65 @@ function RcaInspectorDrawer({
                 />
               ))}
             </div>
-          ) : (
+          ) : !shouldShowEvidenceSection || linkedEvidence.length ? null : (
             <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-3 text-sm text-slate-500">
               No evidence attached yet.
             </div>
           )}
+
+          {linkedEvidence.length ? (
+            <div className="mt-3">
+              <div className="mb-2 flex items-center gap-2">
+                <Link2 aria-hidden="true" className="text-cyan-700" size={15} />
+                <p className="text-xs uppercase tracking-[0.18em] text-cyan-700">
+                  From a connected Evidence node
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                {linkedEvidence.map((item) => {
+                  const previewUrl = getEvidencePreviewUrl(item, evidencePreviewUrls);
+
+                  return (
+                    <button
+                      className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white p-2 text-left transition hover:border-cyan-300 hover:bg-cyan-50/40"
+                      key={getEvidenceKey(item)}
+                      onClick={() => {
+                        /**
+                         * The viewer can only show what it has a picture for.
+                         *
+                         * Branching on the file type instead left a tile that
+                         * did nothing at all whenever the thumbnail had not
+                         * arrived yet — the key matched no entry in the viewer's
+                         * list, and nothing opened the file either.
+                         */
+                        if (previewUrl) {
+                          setSelectedEvidencePhotoKey(getEvidenceKey(item));
+                          return;
+                        }
+
+                        handleEvidenceOpenFile(item);
+                      }}
+                      title={`Open ${item.fileName}`}
+                      type="button"
+                    >
+                      <span className="grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
+                        {previewUrl ? (
+                          <img alt="" className="h-full w-full object-cover" src={previewUrl} />
+                        ) : (
+                          <FileLock2 aria-hidden="true" className="text-slate-400" size={15} />
+                        )}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-xs text-slate-700">{item.fileName}</span>
+                        <span className="block text-[10px] text-slate-400">Owned by the Evidence node</span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+          {shouldShowEvidenceSection ? (
           <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 p-3">
             <div className="mb-2 flex items-center gap-2">
               <Link2 aria-hidden="true" className="text-cyan-700" size={16} />
@@ -22064,6 +22169,7 @@ function RcaInspectorDrawer({
               </button>
             </div>
           </div>
+          ) : null}
         </section>
         ) : null}
 
@@ -23021,6 +23127,7 @@ function buildFlowNodes(
 ): RcaFlowNode[] {
   const nodeLayerRankById = getRcaFlowNodeLayerRanks(nodes);
   const missingDataBadgesByNodeId = buildRcaMissingDataBadgesByNodeId(nodes, methodology);
+  const linkedEvidenceByNodeId = buildRcaLinkedEvidenceByNodeId(nodes);
   const flowNodes: RcaFlowNode[] = nodes.map((node, index) => {
     const detail = nodeDetails[node.id];
     const estimatedNodeSize = getRcaNodeSize(node, detail);
@@ -23036,6 +23143,7 @@ function buildFlowNodes(
         incidentId,
         isReferenceProject,
         isRealtimeReady,
+        linkedEvidence: linkedEvidenceByNodeId.get(node.id) || [],
         methodology,
         missingDataBadges: missingDataBadgesByNodeId.get(node.id) || [],
         node,
@@ -26354,9 +26462,20 @@ function getRcaMissingDataBadgesForNode(
   }
 
   if (hasRcaLinkedEvidenceFiles(node, childrenByParentId, nodeById)) {
+    /**
+     * Two different things, said differently.
+     *
+     * Evidence on the node itself is the node's own. Evidence reached through a
+     * connected Evidence node belongs to that node, and saying so tells a reader
+     * where to go to change it.
+     */
+    const isOwnEvidence = Boolean(node.attachedEvidence?.length);
+
     addBadge({
-      label: 'Evidence linked',
-      title: 'This node has linked evidence records available for review.',
+      label: isOwnEvidence ? 'Evidence linked' : 'Evidence node Linked',
+      title: isOwnEvidence
+        ? 'This node has linked evidence records available for review.'
+        : 'A connected Evidence node holds the records shown on this node.',
       tone: 'ready'
     });
   }
@@ -26670,6 +26789,96 @@ function hasRcaEvidenceSupport(
   nodeById: Map<string, RcaNode>
 ): boolean {
   return hasRcaLinkedEvidenceFiles(node, childrenByParentId, nodeById);
+}
+
+/**
+ * Evidence a node can reach but does not hold itself.
+ *
+ * An Evidence node connected to a Cause is the Cause's evidence as far as
+ * anybody reading the canvas is concerned, so the Cause shows it too. It stays
+ * one record: this returns references to the same attachments, and removing one
+ * is still done on the Evidence node that owns it.
+ *
+ * The four routes are the same ones `hasRcaLinkedEvidenceFiles` already treats
+ * as linked, so a node never shows the badge without the files behind it.
+ */
+function collectRcaLinkedEvidence(
+  node: RcaNode,
+  childrenByParentId: Map<string, RcaNode[]>,
+  nodeById: Map<string, RcaNode>
+): RcaAttachedEvidence[] {
+  if (isEvidenceRoleNode(node)) {
+    return [];
+  }
+
+  /**
+   * A library record is identified by its library id, not by its URL.
+   *
+   * `getEvidenceKey` is `fileHash:fileUrl`, and the same record can carry a
+   * different URL depending on whether the library had one when it was
+   * attached — `rails-evidence://` stands in when it did not. Keying on that
+   * counts one file twice. The attach path already guards for this.
+   */
+  const identify = (item: RcaAttachedEvidence) =>
+    getRcaLibraryEvidenceIdFromAttachedEvidence(item) || getEvidenceKey(item);
+  const ownKeys = new Set((node.attachedEvidence || []).map(identify));
+  const collected: RcaAttachedEvidence[] = [];
+  const seenKeys = new Set<string>();
+
+  function take(candidate: RcaNode | undefined) {
+    if (!candidate) {
+      return;
+    }
+
+    (candidate.attachedEvidence || []).forEach((item) => {
+      const key = identify(item);
+
+      // Already on this node, or reached twice by different routes.
+      if (ownKeys.has(key) || seenKeys.has(key)) {
+        return;
+      }
+
+      seenKeys.add(key);
+      collected.push(item);
+    });
+  }
+
+  (childrenByParentId.get(node.id) || []).forEach(take);
+
+  if (node.parentNodeId) {
+    const parentNode = nodeById.get(node.parentNodeId);
+
+    if (parentNode && isEvidenceRoleNode(parentNode)) {
+      take(parentNode);
+    }
+  }
+
+  normalizeRcaLinkedNodeIds(node.linkedNodeIds).forEach((linkedNodeId) => take(nodeById.get(linkedNodeId)));
+
+  return collected;
+}
+
+/** The same, for every node at once, so a canvas is not walked per card. */
+function buildRcaLinkedEvidenceByNodeId(nodes: RcaNode[]): Map<string, RcaAttachedEvidence[]> {
+  const activeNodes = nodes.filter((node) => node.status !== 'DELETED');
+  const nodeById = new Map(activeNodes.map((node) => [node.id, node]));
+  const childrenByParentId = new Map<string, RcaNode[]>();
+
+  activeNodes.forEach((node) => {
+    if (!node.parentNodeId) {
+      return;
+    }
+
+    const siblings = childrenByParentId.get(node.parentNodeId) || [];
+
+    siblings.push(node);
+    childrenByParentId.set(node.parentNodeId, siblings);
+  });
+
+  return new Map(activeNodes.map((node) => [
+    node.id,
+    collectRcaLinkedEvidence(node, childrenByParentId, nodeById)
+  ]));
 }
 
 function hasRcaLinkedEvidenceFiles(
