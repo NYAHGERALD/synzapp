@@ -12084,6 +12084,18 @@ function RcaWorkspaceInner() {
             onAsk={(question, onDelta) => streamRcaKnowledgeBase({
               incidentId: !isReferenceProjectActive && selectedIncident ? selectedIncident.id : undefined,
               question,
+              /**
+               * What the canvas says, sent with the question.
+               *
+               * Without these the guide was asked what was selected while being
+               * told nothing about the selection, and answered anyway. The gap
+               * labels are the same ones the Validate panel shows, so the guide
+               * and the panel cannot disagree.
+               */
+              selectedNodeGaps: (guidedPathSummary.qualityScore.selectedNodeQuality?.gaps || [])
+                .map((gap) => gap.label),
+              selectedNodeId: selectedNode ? selectedNode.id : undefined,
+              selectedSplineCount: selectedFlowEdgeIds.size,
               sessionId: !isReferenceProjectActive && selectedSession ? selectedSession.id : undefined
             }, onDelta)}
             onToggle={() => setIsKnowledgeBaseOpen((isOpen) => !isOpen)}

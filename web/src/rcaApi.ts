@@ -261,6 +261,10 @@ export interface RcaOccurrenceSuggestion {
 export interface RcaKnowledgeAskInput {
   incidentId?: string;
   question: string;
+  /** The Validate panel's own words for what the selected node is missing. */
+  selectedNodeGaps?: string[];
+  selectedNodeId?: string;
+  selectedSplineCount?: number;
   sessionId?: string;
 }
 

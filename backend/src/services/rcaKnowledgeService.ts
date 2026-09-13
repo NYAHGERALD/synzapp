@@ -1,3 +1,4 @@
+import { buildRcaAiContext, type RcaAiContextNode } from './rcaAiContext.js';
 import { DecodedIdToken } from 'firebase-admin/auth';
 import { env } from '../config/env.js';
 import { assertRateLimit } from '../middleware/rateLimit.js';
@@ -15,6 +16,10 @@ import {
 import { assertTenantAiAllowed } from './tenantAiPolicyService.js';
 
 interface RcaKnowledgeAskInput {
+  /** What the canvas says the selected node is missing, as the panel shows it. */
+  selectedNodeGaps?: string[];
+  selectedNodeId?: string;
+  selectedSplineCount?: number;
   incidentId?: string;
   question: string;
   sessionId?: string;
@@ -44,7 +49,30 @@ const RCA_KNOWLEDGE_SYSTEM_PROMPT = [
   'Do not invent regulatory requirements, legal advice, medical advice, or confidential details not provided in the prompt.',
   'Use practical, step-by-step guidance. Be concise, professional, and specific to the user question and the current canvas context.',
   'When RCA canvas context is provided, reference it at a high level and never reveal secrets, tokens, IDs that look internal, or implementation details.',
-  'If the user asks for something outside RCA, redirect them back to RCA analysis.'
+  'If the user asks for something outside RCA, redirect them back to RCA analysis.',
+  /**
+   * The canvas controls, as they actually behave.
+   *
+   * Written from a read of the workspace code rather than from memory. A guide
+   * that describes a control it has imagined is worse than one that says it does
+   * not know, because a user will go looking for it.
+   */
+  'Synzapp canvas controls, in the bar at the foot of the canvas: Incident opens the incident launcher. Main View is the canvas methodology. Rearrange Canvas re-runs the automatic layout, moves every node and saves the new positions, and can be undone. Present starts presentation mode. Branches steps through the Fishbone categories one at a time. Validate opens the validation panel. Connect opens connection recommendations. Focus is an on/off switch.',
+  'Synzapp Validate: the panel checks only the node that is currently selected and lists that node\'s missing required fields. The number on the Validate button is the count of missing fields on the selected node, so it is 0 when nothing is selected. It does not validate the whole case.',
+  'Synzapp Connect: the panel suggests the next node for the selected node and each row both creates that node and draws the connection. Its suggestions are fixed product rules, not AI.',
+  'Synzapp Present: presentation mode hides the toolbars and walks fixed steps — RCA overview, Incident path, one step per Fishbone branch, Root causes, then CAPA and closure. Arrow keys move between steps and Escape leaves. The canvas cannot be edited while presenting.',
+  'Synzapp Branches: the walkthrough zooms to each Fishbone branch in turn. It only changes the view; it never moves a node.',
+  'Synzapp history: Cmd/Ctrl+Z undoes and Cmd/Ctrl+Shift+Z redoes canvas changes, including a Rearrange. Switching methodology or reloading the canvas clears that history.',
+  'Synzapp evidence ownership: Evidence nodes hold the files. Another node counts as having evidence when a connected Evidence node holds it, and such a node shows "Evidence node Linked" rather than "Evidence linked". Adding, renaming and removing evidence is done on the Evidence node that owns it, not on the node it supports.',
+  /**
+   * The context is fact; the model's guesses are not.
+   *
+   * This is the rule that answers the failure this was built for — asked which
+   * node was selected, with no selection in the prompt, it named one anyway.
+   */
+  'The RCA canvas state given to you is computed from the live canvas and is authoritative. Never contradict it and never guess a fact it could have told you. If it says no node is selected, say nothing is selected. If a detail is not in it — a field\'s contents, who recorded something, a file\'s name — say you cannot see it from here and name the node and panel where the user will find it.',
+  'You are told which required fields are missing, never what the filled ones contain. Do not claim to know a value you were not given, and do not ask the user to confirm personal details back to you.',
+  'Answer only about Root Cause Analysis and using Synzapp to do it. For anything else — general knowledge, other products, code, or Synzapp\'s own security, infrastructure or internals — say it is outside what this guide covers and offer the nearest RCA question you can answer.'
 ].join('\n');
 
 const RCA_GUIDE_FALLBACK = [
@@ -246,7 +274,20 @@ async function buildAuthorizedRcaKnowledgeContext(
     listRcaNodes(decodedToken, input.incidentId, input.sessionId)
   ]);
 
-  return summarizeRcaCanvasForAi(incident, nodesResult.nodes);
+  return buildRcaAiContext({
+    incident: {
+      departmentName: incident.departmentName || '',
+      // The session's methodology is not carried on the incident, and the guide
+      // does not need it to answer; the canvas state speaks for itself.
+      methodology: 'Main View',
+      status: incident.status || '',
+      title: incident.title || ''
+    },
+    nodes: describeNodesForAi(nodesResult.nodes),
+    selectedNodeGaps: (input.selectedNodeGaps || []).map((gap) => String(gap)),
+    selectedNodeId: input.selectedNodeId || null,
+    selectedSplineCount: input.selectedSplineCount || 0
+  });
 }
 
 /**
@@ -449,6 +490,40 @@ async function requestOpenAiRcaGuidance(question: string, context: string): Prom
   } finally {
     clearTimeout(timeout);
   }
+}
+
+/**
+ * Reduces canvas nodes to the handful of facts the guide may see.
+ *
+ * The reduction happens here rather than in the builder, so the builder never
+ * holds an RcaNode at all — it cannot leak a field it was never handed.
+ */
+function describeNodesForAi(nodes: RcaNode[]): RcaAiContextNode[] {
+  const activeNodes = nodes.filter((node) => node.status !== 'DELETED');
+  const activeNodeById = new Map(activeNodes.map((node) => [node.id, node]));
+  const childrenByParentId = new Map<string, RcaNode[]>();
+
+  activeNodes.forEach((node) => {
+    if (!node.parentNodeId || !activeNodeById.has(node.parentNodeId)) {
+      return;
+    }
+
+    const siblings = childrenByParentId.get(node.parentNodeId) || [];
+
+    siblings.push(node);
+    childrenByParentId.set(node.parentNodeId, siblings);
+  });
+
+  return activeNodes.map((node) => ({
+    attachedEvidenceCount: node.attachedEvidence.length,
+    hasReachableEvidence: hasRcaKnowledgeEvidenceSupport(node, childrenByParentId, activeNodeById),
+    id: node.id,
+    isRootCause: Boolean(node.isRootCause),
+    isSuspectedCause: Boolean(node.isSuspectedCause),
+    label: node.label || '',
+    parentNodeId: node.parentNodeId || null,
+    role: node.fiveWhysRole || node.nodeType
+  }));
 }
 
 function summarizeRcaCanvasForAi(incident: RcaIncident, nodes: RcaNode[]): string {

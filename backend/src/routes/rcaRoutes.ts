@@ -94,6 +94,17 @@ const sessionBodySchema = z.object({
 const knowledgeAskBodySchema = z.object({
   incidentId: idParamSchema.optional(),
   question: z.string().trim().min(3).max(1200),
+  /**
+   * What the canvas says is missing, in the panel's own words.
+   *
+   * Taken from the client because the client is where those rules live and is
+   * what the user is looking at; recomputing them here would be a second copy
+   * free to disagree with the badges on screen. It decides nothing but wording
+   * in a prompt, so it is capped rather than trusted.
+   */
+  selectedNodeGaps: z.array(z.string().trim().max(80)).max(12).optional(),
+  selectedNodeId: idParamSchema.optional(),
+  selectedSplineCount: z.number().int().min(0).max(9999).optional(),
   sessionId: idParamSchema.optional()
 });
 
