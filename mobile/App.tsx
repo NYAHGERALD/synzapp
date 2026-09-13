@@ -11,6 +11,7 @@ import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { AdminChatScreen } from './src/screens/AdminChatScreen';
+import { AppIntroScreen } from './src/screens/AppIntroScreen';
 import {
   AppOnboardingScreen,
   SecureLoginPreparationScreen
@@ -83,6 +84,16 @@ function SynzappApp() {
   const [verifiedAdmin, setVerifiedAdmin] = useState<VerifiedOrgAdmin | null>(null);
   const [isOnboardingComplete, setIsOnboardingComplete] = useState<boolean | null>(null);
   const [isRestoringSession, setIsRestoringSession] = useState(true);
+  /**
+   * The opening logo, shown once per launch.
+   *
+   * State rather than anything stored: this component mounts once per process,
+   * so a fresh launch starts true and everything after it — a tab change, a
+   * sign-out, coming back from the background — leaves it false. That is
+   * exactly "opened the app after closing it, or just installed it".
+   */
+  const [isIntroVisible, setIsIntroVisible] = useState(true);
+  const handleIntroFinished = useCallback(() => setIsIntroVisible(false), []);
   /**
    * Whether the chat screen has finished its first load.
    *
@@ -280,7 +291,7 @@ function SynzappApp() {
     <SafeAreaProvider style={styles.safeAreaProvider}>
       <KeyboardProvider>
       <SafeAreaView style={styles.safeArea}>
-        <StatusBar style={theme.isDark ? 'light' : 'dark'} />
+        <StatusBar style={isIntroVisible || !theme.isDark ? 'dark' : 'light'} />
 
         {isOnboardingComplete === false ? (
           <AppOnboardingScreen onComplete={handleAppOnboardingComplete} />
@@ -358,6 +369,7 @@ function SynzappApp() {
         </View>
         )}
       </SafeAreaView>
+      {isIntroVisible ? <AppIntroScreen onFinished={handleIntroFinished} /> : null}
       </KeyboardProvider>
     </SafeAreaProvider>
   );
