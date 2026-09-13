@@ -553,6 +553,10 @@ import {
   updateCachedChatMessageMedia,
   updatePendingChatMessage
 } from '../services/localChatStore';
+import {
+  describeMobileSeatHolder,
+  isMobileSeatHeldError
+} from '../services/mobileSeatConflict';
 import type {
   LocalConversationRecord,
   LocalCachedChatMediaRecord,
@@ -3648,6 +3652,46 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
     }
   }
 
+  function promptToMoveChatToThisPhone(displacedDeviceId: string, otherPhone: string) {
+    Alert.alert(
+      'Chat is on another phone',
+      `${otherPhone} is signed in to chat for this account. Chat can only be on one phone, so moving it here will sign that one out and remove its copy of your messages.`,
+      [
+        {
+          style: 'cancel',
+          text: 'Cancel'
+        },
+        {
+          onPress: () => {
+            void moveChatToThisPhone(displacedDeviceId);
+          },
+          style: 'destructive',
+          text: 'Move chat here'
+        }
+      ]
+    );
+  }
+
+  async function moveChatToThisPhone(displacedDeviceId: string) {
+    try {
+      const registrationToken = await getIdToken();
+      const device = await ensureRegisteredDeviceIdentity(registrationToken, {
+        claimFromMobileDeviceId: displacedDeviceId
+      });
+
+      setRegisteredDeviceId(device.deviceId);
+      void registerCurrentDevicePushToken(registrationToken);
+      setError(null);
+    } catch (nextError) {
+      // The claim needs a recent sign-in, so the most likely refusal here is a
+      // session that has been open too long. Say what to do about it.
+      setError(getErrorMessage(
+        nextError,
+        'Chat could not be moved to this phone. Sign in again and try once more.'
+      ));
+    }
+  }
+
   async function registerCurrentDeviceIdentity(idToken?: string) {
     if (deviceIdentityRegistrationStartedRef.current) {
       return;
@@ -3663,6 +3707,25 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
       void registerCurrentDevicePushToken(registrationToken);
     } catch (nextError) {
       deviceIdentityRegistrationStartedRef.current = false;
+
+      /**
+       * Chat lives on one phone, and this one is not it — yet.
+       *
+       * Asked before anything is destroyed, and the other phone is described by
+       * what it is and when it was last used. There is no honest way to say "this
+       * is the handset you just reinstalled": the identifier that would prove it
+       * is minted in the same blob the reinstall destroyed. So the facts are
+       * offered and the person decides.
+       */
+      if (isMobileSeatHeldError(nextError) && nextError.seat.deviceId) {
+        promptToMoveChatToThisPhone(nextError.seat.deviceId, describeMobileSeatHolder(
+          nextError.seat,
+          Date.now()
+        ));
+
+        return;
+      }
+
       console.warn(
         'Device identity registration failed:',
         getErrorMessage(nextError, 'Unable to register this device.')

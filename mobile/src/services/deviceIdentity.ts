@@ -9,6 +9,7 @@ import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 import nacl from 'tweetnacl';
 import { getSynzappApiBaseUrl } from './apiConfig';
+import { isMobileSeatHeldError, readMobileSeatHeldError } from './mobileSeatConflict';
 
 type DevicePlatform = 'android' | 'ios' | 'unknown' | 'web';
 
@@ -76,15 +77,20 @@ const legacySecureStoreOptions: SecureStore.SecureStoreOptions = {
 let isNaclPrngConfigured = false;
 const registeredDeviceIdentityPromises = new Map<string, Promise<RegisteredDeviceIdentity>>();
 
-export async function ensureRegisteredDeviceIdentity(idToken: string): Promise<RegisteredDeviceIdentity> {
+export async function ensureRegisteredDeviceIdentity(
+  idToken: string,
+  options: { claimFromMobileDeviceId?: string } = {}
+): Promise<RegisteredDeviceIdentity> {
   const storageKey = getDeviceIdentityStorageKeyForToken(idToken);
   const existingPromise = registeredDeviceIdentityPromises.get(storageKey);
 
-  if (existingPromise) {
+  // A claim is a fresh answer to a refusal, so it must not be served the cached
+  // rejection that prompted the question.
+  if (existingPromise && !options.claimFromMobileDeviceId) {
     return existingPromise;
   }
 
-  const nextPromise = registerDeviceIdentity(idToken, storageKey).catch((error) => {
+  const nextPromise = registerDeviceIdentity(idToken, storageKey, options).catch((error) => {
     registeredDeviceIdentityPromises.delete(storageKey);
     throw error;
   });
@@ -161,29 +167,38 @@ async function clearStoredDeviceIdentity(storageKey: string): Promise<void> {
 
 async function registerDeviceIdentity(
   idToken: string,
-  storageKey: string
+  storageKey: string,
+  options: { claimFromMobileDeviceId?: string } = {}
 ): Promise<RegisteredDeviceIdentity> {
   const identity = await ensureLocalDeviceIdentity(storageKey);
   try {
-    return await submitDeviceIdentityRegistration(idToken, identity);
+    return await submitDeviceIdentityRegistration(idToken, identity, options);
   } catch (error) {
-    if (!isDeviceIdentityAlreadyRegisteredError(error)) {
+    // A held seat is a question for the person, not a broken identity. Rotating
+    // the keys would throw away this handset's identity and change nothing.
+    if (isMobileSeatHeldError(error) || !isDeviceIdentityAlreadyRegisteredError(error)) {
       throw error;
     }
 
     const nextIdentity = await rotateLocalDeviceIdentity(storageKey);
 
-    return submitDeviceIdentityRegistration(idToken, nextIdentity);
+    return submitDeviceIdentityRegistration(idToken, nextIdentity, options);
   }
 }
 
 async function submitDeviceIdentityRegistration(
   idToken: string,
-  identity: StoredDeviceIdentity
+  identity: StoredDeviceIdentity,
+  options: { claimFromMobileDeviceId?: string } = {}
 ): Promise<RegisteredDeviceIdentity> {
   const publicIdentity = getPublicDeviceIdentity(identity);
   const response = await fetch(`${getSynzappApiBaseUrl()}/api/profile/me/devices`, {
-    body: JSON.stringify(publicIdentity),
+    body: JSON.stringify({
+      ...publicIdentity,
+      ...(options.claimFromMobileDeviceId
+        ? { claimFromMobileDeviceId: options.claimFromMobileDeviceId }
+        : {})
+    }),
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${idToken}`,
@@ -192,11 +207,35 @@ async function submitDeviceIdentityRegistration(
     method: 'POST'
   });
 
+  /**
+   * The body is read once, and used for both jobs.
+   *
+   * A refusal because another phone holds chat is a question somebody can answer,
+   * so it has to keep its code rather than be flattened into a message — matching
+   * on the wording of an error is how a revoked device ended up not recognising
+   * itself.
+   */
+  const body = await response.json().catch(() => null) as
+    | { code?: string; details?: Record<string, unknown>; device?: RegisteredDeviceIdentity; error?: string }
+    | null;
+
   if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
+    const seatHeld = readMobileSeatHeldError({ body, status: response.status });
+
+    if (seatHeld) {
+      throw seatHeld;
+    }
+
+    throw new Error(
+      typeof body?.error === 'string' && body.error.trim()
+        ? body.error
+        : 'Unable to register this device.'
+    );
   }
 
-  const body = await response.json() as { device: RegisteredDeviceIdentity };
+  if (!body?.device) {
+    throw new Error('Unable to register this device.');
+  }
 
   return body.device;
 }
