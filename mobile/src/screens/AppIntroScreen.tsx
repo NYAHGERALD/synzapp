@@ -20,16 +20,10 @@ const LOGO_SOURCE = require('../../assets/Synzapp-Nav.png');
 /**
  * The first thing drawn on a cold start, before anything else is ready.
  *
- * Deliberately fixed in both themes. It is the brand's own ground rather than
+ * Deliberately light in both themes. It is the brand's own ground rather than
  * the app's, the way an opening screen is fixed everywhere else, so it does not
  * read as two different products depending on a phone setting. That is why the
  * colours come from `lightColors` directly instead of the active theme.
- *
- * It keeps a pale corner at the top left and deepens to full red, which is what
- * gives the flat colour its light source. The status bar switches to white text
- * while this is up, because dark text on this ground cannot be read.
- *
- * `red` rather than `destructive` — this is a background, not a warning.
  *
  * It covers the screen rather than replacing it, so everything behind mounts
  * and loads while the logo is still animating.
@@ -90,9 +84,9 @@ export function AppIntroScreen({ onFinished }: { onFinished: () => void }) {
       <Svg height="100%" style={StyleSheet.absoluteFill} width="100%">
         <Defs>
           <LinearGradient id="synzappIntroWash" x1="0" x2="0.35" y1="0" y2="1">
-            <Stop offset="0" stopColor={lightColors.redSoft} stopOpacity="1" />
-            <Stop offset="0.35" stopColor={lightColors.red} stopOpacity="0.8" />
-            <Stop offset="1" stopColor={lightColors.red} stopOpacity="1" />
+            <Stop offset="0" stopColor={lightColors.groupedCard} stopOpacity="1" />
+            <Stop offset="0.52" stopColor={lightColors.blueSoft} stopOpacity="0.55" />
+            <Stop offset="1" stopColor={lightColors.link} stopOpacity="0.18" />
           </LinearGradient>
         </Defs>
         <Rect fill="url(#synzappIntroWash)" height="100%" width="100%" x="0" y="0" />
@@ -115,7 +109,7 @@ export function AppIntroScreen({ onFinished }: { onFinished: () => void }) {
 const styles = StyleSheet.create({
   screen: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: lightColors.redSoft
+    backgroundColor: lightColors.groupedCard
   },
   logoWrap: {
     alignItems: 'center',
