@@ -21119,6 +21119,103 @@ h1 {
   margin-top: 14px;
 }
 
+/**
+ * The organization device console.
+ *
+ * Borrows the settings row's shape so a device reads as one more row on the same
+ * page, rather than a panel bolted on. Signing a phone out is destructive, so
+ * that one control is the only thing here in the destructive colour.
+ */
+.settings-row-button {
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--surface-rule);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  width: 100%;
+}
+
+.settings-row-button:hover .settings-row-text h3 { color: var(--accent, #0f6cbd); }
+
+.tenant-devices-actions { display: flex; gap: 8px; }
+
+.tenant-devices-action {
+  align-items: center;
+  background: none;
+  border: 1px solid var(--surface-rule);
+  border-radius: 6px;
+  color: var(--surface-muted);
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  font-size: 13px;
+  gap: 6px;
+  padding: 5px 10px;
+}
+
+.tenant-devices-action:hover:not(:disabled) { color: var(--surface-heading); }
+.tenant-devices-action:disabled { cursor: not-allowed; opacity: 0.5; }
+
+.tenant-devices-error {
+  border-left: 3px solid #d13438;
+  color: #d13438;
+  font-size: 14px;
+  margin: 0 0 12px;
+  padding-left: 12px;
+}
+
+.tenant-devices-empty { color: var(--surface-muted); font-size: 14px; margin: 0; }
+
+.tenant-devices-subhead {
+  color: var(--surface-muted);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  margin: 20px 0 0;
+  text-transform: uppercase;
+}
+
+.tenant-device {
+  align-items: center;
+  border-bottom: 1px solid var(--surface-rule);
+  display: flex;
+  gap: 16px;
+  padding: 14px 0;
+}
+
+.tenant-device-text { flex: 1 1 auto; min-width: 0; }
+
+.tenant-device-text h3 {
+  color: var(--surface-heading);
+  font-size: 15px;
+  font-weight: 500;
+  margin: 0 0 3px;
+}
+
+.tenant-device-text p {
+  color: var(--surface-muted);
+  font-size: 13.5px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.tenant-device-revoke {
+  background: none;
+  border: 1px solid #d13438;
+  border-radius: 6px;
+  color: #d13438;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 12px;
+}
+
+.tenant-device-revoke:hover:not(:disabled) { background: #d13438; color: #ffffff; }
+.tenant-device-revoke:disabled { cursor: not-allowed; opacity: 0.55; }
+
+.tenant-device-revoked { opacity: 0.6; }
+
 .settings-row {
   align-items: center;
   border-bottom: 1px solid var(--surface-rule);

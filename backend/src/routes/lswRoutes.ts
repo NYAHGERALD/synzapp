@@ -1,7 +1,7 @@
 import { Router } from 'express';
+import { getDecodedTokenFromHeader as getDecodedToken } from '../middleware/requestAuth.js';
 import { z } from 'zod';
 import { verifyAppCheck } from '../middleware/appCheck.js';
-import { verifyFirebaseSession } from '../services/authSessionService.js';
 import { getCompanyKeyResultsForCurrentUser } from '../services/keyResultsService.js';
 import { writeAuditEvent } from '../services/auditService.js';
 import { generateLswExcelExport } from '../services/lswExcelExportService.js';
@@ -789,18 +789,5 @@ lswRouter.delete('/rca-triggers/:triggerId', verifyAppCheck, async (req, res, ne
   }
 });
 
-async function getDecodedToken(authorizationHeader: string) {
-  const idToken = authorizationHeader.startsWith('Bearer ')
-    ? authorizationHeader.slice('Bearer '.length)
-    : '';
-
-  if (!idToken) {
-    const error = new Error('Missing Firebase ID token.');
-    error.name = 'AuthenticationError';
-    throw error;
-  }
-
-  return verifyFirebaseSession(idToken);
-}
 
 export { lswRouter };

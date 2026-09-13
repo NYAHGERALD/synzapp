@@ -1,4 +1,5 @@
 import { Request, Router } from 'express';
+import { getDecodedTokenFromHeader as getDecodedToken } from '../middleware/requestAuth.js';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import { z } from 'zod';
 import {
@@ -87,7 +88,6 @@ import {
 } from '../services/employeeLifecycleService.js';
 import { updateEmployeeDepartmentAdminAssignment } from '../services/employeeDepartmentAdminService.js';
 import { updateEmployeeCompanyRole } from '../services/employeeRoleAssignmentService.js';
-import { verifyFirebaseSession } from '../services/authSessionService.js';
 import { verifyActiveRegisteredDevice } from '../services/deviceIdentityService.js';
 import { writeAuditEvent } from '../services/auditService.js';
 
@@ -891,10 +891,22 @@ adminRouter.post('/scheduled-messages/:scheduledMessageId/cancel', verifyAppChec
   }
 });
 
+/**
+ * Reachable from a browser, deliberately, unlike every other admin route.
+ *
+ * Managing devices is the one job an administrator may have to do *because* a
+ * phone is gone. Requiring a working registered phone meant the person who had
+ * just lost theirs could not revoke it, and nobody could revoke anybody's from a
+ * computer — the browser registers no device at all.
+ *
+ * Nothing is weakened by dropping it: `requireSecurityAdmin` inside the service
+ * demands an active ORG_ADMIN holding `security.manage`, and refuses any device
+ * outside the caller's own tenant. The device header never carried authority
+ * here, only the assumption that an administrator is holding a phone.
+ */
 adminRouter.get('/devices', verifyAppCheck, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
-    await requireActiveRegisteredDevice(req, decodedToken);
     const devices = await listTenantDevices(decodedToken);
 
     res.json({ devices });
@@ -903,10 +915,10 @@ adminRouter.get('/devices', verifyAppCheck, async (req, res, next) => {
   }
 });
 
+/** Also reachable from a browser, for the reason given above. */
 adminRouter.post('/devices/:deviceId/revoke', verifyAppCheck, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
-    await requireActiveRegisteredDevice(req, decodedToken);
     const deviceId = deviceIdParamSchema.parse(
       Array.isArray(req.params.deviceId)
         ? req.params.deviceId[0] || ''
@@ -1623,19 +1635,6 @@ adminRouter.patch('/ai-policy/employees/:employeeUid', verifyAppCheck, async (re
   }
 });
 
-async function getDecodedToken(authorizationHeader: string) {
-  const idToken = authorizationHeader.startsWith('Bearer ')
-    ? authorizationHeader.slice('Bearer '.length)
-    : '';
-
-  if (!idToken) {
-    const error = new Error('Missing Firebase ID token.');
-    error.name = 'AuthenticationError';
-    throw error;
-  }
-
-  return verifyFirebaseSession(idToken);
-}
 
 async function requireActiveRegisteredDevice(req: Request, decodedToken: DecodedIdToken) {
   const parsedDeviceId = deviceIdParamSchema.safeParse(req.header('X-Synzapp-Device-Id') || '');

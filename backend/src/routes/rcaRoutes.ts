@@ -1,7 +1,8 @@
 import { Router } from 'express';
+import { getDecodedTokenFromHeader as getDecodedToken } from '../middleware/requestAuth.js';
 import { z } from 'zod';
 import { verifyAppCheck } from '../middleware/appCheck.js';
-import { buildAuthSession, verifyFirebaseSession } from '../services/authSessionService.js';
+import { buildAuthSession } from '../services/authSessionService.js';
 import { askRcaKnowledgeBase } from '../services/rcaKnowledgeService.js';
 import {
   createRcaIncident,
@@ -551,18 +552,5 @@ rcaRouter.get('/users/:uid/photo', verifyAppCheck, async (req, res, next) => {
   }
 });
 
-async function getDecodedToken(authorizationHeader: string) {
-  const idToken = authorizationHeader.startsWith('Bearer ')
-    ? authorizationHeader.slice('Bearer '.length)
-    : '';
-
-  if (!idToken) {
-    const error = new Error('Missing Firebase ID token.');
-    error.name = 'AuthenticationError';
-    throw error;
-  }
-
-  return verifyFirebaseSession(idToken);
-}
 
 export { rcaRouter };

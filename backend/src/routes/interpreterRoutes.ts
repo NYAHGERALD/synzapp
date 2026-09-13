@@ -1,7 +1,7 @@
 import { Router, type Response, text } from 'express';
+import { getDecodedTokenFromHeader as getDecodedToken } from '../middleware/requestAuth.js';
 import { z } from 'zod';
 import { verifyAppCheck } from '../middleware/appCheck.js';
-import { verifyFirebaseSession } from '../services/authSessionService.js';
 import {
   addInterpreterTranscriptSegment,
   addInterpreterTranslationSegment,
@@ -654,17 +654,6 @@ interpreterRouter.post('/meetings/:meetingId/summaries/:summaryId/audio', verify
   }
 });
 
-async function getDecodedToken(authorizationHeader: string) {
-  const idToken = authorizationHeader.startsWith('Bearer ')
-    ? authorizationHeader.slice('Bearer '.length)
-    : authorizationHeader;
-
-  if (!idToken) {
-    throw authenticationError('Missing authorization token.');
-  }
-
-  return verifyFirebaseSession(idToken);
-}
 
 function authenticationError(message: string): Error {
   const error = new Error(message);

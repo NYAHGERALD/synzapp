@@ -18,7 +18,20 @@ describe('audit coverage foundation', () => {
 
     mutationBlocks.forEach((block) => {
       assert.match(block.header, /verifyAppCheck/, `${block.header} must require App Check middleware.`);
-      assert.match(block.body, /requireActiveRegisteredDevice/, `${block.header} must require an active device.`);
+
+      /**
+       * Revoking a device has to work from a browser.
+       *
+       * It is the one administrator job that may be needed *because* a phone is
+       * gone, and a browser registers no device. Authority comes from
+       * requireSecurityAdmin in the service, which demands an active ORG_ADMIN
+       * holding security.manage and refuses any device outside their tenant. The
+       * audit requirements below still apply in full.
+       */
+      if (!block.header.includes("adminRouter.post('/devices/:deviceId/revoke'")) {
+        assert.match(block.body, /requireActiveRegisteredDevice/, `${block.header} must require an active device.`);
+      }
+
       assert.match(block.body, /writeAuditEvent/, `${block.header} must write an audit event.`);
       assert.match(block.body, /status:\s*'SUCCESS'/, `${block.header} must audit success.`);
       assert.match(block.body, /status:\s*'FAILED'/, `${block.header} must audit failure.`);

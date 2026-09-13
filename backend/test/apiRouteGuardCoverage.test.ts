@@ -19,6 +19,21 @@ describe('API route guard coverage foundation', () => {
     blocks.forEach((block) => {
       assert.match(block.header, /verifyAppCheck/, `${block.header} must require App Check middleware.`);
       assert.match(block.body, /getDecodedToken/, `${block.header} must verify the Firebase session.`);
+
+      if (isBrowserReachableAdminRoute(block.header)) {
+        // Managing devices is the one job an administrator may have to do
+        // because a phone is gone, so it must work from a computer. Asserted so
+        // the exemption stays deliberate and cannot spread: authority here comes
+        // from requireSecurityAdmin in the service, not from a device header.
+        assert.doesNotMatch(
+          block.body,
+          /requireActiveRegisteredDevice/,
+          `${block.header} must not require a registered device — it has to work from a browser.`
+        );
+
+        return;
+      }
+
       assert.match(block.body, /requireActiveRegisteredDevice/, `${block.header} must require an active registered device.`);
     });
   });
@@ -70,6 +85,17 @@ describe('API route guard coverage foundation', () => {
  * these on the device still being ACTIVE addressed the order to a device already
  * blocked from reading it — wiping a lost phone did nothing at all.
  */
+/**
+ * The tenant device console, and nothing else.
+ *
+ * An administrator revoking a lost phone cannot be asked to produce a working
+ * phone, and a browser registers no device at all.
+ */
+function isBrowserReachableAdminRoute(header: string): boolean {
+  return header.includes("adminRouter.get('/devices'") ||
+    header.includes("adminRouter.post('/devices/:deviceId/revoke'");
+}
+
 function requiresOwnedDevice(header: string): boolean {
   return header.includes("profileRouter.get('/me/company-data-wipe-commands'") ||
     header.includes("profileRouter.post('/me/company-data-wipe-commands/:commandId/complete'");

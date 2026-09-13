@@ -3,6 +3,7 @@ import { fieldValue, firestore } from '../config/firebaseAdmin.js';
 import { SynzappRole } from '../types/auth.js';
 import { buildAuthSession } from './authSessionService.js';
 import { createDeviceWipeCommand } from './companyDataWipeService.js';
+import { releaseMobileSeatIfHeldBy } from './deviceIdentityService.js';
 
 interface TenantAdminContext {
   permissions: string[];
@@ -141,6 +142,12 @@ export async function revokeTenantDevice(
   if (!refreshedDeviceSnapshot.exists) {
     throw notFoundError('Device was not found.');
   }
+
+  // The owner's next phone must not be asked to sign out one an administrator
+  // has already revoked.
+  await releaseMobileSeatIfHeldBy(targetUid, safeDeviceId).catch((error) => {
+    console.warn('Unable to release the mobile seat for a revoked device:', error);
+  });
 
   await createDeviceWipeCommand({
     deviceId: safeDeviceId,

@@ -4,8 +4,8 @@ import {
   RETENTION_TEMPLATES
 } from '../services/retentionBoundsService.js';
 import { Router } from 'express';
+import { getDecodedTokenFromHeader as getDecodedToken } from '../middleware/requestAuth.js';
 import { z } from 'zod';
-import { verifyFirebaseSession } from '../services/authSessionService.js';
 import { writeAuditEvent } from '../services/auditService.js';
 import { requireStaff, requireStaffAdmin, listStaff } from '../services/staffAccessService.js';
 import {
@@ -358,20 +358,5 @@ staffRouter.post('/policies/:slug/publish', async (req, res, next) => {
   }
 });
 
-async function getDecodedToken(authorizationHeader: string) {
-  const idToken = authorizationHeader.startsWith('Bearer ')
-    ? authorizationHeader.slice('Bearer '.length)
-    : authorizationHeader;
-
-  if (!idToken) {
-    const error = new Error('Missing authorization token.');
-
-    error.name = 'AuthorizationError';
-
-    throw error;
-  }
-
-  return verifyFirebaseSession(idToken);
-}
 
 export { staffRouter };

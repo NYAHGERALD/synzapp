@@ -1,8 +1,8 @@
 import { timingSafeEqual } from 'node:crypto';
+import { getDecodedTokenFromHeader as getDecodedToken } from '../middleware/requestAuth.js';
 import { Router } from 'express';
 import { z } from 'zod';
 import { verifyAppCheck } from '../middleware/appCheck.js';
-import { verifyFirebaseSession } from '../services/authSessionService.js';
 import { writeAuditEvent } from '../services/auditService.js';
 import { requireComplianceAdmin } from '../services/complianceAccess.js';
 import {
@@ -806,19 +806,5 @@ complianceRouter.post('/retention/explain', verifyAppCheck, async (req, res, nex
   }
 });
 
-async function getDecodedToken(authorizationHeader: string) {
-  const idToken = authorizationHeader.startsWith('Bearer ')
-    ? authorizationHeader.slice('Bearer '.length)
-    : authorizationHeader;
-
-  if (!idToken) {
-    const error = new Error('Missing authorization token.');
-    error.name = 'AuthorizationError';
-
-    throw error;
-  }
-
-  return verifyFirebaseSession(idToken);
-}
 
 export { complianceRouter };

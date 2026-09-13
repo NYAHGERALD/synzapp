@@ -1,7 +1,7 @@
 import { Router } from 'express';
+import { getDecodedTokenFromHeader as getDecodedToken } from '../middleware/requestAuth.js';
 import { z } from 'zod';
 import { createRateLimiter, getClientIp } from '../middleware/rateLimit.js';
-import { verifyFirebaseSession } from '../services/authSessionService.js';
 import { buildAuthSession } from '../services/authSessionService.js';
 import { writeAuditEvent } from '../services/auditService.js';
 import { getPublishedPolicy, isPolicySlug } from '../services/policyDocumentService.js';
@@ -199,20 +199,5 @@ contactRouter.get('/policies/:slug', async (req, res, next) => {
   }
 });
 
-async function getDecodedToken(authorizationHeader: string) {
-  const idToken = authorizationHeader.startsWith('Bearer ')
-    ? authorizationHeader.slice('Bearer '.length)
-    : authorizationHeader;
-
-  if (!idToken) {
-    const error = new Error('Missing authorization token.');
-
-    error.name = 'AuthorizationError';
-
-    throw error;
-  }
-
-  return verifyFirebaseSession(idToken);
-}
 
 export { contactRouter };

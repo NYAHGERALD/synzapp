@@ -672,6 +672,10 @@ export async function revokeCurrentUserDevice(
    * that could not be written is retried the next time the device is revoked
    * rather than undoing a revocation somebody asked for.
    */
+  await releaseMobileSeatIfHeldBy(decodedToken.uid, safeTargetDeviceId).catch((error) => {
+    console.warn('Unable to release the mobile seat for a revoked device:', error);
+  });
+
   await createDeviceWipeCommand({
     deviceId: safeTargetDeviceId,
     reason: 'DEVICE_REVOKED',
@@ -987,6 +991,36 @@ function mobileSeatConflictError(seat: MobileSeatRecord): Error {
       deviceId: seat.deviceId || null,
       platform: seat.platform || null
     }
+  });
+}
+
+/**
+ * Gives up the seat if the device being revoked is the one holding it.
+ *
+ * A seat naming a revoked phone is worse than no seat: the owner's next handset
+ * would be asked to sign out a phone that is already gone, and told to confirm
+ * something that has already happened. Cleared in a transaction that re-reads
+ * the seat, so a phone claiming it at the same moment is not quietly erased.
+ */
+export async function releaseMobileSeatIfHeldBy(uid: string, deviceId: string): Promise<void> {
+  const identityRef = firestore.collection('identityDirectory').doc(uid);
+
+  await firestore.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(identityRef);
+
+    if (!snapshot.exists) {
+      return;
+    }
+
+    const identity = snapshot.data() as { activeMobileSeat?: MobileSeatRecord };
+
+    if (identity.activeMobileSeat?.deviceId !== deviceId) {
+      return;
+    }
+
+    transaction.set(identityRef, {
+      activeMobileSeat: fieldValue.delete()
+    }, { merge: true });
   });
 }
 

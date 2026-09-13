@@ -1,7 +1,7 @@
 import { Router } from 'express';
+import { getDecodedTokenFromHeader as getDecodedToken } from '../middleware/requestAuth.js';
 import { z } from 'zod';
 import { verifyAppCheck } from '../middleware/appCheck.js';
-import { verifyFirebaseSession } from '../services/authSessionService.js';
 import {
   addRailsAction,
   addRailsCollaborator,
@@ -654,17 +654,6 @@ railsRouter.post('/items/:itemId/comments', verifyAppCheck, async (req, res, nex
   }
 });
 
-async function getDecodedToken(authorizationHeader: string) {
-  const idToken = authorizationHeader.startsWith('Bearer ')
-    ? authorizationHeader.slice('Bearer '.length)
-    : authorizationHeader;
-
-  if (!idToken) {
-    throw authorizationError('Missing authorization token.');
-  }
-
-  return verifyFirebaseSession(idToken);
-}
 
 function authorizationError(message: string): Error {
   const error = new Error(message);

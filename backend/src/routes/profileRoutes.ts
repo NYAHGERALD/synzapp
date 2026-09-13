@@ -1,4 +1,5 @@
 import { Request, Router } from 'express';
+import { getDecodedTokenFromHeader as getDecodedToken } from '../middleware/requestAuth.js';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import { z } from 'zod';
 import {
@@ -26,7 +27,6 @@ import {
   updateDirectChatMessageReaction,
   updateCurrentUserProfilePhoto
 } from '../services/userProfileService.js';
-import { verifyFirebaseSession } from '../services/authSessionService.js';
 import {
   getCurrentDeviceSynzappAiStatus,
   listCurrentUserDevices,
@@ -2344,19 +2344,6 @@ profileRouter.post('/org-admin', verifyAppCheck, async (req, res, next) => {
   }
 });
 
-async function getDecodedToken(authorizationHeader: string) {
-  const idToken = authorizationHeader.startsWith('Bearer ')
-    ? authorizationHeader.slice('Bearer '.length)
-    : '';
-
-  if (!idToken) {
-    const error = new Error('Missing Firebase ID token.');
-    error.name = 'AuthenticationError';
-    throw error;
-  }
-
-  return verifyFirebaseSession(idToken);
-}
 
 async function requireActiveRegisteredDevice(req: Request, decodedToken: DecodedIdToken) {
   const deviceId = getDeviceIdFromHeader(req);

@@ -1,7 +1,7 @@
 import { Router } from 'express';
+import { getDecodedTokenFromHeader as getDecodedToken } from '../middleware/requestAuth.js';
 import { z } from 'zod';
 import { verifyAppCheck } from '../middleware/appCheck.js';
-import { verifyFirebaseSession } from '../services/authSessionService.js';
 import { describeReassignmentReason } from '../services/actionReassignment.js';
 import { writeAuditEvent } from '../services/auditService.js';
 import {
@@ -74,20 +74,6 @@ const listQuerySchema = z.object({
   status: z.enum(['OPEN', 'IN_PROGRESS', 'BLOCKED', 'DONE', 'VERIFIED']).optional()
 });
 
-async function getDecodedToken(authorizationHeader: string) {
-  const idToken = authorizationHeader.startsWith('Bearer ')
-    ? authorizationHeader.slice('Bearer '.length)
-    : '';
-
-  if (!idToken) {
-    const error = new Error('Missing Firebase ID token.');
-    error.name = 'AuthorizationError';
-
-    throw error;
-  }
-
-  return verifyFirebaseSession(idToken);
-}
 
 actionRouter.post('/', verifyAppCheck, async (req, res, next) => {
   try {

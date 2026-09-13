@@ -1,5 +1,6 @@
 import React from 'react';
 import { getSynzappApiBaseUrl } from './config';
+import { TenantDevicesPanel } from './TenantDevicesPanel';
 import { PRIVACY_POLICY, SUBPROCESSORS, TERMS_OF_SERVICE } from './policyContent';
 import { SUPPORTED_COUNTRIES, formatPostalCode, getCountryFormat } from './addressFormats';
 import {
@@ -1156,6 +1157,7 @@ function SettingsPage({
 }) {
   const isOrgAdmin = roleCode === 'ORG_ADMIN' || roleCode === 'SYSTEM_ADMIN';
   const isDepartmentAdmin = roleCode === 'DEPT_ADMIN';
+  const [isDevicesPanelOpen, setIsDevicesPanelOpen] = React.useState(false);
   const settingsSections = getAccountSettingsSections({
     isDepartmentAdmin,
     isOrgAdmin,
@@ -1203,6 +1205,10 @@ function SettingsPage({
           </div>
         </section>
 
+        {isDevicesPanelOpen ? (
+          <TenantDevicesPanel onClose={() => setIsDevicesPanelOpen(false)} />
+        ) : null}
+
         {settingsSections.length ? (
           <section className="page-section" aria-labelledby="settings-admin-title">
             <div className="page-section-head">
@@ -1212,6 +1218,12 @@ function SettingsPage({
             <div className="settings-rows">
               {settingsSections.map((section) => (
                 <SettingsRow
+                  // The only row that leads anywhere yet. Revoking a device is
+                  // the one administrator job that may be needed because a phone
+                  // is gone, so it cannot live only on a phone.
+                  onOpen={section.title === 'Organization security'
+                    ? () => setIsDevicesPanelOpen(true)
+                    : undefined}
                   icon={section.icon}
                   key={section.title}
                   status={section.status}
@@ -1287,17 +1299,20 @@ function ProtectionNote({
 
 function SettingsRow({
   icon: Icon,
+  onOpen,
   status,
   subtitle,
   title
 }: {
   icon: React.ComponentType<{ 'aria-hidden': true; size: number }>;
+  /** Given only to rows that lead somewhere. The rest stay plain labels. */
+  onOpen?: () => void;
   status: string;
   subtitle: string;
   title: string;
 }) {
-  return (
-    <article className="settings-row">
+  const body = (
+    <>
       <span className="settings-row-icon">
         <Icon aria-hidden={true} size={18} />
       </span>
@@ -1306,7 +1321,17 @@ function SettingsRow({
         <p>{subtitle}</p>
       </div>
       <span className="settings-row-status">{status}</span>
-    </article>
+    </>
+  );
+
+  if (!onOpen) {
+    return <article className="settings-row">{body}</article>;
+  }
+
+  return (
+    <button className="settings-row settings-row-button" onClick={onOpen} type="button">
+      {body}
+    </button>
   );
 }
 
