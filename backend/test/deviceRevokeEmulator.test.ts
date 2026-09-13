@@ -352,3 +352,144 @@ describe('the mobile seat, run against real data', { skip: !process.env.FIRESTOR
     assert.equal((identity.data() || {}).activeMobileSeat?.deviceId, CURRENT_DEVICE);
   });
 });
+
+/**
+ * Moving chat away must never lock the old phone out for good.
+ *
+ * It did. A revoked device may only re-register if the rule recognises why it
+ * was revoked, and that rule matches the *wording* of the reason. The seat move
+ * wrote a reason that said something true and matched nothing, so somebody who
+ * moved chat to a new phone could never go back — the old one answered "this
+ * device is not authorized" for ever.
+ */
+describe('coming back to a phone chat was moved away from', { skip: !process.env.FIRESTORE_EMULATOR_HOST }, () => {
+  const OTHER_PHONE = 'device_other_phone';
+
+  function registrationInput(deviceId: string, claimFrom?: string) {
+    return {
+      appInstallationId: `install_${deviceId}`,
+      ...(claimFrom ? { claimFromMobileDeviceId: claimFrom } : {}),
+      cryptoProvider: 'nacl',
+      deviceId,
+      identityPublicKey: 'a'.repeat(44),
+      keyAgreementPublicKey: 'b'.repeat(44),
+      keyVersion: 1,
+      platform: 'android' as const,
+      protocolVersion: '1.0',
+      signingPublicKey: 'c'.repeat(44)
+    };
+  }
+
+  function freshToken(uid: string) {
+    return {
+      auth_time: Math.floor(Date.now() / 1000),
+      tenantId: TENANT,
+      uid
+    } as unknown as import('firebase-admin/auth').DecodedIdToken;
+  }
+
+  beforeEach(async () => {
+    process.env.FIREBASE_PROJECT_ID ||= EMULATOR_PROJECT_ID;
+    process.env.FIREBASE_STORAGE_BUCKET ||= `${EMULATOR_PROJECT_ID}.appspot.com`;
+
+    const admin = await import('../src/config/firebaseAdmin.js');
+    firestore = admin.firestore;
+    devices = await import('../src/services/deviceIdentityService.js');
+
+    const organizationRef = firestore.collection('organizations').doc(TENANT);
+
+    await organizationRef.set({ status: 'ACTIVE' }, { merge: true });
+    await firestore.collection('identityDirectory').doc(OWNER).set({
+      permissions: [],
+      profileComplete: true,
+      role: 'EMPLOYEE',
+      status: 'ACTIVE',
+      tenantId: TENANT
+    });
+    await organizationRef.collection('users').doc(OWNER).set({
+      displayName: 'Device Owner',
+      role: 'EMPLOYEE',
+      status: 'ACTIVE',
+      tenantId: TENANT
+    });
+
+    const [ownedDevices, tenantDevices] = await Promise.all([
+      organizationRef.collection('users').doc(OWNER).collection('devices').listDocuments(),
+      organizationRef.collection('deviceKeys').listDocuments()
+    ]);
+
+    await Promise.all([
+      ...ownedDevices.map((doc) => doc.delete()),
+      ...tenantDevices.map((doc) => doc.delete())
+    ]);
+  });
+
+  it('lets the first phone take chat back', async () => {
+    await devices.registerDeviceIdentity(freshToken(OWNER), registrationInput(CURRENT_DEVICE));
+    await devices.registerDeviceIdentity(
+      freshToken(OWNER),
+      registrationInput(OTHER_PHONE, CURRENT_DEVICE)
+    );
+
+    // The old phone is revoked at this point. Going back to it must work.
+    await devices.registerDeviceIdentity(
+      freshToken(OWNER),
+      registrationInput(CURRENT_DEVICE, OTHER_PHONE)
+    );
+
+    const identity = await firestore.collection('identityDirectory').doc(OWNER).get();
+
+    assert.equal((identity.data() || {}).activeMobileSeat?.deviceId, CURRENT_DEVICE);
+    assert.deepEqual(await readStatuses(CURRENT_DEVICE), {
+      tenant: 'ACTIVE',
+      user: 'ACTIVE'
+    });
+  });
+
+  it('clears the revocation marks when it comes back', async () => {
+    // A record that is ACTIVE and still carries why it was revoked reads as two
+    // contradictory things, and the next rule to consult it would get it wrong.
+    await devices.registerDeviceIdentity(freshToken(OWNER), registrationInput(CURRENT_DEVICE));
+    await devices.registerDeviceIdentity(
+      freshToken(OWNER),
+      registrationInput(OTHER_PHONE, CURRENT_DEVICE)
+    );
+    await devices.registerDeviceIdentity(
+      freshToken(OWNER),
+      registrationInput(CURRENT_DEVICE, OTHER_PHONE)
+    );
+
+    const device = await firestore
+      .collection('organizations').doc(TENANT)
+      .collection('deviceKeys').doc(CURRENT_DEVICE)
+      .get();
+    const record = device.data() || {};
+
+    assert.equal(record.status, 'ACTIVE');
+    assert.equal(record.revocationCode, null);
+    assert.equal(record.revocationReason, null);
+  });
+
+  it('still refuses a phone an administrator revoked', async () => {
+    // Only a seat move is reversible by the person. An administrator signing a
+    // phone out must not be undone by signing in on it again.
+    await devices.registerDeviceIdentity(freshToken(OWNER), registrationInput(CURRENT_DEVICE));
+
+    const organizationRef = firestore.collection('organizations').doc(TENANT);
+    const revoked = {
+      revocationReason: 'Signed out by an administrator',
+      status: 'REVOKED'
+    };
+
+    await Promise.all([
+      organizationRef.collection('deviceKeys').doc(CURRENT_DEVICE).set(revoked, { merge: true }),
+      organizationRef.collection('users').doc(OWNER).collection('devices').doc(CURRENT_DEVICE)
+        .set(revoked, { merge: true })
+    ]);
+
+    await assert.rejects(
+      () => devices.registerDeviceIdentity(freshToken(OWNER), registrationInput(CURRENT_DEVICE)),
+      /not authorized/i
+    );
+  });
+});

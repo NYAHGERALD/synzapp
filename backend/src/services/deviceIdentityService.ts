@@ -85,6 +85,8 @@ interface TenantUserRecord {
 
 interface DeviceRecord {
   createdAt?: FirebaseDateLike;
+  /** Why it was revoked, as a value rather than prose. See the reclaim rule. */
+  revocationCode?: string | null;
   cryptoProvider?: string;
   deviceId?: string;
   keyVersion?: number;
@@ -237,6 +239,13 @@ export async function registerDeviceIdentity(
         .collection('deviceKeys')
         .doc(currentSeat.deviceId);
       const displacedFields = {
+        /**
+         * A code, because the rule that decides whether a device may come back
+         * reads this. The existing lifecycle rule matches the *wording* of a
+         * reason, which is how moving chat away locked the old phone out for
+         * good: its reason said something true and matched nothing.
+         */
+        revocationCode: MOBILE_SEAT_MOVED_REVOCATION_CODE,
         revocationReason: 'Chat moved to another phone',
         revokedAt: fieldValue.serverTimestamp(),
         revokedByUid: decodedToken.uid,
@@ -279,6 +288,7 @@ export async function registerDeviceIdentity(
       retirementReason: null,
       revokedAt: null,
       revokedByUid: null,
+      revocationCode: null,
       revocationReason: null,
       signingPublicKey: input.signingPublicKey,
       status: 'ACTIVE',
@@ -818,6 +828,19 @@ async function getDormantDeviceRetirementDays(tenantId: string): Promise<number>
 const DORMANCY_WINDOW_CACHE_MS = 5 * 60 * 1000;
 const dormancyWindowCache = new Map<string, { expiresAtMs: number; retirementDays: number }>();
 
+/**
+ * Moving chat to another phone must never be one-way.
+ *
+ * A device revoked because the person moved chat is not being punished — they
+ * did it, and they can do it back. It is the only revocation that means "not
+ * here at the moment" rather than "not allowed".
+ */
+export const MOBILE_SEAT_MOVED_REVOCATION_CODE = 'MOBILE_SEAT_MOVED';
+
+function isReclaimableRevokedDevice(record: DeviceRecord): boolean {
+  return record.revocationCode === MOBILE_SEAT_MOVED_REVOCATION_CODE;
+}
+
 function canReactivateLifecycleRevokedDevice(
   userDevice: DeviceRecord | null,
   tenantDevice: DeviceRecord | null,
@@ -833,7 +856,8 @@ function canReactivateLifecycleRevokedDevice(
     record.uid === uid &&
     (
       record.status !== 'REVOKED' ||
-      isLifecycleRevokedDevice(record)
+      isLifecycleRevokedDevice(record) ||
+      isReclaimableRevokedDevice(record)
     )
   ));
 }
