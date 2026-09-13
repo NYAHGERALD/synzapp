@@ -9588,7 +9588,7 @@ function RcaWorkspaceInner() {
               linkedNodeIds: nextLinkedNodeIds,
               nodeType: connectionChange.nodeType,
               parentNodeId: connectionChange.parentNodeId
-            }, parentNode),
+            }, parentNode, nodes),
             nodes
           )
         : node
@@ -9782,7 +9782,7 @@ function RcaWorkspaceInner() {
                 connectionHandles: normalizeRcaNodeConnectionHandles(connectionChange.connectionHandles),
                 nodeType: connectionChange.nodeType,
                 parentNodeId: connectionChange.parentNodeId
-              }, parentNode),
+              }, parentNode, workingNodes),
               workingNodes
             )
           : node
@@ -20957,13 +20957,22 @@ function RcaInspectorDrawer({
     if (carriedIncidentFields) {
       Object.assign(syncedDetailFields, carriedIncidentFields);
     }
+
+    const syncedParentNode = syncedDisplayNode.parentNodeId
+      ? nodes.find((candidateNode) => candidateNode.id === syncedDisplayNode.parentNodeId)
+      : null;
+    const carriedGateLabel = getRcaFaultGateLabelToCarryOver(
+      syncedDisplayNode,
+      syncedParentNode,
+      nodes
+    );
     const primaryLabelFieldKey = syncedDisplayNode.nodeType === 'ISHIKAWA_CATEGORY' || syncedDisplayNode.nodeType !== 'WHY'
       ? null
       : getRcaPrimaryLabelFieldKey(fiveWhysNodeRole);
     const syncedPrimaryLabel = primaryLabelFieldKey
       ? (syncedDetailFields[primaryLabelFieldKey] || '').trim()
       : '';
-    const syncedLabel = syncedPrimaryLabel || syncedDisplayNode.label || '';
+    const syncedLabel = carriedGateLabel || syncedPrimaryLabel || syncedDisplayNode.label || '';
 
     if (primaryLabelFieldKey && syncedLabel && syncedDetailFields[primaryLabelFieldKey] !== syncedLabel) {
       syncedDetailFields[primaryLabelFieldKey] = syncedLabel;
@@ -24254,7 +24263,57 @@ function getRcaIncidentCarryOverFields(
   return Object.keys(carried).length ? carried : null;
 }
 
-function applyRcaConnectionDetailFieldUpdates(childNode: RcaNode, parentNode: RcaNode | null | undefined): RcaNode {
+/**
+ * The problem statement, for a Fault Gate that is still carrying a placeholder.
+ *
+ * The gate is the top event the branches hang under, and that is the problem
+ * statement said once. Unlike the Incident pairs this writes the node's label
+ * rather than a detail field, because a Fault Gate has no details of its own.
+ *
+ * A new gate is labelled with the incident title, so that counts as unwritten
+ * alongside an empty label and the bare word — otherwise this would never fire
+ * on a real canvas. The title is read from the Incident node rather than passed
+ * in, so both callers can ask the same question from what they already hold.
+ *
+ * If somebody has since renamed the Incident node, its label no longer matches
+ * the gate's and nothing is carried. That is the safe way to be wrong: a gate
+ * keeps a name that might have been a placeholder, rather than losing one
+ * somebody chose.
+ */
+function getRcaFaultGateLabelToCarryOver(
+  childNode: RcaNode,
+  parentNode: RcaNode | null | undefined,
+  nodes: RcaNode[]
+): string | null {
+  if (childNode.nodeType !== 'FAULT_GATE' || !parentNode || !isProblemRoleNode(parentNode)) {
+    return null;
+  }
+
+  const problemStatement = (parentNode.detailFields?.problemStatement || '').trim() ||
+    (parentNode.label || '').trim();
+
+  if (!problemStatement) {
+    return null;
+  }
+
+  const incidentNode = nodes.find(isIncidentRoleNode);
+
+  return isUnwrittenField(childNode.label, ['Fault Gate', incidentNode?.label || ''])
+    ? problemStatement
+    : null;
+}
+
+function applyRcaConnectionDetailFieldUpdates(
+  childNode: RcaNode,
+  parentNode: RcaNode | null | undefined,
+  nodes: RcaNode[] = []
+): RcaNode {
+  const carriedGateLabel = getRcaFaultGateLabelToCarryOver(childNode, parentNode, nodes);
+
+  if (carriedGateLabel) {
+    return { ...childNode, label: carriedGateLabel };
+  }
+
   const carriedFields = getRcaIncidentCarryOverFields(childNode, parentNode);
 
   if (carriedFields) {
