@@ -336,4 +336,24 @@ Nothing is left open. The plan is ready to build against.
   slot.
 - **Step 4 — nothing to do.** Already built; the step was written on a false
   premise. See the correction above.
-- **Step 5 — not started.** Ready to build. Nothing blocks it.
+- **Step 5 — done.** The seat is enforced where a phone becomes real, a second
+  phone is refused with a code naming the incumbent, confirming moves the seat
+  and revokes and wipes the old handset, a claim needs a sign-in from the last
+  ten minutes and is rate limited, a signed-out handset now recognises itself by
+  code and wipes, and a phone that has just taken over is offered its history
+  back.
+
+### Still open after step 5
+
+- **No web surface for device revocation.** Both revoke routes need an active
+  registered device, so an administrator still needs a working phone to revoke a
+  phone. This feature improves the *employee* case — a replacement evicts the lost
+  handset automatically, where today it stays active forever — but the admin case
+  is unchanged and wants either a web surface or a written break-glass procedure.
+- **The 187 un-gated routes.** Out of scope by decision, not by oversight: the
+  limit is on chat, and compliance, RAILS, LSW, RCA and the interpreter are
+  legitimately multi-surface. Worth revisiting only if the promise ever widens
+  from "chat lives on one phone" to "the account lives on one phone".
+- **Eleven private copies of `getDecodedToken`** and two of
+  `requireActiveRegisteredDevice`, already drifted. Worth extracting before the
+  next change to the session contract, not as part of this one.

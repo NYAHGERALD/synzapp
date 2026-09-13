@@ -3672,6 +3672,52 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
     );
   }
 
+  /**
+   * Offers to bring the conversations over, once chat has moved here.
+   *
+   * Messages do not travel with the seat. They are sealed per device, so a
+   * handset that has just taken over holds none of them and the backup is the
+   * only way they arrive. Left in settings, almost nobody would find it — and
+   * binding chat to one phone is precisely what makes swapping phones routine.
+   *
+   * Only offered when this phone genuinely has nothing: a claim after a
+   * reinstall, where the cache survived, should not invite somebody to merge a
+   * backup over messages they can already see.
+   */
+  async function offerToBringChatHistoryOver() {
+    const tenantId = getActiveTenantId();
+
+    if (!tenantId) {
+      return;
+    }
+
+    const cached = await listCachedChatConversations({
+      ownerUid: currentUid,
+      tenantId
+    }).catch(() => []);
+
+    if (cached.length) {
+      return;
+    }
+
+    Alert.alert(
+      'Bring your chats to this phone?',
+      'Your messages are on your other phone, not on this one. If your organization keeps encrypted backups, they can be restored here.',
+      [
+        {
+          style: 'cancel',
+          text: 'Not now'
+        },
+        {
+          onPress: () => {
+            void handleRestoreChatBackup();
+          },
+          text: 'Restore'
+        }
+      ]
+    );
+  }
+
   async function moveChatToThisPhone(displacedDeviceId: string) {
     try {
       const registrationToken = await getIdToken();
@@ -3682,6 +3728,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
       setRegisteredDeviceId(device.deviceId);
       void registerCurrentDevicePushToken(registrationToken);
       setError(null);
+      void offerToBringChatHistoryOver();
     } catch (nextError) {
       // The claim needs a recent sign-in, so the most likely refusal here is a
       // session that has been open too long. Say what to do about it.
