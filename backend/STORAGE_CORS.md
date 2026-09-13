@@ -29,5 +29,12 @@ Nothing is opened for reading: downloads still go through the API, which checks
 who is asking. A wildcard origin would let any website on the internet use a
 signed URL it somehow obtained, so the list is explicit.
 
-Add a production domain here when one is pointed at the app, or uploads from it
-will fail with a CORS error and no other symptom.
+The customer app is `synzapp.com`, plus the two Firebase Hosting names the same
+site answers on and the local dev server.
+
+`admin.synzapp.com` is deliberately **not** here. That is Synzapp's own staff
+console, and it uploads nothing — it sets what each organization is allowed and
+never sends a file. Origins that do not upload do not get upload access.
+
+Add a domain here if the customer app is ever served from another one, or
+uploads from it fail with a CORS error and no other symptom.

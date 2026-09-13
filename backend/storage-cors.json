@@ -1,10 +1,10 @@
 [
   {
     "origin": [
+      "https://synzapp.com",
+      "https://www.synzapp.com",
       "https://synzapp-a7ee3.web.app",
       "https://synzapp-a7ee3.firebaseapp.com",
-      "https://synzapp-admin.web.app",
-      "https://admin.synzapp.com",
       "http://localhost:5173"
     ],
     "method": ["PUT", "OPTIONS"],
