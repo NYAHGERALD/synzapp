@@ -197,8 +197,18 @@
   gap: 12px;
   min-height: 0;
   overflow: auto;
+  /* 18 up + 54 tall + 14 clear is the room the upload button needs below it. */
   padding: 0 14px 86px;
   scrollbar-width: none;
+}
+
+/*
+ * While linking, that button sits above the footer, so the gutter grows with it.
+ * Without this the raised button covers the last row's visibility pill once the
+ * list is scrolled to the end.
+ */
+.shared-evidence-library-list.is-linking {
+  padding-bottom: 142px;
 }
 
 .shared-evidence-library-list::-webkit-scrollbar,
@@ -447,6 +457,58 @@
   cursor: not-allowed;
   opacity: 0.45;
   transform: none;
+}
+
+/* Same treatment RAILS gives its dropzone, so a drag reads the same in both. */
+.shared-evidence-upload-dropzone.is-dragging {
+  background: #eff6ff;
+  border-color: rgba(37, 99, 235, 0.58);
+  outline: none;
+}
+
+/*
+ * The link footer draws above the button, so in selection mode it clears it.
+ * 74 up + 54 tall + 14 clear is the 142 the list reserves below.
+ */
+.shared-evidence-library-upload-fab.is-above-footer {
+  bottom: 74px;
+}
+
+/*
+ * Shown over the whole library while files are dragged onto it.
+ *
+ * pointer-events stay off: this sits above the list, and a veil that swallowed
+ * the drag would fire dragleave the instant it appeared and flicker.
+ */
+.shared-evidence-library-dropveil {
+  align-items: center;
+  background: rgba(239, 246, 255, 0.92);
+  border: 2px dashed rgba(37, 99, 235, 0.55);
+  border-radius: 16px;
+  color: #1d4ed8;
+  display: grid;
+  gap: 10px;
+  inset: 0;
+  justify-items: center;
+  pointer-events: none;
+  position: absolute;
+  z-index: 6;
+}
+
+.shared-evidence-library-dropveil strong {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.shared-evidence-library-dropveil span {
+  align-items: center;
+  background: #ffffff;
+  border-radius: 999px;
+  box-shadow: 0 14px 30px rgba(37, 99, 235, 0.22);
+  display: inline-flex;
+  height: 62px;
+  justify-content: center;
+  width: 62px;
 }
 
 .shared-evidence-library-icon-action.is-danger:not(:disabled) {

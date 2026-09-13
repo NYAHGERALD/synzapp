@@ -117,6 +117,17 @@ export function EvidenceLibraryWindow({
   const [editorEvidenceId, setEditorEvidenceId] = React.useState('');
   const [selectedEvidenceIds, setSelectedEvidenceIds] = React.useState<Set<string>>(() => new Set());
   const [isUploadModalOpen, setIsUploadModalOpen] = React.useState(false);
+  const [isUploadDragActive, setIsUploadDragActive] = React.useState(false);
+  const [isWindowDragActive, setIsWindowDragActive] = React.useState(false);
+  /**
+   * Depth, not a boolean.
+   *
+   * dragenter and dragleave fire for every child the pointer crosses, so a flag
+   * set on enter is cleared again the moment the cursor moves from the header
+   * onto a card. Counting enters against leaves is what survives a window with
+   * this many children.
+   */
+  const windowDragDepthRef = React.useRef(0);
   const [draftFiles, setDraftFiles] = React.useState<File[]>([]);
   const [uploadProgress, setUploadProgress] = React.useState(0);
   const [isFullscreen, setIsFullscreen] = React.useState(false);
@@ -335,6 +346,63 @@ export function EvidenceLibraryWindow({
 
     window.addEventListener('pointermove', handlePointerMove);
     window.addEventListener('pointerup', handlePointerUp);
+  }
+
+  /**
+   * Whether a drag is carrying files, rather than selected text or a link.
+   *
+   * Without this the whole window lights up when somebody drags a word across
+   * it, and the drop does nothing because there was never a file in it.
+   */
+  function isFileDrag(event: React.DragEvent<HTMLElement>): boolean {
+    return Array.from(event.dataTransfer.types || []).includes('Files');
+  }
+
+  function handleWindowDragEnter(event: React.DragEvent<HTMLElement>) {
+    if (!isFileDrag(event) || isSaving) {
+      return;
+    }
+
+    event.preventDefault();
+    windowDragDepthRef.current += 1;
+    setIsWindowDragActive(true);
+  }
+
+  function handleWindowDragLeave(event: React.DragEvent<HTMLElement>) {
+    if (!isFileDrag(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    windowDragDepthRef.current = Math.max(0, windowDragDepthRef.current - 1);
+
+    if (!windowDragDepthRef.current) {
+      setIsWindowDragActive(false);
+    }
+  }
+
+  /**
+   * Dropping anywhere on the library opens the upload panel with the files in it.
+   *
+   * Somebody dragging a file at a library means to add it there; making them
+   * find the upload button first and drop a second time is a step that exists
+   * only because of how the screen is built.
+   */
+  function handleWindowDrop(event: React.DragEvent<HTMLElement>) {
+    if (!isFileDrag(event) || isSaving) {
+      return;
+    }
+
+    event.preventDefault();
+    windowDragDepthRef.current = 0;
+    setIsWindowDragActive(false);
+
+    if (!event.dataTransfer.files.length) {
+      return;
+    }
+
+    setIsUploadModalOpen(true);
+    handleUploadFiles(event.dataTransfer.files);
   }
 
   function handleUploadFiles(files: FileList | File[]) {
@@ -667,6 +735,39 @@ export function EvidenceLibraryWindow({
     };
   }, [hintUploader?.profilePhotoCacheKey, hintUploader?.profilePhotoUrl, resolveProfilePhotoUrl]);
 
+  React.useEffect(() => {
+    if (!isOpen || typeof window === 'undefined') {
+      return undefined;
+    }
+
+    /**
+     * Swallows file drops that miss the library.
+     *
+     * A browser's default for a dropped file is to open it, which navigates away
+     * from the workspace and loses everything unsaved in it. Nothing guarded
+     * against that before; it mattered less when the app never invited a drag.
+     * Now that the library lights up and asks for one, a near miss is likely.
+     *
+     * The library's own handlers sit below this on the path and have already
+     * run, so this only ever catches what they did not.
+     */
+    function swallowStrayFileDrop(event: DragEvent) {
+      if (!Array.from(event.dataTransfer?.types || []).includes('Files')) {
+        return;
+      }
+
+      event.preventDefault();
+    }
+
+    window.addEventListener('dragover', swallowStrayFileDrop);
+    window.addEventListener('drop', swallowStrayFileDrop);
+
+    return () => {
+      window.removeEventListener('dragover', swallowStrayFileDrop);
+      window.removeEventListener('drop', swallowStrayFileDrop);
+    };
+  }, [isOpen]);
+
   if (!isOpen || typeof document === 'undefined') {
     return null;
   }
@@ -676,9 +777,23 @@ export function EvidenceLibraryWindow({
       <section
         aria-label={title}
         className={`shared-evidence-library-window ${isFullscreen ? 'is-fullscreen' : ''}`}
+        onDragEnter={handleWindowDragEnter}
+        onDragLeave={handleWindowDragLeave}
+        onDragOver={(event) => {
+          if (isFileDrag(event)) {
+            event.preventDefault();
+          }
+        }}
+        onDrop={handleWindowDrop}
         ref={windowRef}
         style={windowStyle}
       >
+        {isWindowDragActive ? (
+          <div aria-hidden="true" className="shared-evidence-library-dropveil">
+            <span><UploadCloud size={30} /></span>
+            <strong>Drop files to add them to the library</strong>
+          </div>
+        ) : null}
         <header className="shared-evidence-library-header" onPointerDown={handleHeaderPointerDown}>
           <span className="shared-evidence-drag-handle" aria-hidden="true">
             <Move size={15} />
@@ -743,7 +858,7 @@ export function EvidenceLibraryWindow({
           </div>
         </div>
 
-        <div className={`shared-evidence-library-list is-${viewStyle}${filteredEvidence.length ? '' : ' is-empty'}`}>
+        <div className={`shared-evidence-library-list is-${viewStyle}${isSelectionMode ? ' is-linking' : ''}${filteredEvidence.length ? '' : ' is-empty'}`}>
           {isLoading && !filteredEvidence.length ? (
             <div className="shared-evidence-library-empty">
               <UploadCloud aria-hidden="true" size={22} />
@@ -884,17 +999,21 @@ export function EvidenceLibraryWindow({
           </div>
         ) : null}
 
-        {!isSelectionMode ? (
-          <button
-            aria-label="Upload evidence"
-            className="shared-evidence-library-upload-fab"
-            disabled={isSaving}
-            onClick={() => setIsUploadModalOpen(true)}
-            type="button"
-          >
-            <UploadCloud aria-hidden="true" size={21} />
-          </button>
-        ) : null}
+        {/*
+          * Shown while linking too. Somebody attaching evidence to a node is
+          * exactly the person most likely to find the file is not in here yet,
+          * and hiding the button sent them out of the flow to add it.
+          * Lifted clear of the link footer, which draws above it.
+          */}
+        <button
+          aria-label="Upload evidence"
+          className={`shared-evidence-library-upload-fab ${isSelectionMode ? 'is-above-footer' : ''}`}
+          disabled={isSaving}
+          onClick={() => setIsUploadModalOpen(true)}
+          type="button"
+        >
+          <UploadCloud aria-hidden="true" size={21} />
+        </button>
 
         {!isFullscreen ? (
           <>
@@ -1053,11 +1172,24 @@ export function EvidenceLibraryWindow({
               </button>
             </header>
             <button
-              className="shared-evidence-upload-dropzone"
+              className={`shared-evidence-upload-dropzone ${isUploadDragActive ? 'is-dragging' : ''}`}
               onClick={() => uploadInputRef.current?.click()}
+              onDragEnter={(event) => {
+                if (isFileDrag(event)) {
+                  event.preventDefault();
+                  setIsUploadDragActive(true);
+                }
+              }}
+              onDragLeave={(event) => {
+                event.preventDefault();
+                if (event.currentTarget === event.target) {
+                  setIsUploadDragActive(false);
+                }
+              }}
               onDragOver={(event) => event.preventDefault()}
               onDrop={(event) => {
                 event.preventDefault();
+                setIsUploadDragActive(false);
                 handleUploadFiles(event.dataTransfer.files);
               }}
               type="button"
