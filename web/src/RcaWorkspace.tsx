@@ -24208,19 +24208,20 @@ function isValidHexColor(color: string | null | undefined): color is string {
  * "What Happened?" is never truly empty — it mirrors the node's title, so a
  * fresh node holds the default "Incident details". That placeholder has to be
  * recognised rather than treated as content, or the copy would never fire.
- * "When Did It Happen?" mirrors nothing, so empty is the only placeholder.
+ * "When Did It Happen?" and "Where Did It Happen?" mirror nothing, so empty is
+ * the only placeholder for those.
  */
 function getRcaIncidentCarryOverFields(
   childNode: RcaNode,
   parentNode: RcaNode | null | undefined
-): { whatHappened?: string; whenDidItHappen?: string } | null {
+): { whatHappened?: string; whenDidItHappen?: string; whereDidItHappen?: string } | null {
   if (!isIncidentDetailsRoleNode(childNode) || !parentNode || !isIncidentRoleNode(parentNode)) {
     return null;
   }
 
   const incidentFields = parentNode.detailFields || {};
   const existingFields = childNode.detailFields || {};
-  const carried: { whatHappened?: string; whenDidItHappen?: string } = {};
+  const carried: { whatHappened?: string; whenDidItHappen?: string; whereDidItHappen?: string } = {};
   const incidentDescription = (incidentFields.incidentDescription || '').trim();
 
   if (incidentDescription && isUnwrittenField(existingFields.whatHappened, [
@@ -24242,6 +24243,12 @@ function getRcaIncidentCarryOverFields(
 
   if (incidentMoment && isUnwrittenField(existingFields.whenDidItHappen, [])) {
     carried.whenDidItHappen = incidentMoment;
+  }
+
+  const incidentLocation = (incidentFields.areaLocation || '').trim();
+
+  if (incidentLocation && isUnwrittenField(existingFields.whereDidItHappen, [])) {
+    carried.whereDidItHappen = incidentLocation;
   }
 
   return Object.keys(carried).length ? carried : null;
