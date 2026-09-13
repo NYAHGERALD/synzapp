@@ -9605,6 +9605,16 @@ function RcaWorkspaceInner() {
         auditIntent,
         connectionHandles: normalizeRcaNodeConnectionHandles(connectionChange.connectionHandles),
         ...(nextChildNode?.detailFields ? { detailFields: nextChildNode.detailFields } : {}),
+        /**
+         * Sent only when connecting actually renamed the node.
+         *
+         * Carrying the incident description into Incident Details retitles it,
+         * and the label was not part of this request before — so the server's
+         * reply would have arrived with the old title and undone it on screen.
+         */
+        ...(nextChildNode && nextChildNode.label !== childNode.label
+          ? { label: nextChildNode.label }
+          : {}),
         ...(nextChildNode ? {
           isRootCause: nextChildNode.isRootCause,
           isSuspectedCause: nextChildNode.isSuspectedCause
@@ -24170,6 +24180,43 @@ function isValidHexColor(color: string | null | undefined): color is string {
 }
 
 function applyRcaConnectionDetailFieldUpdates(childNode: RcaNode, parentNode: RcaNode | null | undefined): RcaNode {
+  /**
+   * Carries the incident's description into Incident Details on connection.
+   *
+   * The two fields are the same account of the same event, and retyping it is
+   * how they drift apart. Connecting the nodes is the moment the user says they
+   * belong together, so that is when it is copied.
+   *
+   * Only into a field nobody has written in. "What Happened?" is never truly
+   * empty — it mirrors the node's title, so a fresh node holds the default
+   * "Incident details" — and anything else there is somebody's own words and is
+   * left alone.
+   *
+   * Because it mirrors the title, the node is retitled to match. That is the
+   * existing design and the same thing happens when the field is typed by hand,
+   * so the copy behaves no differently from doing it manually.
+   */
+  if (isIncidentDetailsRoleNode(childNode) && parentNode && isIncidentRoleNode(parentNode)) {
+    const incidentDescription = (parentNode.detailFields?.incidentDescription || '').trim();
+    const existingFields = childNode.detailFields || {};
+    const existingAccount = (existingFields.whatHappened || '').trim();
+    const defaultLabel = getDefaultRcaNodeRoleLabel('INCIDENT_DETAILS');
+    const isUnwritten = !existingAccount ||
+      existingAccount === defaultLabel ||
+      existingAccount === (childNode.label || '').trim();
+
+    if (incidentDescription && isUnwritten) {
+      return {
+        ...childNode,
+        detailFields: {
+          ...existingFields,
+          whatHappened: incidentDescription
+        },
+        label: incidentDescription
+      };
+    }
+  }
+
   if (isRootCauseRoleNode(childNode) && parentNode && isFiveWhysInvestigationRoleNode(parentNode)) {
     const fiveWhysNode = parentNode;
     const fiveWhysFields = fiveWhysNode.detailFields || {};
