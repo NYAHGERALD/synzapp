@@ -281,6 +281,7 @@ import { ActionAttentionBanner } from '../components/actions/ActionAttentionBann
 import { ActionRemindersSettings } from '../components/settings/ActionRemindersSettings';
 import { AdminContactSettings } from '../components/settings/AdminContactSettings';
 import { ScheduledMessagesSettings } from '../components/settings/ScheduledMessagesSettings';
+import { RecoveryKeySheet } from '../components/settings/RecoveryKeySheet';
 import { StopReasonSheet } from '../components/settings/StopReasonSheet';
 import { WaitingMessagesModal } from '../components/settings/WaitingMessagesModal';
 import { SecuritySettings } from '../components/settings/SecuritySettings';
@@ -865,6 +866,8 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
   const [busyTenantScheduledMessageId, setBusyTenantScheduledMessageId] = useState<string | null>(null);
   const [isWaitingMessagesOpen, setIsWaitingMessagesOpen] = useState(false);
   const [stopReasonTarget, setStopReasonTarget] = useState<TenantScheduledMessage | null>(null);
+  const [isRecoveryKeyPromptOpen, setIsRecoveryKeyPromptOpen] = useState(false);
+  const [recoveryKeyDraft, setRecoveryKeyDraft] = useState('');
   const [stopReasonDraft, setStopReasonDraft] = useState('');
   const [mediaReviewItems, setMediaReviewItems] = useState<MediaReviewItem[]>([]);
   const [mediaReviewActiveIndex, setMediaReviewActiveIndex] = useState(0);
@@ -3527,6 +3530,21 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
       const storedRecoveryKey = await getStoredChatBackupRecoveryKey(currentUid) ||
         await claimChatBackupRestore({ deviceId, idToken }).catch(() => null);
 
+      /**
+       * The organization said people may restore without waiting. Let them.
+       *
+       * This step was missing, so a tenant with self-service restore switched on
+       * still sent everybody away to wait for an administrator — the opposite of
+       * what the setting says, and confusing to read beside a screen showing it
+       * enabled. Where it is off, the key was never handed to the person and
+       * asking for one would only invite failure, so the request path stands.
+       */
+      if (!storedRecoveryKey && policy.selfRestoreEnabled) {
+        askForRecoveryKey();
+
+        return;
+      }
+
       if (!storedRecoveryKey) {
         // No key and nothing approved, so this becomes a request. Typing a key
         // is not offered: the employee never had one to type. It is escrowed to
@@ -3634,6 +3652,39 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
     } finally {
       setIsSavingChatBackupPolicy(false);
     }
+  }
+
+  /**
+   * Asks for the recovery key, on whichever platform this is.
+   *
+   * `Alert.prompt` is the system's own text prompt and exists only on iOS.
+   * Android gets the same question in a sheet of the app's own, so neither
+   * platform quietly loses the option the organization switched on.
+   */
+  function askForRecoveryKey() {
+    if (Platform.OS === 'ios') {
+      Alert.prompt(
+        'Enter your recovery key',
+        'Your organization allows restoring without waiting for an administrator. This is the key you were shown when encrypted backup was first set up.',
+        [
+          { style: 'cancel', text: 'I do not have it' },
+          {
+            onPress: (recoveryKey?: string) => {
+              if (recoveryKey?.trim()) {
+                void restoreChatBackupWithKey(recoveryKey.trim());
+              }
+            },
+            text: 'Restore'
+          }
+        ],
+        'plain-text'
+      );
+
+      return;
+    }
+
+    setRecoveryKeyDraft('');
+    setIsRecoveryKeyPromptOpen(true);
   }
 
   async function restoreChatBackupWithKey(recoveryKey: string) {
@@ -14682,6 +14733,17 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
         onStop={handleCancelTenantScheduledMessage}
         scheduledMessages={tenantScheduledMessages}
         visible={isWaitingMessagesOpen}
+      />
+
+      <RecoveryKeySheet
+        onCancel={() => setIsRecoveryKeyPromptOpen(false)}
+        onChangeRecoveryKey={setRecoveryKeyDraft}
+        onConfirm={() => {
+          setIsRecoveryKeyPromptOpen(false);
+          void restoreChatBackupWithKey(recoveryKeyDraft.trim());
+        }}
+        recoveryKey={recoveryKeyDraft}
+        visible={isRecoveryKeyPromptOpen}
       />
 
       <StopReasonSheet
