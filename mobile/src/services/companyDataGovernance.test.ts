@@ -40,6 +40,9 @@ vi.mock('./localCallStore', () => ({
 vi.mock('./localChatStore', () => ({
   clearLocalChatDataForOwner: vi.fn(async () => {
     purgeMock.calls.push('local-chat');
+  }),
+  destroyLocalChatKey: vi.fn(async () => {
+    purgeMock.calls.push('local-chat-key');
   })
 }));
 
@@ -83,5 +86,23 @@ describe('purgeTenantCompanyData', () => {
 
     expect(purgeMock.calls).toContain('chat-backup-recovery-key');
     expect(purgeMock.calls).toContain('device-identity');
+  });
+});
+
+describe('purgeTenantCompanyData key destruction', () => {
+  it('destroys the account chat key, after clearing the rows it seals', async () => {
+    // Deleting rows leaves the ciphertext recoverable; the key's absence is what
+    // makes the cache unreadable, and it was never removed at all.
+    purgeMock.calls.length = 0;
+
+    await purgeTenantCompanyData({
+      ownerUid: 'owner-1',
+      reason: 'device-revoked',
+      tenantId: 'tenant-1'
+    });
+
+    expect(purgeMock.calls).toContain('local-chat-key');
+    expect(purgeMock.calls.indexOf('local-chat-key'))
+      .toBeGreaterThan(purgeMock.calls.indexOf('local-chat'));
   });
 });

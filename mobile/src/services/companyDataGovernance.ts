@@ -1,4 +1,5 @@
 import { clearStoredChatBackupRecoveryKey } from './chatBackup';
+import { destroyLocalChatKey } from './localChatStore';
 import { clearChatMediaStorage } from './chatMediaApi';
 import { incrementChatOfflineCounterMetric } from './chatOfflineMetrics';
 import { clearRegisteredDeviceIdentity } from './deviceIdentity';
@@ -79,6 +80,19 @@ export async function purgeTenantCompanyData(input: CompanyDataPurgeInput): Prom
     [
       'profile-photo-cache',
       () => clearProfilePhotoCache()
+    ],
+    [
+      /**
+       * Destroying the key is what makes this a wipe.
+       *
+       * Deleting the rows leaves the ciphertext recoverable — SQLite in WAL mode
+       * does not hand pages back on DELETE. The key is the one thing whose
+       * absence makes the cache unreadable, and it was never removed at all.
+       *
+       * Last, so it runs after the rows it seals have already been cleared.
+       */
+      'local-chat-key',
+      () => destroyLocalChatKey(input.ownerUid)
     ]
   ];
 

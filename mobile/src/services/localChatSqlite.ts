@@ -226,7 +226,7 @@ export async function upsertPendingChatMessageToSqlite(
       Math.max(0, Math.round(message.attempts || 0)),
       message.lastError || null,
       message.text.slice(0, 240),
-      await encryptJson(message),
+      await encryptJson(scope.ownerUid, message),
       message.createdAt,
       nowIso
     ]
@@ -238,7 +238,7 @@ export async function mapSqlitePendingOutboxRow(
   scope: LocalChatScope,
   row: SqlitePendingOutboxRow
 ): Promise<PendingChatMessage | null> {
-  const pendingMessage = await decryptJson<PendingChatMessage>(row.payload).catch(() => null);
+  const pendingMessage = await decryptJson<PendingChatMessage>(scope.ownerUid, row.payload).catch(() => null);
 
   if (
     !pendingMessage ||
@@ -264,7 +264,7 @@ export async function mapSqliteMediaTransferQueueRow(
   scope: LocalChatScope,
   row: SqliteMediaTransferQueueRow
 ): Promise<LocalChatMediaTransferQueueItem | null> {
-  const queueItem = await decryptJson<LocalChatMediaTransferQueueItem>(row.payload).catch(() => null);
+  const queueItem = await decryptJson<LocalChatMediaTransferQueueItem>(scope.ownerUid, row.payload).catch(() => null);
   const transferType = normalizeMediaTransferType(row.transfer_type);
   const status = normalizeMediaTransferStatus(row.status);
   const media = normalizeCachedMediaAttachment(queueItem?.media || buildQueuedMediaAttachmentFromRow(row));
@@ -305,7 +305,7 @@ export async function mapSqliteMediaPreparationQueueRow(
   scope: LocalChatScope,
   row: SqliteMediaPreparationQueueRow
 ): Promise<LocalChatMediaPreparationQueueItem | null> {
-  const queueItem = await decryptJson<LocalChatMediaPreparationQueueItem>(row.payload).catch(() => null);
+  const queueItem = await decryptJson<LocalChatMediaPreparationQueueItem>(scope.ownerUid, row.payload).catch(() => null);
   const status = normalizeMediaPreparationStatus(row.status);
   const media = normalizeCachedMediaAttachment(queueItem?.media);
   const preparedMedia = queueItem?.preparedMedia
@@ -402,12 +402,12 @@ export async function loadRawCachedChatConversationFromSqlite(input: {
   );
   const [contact, hiddenMessageIds, messages] = await Promise.all([
     conversation.contact_payload
-      ? decryptJson<ChatContact>(conversation.contact_payload).catch(() => null)
+      ? decryptJson<ChatContact>(scope.ownerUid, conversation.contact_payload).catch(() => null)
       : null,
     conversation.hidden_payload
-      ? decryptJson<string[]>(conversation.hidden_payload).catch(() => [])
+      ? decryptJson<string[]>(scope.ownerUid, conversation.hidden_payload).catch(() => [])
       : [],
-    Promise.all(rows.map((row) => decryptJson<ChatMessage>(row.payload).catch(() => null)))
+    Promise.all(rows.map((row) => decryptJson<ChatMessage>(scope.ownerUid, row.payload).catch(() => null)))
   ]);
 
   return normalizeCachedConversationRecord({
@@ -474,12 +474,12 @@ export async function loadCachedChatConversationPageFromSqlite(input: {
   const pageRows = rows.slice(0, limit).reverse();
   const [contact, hiddenMessageIds, messages] = await Promise.all([
     conversation.contact_payload
-      ? decryptJson<ChatContact>(conversation.contact_payload).catch(() => null)
+      ? decryptJson<ChatContact>(scope.ownerUid, conversation.contact_payload).catch(() => null)
       : null,
     conversation.hidden_payload
-      ? decryptJson<string[]>(conversation.hidden_payload).catch(() => [])
+      ? decryptJson<string[]>(scope.ownerUid, conversation.hidden_payload).catch(() => [])
       : [],
-    Promise.all(pageRows.map((row) => decryptJson<ChatMessage>(row.payload).catch(() => null)))
+    Promise.all(pageRows.map((row) => decryptJson<ChatMessage>(scope.ownerUid, row.payload).catch(() => null)))
   ]);
   const decryptedMessages = messages.filter((message): message is ChatMessage => Boolean(message));
   // Thumbnails come from their own column rather than out of the payload. One
@@ -583,8 +583,8 @@ export async function saveCachedChatConversationToSqlite(input: {
     .slice(-LOCAL_CACHED_MESSAGE_LIMIT);
   const db = await getLocalChatSqliteDatabase();
   const nowIso = new Date().toISOString();
-  const contactPayload = input.contact ? await encryptJson(input.contact) : null;
-  const hiddenPayload = await encryptJson(hiddenMessageIds);
+  const contactPayload = input.contact ? await encryptJson(scope.ownerUid, input.contact) : null;
+  const hiddenPayload = await encryptJson(scope.ownerUid, hiddenMessageIds);
   const messageIds = messages.map((message) => message.messageId).filter(Boolean);
   const latestMessage = messages[messages.length - 1] || null;
   // The whole thread is handed to every save, but almost none of it has changed.
@@ -664,7 +664,7 @@ export async function saveCachedChatConversationToSqlite(input: {
       // `replaceCachedMessageMediaRows`, and are put back on the way out. See
       // localChatThumbnailSplit: sealing them here as well is what made a
       // thread holding three videos take a second and a half to persist.
-      const payload = await encryptJson(stripThumbnailsForPayload(message));
+      const payload = await encryptJson(scope.ownerUid, stripThumbnailsForPayload(message));
 
       await db.runAsync(
         `INSERT INTO local_messages (
@@ -757,7 +757,7 @@ export async function loadCachedChatContactsFromSqlite(scope: LocalChatScope): P
     [scope.ownerUid, scope.tenantId, LOCAL_CACHED_CHAT_CONTACT_LIMIT]
   );
   const contacts = await Promise.all(rows.map((row) =>
-    row.contact_payload ? decryptJson<ChatContact>(row.contact_payload).catch(() => null) : null
+    row.contact_payload ? decryptJson<ChatContact>(scope.ownerUid, row.contact_payload).catch(() => null) : null
   ));
 
   return normalizeCachedChatContacts(
@@ -810,7 +810,7 @@ export async function saveCachedChatContactsToSqlite(
     }
 
     for (const contact of contacts) {
-      const contactPayload = await encryptJson(contact);
+      const contactPayload = await encryptJson(scope.ownerUid, contact);
 
       await db.runAsync(
         `INSERT INTO local_conversations (
@@ -841,7 +841,7 @@ export async function saveCachedChatContactsToSqlite(
           scope.ownerUid,
           scope.tenantId,
           contact.contactId,
-          await encryptJson([]),
+          await encryptJson(scope.ownerUid, []),
           getContactLastMessageAtMs(contact),
           contact.preview || '',
           Math.max(0, Math.round(contact.unreadCount || 0)),
@@ -1117,7 +1117,7 @@ export async function mapSqliteMediaRow(
   contactId: string,
   row: SqliteMediaRow
 ): Promise<LocalCachedChatMediaRecord | null> {
-  const decryptedMedia = await decryptJson<ChatMediaAttachment>(row.payload).catch(() => null);
+  const decryptedMedia = await decryptJson<ChatMediaAttachment>(scope.ownerUid, row.payload).catch(() => null);
   const storedMedia = decryptedMedia || buildMediaAttachmentFromSqliteRow(row);
   // The payload no longer carries the thumbnail, so it comes from its own
   // column. A row written before the split still has it inside, and that copy

@@ -29,6 +29,13 @@ import { fromByteArray, toByteArray } from 'base64-js';
 import * as Crypto from 'expo-crypto';
 import * as SecureStore from 'expo-secure-store';
 import { planLocalChatRowWrites } from './localChatRowSignatures';
+import {
+  clearScopedSecret,
+  getScopedSecretStorageKey,
+  readScopedSecret,
+  type ScopedSecretNames,
+  type ScopedSecretStore
+} from './scopedDeviceSecret';
 import * as SQLite from 'expo-sqlite';
 import nacl from 'tweetnacl';
 import type { ChatContact, ChatMediaAttachment, ChatMessage } from './chatApi';
@@ -200,7 +207,33 @@ export interface UpsertLocalChatMediaPreparationQueueInput {
   tenantId: string;
 }
 
-const LOCAL_CHAT_KEY_STORAGE_KEY = 'synzapp.localChatKey.v1';
+/**
+ * The key sealing this account's cached conversations.
+ *
+ * It was one name for the whole handset, so two accounts' rows sat in the same
+ * database sealed with the same key. What kept them apart was a query filter,
+ * not encryption — anyone with the phone and that key could read the other
+ * person's cached messages whoever was signed in.
+ *
+ * Scoped per account. A single-account handset notices nothing: its existing key
+ * is claimed on first read and its cache keeps working. On a shared handset the
+ * second account re-syncs from the server, which is the correct outcome and the
+ * point of the change.
+ */
+const LOCAL_CHAT_KEY_NAMES: ScopedSecretNames = {
+  legacyKey: 'synzapp.localChatKey.v1',
+  prefix: 'synzapp.localChatKey.v1.user.'
+};
+
+const localChatKeyStore: ScopedSecretStore = {
+  read: (storageKey) => SecureStore.getItemAsync(storageKey, localChatSecureStoreOptions),
+  remove: async (storageKey) => {
+    await SecureStore.deleteItemAsync(storageKey, localChatSecureStoreOptions)
+      .catch(() => undefined);
+  },
+  write: (storageKey, value) =>
+    SecureStore.setItemAsync(storageKey, value, localChatSecureStoreOptions)
+};
 export const LOCAL_CACHED_CHAT_CONTACT_LIMIT = 500;
 export const LOCAL_CACHED_MESSAGE_LIMIT = 1000;
 export const LOCAL_CHAT_MESSAGE_PAGE_LIMIT = 60;
@@ -233,7 +266,7 @@ export async function loadCachedChatContacts(input: {
     return [];
   }
 
-  const record = await decryptJson<LocalChatContactListRecord>(encryptedValue);
+  const record = await decryptJson<LocalChatContactListRecord>(scope.ownerUid, encryptedValue);
 
   if (!isMatchingLocalChatRecord(record, scope)) {
     return [];
@@ -270,7 +303,7 @@ export async function saveCachedChatContacts(input: {
     saveCachedChatContactsToSqlite(scope, contacts).catch(() => undefined),
     AsyncStorage.setItem(
       getChatContactsStorageKey(scope),
-      await encryptJson(record)
+      await encryptJson(scope.ownerUid, record)
     )
   ]);
 }
@@ -645,7 +678,7 @@ export async function upsertLocalChatMediaTransferQueueItem(
       item.attempts,
       item.lastError,
       item.nextRetryAtMs,
-      await encryptJson(item),
+      await encryptJson(scope.ownerUid, item),
       nowIso
     ]
   );
@@ -782,7 +815,7 @@ export async function upsertLocalChatMediaPreparationQueueItem(
       item.progress,
       item.attempts,
       item.lastError,
-      await encryptJson(item),
+      await encryptJson(scope.ownerUid, item),
       nowIso
     ]
   );
@@ -858,7 +891,7 @@ export async function saveCachedChatConversation(input: {
 
   await AsyncStorage.setItem(
     getConversationStorageKey(scope, input.contactId),
-    await encryptJson(record)
+    await encryptJson(scope.ownerUid, record)
   );
 }
 
@@ -932,7 +965,7 @@ export async function updateCachedChatMessageMedia(input: {
     return false;
   }
 
-  const existingMessage = await decryptJson<ChatMessage>(row.payload).catch(() => null);
+  const existingMessage = await decryptJson<ChatMessage>(scope.ownerUid, row.payload).catch(() => null);
 
   if (!existingMessage?.messageId) {
     return false;
@@ -943,7 +976,7 @@ export async function updateCachedChatMessageMedia(input: {
     // Sealed without its thumbnails, like the full save. This runs on every
     // media update, so it fires more often than any other write, and it was
     // re-encrypting 40KB of base64 while the user was tapping.
-    const payload = await encryptJson(stripThumbnailsForPayload(nextMessage));
+    const payload = await encryptJson(scope.ownerUid, stripThumbnailsForPayload(nextMessage));
 
   await db.withTransactionAsync(async () => {
     await db.runAsync(
@@ -1005,7 +1038,7 @@ export async function listCachedChatConversations(input: {
           return null;
         }
 
-        const record = await decryptJson<LocalConversationRecord>(encryptedValue);
+        const record = await decryptJson<LocalConversationRecord>(scope.ownerUid, encryptedValue);
 
         if (!isMatchingLocalChatRecord(record, scope) || !record.contactId) {
           return null;
@@ -1166,7 +1199,7 @@ export async function hideCachedChatMessagesForMe(input: {
   if (!didSaveToSqlite) {
     await AsyncStorage.setItem(
       getConversationStorageKey(scope, input.contactId),
-      await encryptJson(nextRecord)
+      await encryptJson(scope.ownerUid, nextRecord)
     );
   }
 
@@ -1354,7 +1387,7 @@ async function savePendingChatMessagesToAsyncStorage(scope: LocalChatScope, mess
 
   await AsyncStorage.setItem(
     getOutboxStorageKey(scope),
-    await encryptJson(safeMessages)
+    await encryptJson(scope.ownerUid, safeMessages)
   );
 }
 
@@ -1386,7 +1419,7 @@ export async function listPendingChatMessagesFromAsyncStorage(
     return [];
   }
 
-  const messages = await decryptJson<PendingChatMessage[]>(encryptedValue);
+  const messages = await decryptJson<PendingChatMessage[]>(scope.ownerUid, encryptedValue);
 
   if (!Array.isArray(messages)) {
     return [];
@@ -1507,7 +1540,7 @@ export async function replaceCachedMessageMediaRows(
           // Without the thumbnail: it goes to its own column in this same row,
           // in the clear. Sealing a second copy here was the same mistake as in
           // the message payload, in a second place.
-          await encryptJson(stripMediaThumbnail(media)),
+          await encryptJson(scope.ownerUid, stripMediaThumbnail(media)),
         updatedAt
       ]
     );
@@ -1536,7 +1569,7 @@ export async function loadCachedHiddenMessageIds(
     return [];
   }
 
-  const hiddenMessageIds = await decryptJson<string[]>(row.hidden_payload).catch(() => []);
+  const hiddenMessageIds = await decryptJson<string[]>(scope.ownerUid, row.hidden_payload).catch(() => []);
 
   return Array.isArray(hiddenMessageIds) ? hiddenMessageIds : [];
 }
@@ -1931,7 +1964,7 @@ async function loadRawCachedChatConversation(input: {
     return null;
   }
 
-  const record = await decryptJson<LocalConversationRecord>(encryptedValue);
+  const record = await decryptJson<LocalConversationRecord>(scope.ownerUid, encryptedValue);
 
   if (!isMatchingLocalChatRecord(record, scope) || record.contactId !== input.contactId) {
     return null;
@@ -1940,8 +1973,8 @@ async function loadRawCachedChatConversation(input: {
   return normalizeCachedConversationRecord(record);
 }
 
-export async function encryptJson(value: unknown): Promise<string> {
-  const key = await getOrCreateLocalChatKey();
+export async function encryptJson(ownerUid: string, value: unknown): Promise<string> {
+  const key = await getOrCreateLocalChatKey(ownerUid);
   const nonce = Crypto.getRandomBytes(nacl.secretbox.nonceLength);
   const plaintext = utf8ToBytes(JSON.stringify(value));
   const ciphertext = nacl.secretbox(plaintext, nonce, key);
@@ -1954,7 +1987,7 @@ export async function encryptJson(value: unknown): Promise<string> {
   return JSON.stringify(payload);
 }
 
-export async function decryptJson<T>(encryptedValue: string): Promise<T | null> {
+export async function decryptJson<T>(ownerUid: string, encryptedValue: string): Promise<T | null> {
   try {
     const payload = JSON.parse(encryptedValue) as Partial<EncryptedPayload>;
 
@@ -1962,7 +1995,7 @@ export async function decryptJson<T>(encryptedValue: string): Promise<T | null> 
       return null;
     }
 
-    const key = await getOrCreateLocalChatKey();
+    const key = await getOrCreateLocalChatKey(ownerUid);
     const plaintext = nacl.secretbox.open(
       toByteArray(payload.ciphertext),
       toByteArray(payload.nonce),
@@ -1994,38 +2027,54 @@ export async function decryptJson<T>(encryptedValue: string): Promise<T | null> 
  * Uint8Array for the duration of every operation, so the security boundary is
  * the process either way. It is dropped when the owner's data is cleared.
  */
-let localChatKeyPromise: Promise<Uint8Array> | null = null;
+// One in-flight load per account, so a handset serving two of them cannot hand
+// one account the other's key.
+const localChatKeyPromises = new Map<string, Promise<Uint8Array>>();
 
-function getOrCreateLocalChatKey(): Promise<Uint8Array> {
-  if (!localChatKeyPromise) {
-    // A rejection must not be cached, or one failure at startup would leave the
-    // store permanently unusable for the rest of the run.
-    localChatKeyPromise = loadOrCreateLocalChatKey().catch((error) => {
-      localChatKeyPromise = null;
+function getOrCreateLocalChatKey(ownerUid: string): Promise<Uint8Array> {
+  const existing = localChatKeyPromises.get(ownerUid);
 
-      throw error;
-    });
+  if (existing) {
+    return existing;
   }
 
-  return localChatKeyPromise;
+  // A rejection must not be cached, or one failure at startup would leave the
+  // store permanently unusable for the rest of the run.
+  const pending = loadOrCreateLocalChatKey(ownerUid).catch((error) => {
+    localChatKeyPromises.delete(ownerUid);
+
+    throw error;
+  });
+
+  localChatKeyPromises.set(ownerUid, pending);
+
+  return pending;
 }
 
-/** Forgets the cached key. Called when the owner's local data is cleared. */
+/** Forgets the cached keys. Called when an owner's local data is cleared. */
 export function clearLocalChatKeyCache(): void {
-  localChatKeyPromise = null;
+  localChatKeyPromises.clear();
 }
 
-async function loadOrCreateLocalChatKey(): Promise<Uint8Array> {
+/** Destroys an account's key outright, so its cached rows can never be reopened. */
+export async function destroyLocalChatKey(ownerUid: string): Promise<void> {
+  localChatKeyPromises.delete(ownerUid);
+
+  if (!(await SecureStore.isAvailableAsync())) {
+    return;
+  }
+
+  await clearScopedSecret(localChatKeyStore, LOCAL_CHAT_KEY_NAMES, ownerUid);
+}
+
+async function loadOrCreateLocalChatKey(ownerUid: string): Promise<Uint8Array> {
   const secureStoreAvailable = await SecureStore.isAvailableAsync();
 
   if (!secureStoreAvailable) {
     throw new Error('Secure device storage is not available.');
   }
 
-  const existingKey = await SecureStore.getItemAsync(
-    LOCAL_CHAT_KEY_STORAGE_KEY,
-    localChatSecureStoreOptions
-  );
+  const existingKey = await readScopedSecret(localChatKeyStore, LOCAL_CHAT_KEY_NAMES, ownerUid);
 
   if (existingKey) {
     return toByteArray(existingKey);
@@ -2033,10 +2082,9 @@ async function loadOrCreateLocalChatKey(): Promise<Uint8Array> {
 
   const key = Crypto.getRandomBytes(nacl.secretbox.keyLength);
 
-  await SecureStore.setItemAsync(
-    LOCAL_CHAT_KEY_STORAGE_KEY,
-    fromByteArray(key),
-    localChatSecureStoreOptions
+  await localChatKeyStore.write(
+    getScopedSecretStorageKey(LOCAL_CHAT_KEY_NAMES, ownerUid),
+    fromByteArray(key)
   );
 
   return key;
