@@ -34,7 +34,7 @@ export const APP_INTRO_FADE_OUT_MS = 240;
  * Drawn below the file's own 150 so it is downscaled rather than stretched —
  * an opening screen is the one place a soft edge on the mark is obvious.
  */
-export const APP_INTRO_LOGO_WIDTH = 140;
+export const APP_INTRO_LOGO_WIDTH = 120;
 const LOGO_SOURCE_WIDTH = 150;
 const LOGO_SOURCE_HEIGHT = 132;
 
