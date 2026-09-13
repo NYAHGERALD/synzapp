@@ -171,6 +171,7 @@ import {
 } from './rcaApi';
 import { useAppLoading } from './appLoading';
 import { EvidenceLibraryWindow } from './EvidenceLibraryWindow';
+import { RcaAnswerText } from './RcaAnswerText';
 import { downloadRailsEvidenceBlob, type RailsEvidence } from './railsApi';
 import {
   decodeRcaRealtimeUpdate,
@@ -14330,6 +14331,20 @@ function RcaKnowledgeBasePanel({
    */
   const [turns, setTurns] = React.useState<RcaKnowledgeTurn[]>([]);
   const conversationRef = React.useRef<HTMLDivElement | null>(null);
+  /** Text the model has sent that has not been shown yet. */
+  const pendingAnswerRef = React.useRef('');
+  /** The finished reply, held back until the last of it has been read out. */
+  const finishedAnswerRef = React.useRef<{ result: RcaKnowledgeAskResponse; turnId: string } | null>(null);
+  const [streamingTurnId, setStreamingTurnId] = React.useState<string | null>(null);
+  /**
+   * Whether the reader is still at the newest text.
+   *
+   * Scrolling up is a decision, and following the text down after that would
+   * drag somebody away from the paragraph they went back to read. Once they
+   * return to the bottom, or press the arrow, it follows again.
+   */
+  const isPinnedToBottomRef = React.useRef(true);
+  const [canJumpToLatest, setCanJumpToLatest] = React.useState(false);
 
   const [panelMode, setPanelMode] = React.useState<RcaKnowledgePanelMode>('guide');
   const [panelWidth, setPanelWidth] = React.useState(RCA_KNOWLEDGE_PANEL_DEFAULT_WIDTH);
@@ -14350,8 +14365,90 @@ function RcaKnowledgeBasePanel({
       return;
     }
 
+    isPinnedToBottomRef.current = true;
+    setCanJumpToLatest(false);
     container.scrollTo({ behavior: 'smooth', top: container.scrollHeight });
   }, [isAsking, panelMode, turns.length]);
+
+  /**
+   * Reveals the answer at a readable pace.
+   *
+   * The model sends far faster than anybody reads, and dropping each delta
+   * straight on screen made the text appear in jumps. This moves a little of
+   * the backlog each tick — proportionally, so a burst catches up without the
+   * trickle at the end turning into a stutter.
+   *
+   * The finished reply waits here too: swapping it in while text is still
+   * queued would skip whatever had not been shown.
+   */
+  React.useEffect(() => {
+    if (!streamingTurnId) {
+      return undefined;
+    }
+
+    const timer = window.setInterval(() => {
+      const pending = pendingAnswerRef.current;
+
+      if (!pending) {
+        const finished = finishedAnswerRef.current;
+
+        if (finished) {
+          finishedAnswerRef.current = null;
+          setAnswer(finished.result);
+          setTurns((current) => current.map((turn) => (
+            turn.id === finished.turnId ? { ...turn, answer: finished.result } : turn
+          )));
+          setStreamingTurnId(null);
+        }
+
+        return;
+      }
+
+      const revealCount = Math.max(2, Math.ceil(pending.length / 24));
+
+      pendingAnswerRef.current = pending.slice(revealCount);
+      setTurns((current) => current.map((turn) => (
+        turn.id === streamingTurnId
+          ? { ...turn, streamingText: (turn.streamingText || '') + pending.slice(0, revealCount) }
+          : turn
+      )));
+
+      const container = conversationRef.current;
+
+      if (container && isPinnedToBottomRef.current) {
+        container.scrollTop = container.scrollHeight;
+      }
+    }, 26);
+
+    return () => window.clearInterval(timer);
+  }, [streamingTurnId]);
+
+  function handleConversationScroll() {
+    const container = conversationRef.current;
+
+    if (!container) {
+      return;
+    }
+
+    // A little slack, so a pixel of rounding does not read as scrolling away.
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    const isAtBottom = distanceFromBottom < 24;
+
+    isPinnedToBottomRef.current = isAtBottom;
+    setCanJumpToLatest(!isAtBottom && Boolean(streamingTurnId || turns.length));
+  }
+
+  function handleJumpToLatest() {
+    const container = conversationRef.current;
+
+    if (!container) {
+      return;
+    }
+
+    isPinnedToBottomRef.current = true;
+    setCanJumpToLatest(false);
+    container.scrollTo({ behavior: 'smooth', top: container.scrollHeight });
+  }
   const selectedItemSummary = selectedNode
     ? getRcaKnowledgeSelectedNodeSummary(selectedNode, nodes)
     : selectedSplineCount > 0
@@ -14406,20 +14503,27 @@ function RcaKnowledgeBasePanel({
     setPanelMode('answer');
 
     try {
+      pendingAnswerRef.current = '';
+      finishedAnswerRef.current = null;
+      setStreamingTurnId(turnId);
+
       const result = await onAsk(submittedQuestion, (delta) => {
-        setTurns((current) => current.map((turn) => (
-          turn.id === turnId
-            ? { ...turn, streamingText: (turn.streamingText || '') + delta }
-            : turn
-        )));
+        pendingAnswerRef.current += delta;
       });
 
-      setAnswer(result);
-      setTurns((current) => current.map((turn) => (
-        turn.id === turnId ? { ...turn, answer: result } : turn
-      )));
+      /**
+       * Handed to the reveal loop rather than applied here.
+       *
+       * The reply is complete long before the last of it has been read out, and
+       * showing it now would jump past the text still queued. The fallback
+       * streams nothing, so there is no queue and it appears at once.
+       */
+      finishedAnswerRef.current = { result, turnId };
     } catch (error) {
       setAskError(error instanceof Error ? error.message : 'RCA guidance is temporarily unavailable.');
+      pendingAnswerRef.current = '';
+      finishedAnswerRef.current = null;
+      setStreamingTurnId(null);
       // A question with no answer is not left sitting there for ever.
       setTurns((current) => current.filter((turn) => turn.id !== turnId));
     } finally {
@@ -14516,8 +14620,23 @@ function RcaKnowledgeBasePanel({
           </div>
         </div>
 
-        <div className="flex min-h-0 flex-1 flex-col">
-          <div className="min-h-0 flex-1 overflow-auto px-4 py-4" ref={conversationRef}>
+        <div className="relative flex min-h-0 flex-1 flex-col">
+          {canJumpToLatest ? (
+            <button
+              aria-label="Jump to the newest text"
+              className="rca-answer-jump"
+              onClick={handleJumpToLatest}
+              title="Jump to the newest text"
+              type="button"
+            >
+              <ChevronDown aria-hidden="true" size={18} />
+            </button>
+          ) : null}
+          <div
+            className="min-h-0 flex-1 overflow-auto px-4 py-4"
+            onScroll={handleConversationScroll}
+            ref={conversationRef}
+          >
             {panelMode === 'answer' && turns.length ? (
               <RcaKnowledgeConversation isAsking={isAsking} turns={turns} />
             ) : panelMode === 'answer' && answer ? (
@@ -14673,9 +14792,7 @@ function RcaKnowledgeConversation({
                 </span>
               </div>
               {/* No container around the answer. It is the thing being read. */}
-              <p className="whitespace-pre-wrap px-0.5 text-[13px] leading-7 text-slate-700">
-                {turn.answer.answer}
-              </p>
+              <RcaAnswerText text={turn.answer.answer} />
             </div>
           ) : turn.streamingText ? (
             <div className="flex flex-col gap-2">
@@ -14686,11 +14803,11 @@ function RcaKnowledgeConversation({
                 RCA AI
                 <span className="font-normal text-slate-400">Writing…</span>
               </div>
-              <p className="whitespace-pre-wrap px-0.5 text-[13px] leading-7 text-slate-700">
-                {turn.streamingText}
+              <div>
+                <RcaAnswerText text={turn.streamingText} />
                 {/* A caret, so a pause reads as thinking rather than finished. */}
-                <span className="ml-0.5 inline-block h-4 w-[2px] animate-pulse bg-cyan-600 align-[-2px]" />
-              </p>
+                <span className="-mt-4 ml-0.5 inline-block h-4 w-[2px] animate-pulse bg-cyan-600 align-[-2px]" />
+              </div>
             </div>
           ) : isAsking ? (
             <div className="flex items-center gap-2 px-0.5 text-[12px] text-slate-400">

@@ -274,7 +274,14 @@ async function requestOpenAiRcaGuidanceStream(
             role: 'user'
           }
         ],
-        max_output_tokens: 650,
+        /**
+         * Room to finish.
+         *
+         * 650 cut a start-to-finish walkthrough off mid-item, leaving a
+         * dangling bullet and no sign anything was missing — the answer simply
+         * stopped. A full process answer runs well past that.
+         */
+        max_output_tokens: 2400,
         model: env.openAiModel,
         stream: true
       }),
@@ -378,7 +385,14 @@ async function requestOpenAiRcaGuidance(question: string, context: string): Prom
             role: 'user'
           }
         ],
-        max_output_tokens: 650,
+        /**
+         * Room to finish.
+         *
+         * 650 cut a start-to-finish walkthrough off mid-item, leaving a
+         * dangling bullet and no sign anything was missing — the answer simply
+         * stopped. A full process answer runs well past that.
+         */
+        max_output_tokens: 2400,
         model: env.openAiModel
         /**
          * No `temperature`.
