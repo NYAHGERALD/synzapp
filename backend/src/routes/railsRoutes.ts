@@ -3,6 +3,10 @@ import { getDecodedTokenFromHeader as getDecodedToken } from '../middleware/requ
 import { z } from 'zod';
 import { verifyAppCheck } from '../middleware/appCheck.js';
 import {
+  getEvidenceSizePolicyForCurrentUser,
+  updateEvidenceSizePolicy
+} from '../services/evidenceSizePolicyService.js';
+import {
   addRailsAction,
   addRailsCollaborator,
   addRailsComment,
@@ -32,6 +36,7 @@ import {
   deleteRailsEvidence,
   deleteRailsEvidenceLibrary,
   addRailsEvidenceLibrary,
+  createRailsEvidenceUploadTicket,
   updateRailsEvidenceLibrary,
   updateRailsAction,
   updateRailsItem,
@@ -173,6 +178,7 @@ const railsRcaTriageReviewBodySchema = z.object({
 });
 
 const railsEvidenceBodySchema = z.object({
+  uploadId: z.string().trim().regex(/^ev_[A-Fa-f0-9]{32}$/).optional(),
   dataUrl: z.string().max(6_000_000).optional(),
   evidenceId: z.string().trim().max(128).optional(),
   // A poster frame, not a second copy of the file. Bounded well below the file
@@ -509,12 +515,68 @@ railsRouter.get('/items/:itemId/activity', verifyAppCheck, async (req, res, next
   }
 });
 
+const evidenceSizePolicyBodySchema = z.object({
+  maxFileBytes: z.number().int().positive()
+});
+
+/**
+ * The size limit, read by anybody who can upload.
+ *
+ * On this router rather than the admin one because the evidence library is a
+ * web feature and every admin route demands a registered device header, which a
+ * browser has none of. Authority for the write comes from requireSecurityAdmin
+ * inside the service, which is where it belongs either way.
+ */
+railsRouter.get('/evidence-library/size-policy', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+
+    res.json({ policy: await getEvidenceSizePolicyForCurrentUser(decodedToken) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+railsRouter.patch('/evidence-library/size-policy', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const body = evidenceSizePolicyBodySchema.parse(req.body);
+
+    res.json({ policy: await updateEvidenceSizePolicy(decodedToken, body) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 railsRouter.get('/evidence-library', verifyAppCheck, async (req, res, next) => {
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
     const evidence = await listRailsEvidenceLibrary(decodedToken);
 
     res.json(evidence);
+  } catch (error) {
+    next(error);
+  }
+});
+
+const evidenceUploadTicketSchema = z.object({
+  contentType: z.string().trim().min(3).max(120),
+  fileName: z.string().trim().max(200).optional(),
+  sizeBytes: z.number().int().positive()
+});
+
+/**
+ * Reserves somewhere to put a file, so the bytes never come through here.
+ *
+ * The browser then PUTs straight to Cloud Storage and calls POST
+ * /evidence-library with the returned evidenceId as `uploadId`.
+ */
+railsRouter.post('/evidence-library/uploads', verifyAppCheck, async (req, res, next) => {
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+    const body = evidenceUploadTicketSchema.parse(req.body);
+
+    res.status(201).json(await createRailsEvidenceUploadTicket(decodedToken, body));
   } catch (error) {
     next(error);
   }

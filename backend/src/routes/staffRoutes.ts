@@ -6,6 +6,10 @@ import {
 import { Router } from 'express';
 import { getDecodedTokenFromHeader as getDecodedToken } from '../middleware/requestAuth.js';
 import { z } from 'zod';
+import {
+  getEvidenceSizePolicyForTenant,
+  updateEvidenceMaxAllowedForTenant
+} from '../services/evidenceSizePolicyService.js';
 import { writeAuditEvent } from '../services/auditService.js';
 import { requireStaff, requireStaffAdmin, listStaff } from '../services/staffAccessService.js';
 import {
@@ -258,6 +262,72 @@ staffRouter.get('/retention-templates', async (req, res, next) => {
 });
 
 /** Every set of bounds ever published for one tenant. None of them editable. */
+const evidenceMaxAllowedSchema = z.object({
+  maxAllowedFileBytes: z.number().int().positive()
+});
+
+staffRouter.get('/tenants/:tenantId/evidence-size-policy', async (req, res, next) => {
+  try {
+    await requireStaff(await getDecodedToken(req.header('Authorization') || ''));
+
+    res.json({ policy: await getEvidenceSizePolicyForTenant(String(req.params.tenantId)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Sets how large an evidence file this organization may be allowed to reach.
+ *
+ * A staff admin only, and audited with their name. The storage it commits is
+ * Synzapp's, and raising it for one customer is a commercial decision somebody
+ * should be able to point at later. The company's own admin then chooses any
+ * limit up to what is set here.
+ */
+staffRouter.post('/tenants/:tenantId/evidence-size-policy', async (req, res, next) => {
+  const tenantId = String(req.params.tenantId || '');
+
+  try {
+    const context = await requireStaff(await getDecodedToken(req.header('Authorization') || ''));
+
+    requireStaffAdmin(context);
+
+    const body = evidenceMaxAllowedSchema.parse(req.body);
+    const policy = await updateEvidenceMaxAllowedForTenant({
+      maxAllowedFileBytes: body.maxAllowedFileBytes,
+      staffUid: context.uid,
+      tenantId
+    });
+
+    await writeAuditEvent({
+      action: 'STAFF_EVIDENCE_SIZE_MAX_SET',
+      metadata: {
+        maxAllowedFileBytes: policy.maxAllowedFileBytes,
+        subjectTenantId: tenantId
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: 'synzapp-internal',
+      uid: context.uid
+    });
+
+    // Written to the tenant's own log as well. An organization is entitled to
+    // see what it has been allowed without asking Synzapp for it.
+    await writeAuditEvent({
+      action: 'EVIDENCE_SIZE_MAX_SET',
+      metadata: { maxAllowedFileBytes: policy.maxAllowedFileBytes },
+      req,
+      status: 'SUCCESS',
+      tenantId,
+      uid: context.uid
+    });
+
+    res.json({ policy });
+  } catch (error) {
+    next(error);
+  }
+});
+
 staffRouter.get('/tenants/:tenantId/retention-bounds', async (req, res, next) => {
   try {
     await requireStaff(await getDecodedToken(req.header('Authorization') || ''));

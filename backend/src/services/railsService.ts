@@ -5,6 +5,8 @@ import { SynzappRole } from '../types/auth.js';
 import { buildAuthSession } from './authSessionService.js';
 import { sendRailsPushNotification } from './notificationService.js';
 import { createRcaIncident } from './rcaService.js';
+import { describeBytes } from './evidenceSizePolicy.js';
+import { getEvidenceSizePolicyForTenant } from './evidenceSizePolicyService.js';
 import {
   HUMAN_RESOURCES_DEPARTMENT_ID,
   HUMAN_RESOURCES_DEPARTMENT_NAME
@@ -624,6 +626,13 @@ export interface RailsActionPatch {
 
 export interface RailsEvidenceInput {
   dataUrl?: string;
+  /**
+   * An upload already in storage, reserved by `createRailsEvidenceUploadTicket`.
+   *
+   * The alternative to `dataUrl`, and the only one large files can use: bytes
+   * sent this way never pass through the API at all.
+   */
+  uploadId?: string;
   evidenceId?: string;
   fileName?: string;
   /** Poster frame for video evidence, captured by the uploading client. */
@@ -722,6 +731,16 @@ export interface RailsWorkflowPolicyCheckResult {
 const RAILS_ITEMS_COLLECTION = 'railsItems';
 const RAILS_AUDIT_EVENTS_COLLECTION = 'railsAuditEvents';
 const RAILS_EVIDENCE_LIBRARY_COLLECTION = 'railsEvidenceLibrary';
+const RAILS_EVIDENCE_PENDING_UPLOADS_COLLECTION = 'railsEvidencePendingUploads';
+
+
+/**
+ * How long a reserved upload URL is good for.
+ *
+ * Long enough for a large file on a plant-floor connection, short enough that a
+ * URL copied out of a browser's network tab is not a lasting way in.
+ */
+const EVIDENCE_UPLOAD_URL_TTL_MS = 15 * 60 * 1000;
 const RAILS_INTAKE_REQUESTS_COLLECTION = 'railsIntakeRequests';
 const RAILS_ITEM_ACTIVITY_COLLECTION = 'activity';
 const RAILS_NOTIFICATIONS_COLLECTION = 'railsNotificationQueue';
@@ -2382,35 +2401,186 @@ export async function getRailsEvidenceLibraryThumbnail(
   };
 }
 
+export interface RailsEvidenceUploadTicket {
+  evidenceId: string;
+  expiresAtMs: number;
+  uploadUrl: string;
+}
+
+/**
+ * Reserves a place in storage and hands back a URL to put the file at.
+ *
+ * The bytes never reach the API. That is not an optimisation: JSON is read into
+ * memory whole, base64 makes it a third larger again, and the container has
+ * 512 MB shared across every request it is serving. A 100 MB file could not
+ * travel that way at any body limit.
+ *
+ * The size given here is only what the caller claims. It is checked again
+ * against the file that actually arrives, in `claimPendingEvidenceUpload`,
+ * because nothing stops a client declaring one megabyte and sending fifty.
+ */
+export async function createRailsEvidenceUploadTicket(
+  decodedToken: DecodedIdToken,
+  input: { contentType: string; fileName?: string; sizeBytes: number }
+): Promise<RailsEvidenceUploadTicket> {
+  const context = await getAuthorizedRailsContext(decodedToken);
+  const policy = await getEvidenceSizePolicyForTenant(context.tenantId);
+
+  if (input.sizeBytes > policy.maxFileBytes) {
+    throw validationError(`Evidence files must be under ${describeBytes(policy.maxFileBytes)}.`);
+  }
+
+  const evidenceId = `ev_${randomUUID().replace(/-/g, '')}`;
+  const fileName = sanitizeFileName(input.fileName || 'rails-evidence');
+  const storagePath = getEvidenceLibraryStoragePath(context.tenantId, evidenceId, fileName);
+  const contentType = sanitizeEvidenceContentType(input.contentType);
+  const expiresAtMs = Date.now() + EVIDENCE_UPLOAD_URL_TTL_MS;
+
+  // Written before the URL is handed out, so an upload that is never claimed
+  // still has a record saying whose it was and what it was allowed to be.
+  await context.organizationRef
+    .collection(RAILS_EVIDENCE_PENDING_UPLOADS_COLLECTION)
+    .doc(evidenceId)
+    .set({
+      contentType,
+      createdAt: fieldValue.serverTimestamp(),
+      declaredSizeBytes: input.sizeBytes,
+      fileName,
+      storagePath,
+      tenantId: context.tenantId,
+      uploadedByUid: context.uid
+    });
+
+  const [uploadUrl] = await storageBucket.file(storagePath).getSignedUrl({
+    action: 'write',
+    contentType,
+    expires: expiresAtMs,
+    version: 'v4'
+  });
+
+  return { evidenceId, expiresAtMs, uploadUrl };
+}
+
+/**
+ * Turns a finished upload into something the library may keep.
+ *
+ * Three things are established before it counts: the reservation exists under
+ * this tenant, the person claiming it is the person who made it, and the file
+ * is really there. Only then is its true size read — the declared one was never
+ * evidence of anything.
+ */
+async function claimPendingEvidenceUpload(
+  context: Awaited<ReturnType<typeof getAuthorizedRailsContext>>,
+  uploadId: string
+): Promise<{ contentType: string; fileName: string; sizeBytes: number; storagePath: string }> {
+  const pendingRef = context.organizationRef
+    .collection(RAILS_EVIDENCE_PENDING_UPLOADS_COLLECTION)
+    .doc(uploadId);
+  const snapshot = await pendingRef.get();
+
+  if (!snapshot.exists) {
+    throw validationError('That upload was not recognised.');
+  }
+
+  const pending = snapshot.data() as {
+    contentType?: string;
+    fileName?: string;
+    storagePath?: string;
+    uploadedByUid?: string;
+  };
+
+  if (pending.uploadedByUid !== context.uid) {
+    throw validationError('That upload belongs to somebody else.');
+  }
+
+  const storagePath = pending.storagePath || '';
+  const file = storageBucket.file(storagePath);
+  const [exists] = await file.exists();
+
+  if (!storagePath || !exists) {
+    throw validationError('That file did not finish uploading.');
+  }
+
+  const [metadata] = await file.getMetadata();
+  const sizeBytes = Number(metadata.size || 0);
+  const policy = await getEvidenceSizePolicyForTenant(context.tenantId);
+
+  if (sizeBytes > policy.maxFileBytes) {
+    // Over the limit and already in the bucket, so it is removed rather than
+    // left to be paid for by a company that never agreed to hold it.
+    await file.delete().catch(() => undefined);
+    await pendingRef.delete().catch(() => undefined);
+    throw validationError(`Evidence file is too large. Please choose a file under ${describeBytes(policy.maxFileBytes)}.`);
+  }
+
+  await pendingRef.delete().catch(() => undefined);
+
+  return {
+    contentType: sanitizeEvidenceContentType(pending.contentType || metadata.contentType || ''),
+    fileName: pending.fileName || 'rails-evidence',
+    sizeBytes,
+    storagePath
+  };
+}
+
+/** Kept narrow: it is baked into a signed URL the browser must match exactly. */
+function sanitizeEvidenceContentType(contentType: string): string {
+  const safe = (contentType || '').trim().toLowerCase();
+
+  return /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(safe) ? safe : 'application/octet-stream';
+}
+
 export async function addRailsEvidenceLibrary(
   decodedToken: DecodedIdToken,
   input: RailsEvidenceInput = {}
 ): Promise<RailsEvidence> {
   const context = await getAuthorizedRailsContext(decodedToken);
 
-  if (!input.dataUrl) {
+  if (!input.dataUrl && !input.uploadId) {
     throw validationError('Choose a file before adding evidence.');
   }
 
   const nowIso = new Date().toISOString();
-  const evidenceId = `ev_${randomUUID().replace(/-/g, '')}`;
-  const parsed = parseEvidenceDataUrl(input.dataUrl);
-  const fileName = sanitizeFileName(input.fileName || 'rails-evidence');
-  const storagePath = getEvidenceLibraryStoragePath(context.tenantId, evidenceId, fileName);
+  const policy = await getEvidenceSizePolicyForTenant(context.tenantId);
 
-  await storageBucket.file(storagePath).save(parsed.payload, {
-    contentType: parsed.contentType,
-    metadata: {
-      cacheControl: 'private, max-age=3600',
+  /**
+   * Two ways in, and the reserved one is preferred.
+   *
+   * A file already in storage only has to be claimed. A data URL still works,
+   * so an older client and every other caller of this function keep going, but
+   * it can never carry more than the request body allows.
+   */
+  const claimed = input.uploadId
+    ? await claimPendingEvidenceUpload(context, input.uploadId)
+    : null;
+  const parsed = claimed ? null : parseEvidenceDataUrl(input.dataUrl || '', policy.maxFileBytes);
+  const evidenceId = claimed && input.uploadId
+    ? input.uploadId
+    : `ev_${randomUUID().replace(/-/g, '')}`;
+  const fileName = claimed
+    ? claimed.fileName
+    : sanitizeFileName(input.fileName || 'rails-evidence');
+  const storagePath = claimed
+    ? claimed.storagePath
+    : getEvidenceLibraryStoragePath(context.tenantId, evidenceId, fileName);
+  const contentType = claimed ? claimed.contentType : (parsed?.contentType || 'application/octet-stream');
+  const fileSizeBytes = claimed ? claimed.sizeBytes : (parsed?.payload.length || 0);
+
+  if (parsed) {
+    await storageBucket.file(storagePath).save(parsed.payload, {
+      contentType: parsed.contentType,
       metadata: {
-        evidenceId,
-        tenantId: context.tenantId,
-        uploadedAtIso: nowIso,
-        uploadedByUid: context.uid
-      }
-    },
-    resumable: false
-  });
+        cacheControl: 'private, max-age=3600',
+        metadata: {
+          evidenceId,
+          tenantId: context.tenantId,
+          uploadedAtIso: nowIso,
+          uploadedByUid: context.uid
+        }
+      },
+      resumable: false
+    });
+  }
 
   const thumbnailStoragePath = await saveRailsEvidenceThumbnail({
     evidenceId,
@@ -2421,11 +2591,11 @@ export async function addRailsEvidenceLibrary(
   });
 
   const evidenceRecord: RailsEvidenceLibraryRecord = {
-    contentType: parsed.contentType,
+    contentType,
     createdAtIso: nowIso,
     evidenceId,
     fileName,
-    fileSizeBytes: parsed.payload.length,
+    fileSizeBytes,
     fileUrl: `/api/rails/evidence-library/${encodeURIComponent(evidenceId)}`,
     thumbnailStoragePath,
     thumbnailUrl: thumbnailStoragePath
@@ -2456,7 +2626,7 @@ export async function addRailsEvidenceLibrary(
     metadata: {
       evidenceId,
       fileName,
-      fileSizeBytes: parsed.payload.length,
+      fileSizeBytes,
       visibility: evidenceRecord.visibility
     },
     summary: `Added shared evidence: ${evidenceRecord.label}.`,
@@ -5100,7 +5270,10 @@ function normalizeText(value: string | undefined, fallback: string, maxLength: n
   return trimmedValue.slice(0, maxLength);
 }
 
-function parseEvidenceDataUrl(dataUrl: string): { contentType: string; payload: Buffer } {
+function parseEvidenceDataUrl(
+  dataUrl: string,
+  maxBytes: number = MAX_RAILS_EVIDENCE_BYTES
+): { contentType: string; payload: Buffer } {
   const match = /^data:([A-Za-z0-9.+/-]+);base64,(.+)$/.exec(dataUrl);
 
   if (!match) {
@@ -5113,8 +5286,8 @@ function parseEvidenceDataUrl(dataUrl: string): { contentType: string; payload: 
     throw validationError('Evidence upload is empty.');
   }
 
-  if (payload.length > MAX_RAILS_EVIDENCE_BYTES) {
-    throw validationError('Evidence file is too large. Please choose a file under 4 MB.');
+  if (payload.length > maxBytes) {
+    throw validationError(`Evidence file is too large. Please choose a file under ${describeBytes(maxBytes)}.`);
   }
 
   return {
