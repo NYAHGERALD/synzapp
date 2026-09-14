@@ -17070,7 +17070,15 @@ function RcaIncidentReportModal({
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [isMaximized, size.height, size.width]);
+  /**
+   * maximizedRect belongs here.
+   *
+   * Without it the mousemove listener keeps the value it closed over when it
+   * was attached, which is null — the canvas is measured a moment later and
+   * this effect had no reason to run again. The clamp then fell back to the
+   * window on every drag, which is exactly what it was meant to stop.
+   */
+  }, [isMaximized, maximizedRect, size.height, size.width]);
 
   React.useEffect(() => {
     function handleWindowResize() {
@@ -23190,7 +23198,7 @@ function RcaEvidencePhotoViewer({
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [isMaximized]);
+  }, [isMaximized, maximizedRect]);
 
   React.useLayoutEffect(() => {
     const canvasArea = document.querySelector('[data-workspace-surface="true"]');
