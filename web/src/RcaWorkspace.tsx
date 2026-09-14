@@ -172,6 +172,7 @@ import {
 import { useAppLoading } from './appLoading';
 import { EvidenceLibraryWindow } from './EvidenceLibraryWindow';
 import { RcaAnswerText } from './RcaAnswerText';
+import { buildFiveWhyQuestions } from './fiveWhysQuestion';
 import { combineIncidentDateAndTime, isUnwrittenField } from './rcaIncidentCarryOver';
 import { downloadRailsEvidenceBlob, type RailsEvidence } from './railsApi';
 import {
@@ -632,16 +633,6 @@ const RCA_NODE_FONT_SIZE_MIN = RCA_NODE_FONT_SIZE_OPTIONS[0];
 const RCA_NODE_FONT_SIZE_MAX = RCA_NODE_FONT_SIZE_OPTIONS[RCA_NODE_FONT_SIZE_OPTIONS.length - 1];
 const RCA_RISK_FACTOR_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const;
 const RCA_DEFAULT_NODE_FONT_FAMILY = 'Inter';
-const RCA_FIVE_WHY_LEADING_CONNECTIVE_PATTERNS = [
-  /^(?:because of|because|since|as a result of|as|so that|so|therefore|thus|hence|then|and|but|however|although|though|while|whereas|also|additionally|moreover|furthermore|consequently|accordingly|instead)\b[\s,;:.-]*/i,
-  /^(?:due to|owing to|caused by|resulting from|resulted from|related to|linked to)\b[\s,;:.-]*/i,
-  /^(?:it|this|that|there)\s+(?:is|are|was|were|has|have|had|does|do|did|can|could|may|might|must|should|would)(?:\s+not)?(?:\s+been)?\b[\s,;:.-]*/i,
-  /^(?:it|this|that)\s+(?:happened|occurred|resulted)\s*(?:because|when|after|as|from|due to)?\b[\s,;:.-]*/i,
-  /^(?:we|they|the team|team|operator|maintenance|qa|production|supervisor)\s+(?:found|observed|confirmed|determined|saw|noticed|reported|identified|verified)\s+(?:that\s+)?/i,
-  /^(?:the|a|an)\s+(?:reason|cause|issue|problem|failure|finding)\s+(?:is|are|was|were|has been|had been)\b[\s,;:.-]*/i,
-  /^(?:it|this|that)\b[\s,;:.-]*/i,
-  /^(?:that|which)\s+/i
-] as const;
 const RCA_NODE_FONT_FAMILY_OPTIONS: Array<{ css: string; label: string; value: string }> = [
   { css: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', label: 'Inter', value: 'Inter' },
   { css: 'Calibri, "Segoe UI", sans-serif', label: 'Calibri', value: 'Calibri' },
@@ -29306,63 +29297,6 @@ function getInitialFiveWhysRevealCount(whyChain: string[] = []): number {
   }
 
   return Math.min(5, Math.max(1, firstEmptyIndex + 1));
-}
-
-function buildFiveWhyQuestions(causeLabel: string, whyChain: string[] = []): string[] {
-  const answers = normalizeFiveWhyDraft(whyChain);
-
-  return answers.map((_, index) => {
-    const sourceText = index === 0 ? causeLabel : answers[index - 1];
-
-    if (!sourceText?.trim()) {
-      return index === 0
-        ? 'Why the selected cause?'
-        : `Answer Why ${index} to generate this question.`;
-    }
-
-    return buildFiveWhyQuestion(sourceText);
-  });
-}
-
-function buildFiveWhyQuestion(sourceText: string): string {
-  const subject = addFiveWhyDefiniteArticle(normalizeFiveWhyQuestionSubject(sourceText));
-
-  return subject ? `Why ${subject}?` : 'Why the selected cause?';
-}
-
-function normalizeFiveWhyQuestionSubject(sourceText: string): string {
-  let subject = sourceText
-    .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/^[\s"'([{]+/, '')
-    .replace(/[\s"'.,;:!?)}\]]+$/, '')
-    .trim();
-
-  for (let passIndex = 0; passIndex < 8; passIndex += 1) {
-    const previousSubject = subject;
-
-    RCA_FIVE_WHY_LEADING_CONNECTIVE_PATTERNS.forEach((pattern) => {
-      subject = subject.replace(pattern, '').trim();
-    });
-    subject = subject
-      .replace(/^[\s"'([{]+/, '')
-      .replace(/[\s"'.,;:!?)}\]]+$/, '')
-      .trim();
-
-    if (subject === previousSubject) {
-      break;
-    }
-  }
-
-  return subject;
-}
-
-function addFiveWhyDefiniteArticle(subject: string): string {
-  const normalizedSubject = subject
-    .replace(/^(?:the|a|an)\s+/i, '')
-    .trim();
-
-  return normalizedSubject ? `the ${normalizedSubject}` : '';
 }
 
 function hasCompletedFiveWhys(whyChain: string[] = []): boolean {
