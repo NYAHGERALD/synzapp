@@ -86,6 +86,7 @@ import {
   Lock,
   Maximize2,
   MessageSquareText,
+  Target,
   SquarePen,
   Minimize2,
   Moon,
@@ -172,7 +173,11 @@ import {
 import { useAppLoading } from './appLoading';
 import { EvidenceLibraryWindow } from './EvidenceLibraryWindow';
 import { RcaAnswerText } from './RcaAnswerText';
-import { buildFiveWhyQuestions } from './fiveWhysQuestion';
+import {
+  FIVE_WHYS_MAXIMUM_STEPS,
+  buildFiveWhyQuestions,
+  getFiveWhysStepCount
+} from './fiveWhysQuestion';
 import { combineIncidentDateAndTime, isUnwrittenField } from './rcaIncidentCarryOver';
 import { downloadRailsEvidenceBlob, type RailsEvidence } from './railsApi';
 import {
@@ -21292,7 +21297,10 @@ function RcaInspectorDrawer({
     ? fiveWhysSelectedCause
     : (draft.label || inspectedNode.label);
   const fiveWhyQuestions = buildFiveWhyQuestions(fiveWhysQuestionSource, fiveWhyAnswers);
-  const activeFiveWhyIndex = Math.min(revealedFiveWhysCount - 1, 4);
+  const fiveWhyStepCount = fiveWhyAnswers.length;
+  const activeFiveWhyIndex = Math.min(revealedFiveWhysCount - 1, fiveWhyStepCount - 1);
+  /** Room to ask again, once the last one on screen has been answered. */
+  const canExtendFiveWhys = fiveWhyStepCount < FIVE_WHYS_MAXIMUM_STEPS;
   const fiveWhysCauseDisposition = getFiveWhysCauseDisposition(draft.detailFields);
   const fiveWhysDecisionReady = hasFiveWhysGovernedDecision(draft.whyChain, draft.detailFields);
   const fiveWhysLinkedCauseReady = Boolean(fiveWhysLinkedCauseNode);
@@ -21458,12 +21466,65 @@ function RcaInspectorDrawer({
       return;
     }
 
-    setRevealedFiveWhysCount((currentCount) => Math.min(5, currentCount + 1));
+    setRevealedFiveWhysCount((currentCount) => Math.min(fiveWhyStepCount, currentCount + 1));
     persistDraft({
       ...draft,
       isSuspectedCause: true,
       whyChain: normalizeFiveWhyDraft(draft.whyChain)
     });
+  }
+
+  /**
+   * Adds a sixth why, and a seventh, up to the ceiling.
+   *
+   * The chain grows by giving it an empty slot: every count in the panel is
+   * derived from its length, so nothing else has to be told.
+   */
+  function handleExtendFiveWhys() {
+    if (isDetailReadOnly || !canExtendFiveWhys) {
+      return;
+    }
+
+    const extendedChain = [...normalizeFiveWhyDraft(draft.whyChain), ''];
+
+    setRevealedFiveWhysCount(extendedChain.length);
+    persistDraft({ ...draft, isSuspectedCause: true, whyChain: extendedChain });
+  }
+
+  /**
+   * Takes an answer as the root cause and opens the decision on it.
+   *
+   * It fills the finding and leaves the two judgements to the investigator,
+   * because they are different questions: whether the cause is ruled in, and
+   * whether fixing it would prevent recurrence. A cause can be real and
+   * contributing while fixing it alone changes nothing, and one button cannot
+   * answer both honestly.
+   *
+   * Nothing is closed here. The decision section below is still where a cause is
+   * ruled in or out, so the record shows a person deciding.
+   */
+  function handleAdoptFiveWhysRootCause(index: number) {
+    if (isDetailReadOnly) {
+      return;
+    }
+
+    const adoptedAnswer = (fiveWhyAnswers[index] || '').trim();
+
+    if (!adoptedAnswer) {
+      return;
+    }
+
+    persistDraft({
+      ...draft,
+      detailFields: {
+        ...draft.detailFields,
+        answerStatement: adoptedAnswer,
+        // Left as it stands if somebody has already judged it.
+        causeDisposition: draft.detailFields.causeDisposition || 'Needs More Evidence'
+      },
+      isSuspectedCause: true
+    });
+    setRevealedFiveWhysCount(Math.max(revealedFiveWhysCount, index + 1));
   }
 
   function handleApplyFiveWhysCauseDecision() {
@@ -22113,7 +22174,28 @@ function RcaInspectorDrawer({
                     </div>
                     {isActiveStep ? (
                       <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
-                        {index < 4 ? (
+                        {/*
+                          * Offered from the third answer on.
+                          *
+                          * Investigations reach something actionable at their own
+                          * depth, and five is a rule of thumb rather than a
+                          * quota. Stopping is a decision though, so this takes
+                          * the answer to the decision below rather than closing
+                          * anything on its own.
+                          */}
+                        {index >= 2 && answer.trim() ? (
+                          <button
+                            className="inline-flex min-h-[36px] items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 text-xs font-semibold text-emerald-800 transition hover:bg-emerald-100 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={isDetailReadOnly}
+                            onClick={() => handleAdoptFiveWhysRootCause(index)}
+                            title="Take this answer as the root cause and go to the decision"
+                            type="button"
+                          >
+                            <Target aria-hidden="true" size={15} />
+                            This is the root cause
+                          </button>
+                        ) : null}
+                        {index < fiveWhyStepCount - 1 ? (
                           <button
                             className="inline-flex min-h-[36px] items-center justify-center gap-2 rounded-xl bg-cyan-600 px-3 text-xs font-semibold text-white transition hover:bg-cyan-700 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
                             disabled={isDetailReadOnly || !answer.trim()}
@@ -22122,6 +22204,17 @@ function RcaInspectorDrawer({
                           >
                             <Plus aria-hidden="true" size={15} />
                             Add
+                          </button>
+                        ) : canExtendFiveWhys ? (
+                          <button
+                            className="inline-flex min-h-[36px] items-center justify-center gap-2 rounded-xl border border-cyan-200 bg-white px-3 text-xs font-semibold text-cyan-700 transition hover:bg-cyan-50 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={isDetailReadOnly || !answer.trim()}
+                            onClick={handleExtendFiveWhys}
+                            title="Ask another why, if this answer is not yet something you can act on"
+                            type="button"
+                          >
+                            <Plus aria-hidden="true" size={15} />
+                            Ask another why
                           </button>
                         ) : (
                           <div className="basis-full rounded-xl border border-cyan-100 bg-cyan-50/70 px-3 py-2 text-xs font-medium leading-5 text-cyan-950">
@@ -29285,7 +29378,7 @@ function getMiniMapColor(node: RcaNode): string {
 }
 
 function normalizeFiveWhyDraft(whyChain: string[] = []): string[] {
-  return Array.from({ length: 5 }, (_, index) => whyChain[index] || '');
+  return Array.from({ length: getFiveWhysStepCount(whyChain) }, (_, index) => whyChain[index] || '');
 }
 
 function getInitialFiveWhysRevealCount(whyChain: string[] = []): number {
@@ -29293,10 +29386,10 @@ function getInitialFiveWhysRevealCount(whyChain: string[] = []): number {
   const firstEmptyIndex = answers.findIndex((answer) => !answer.trim());
 
   if (firstEmptyIndex === -1) {
-    return 5;
+    return answers.length;
   }
 
-  return Math.min(5, Math.max(1, firstEmptyIndex + 1));
+  return Math.min(answers.length, Math.max(1, firstEmptyIndex + 1));
 }
 
 function hasCompletedFiveWhys(whyChain: string[] = []): boolean {

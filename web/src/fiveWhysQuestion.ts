@@ -33,6 +33,26 @@ const MAX_STRIPPING_PASSES = 8;
 export const FIVE_WHYS_FALLBACK_QUESTION = 'Why the selected cause?';
 
 /**
+ * Where the method starts, not where it stops.
+ *
+ * "Five whys" is a rule of thumb meaning keep asking until the answer is
+ * something you can act on. Some chains reach that at three and some need
+ * seven, so five is the shape a node begins with rather than a limit.
+ */
+export const FIVE_WHYS_MINIMUM_STEPS = 5;
+
+/** A ceiling against a runaway chain, not a judgement about depth. */
+export const FIVE_WHYS_MAXIMUM_STEPS = 10;
+
+/** How many steps a chain holds: five, or more once somebody has added them. */
+export function getFiveWhysStepCount(whyChain: string[] = []): number {
+  return Math.min(
+    FIVE_WHYS_MAXIMUM_STEPS,
+    Math.max(FIVE_WHYS_MINIMUM_STEPS, whyChain.length)
+  );
+}
+
+/**
  * The first sentence, which is the one the question is asked about.
  *
  * A cause is often written as a headline followed by explanation. Asking the
@@ -95,7 +115,7 @@ export function buildFiveWhyQuestion(sourceText: string): string {
 
 /** Every question in the chain: the cause first, then each answer in turn. */
 export function buildFiveWhyQuestions(causeLabel: string, whyChain: string[] = []): string[] {
-  return Array.from({ length: 5 }, (unused, index) => {
+  return Array.from({ length: getFiveWhysStepCount(whyChain) }, (unused, index) => {
     const sourceText = index === 0 ? causeLabel : whyChain[index - 1] || '';
 
     if (!sourceText.trim()) {

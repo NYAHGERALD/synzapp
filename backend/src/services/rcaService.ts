@@ -2438,14 +2438,26 @@ function normalizeText(value: unknown, fallback: string, maxLength: number): str
   return trimmedValue.slice(0, maxLength);
 }
 
+const MAX_RCA_WHY_CHAIN_LENGTH = 10;
+
 function normalizeWhyChain(value: unknown): string[] {
   if (!Array.isArray(value)) {
     return [];
   }
 
+  /**
+   * Five is where the method starts, not where it stops.
+   *
+   * "Five whys" is a rule of thumb meaning keep asking until the answer is
+   * something you can act on. Capping the store at five forced an investigator
+   * who was not there yet to either stop short of the real cause or fold two
+   * steps into one answer, which hides the reasoning an auditor came to read.
+   *
+   * Ten is a ceiling against a runaway payload, not a judgement about depth.
+   */
   return value
     .map((item) => normalizeText(item, '', 260))
-    .slice(0, 5);
+    .slice(0, MAX_RCA_WHY_CHAIN_LENGTH);
 }
 
 function normalizeAttachedEvidence(value: unknown): RcaAttachedEvidence[] {

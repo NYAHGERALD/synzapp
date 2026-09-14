@@ -188,7 +188,7 @@ const nodeBodySchema = z.object({
     y: z.number().finite().min(-100_000).max(100_000).optional()
   }).optional(),
   visualStyle: visualStyleBodySchema.optional(),
-  whyChain: z.array(z.string().trim().max(260)).max(5).optional()
+  whyChain: z.array(z.string().trim().max(260)).max(10).optional()
 });
 
 rcaRouter.get('/context', verifyAppCheck, async (req, res, next) => {
