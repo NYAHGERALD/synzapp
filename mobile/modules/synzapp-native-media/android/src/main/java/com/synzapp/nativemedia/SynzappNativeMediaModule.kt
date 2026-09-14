@@ -54,6 +54,20 @@ class SynzappNativeMediaModule : Module() {
   // One transcode at a time. Two concurrent MediaCodec pipelines starve each
   // other on the hardware encoder and make every send slower, not faster.
   private val transcodeExecutor = Executors.newSingleThreadExecutor()
+
+  /**
+   * The thread a picked file is copied on.
+   *
+   * An AsyncFunction body runs on the shared modules queue, a single thread
+   * that every expo-file-system call in the app also waits on. Copying a photo
+   * out of a content provider there stalls getInfoAsync, copyAsync and
+   * readDirectoryAsync everywhere else for as long as it takes.
+   *
+   * Its own thread, as transcodeVideo already has and as the iOS side does with
+   * its own dispatch queue. Kept separate from the transcode executor so a
+   * photo does not queue behind a video.
+   */
+  private val prepareExecutor = Executors.newSingleThreadExecutor()
   private val videoTranscoder: SynzappNativeVideoTranscoder by lazy {
     SynzappNativeVideoTranscoder(cacheDir)
   }
@@ -200,10 +214,11 @@ class SynzappNativeMediaModule : Module() {
     }
 
     AsyncFunction("prepareMediaAsset") { input: Map<String, Any?>, promise: Promise ->
+      prepareExecutor.execute {
       val assetIdentifier = (input["assetIdentifier"] as? String)?.trim().orEmpty()
       if (assetIdentifier.isBlank()) {
         promise.reject("invalid_input", "assetIdentifier is required.", null)
-        return@AsyncFunction
+        return@execute
       }
 
       cancelledPreparations.remove(assetIdentifier)
@@ -251,7 +266,7 @@ class SynzappNativeMediaModule : Module() {
                   message = "Media preparation was cancelled."
                 )
                 promise.reject("prepare_cancelled", "Media preparation was cancelled.", null)
-                return@AsyncFunction
+                return@execute
               }
 
               val read = inputStream.read(buffer)
@@ -309,6 +324,7 @@ class SynzappNativeMediaModule : Module() {
         promise.reject("prepare_failed", error.message ?: "Synzapp could not prepare the selected media.", error)
       } finally {
         cancelledPreparations.remove(assetIdentifier)
+      }
       }
     }
 
