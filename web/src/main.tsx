@@ -15,7 +15,6 @@ import {
   type ProductEntry
 } from './marketingContent';
 import { createRoot } from 'react-dom/client';
-import { createPortal } from 'react-dom';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import {
   ArrowLeft,
@@ -30,7 +29,6 @@ import {
   KeyRound,
   LockKeyhole,
   LogOut,
-  Settings,
   ShieldCheck,
   Smartphone,
   UserCircle,
@@ -772,7 +770,6 @@ function Dashboard({
   ));
   const [rcaEntryKey, setRcaEntryKey] = React.useState(0);
   const profileButtonRef = React.useRef<HTMLButtonElement | null>(null);
-  const profileMenuRef = React.useRef<HTMLDivElement | null>(null);
   const displayName = profile?.displayName || session.user.displayName || session.user.phoneMasked;
   const role = profile?.roleName || formatRole(session.user.role);
   const roleCode = (profile?.role || session.user.role || 'EMPLOYEE').toUpperCase();
@@ -864,20 +861,13 @@ function Dashboard({
       return undefined;
     }
 
-    function handlePointerDown(event: PointerEvent) {
-      const target = event.target;
-
-      if (!(target instanceof Node)) {
-        return;
-      }
-
-      if (profileButtonRef.current?.contains(target) || profileMenuRef.current?.contains(target)) {
-        return;
-      }
-
-      setIsProfileMenuOpen(false);
-    }
-
+    /**
+     * Escape closes it, as it did when this was a menu.
+     *
+     * The outside-click handler went with the floating card: these sit inside
+     * the panel now, so clicking elsewhere in the app is not a gesture to
+     * dismiss them, any more than it is for the navigation above.
+     */
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') {
         setIsProfileMenuOpen(false);
@@ -885,13 +875,9 @@ function Dashboard({
       }
     }
 
-    window.addEventListener('pointerdown', handlePointerDown);
     window.addEventListener('keydown', handleKeyDown);
 
-    return () => {
-      window.removeEventListener('pointerdown', handlePointerDown);
-      window.removeEventListener('keydown', handleKeyDown);
-    };
+    return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isProfileMenuOpen]);
 
   function openAccountPanel(tab: AccountPanelTab) {
@@ -908,45 +894,18 @@ function Dashboard({
         departmentName={departmentName}
         displayName={displayName}
         groups={sidePanelGroups}
+        isAccountOpen={isProfileMenuOpen}
         isCollapsed={isPanelCollapsed}
         isSettingsActive={activeModule === 'settings' || activeModule === 'account'}
         onOpenAccount={() => setIsProfileMenuOpen((isOpen) => !isOpen)}
-        onOpenSettings={() => setDashboardModule('settings')}
+        onOpenAccountPage={() => openAccountPanel('account')}
+        onOpenSettings={() => openAccountPanel('settings')}
+        onSignOut={onSignOut}
         onSelect={(id: SidePanelItemId) => setDashboardModule(id)}
         onToggleCollapsed={() => setIsPanelCollapsed((collapsed) => !collapsed)}
         role={role}
       />
 
-      {isProfileMenuOpen ? createPortal((
-        <div
-          aria-label="Employee profile menu"
-          className="dashboard-profile-menu side-panel-profile-menu"
-          id="dashboard-profile-menu"
-          ref={profileMenuRef}
-          role="menu"
-        >
-          <div className="dashboard-profile-menu-card">
-            <Avatar className="dashboard-profile-menu-avatar" name={displayName} photoUrl={profilePhotoUrl} />
-            <div>
-              <span>{displayName}</span>
-              <strong>{role}</strong>
-              <small>{departmentName}</small>
-            </div>
-          </div>
-          <button onClick={() => openAccountPanel('account')} role="menuitem" type="button">
-            <UserCircle aria-hidden="true" size={16} />
-            My account
-          </button>
-          <button onClick={() => openAccountPanel('settings')} role="menuitem" type="button">
-            <Settings aria-hidden="true" size={16} />
-            Settings
-          </button>
-          <button onClick={onSignOut} role="menuitem" type="button">
-            <LogOut aria-hidden="true" size={16} />
-            Log out
-          </button>
-        </div>
-      ), document.body) : null}
 
       <section className="workspace-content" aria-label="Synzapp workspace">
         {activeModule === 'dashboard' ? (

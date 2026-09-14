@@ -8,10 +8,12 @@ import {
   LifeBuoy,
   ListChecks,
   Lock,
+  LogOut,
   Megaphone,
   PanelLeftClose,
   PanelLeftOpen,
   Scale,
+  UserCircle,
   Search,
   Settings,
   Workflow
@@ -75,14 +77,21 @@ export function SidePanel({
   departmentName,
   displayName,
   groups,
+  isAccountOpen,
   isCollapsed,
   isSettingsActive,
   onOpenAccount,
+  onOpenAccountPage,
   onOpenSettings,
   onSelect,
+  onSignOut,
   onToggleCollapsed,
   role
 }: {
+  isAccountOpen: boolean;
+  /** Opens the account page. Distinct from the block, which opens the list. */
+  onOpenAccountPage: () => void;
+  onSignOut: () => void;
   activeId: string;
   /** Passed in rather than imported: the avatar lives in the shell. */
   avatar: React.ReactNode;
@@ -152,8 +161,10 @@ export function SidePanel({
       </div>
 
       <button
+        aria-controls="side-panel-account-actions"
+        aria-expanded={isAccountOpen}
         aria-label={`Account menu for ${displayName}`}
-        className="side-panel-account"
+        className={isAccountOpen ? 'side-panel-account is-open' : 'side-panel-account'}
         onClick={onOpenAccount}
         type="button"
       >
@@ -170,6 +181,36 @@ export function SidePanel({
           </>
         )}
       </button>
+
+      {/*
+        * Opened in place rather than as a floating card.
+        *
+        * The account block sits at the top of the panel now, and a menu that
+        * hovered beside it read as belonging to the page rather than to the
+        * panel. These are navigation, and they behave like the rest of it.
+        */}
+      {isAccountOpen && !isCollapsed ? (
+        <div className="side-panel-account-actions" id="side-panel-account-actions">
+          <button className="side-panel-item" onClick={onOpenAccountPage} type="button">
+            <span className="side-panel-item-icon">
+              <UserCircle aria-hidden="true" size={17} />
+            </span>
+            <span className="side-panel-item-label">My account</span>
+          </button>
+          <button className="side-panel-item" onClick={onOpenSettings} type="button">
+            <span className="side-panel-item-icon">
+              <Settings aria-hidden="true" size={17} />
+            </span>
+            <span className="side-panel-item-label">Settings</span>
+          </button>
+          <button className="side-panel-item side-panel-item-signout" onClick={onSignOut} type="button">
+            <span className="side-panel-item-icon">
+              <LogOut aria-hidden="true" size={17} />
+            </span>
+            <span className="side-panel-item-label">Log out</span>
+          </button>
+        </div>
+      ) : null}
 
       {isCollapsed ? null : (
         <div className="side-panel-search">

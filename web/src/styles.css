@@ -23213,3 +23213,30 @@ body:not(:has(.side-panel)) {
   border-color: rgba(8, 145, 178, 0.5);
   color: #0891b2;
 }
+
+/*
+ * The account actions, opened inside the panel.
+ *
+ * Indented to sit under the block they belong to, and separated from the
+ * search below, so an open disclosure does not read as part of the navigation.
+ */
+.side-panel-account-actions {
+  border-bottom: 1px solid var(--surface-rule);
+  display: grid;
+  gap: 2px;
+  padding: 6px 8px 8px;
+}
+
+.side-panel-account.is-open {
+  border-bottom-color: transparent;
+}
+
+/* Destructive, and the one action here that cannot be undone. */
+.side-panel-item-signout,
+.side-panel-item-signout .side-panel-item-icon {
+  color: #b91c1c;
+}
+
+.side-panel-item-signout:hover {
+  background: #fef2f2;
+}
