@@ -2602,6 +2602,7 @@ export const ProfileAvatar = React.memo(function ProfileAvatar({
   uri?: string | null;
 }) {
   const [didImageFail, setDidImageFail] = useState(false);
+  const [hasImageLoaded, setHasImageLoaded] = useState(false);
   const authorizationHeader = headers?.Authorization || '';
   const deviceHeader = headers?.['X-Synzapp-Device-Id'] || '';
   const avatarStyle = {
@@ -2612,7 +2613,9 @@ export const ProfileAvatar = React.memo(function ProfileAvatar({
 
   useEffect(() => {
     setDidImageFail(false);
-  }, [authorizationHeader, uri]);
+    // A different face has to prove itself again; the same one does not.
+    setHasImageLoaded(false);
+  }, [uri]);
 
   const isRemote = Boolean(uri && /^https?:\/\//i.test(uri));
   // Keyed on the values, not the object, so a re-render with the same token
@@ -2644,9 +2647,18 @@ export const ProfileAvatar = React.memo(function ProfileAvatar({
   if (canLoadImage && source) {
     return (
       <View style={[styles.profileAvatarShell, avatarStyle]}>
-        {fallback}
+        {/*
+          * Initials only until the face has loaded once, never behind it after.
+          *
+          * Drawn underneath permanently, they show through for as long as any
+          * reload takes — so a refetch does not read as a slow image, it reads
+          * as the face flashing. Once a photo has arrived this stops rendering,
+          * and a later reload leaves the last frame up instead.
+          */}
+        {hasImageLoaded ? null : fallback}
         <Image
           onError={() => setDidImageFail(true)}
+          onLoad={() => setHasImageLoaded(true)}
           resizeMode="cover"
           source={source}
           style={[styles.profileAvatarImage, StyleSheet.absoluteFillObject]}

@@ -4391,15 +4391,36 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
     );
   }
 
+  /**
+   * Keeps the photo already on screen when a contact is refreshed.
+   *
+   * A realtime contact arrives carrying the server's https photo URL; the
+   * cached file:// path is written a moment later, and the same handler applies
+   * the contact twice — once raw, once cached. The header was handed the raw
+   * one, so its avatar uri flipped https, file, https, file on every event.
+   *
+   * Android treats each as a different image and fetches it again, and the
+   * initials sitting behind the photo show through while it does. Several
+   * events arrive per message, which is why a face blinked several times a
+   * second while sending and receiving and was still on an idle chat.
+   *
+   * The list never had this: it merged against what it already held. The helper
+   * for it was written and imported and never called.
+   */
   function applyVisibleChatContactUpdate(nextContact: ChatContact, shouldSelect: boolean) {
     if (shouldSelect && selectedChatRef.current?.contactId === nextContact.contactId) {
-      setSelectedChat(mapChatContactToChatItem(nextContact));
+      const openContact = mapChatItemToChatContact(selectedChatRef.current);
+
+      setSelectedChat(mapChatContactToChatItem(mergeChatContactCachedPhoto(openContact, nextContact)));
     }
 
     setChatContacts((currentContacts) => {
       const existingContact = currentContacts.find((contact) => contact.contactId === nextContact.contactId);
 
-      return upsertChatContact(currentContacts, mergeChatContactVisibleState(existingContact, nextContact));
+      return upsertChatContact(
+        currentContacts,
+        mergeChatContactVisibleState(existingContact, mergeChatContactCachedPhoto(existingContact, nextContact))
+      );
     });
   }
 
