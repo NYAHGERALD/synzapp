@@ -22869,11 +22869,17 @@ body:not(:has(.side-panel)) {
   text-align: center;
 }
 
+/*
+ * Sits under the brand rather than at the foot of the panel.
+ *
+ * The rule moved with it: it divides the account from the search below, where
+ * before it divided the account from the navigation above.
+ */
 .side-panel-account {
   align-items: center;
   background: none;
   border: none;
-  border-top: 1px solid var(--surface-rule);
+  border-bottom: 1px solid var(--surface-rule);
   color: var(--surface-text);
   cursor: pointer;
   display: flex;

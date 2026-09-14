@@ -151,6 +151,26 @@ export function SidePanel({
         </button>
       </div>
 
+      <button
+        aria-label={`Account menu for ${displayName}`}
+        className="side-panel-account"
+        onClick={onOpenAccount}
+        type="button"
+      >
+        {avatar}
+        {isCollapsed ? null : (
+          <>
+            <span className="side-panel-account-text">
+              {/* The role is the permission scope, and the department under it.
+                  Both come from the directory; neither is typed by anybody. */}
+              <span className="side-panel-account-role">{role}</span>
+              <span className="side-panel-account-department">{departmentName}</span>
+            </span>
+            <ChevronsUpDown aria-hidden="true" size={15} />
+          </>
+        )}
+      </button>
+
       {isCollapsed ? null : (
         <div className="side-panel-search">
           <Search aria-hidden="true" size={15} />
@@ -233,26 +253,6 @@ export function SidePanel({
           {isCollapsed ? null : <span className="side-panel-item-label">Settings</span>}
         </button>
       </div>
-
-      <button
-        aria-label={`Account menu for ${displayName}`}
-        className="side-panel-account"
-        onClick={onOpenAccount}
-        type="button"
-      >
-        {avatar}
-        {isCollapsed ? null : (
-          <>
-            <span className="side-panel-account-text">
-              {/* The role is the permission scope, and the department under it.
-                  Both come from the directory; neither is typed by anybody. */}
-              <span className="side-panel-account-role">{role}</span>
-              <span className="side-panel-account-department">{departmentName}</span>
-            </span>
-            <ChevronsUpDown aria-hidden="true" size={15} />
-          </>
-        )}
-      </button>
     </nav>
   );
 }
