@@ -1,5 +1,10 @@
 import type { ChatMediaAttachment } from './chatApi';
 import {
+  createMediaPreparationReportState,
+  markMediaPreparationReported,
+  shouldReportMediaPreparation
+} from './mediaPreparationReporting';
+import {
   listLocalChatMediaPreparationQueue,
   removeLocalChatMediaPreparationQueueItem,
   upsertLocalChatMediaPreparationQueueItem,
@@ -182,6 +187,13 @@ async function runQueuedPreparation(
     status: 'queued'
   });
 
+  /**
+   * Android raises one of these per 8 KB copied, so a photo arrives as hundreds.
+   * Each used to redraw the ring and write a SQLite row carrying the base64
+   * thumbnail. iOS delivers the same copy in a handful of callbacks, which is
+   * most of why this felt slow on one platform and not the other.
+   */
+  const reportState = createMediaPreparationReportState();
   const subscription = subscribeNativeMediaPreparationEvents((event) => {
     if (event.assetIdentifier !== input.assetIdentifier) {
       return;
@@ -189,6 +201,14 @@ async function runQueuedPreparation(
 
     const progress = normalizeProgress(event.progress);
     const status = mapNativePreparationStatus(event.status);
+    const isTerminal = status === 'ready' || status === 'failed' || status === 'cancelled';
+    const nowMs = Date.now();
+
+    if (!shouldReportMediaPreparation({ isTerminal, nowMs, progress, state: reportState })) {
+      return;
+    }
+
+    markMediaPreparationReported(reportState, progress, nowMs);
     const progressMedia: ChatMediaAttachment = {
       ...baseQueuedMedia,
       transferProgress: progress,

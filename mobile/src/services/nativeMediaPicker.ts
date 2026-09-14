@@ -56,7 +56,26 @@ export async function pickNativeMediaAssets(
   return normalizeNativeMediaPickerResult(result);
 }
 
+/**
+ * Answered once per session.
+ *
+ * The answer cannot change while the app runs — it is a cipher probe and an OS
+ * version — and it was being asked again on every single send, as a native
+ * round trip sitting in front of the first progress report. On Android that
+ * round trip queues behind whatever else is on the modules thread, which during
+ * a send is the photo copy itself.
+ */
+let cachedCapabilities: Promise<NativeMediaPipelineCapabilities> | null = null;
+
 export async function getNativeMediaPipelineCapabilities(): Promise<NativeMediaPipelineCapabilities> {
+  if (!cachedCapabilities) {
+    cachedCapabilities = resolveNativeMediaPipelineCapabilities();
+  }
+
+  return cachedCapabilities;
+}
+
+async function resolveNativeMediaPipelineCapabilities(): Promise<NativeMediaPipelineCapabilities> {
   const fallback: NativeMediaPipelineCapabilities = {
     backgroundMultipartUploadWorkerAvailable: false,
     killedAppSecretboxWorkerAvailable: false,

@@ -28,6 +28,23 @@ private const val REQUEST_PICK_MEDIA = 42073
 private const val CACHE_DIR_NAME = "SynzappNativeMedia"
 private const val PERSISTENT_MEDIA_DIR_NAME = "SynzappMedia"
 
+/**
+ * How much of a picked file is read at a time.
+ *
+ * Kotlin's default is 8 KB, and both streams here are unbuffered, so a photo
+ * was copied out of the content provider in hundreds of small round trips.
+ */
+private const val COPY_BUFFER_BYTES = 256 * 1024
+
+/**
+ * How much the copy must advance before it is worth telling JavaScript.
+ *
+ * An event per read meant a bridge crossing, a progress ring redraw and a
+ * SQLite write per 8 KB — several hundred for one photo. A ring a few
+ * millimetres across cannot show a change smaller than this.
+ */
+private const val COPY_PROGRESS_STEP = 0.01
+
 class SynzappNativeMediaModule : Module() {
   private var activePickerPromise: Promise? = null
   /** Cached once: the cipher probe should not run on every chunk. */
@@ -189,6 +206,17 @@ class SynzappNativeMediaModule : Module() {
         return@AsyncFunction
       }
 
+      cancelledPreparations.remove(assetIdentifier)
+      // Before the metadata read, not after: buildAssetPayload opens the
+      // content stream and decodes the image header, and the ring stays
+      // indeterminate until something reports a progress above zero.
+      sendPreparationEvent(
+        assetIdentifier = assetIdentifier,
+        status = "running",
+        progress = 0.01,
+        message = "Preparing media."
+      )
+
       val resolver = contentResolver
       val sourceUri = Uri.parse(assetIdentifier)
       val metadata = buildAssetPayload(sourceUri)
@@ -200,13 +228,6 @@ class SynzappNativeMediaModule : Module() {
       // show anyone. The display name is kept separately and reported instead.
       val destination = File(cacheDir, "${sanitizeFileName(assetIdentifier)}-$fileName")
 
-      cancelledPreparations.remove(assetIdentifier)
-      sendPreparationEvent(
-        assetIdentifier = assetIdentifier,
-        status = "running",
-        progress = 0.01,
-        message = "Preparing media."
-      )
 
       try {
         resolver.openInputStream(sourceUri).use { inputStream ->
@@ -216,8 +237,9 @@ class SynzappNativeMediaModule : Module() {
 
           FileOutputStream(destination).use { outputStream ->
             val sizeBytes = (metadata["sizeBytes"] as? Long)?.takeIf { it > 0 }
-            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            val buffer = ByteArray(COPY_BUFFER_BYTES)
             var copiedBytes = 0L
+            var lastReportedProgress = 0.01
 
             while (true) {
               if (cancelledPreparations.contains(assetIdentifier)) {
@@ -240,12 +262,17 @@ class SynzappNativeMediaModule : Module() {
               outputStream.write(buffer, 0, read)
               copiedBytes += read
               if (sizeBytes != null) {
-                sendPreparationEvent(
-                  assetIdentifier = assetIdentifier,
-                  status = "running",
-                  progress = (copiedBytes.toDouble() / sizeBytes.toDouble()).coerceIn(0.02, 0.98),
-                  message = "Copying media."
-                )
+                val progress = (copiedBytes.toDouble() / sizeBytes.toDouble()).coerceIn(0.02, 0.98)
+
+                if (progress - lastReportedProgress >= COPY_PROGRESS_STEP) {
+                  lastReportedProgress = progress
+                  sendPreparationEvent(
+                    assetIdentifier = assetIdentifier,
+                    status = "running",
+                    progress = progress,
+                    message = "Copying media."
+                  )
+                }
               }
             }
           }
