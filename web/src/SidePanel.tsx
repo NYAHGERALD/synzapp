@@ -197,7 +197,12 @@ export function SidePanel({
             </span>
             <span className="side-panel-item-label">My account</span>
           </button>
-          <button className="side-panel-item" onClick={onOpenSettings} type="button">
+          <button
+            aria-current={isSettingsActive ? 'page' : undefined}
+            className={isSettingsActive ? 'side-panel-item is-selected' : 'side-panel-item'}
+            onClick={onOpenSettings}
+            type="button"
+          >
             <span className="side-panel-item-icon">
               <Settings aria-hidden="true" size={17} />
             </span>
@@ -277,22 +282,6 @@ export function SidePanel({
         {!shownGroups.length ? (
           <p className="side-panel-empty">Nothing matches that.</p>
         ) : null}
-      </div>
-
-      {/* Kept out of the groups so it always sits last, above the identity. */}
-      <div className="side-panel-group side-panel-group-tail">
-        <button
-          aria-current={isSettingsActive ? 'page' : undefined}
-          className={isSettingsActive ? 'side-panel-item is-selected' : 'side-panel-item'}
-          onClick={onOpenSettings}
-          title={isCollapsed ? 'Settings' : undefined}
-          type="button"
-        >
-          <span className="side-panel-item-icon">
-            <Settings aria-hidden="true" size={17} />
-          </span>
-          {isCollapsed ? null : <span className="side-panel-item-label">Settings</span>}
-        </button>
       </div>
     </nav>
   );

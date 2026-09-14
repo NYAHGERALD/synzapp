@@ -22760,12 +22760,6 @@ body:not(:has(.side-panel)) {
   margin: 10px 12px;
 }
 
-.side-panel-group-tail {
-  border-top: 1px solid var(--surface-rule);
-  margin: 0;
-  padding: 8px;
-}
-
 .side-panel-item {
   align-items: center;
   background: none;
