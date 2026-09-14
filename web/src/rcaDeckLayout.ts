@@ -1,13 +1,18 @@
 /**
  * How an RCA report is divided into slides.
  *
- * The deck this replaced fitted whatever would go on one slide and abandoned
- * the rest — four nodes per section, four fields per node, then a line saying
- * how much had been left out. A report taken into a meeting cannot have its
- * findings summarised as "+ 6 additional items".
+ * Two things this has to get right, both learned the hard way.
  *
- * So nothing is dropped: content is paginated instead, and these are the rules
- * for where the breaks fall. No pptx import, so they can be tested.
+ * Nothing may be dropped. The deck this replaced fitted what would go on one
+ * slide and reported the rest as "+ 6 additional items"; a report taken into a
+ * meeting cannot summarise its own findings as a count of what is missing.
+ *
+ * And the plan has to be measured, not counted. Deciding "twelve fields fit"
+ * put six rows of 0.92in below a start of 1.62in, which ran through the
+ * evidence strip and out of the bottom of the slide. Rows carry their real
+ * heights here, and the renderer places them at exactly these positions.
+ *
+ * No pptx import, so it can be tested.
  */
 
 export interface RcaDeckField {
@@ -15,47 +20,88 @@ export interface RcaDeckField {
   value: string;
 }
 
-/** Fields per slide: two columns, six rows. Beyond that the type shrinks. */
-export const RCA_DECK_FIELDS_PER_SLIDE = 12;
+export interface RcaDeckRow {
+  fields: RcaDeckField[];
+  height: number;
+  isWide: boolean;
+}
+
+/** Inches. A pair of short fields side by side, label above value. */
+export const RCA_DECK_SHORT_ROW_HEIGHT = 0.88;
+
+/** A value that needs the full width gets more room for the extra lines. */
+export const RCA_DECK_WIDE_ROW_HEIGHT = 1.34;
 
 /**
- * A value long enough to need the full width rather than a column.
+ * Long enough to read badly in a half-width column.
  *
- * An incident description runs to several lines and reads badly in a narrow
- * column beside a one-word field. It takes the width and counts for more.
+ * An incident description runs to several lines, and setting it beside a
+ * one-word field is what made the old slides look ragged.
  */
-export const RCA_DECK_WIDE_VALUE_LENGTH = 120;
+export const RCA_DECK_WIDE_VALUE_LENGTH = 110;
 
-/** What a field costs against a slide's budget: a wide one takes a whole row. */
-export function getRcaDeckFieldWeight(field: RcaDeckField): number {
-  return (field.value || '').length > RCA_DECK_WIDE_VALUE_LENGTH ? 2 : 1;
+export function isRcaDeckWideField(field: RcaDeckField): boolean {
+  return (field.value || '').replace(/\s+/g, ' ').trim().length > RCA_DECK_WIDE_VALUE_LENGTH;
+}
+
+/** Packs fields into rows: wide ones alone, short ones in pairs. */
+export function planRcaDeckRows(fields: RcaDeckField[]): RcaDeckRow[] {
+  const rows: RcaDeckRow[] = [];
+  let pendingShort: RcaDeckField | null = null;
+
+  const flushPending = () => {
+    if (!pendingShort) {
+      return;
+    }
+
+    rows.push({ fields: [pendingShort], height: RCA_DECK_SHORT_ROW_HEIGHT, isWide: false });
+    pendingShort = null;
+  };
+
+  fields.forEach((field) => {
+    if (isRcaDeckWideField(field)) {
+      // A wide field never shares a row, so a half-built pair is closed first.
+      flushPending();
+      rows.push({ fields: [field], height: RCA_DECK_WIDE_ROW_HEIGHT, isWide: true });
+
+      return;
+    }
+
+    if (pendingShort) {
+      rows.push({ fields: [pendingShort, field], height: RCA_DECK_SHORT_ROW_HEIGHT, isWide: false });
+      pendingShort = null;
+
+      return;
+    }
+
+    pendingShort = field;
+  });
+
+  flushPending();
+
+  return rows;
 }
 
 /**
- * Splits a node's fields across as many slides as they need.
+ * Splits rows across slides by how tall they actually are.
  *
- * Never returns an empty page for a node that has fields, and never drops one.
+ * A row taller than a whole slide still gets placed rather than looping or
+ * vanishing: it goes on a page of its own and the renderer shrinks it.
  */
-export function chunkRcaDeckFields(
-  fields: RcaDeckField[],
-  budget: number = RCA_DECK_FIELDS_PER_SLIDE
-): RcaDeckField[][] {
-  const safeBudget = Math.max(1, budget);
-  const pages: RcaDeckField[][] = [];
-  let page: RcaDeckField[] = [];
+export function paginateRcaDeckRows(rows: RcaDeckRow[], availableHeight: number): RcaDeckRow[][] {
+  const pages: RcaDeckRow[][] = [];
+  let page: RcaDeckRow[] = [];
   let used = 0;
 
-  fields.forEach((field) => {
-    const weight = Math.min(safeBudget, getRcaDeckFieldWeight(field));
-
-    if (page.length && used + weight > safeBudget) {
+  rows.forEach((row) => {
+    if (page.length && used + row.height > availableHeight) {
       pages.push(page);
       page = [];
       used = 0;
     }
 
-    page.push(field);
-    used += weight;
+    page.push(row);
+    used += row.height;
   });
 
   if (page.length) {
@@ -65,11 +111,19 @@ export function chunkRcaDeckFields(
   return pages;
 }
 
+/** Everything above, in one call: fields to slide-sized pages of rows. */
+export function planRcaDeckFieldPages(
+  fields: RcaDeckField[],
+  availableHeight: number
+): RcaDeckRow[][] {
+  return paginateRcaDeckRows(planRcaDeckRows(fields), availableHeight);
+}
+
 /**
- * The running header for a node spread over more than one slide.
+ * Said as "2 of 3" rather than "continued".
  *
- * Said as "2 of 3" rather than "continued", because somebody flicking back
- * through a deck in a meeting needs to know how much of it they are looking at.
+ * Somebody flicking back through a deck in a meeting needs to know how much of
+ * an item they are looking at.
  */
 export function getRcaDeckContinuationLabel(pageIndex: number, pageCount: number): string {
   return pageCount > 1 ? `${pageIndex + 1} of ${pageCount}` : '';
@@ -87,4 +141,16 @@ export function clipRcaDeckValue(value: string, maxLength: number): string {
   const lastSpace = cut.lastIndexOf(' ');
 
   return `${(lastSpace > maxLength * 0.6 ? cut.slice(0, lastSpace) : cut).trim()}…`;
+}
+
+/**
+ * Whether a data URL is something PowerPoint will actually open.
+ *
+ * `addImage` accepts any base64 payload and embeds it without complaint, so an
+ * evidence record that is a PDF — or a fetch that returned an error page —
+ * produced a file PowerPoint refused to open at all, offering only to repair
+ * it. The deck is worth more without a thumbnail than it is unopenable.
+ */
+export function isRcaDeckEmbeddableImage(dataUrl: string | null | undefined): boolean {
+  return /^data:image\/(png|jpe?g|gif|webp|bmp);base64,[A-Za-z0-9+/=]+$/i.test((dataUrl || '').trim());
 }
