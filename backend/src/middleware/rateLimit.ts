@@ -1,4 +1,6 @@
 import { NextFunction, Request, Response } from 'express';
+import { consumeDurableRateLimit } from './durableRateLimit.js';
+import { getRetryAfterSeconds } from './rateLimitWindow.js';
 
 interface RateLimitOptions {
   windowMs: number;
@@ -6,6 +8,14 @@ interface RateLimitOptions {
   message: string;
   keyPrefix: string;
   keyGenerator?: (req: Request) => string;
+  /**
+   * Count this limit across every instance, not just this one.
+   *
+   * For the public unauthenticated routes, where a per-instance counter is
+   * least defensible and the volume is low enough that a transaction per
+   * request costs nothing worth saving.
+   */
+  durable?: boolean;
 }
 
 interface Bucket {
@@ -16,16 +26,27 @@ interface Bucket {
 const buckets = new Map<string, Bucket>();
 
 export function createRateLimiter(options: RateLimitOptions) {
-  return function rateLimiter(req: Request, res: Response, next: NextFunction) {
+  return async function rateLimiter(req: Request, res: Response, next: NextFunction) {
     const key = `${options.keyPrefix}:${options.keyGenerator?.(req) || getClientIp(req)}`;
-    const result = consumeRateLimit(key, options.windowMs, options.max);
+    /**
+     * The local count first, always.
+     *
+     * It is free, and a caller already over the limit on this instance is
+     * refused without a Firestore round trip. The shared count is only asked
+     * when the local one would have let the request through.
+     */
+    let result = consumeRateLimit(key, options.windowMs, options.max);
+
+    if (result.allowed && options.durable) {
+      result = await consumeDurableRateLimit(key, options.windowMs, options.max);
+    }
 
     res.setHeader('RateLimit-Limit', String(options.max));
     res.setHeader('RateLimit-Remaining', String(Math.max(0, result.remaining)));
     res.setHeader('RateLimit-Reset', String(Math.ceil(result.resetAt / 1000)));
 
     if (!result.allowed) {
-      const retryAfterSeconds = Math.ceil((result.resetAt - Date.now()) / 1000);
+      const retryAfterSeconds = getRetryAfterSeconds(result.resetAt, Date.now());
 
       res.setHeader('Retry-After', String(retryAfterSeconds));
       res.status(429).json({

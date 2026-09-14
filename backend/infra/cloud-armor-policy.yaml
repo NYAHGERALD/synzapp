@@ -1,0 +1,78 @@
+# Cloud Armor policy for the Synzapp API.
+#
+# NOT APPLIED. See SYNZAPP_API_EDGE_SECURITY_PLAN.md for why, and for the order
+# these steps have to happen in.
+#
+# Rules run lowest priority number first; the last one is the default.
+---
+name: synzapp-api-edge
+description: Edge protection for synzapp-backend behind the HTTPS load balancer.
+
+adaptiveProtection:
+  # Learns this service's normal shape and scores anomalies. It is the part that
+  # answers a volumetric attack nobody wrote a rule for.
+  layer7DdosDefenseConfig:
+    enable: true
+    ruleVisibility: STANDARD
+
+rules:
+  # Per-IP request ceiling. Deliberately far above what a person does and well
+  # below what a script does: this is a volume brake, not the per-caller limit.
+  # Those stay in the application, where the caller's identity is known.
+  - priority: 1000
+    description: Throttle a single address to 600 requests a minute.
+    match:
+      versionedExpr: SRC_IPS_V1
+      config:
+        srcIpRanges: ['*']
+    rateLimitOptions:
+      conformAction: allow
+      exceedAction: deny(429)
+      enforceOnKey: IP
+      rateLimitThreshold:
+        count: 600
+        intervalSec: 60
+    action: rate_based_ban
+
+  # The sign-in surface, held much tighter. An address has no honest reason to
+  # ask for six hundred one-time codes a minute.
+  - priority: 900
+    description: Throttle the authentication routes to 30 requests a minute.
+    match:
+      expr:
+        expression: "request.path.startsWith('/api/auth/')"
+    rateLimitOptions:
+      conformAction: allow
+      exceedAction: deny(429)
+      enforceOnKey: IP
+      rateLimitThreshold:
+        count: 30
+        intervalSec: 60
+    action: rate_based_ban
+
+  # OWASP core rules, at a sensitivity that does not fight a JSON API. Set to
+  # preview first: a WAF tuned by guesswork blocks real customers, and preview
+  # logs what it would have done without doing it.
+  - priority: 800
+    description: SQL injection signatures (preview until the logs are read).
+    match:
+      expr:
+        expression: "evaluatePreconfiguredWaf('sqli-v33-stable', {'sensitivity': 1})"
+    action: deny(403)
+    preview: true
+
+  - priority: 810
+    description: Remote code execution signatures (preview until the logs are read).
+    match:
+      expr:
+        expression: "evaluatePreconfiguredWaf('rce-v33-stable', {'sensitivity': 1})"
+    action: deny(403)
+    preview: true
+
+  - priority: 2147483647
+    description: Default allow.
+    match:
+      versionedExpr: SRC_IPS_V1
+      config:
+        srcIpRanges: ['*']
+    action: allow

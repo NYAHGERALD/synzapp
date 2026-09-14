@@ -32,6 +32,7 @@ const contactRouter = Router();
  * low enough that the form is not worth using as a mail relay.
  */
 const publicContactLimiter = createRateLimiter({
+  durable: true,
   keyGenerator: (req) => getClientIp(req),
   keyPrefix: 'contact-enquiry',
   max: 5,

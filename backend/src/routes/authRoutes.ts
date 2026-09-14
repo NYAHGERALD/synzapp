@@ -31,6 +31,7 @@ authRouter.post(
   '/otp/preflight',
   verifyAppCheck,
   createRateLimiter({
+    durable: true,
     keyPrefix: 'otp-preflight-ip',
     max: env.otpRateLimitMax,
     message: 'Too many code requests. Please wait before trying again.',
@@ -71,6 +72,7 @@ authRouter.post(
   '/session',
   verifyAppCheck,
   createRateLimiter({
+    durable: true,
     keyPrefix: 'auth-session-ip',
     max: env.authRateLimitMax,
     message: 'Too many sign-in attempts. Please wait before trying again.',
