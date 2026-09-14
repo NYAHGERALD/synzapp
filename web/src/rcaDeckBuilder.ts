@@ -5,6 +5,7 @@ import type {
 } from './rcaReportExportTypes';
 import {
   clipRcaDeckValue,
+  sanitizeRcaDeckText,
   getRcaDeckContinuationLabel,
   isRcaDeckEmbeddableImage,
   planRcaDeckFieldPages
@@ -66,8 +67,8 @@ export async function buildRcaDeck(
   pptx.layout = 'LAYOUT_WIDE';
   pptx.author = 'Synzapp RCA';
   pptx.company = 'Synzapp';
-  pptx.subject = payload.incidentTitle;
-  pptx.title = payload.incidentTitle;
+  pptx.subject = sanitizeRcaDeckText(payload.incidentTitle);
+  pptx.title = sanitizeRcaDeckText(payload.incidentTitle);
   pptx.theme = { bodyFontFace: 'Aptos', headFontFace: 'Aptos Display' };
 
   /**
@@ -82,7 +83,7 @@ export async function buildRcaDeck(
       {
         text: {
           options: { x: RCA_DECK_MARGIN, y: RCA_DECK_FOOTER_Y, w: 8, h: 0.26, fontSize: 9, color: RCA_DECK.muted },
-          text: `${payload.displayId}  •  ${payload.projectTitle}`
+          text: sanitizeRcaDeckText(`${payload.displayId}  •  ${payload.projectTitle}`)
         }
       }
     ],
@@ -112,16 +113,16 @@ function buildRcaDeckTitleSlide(pptx: any, payload: RcaReportExportPayload) {
   // cover instead of the first page of a document.
   slide.addShape('rect', { x: 0, y: 0, w: 0.22, h: 7.5, fill: { color: RCA_DECK.accent } });
   slide.addText('ROOT CAUSE ANALYSIS', { x: 0.95, y: 2.15, w: 11, h: 0.3, fontSize: 12, bold: true, color: '7DD3FC', charSpacing: 3 });
-  slide.addText(payload.incidentTitle, { x: 0.95, y: 2.62, w: 11.4, h: 1.7, fontSize: 32, bold: true, color: RCA_DECK.white, lineSpacingMultiple: 1.05, valign: 'top' });
-  slide.addText(payload.projectTitle, { x: 0.95, y: 4.42, w: 11.4, h: 0.4, fontSize: 15, color: 'CBD5E1' });
+  slide.addText(sanitizeRcaDeckText(payload.incidentTitle), { x: 0.95, y: 2.62, w: 11.4, h: 1.7, fontSize: 32, bold: true, color: RCA_DECK.white, lineSpacingMultiple: 1.05, valign: 'top' });
+  slide.addText(sanitizeRcaDeckText(payload.projectTitle), { x: 0.95, y: 4.42, w: 11.4, h: 0.4, fontSize: 15, color: 'CBD5E1' });
   slide.addShape('rect', { x: 0.95, y: 5.05, w: 2.4, h: 0.03, fill: { color: RCA_DECK.accent } });
   slide.addText(
     [
-      { text: payload.displayId, options: { bold: true, color: RCA_DECK.white } },
+      { text: sanitizeRcaDeckText(payload.displayId), options: { bold: true, color: RCA_DECK.white } },
       { text: '     ' },
-      { text: payload.status, options: { color: '94A3B8' } },
+      { text: sanitizeRcaDeckText(payload.status), options: { color: '94A3B8' } },
       { text: '     ' },
-      { text: payload.generatedAtLabel, options: { color: '94A3B8' } }
+      { text: sanitizeRcaDeckText(payload.generatedAtLabel), options: { color: '94A3B8' } }
     ],
     { x: 0.95, y: 5.35, w: 11.4, h: 0.34, fontSize: 12 }
   );
@@ -145,7 +146,7 @@ function buildRcaDeckOverviewSlide(pptx: any, payload: RcaReportExportPayload) {
 
     slide.addShape('roundRect', { x, y: RCA_DECK_BODY_TOP, w: statWidth, h: 1.12, rectRadius: 0.06, fill: { color: RCA_DECK.panel }, line: { color: RCA_DECK.border, width: 1 } });
     slide.addText(stat.label.toUpperCase(), { x: x + 0.22, y: RCA_DECK_BODY_TOP + 0.18, w: statWidth - 0.44, h: 0.22, fontSize: 9, bold: true, color: RCA_DECK.muted, charSpacing: 1.4 });
-    slide.addText(stat.value, { x: x + 0.22, y: RCA_DECK_BODY_TOP + 0.46, w: statWidth - 0.44, h: 0.5, fontSize: 20, bold: true, color: RCA_DECK.ink, fit: 'shrink' });
+    slide.addText(sanitizeRcaDeckText(stat.value), { x: x + 0.22, y: RCA_DECK_BODY_TOP + 0.46, w: statWidth - 0.44, h: 0.5, fontSize: 20, bold: true, color: RCA_DECK.ink, fit: 'shrink' });
   });
 
   slide.addText('Contents', { x: RCA_DECK_MARGIN, y: 3.15, w: RCA_DECK_WIDTH, h: 0.3, fontSize: 13, bold: true, color: RCA_DECK.ink });
@@ -162,7 +163,7 @@ function buildRcaDeckOverviewSlide(pptx: any, payload: RcaReportExportPayload) {
     slide.addText(
       [
         { text: `${String(index + 1).padStart(2, '0')}  `, options: { bold: true, color: RCA_DECK.accent } },
-        { text: section.title, options: { color: RCA_DECK.ink } },
+        { text: sanitizeRcaDeckText(section.title), options: { color: RCA_DECK.ink } },
         { text: `   ${section.nodes.length} item${section.nodes.length === 1 ? '' : 's'}`, options: { color: RCA_DECK.muted } }
       ],
       { x, y, w: RCA_DECK_WIDTH / 2 - 0.3, h: 0.36, fontSize: 12 }
@@ -175,8 +176,8 @@ function buildRcaDeckDividerSlide(pptx: any, section: RcaReportExportSection, po
 
   slide.background = { color: RCA_DECK.panel };
   slide.addText(`${String(position).padStart(2, '0')} / ${String(total).padStart(2, '0')}`, { x: RCA_DECK_MARGIN, y: 2.75, w: 4, h: 0.32, fontSize: 12, bold: true, color: RCA_DECK.accent, charSpacing: 2 });
-  slide.addText(section.title, { x: RCA_DECK_MARGIN, y: 3.18, w: RCA_DECK_WIDTH, h: 0.9, fontSize: 30, bold: true, color: RCA_DECK.ink, fit: 'shrink' });
-  slide.addText(section.subtitle, { x: RCA_DECK_MARGIN, y: 4.08, w: RCA_DECK_WIDTH * 0.72, h: 0.6, fontSize: 14, color: RCA_DECK.slate });
+  slide.addText(sanitizeRcaDeckText(section.title), { x: RCA_DECK_MARGIN, y: 3.18, w: RCA_DECK_WIDTH, h: 0.9, fontSize: 30, bold: true, color: RCA_DECK.ink, fit: 'shrink' });
+  slide.addText(sanitizeRcaDeckText(section.subtitle), { x: RCA_DECK_MARGIN, y: 4.08, w: RCA_DECK_WIDTH * 0.72, h: 0.6, fontSize: 14, color: RCA_DECK.slate });
   slide.addShape('rect', { x: RCA_DECK_MARGIN, y: 4.82, w: 2.1, h: 0.035, fill: { color: RCA_DECK.accent } });
 }
 
@@ -223,7 +224,7 @@ async function buildRcaDeckNodeSlides(
 
     if (node.status) {
       slide.addShape('roundRect', { x: 11.1, y: 0.52, w: 1.61, h: 0.36, rectRadius: 0.18, fill: { color: RCA_DECK.panel }, line: { color: RCA_DECK.border, width: 1 } });
-      slide.addText(node.status, { x: 11.1, y: 0.52, w: 1.61, h: 0.36, fontSize: 10, color: RCA_DECK.slate, align: 'center', valign: 'middle', fit: 'shrink' });
+      slide.addText(sanitizeRcaDeckText(node.status), { x: 11.1, y: 0.52, w: 1.61, h: 0.36, fontSize: 10, color: RCA_DECK.slate, align: 'center', valign: 'middle', fit: 'shrink' });
     }
 
     let y = RCA_DECK_BODY_TOP;
@@ -234,7 +235,7 @@ async function buildRcaDeckNodeSlides(
         const width = row.isWide ? RCA_DECK_WIDTH : columnWidth;
         const x = RCA_DECK_MARGIN + (row.isWide ? 0 : columnIndex * (columnWidth + 0.5));
 
-        slide.addText(field.label.toUpperCase(), { x, y, w: width, h: 0.2, fontSize: 9, bold: true, color: RCA_DECK.muted, charSpacing: 1.2 });
+        slide.addText(sanitizeRcaDeckText(field.label).toUpperCase(), { x, y, w: width, h: 0.2, fontSize: 9, bold: true, color: RCA_DECK.muted, charSpacing: 1.2 });
         slide.addText(clipRcaDeckValue(field.value, row.isWide ? 420 : 140) || '—', {
           x,
           y: y + 0.24,
@@ -309,7 +310,7 @@ async function addRcaDeckEvidenceStrip(
 }
 
 function addRcaDeckSlideHeading(slide: any, title: string, eyebrow: string) {
-  slide.addText(eyebrow.toUpperCase(), { x: RCA_DECK_MARGIN, y: 0.5, w: RCA_DECK_WIDTH - 1.8, h: 0.24, fontSize: 9, bold: true, color: RCA_DECK.accent, charSpacing: 1.6 });
-  slide.addText(title, { x: RCA_DECK_MARGIN, y: 0.8, w: RCA_DECK_WIDTH - 1.8, h: 0.62, fontSize: 21, bold: true, color: RCA_DECK.ink, fit: 'shrink', valign: 'top' });
+  slide.addText(sanitizeRcaDeckText(eyebrow).toUpperCase(), { x: RCA_DECK_MARGIN, y: 0.5, w: RCA_DECK_WIDTH - 1.8, h: 0.24, fontSize: 9, bold: true, color: RCA_DECK.accent, charSpacing: 1.6 });
+  slide.addText(sanitizeRcaDeckText(title), { x: RCA_DECK_MARGIN, y: 0.8, w: RCA_DECK_WIDTH - 1.8, h: 0.62, fontSize: 21, bold: true, color: RCA_DECK.ink, fit: 'shrink', valign: 'top' });
   slide.addShape('rect', { x: RCA_DECK_MARGIN, y: 1.48, w: RCA_DECK_WIDTH, h: 0.012, fill: { color: RCA_DECK.border } });
 }

@@ -129,9 +129,37 @@ export function getRcaDeckContinuationLabel(pageIndex: number, pageCount: number
   return pageCount > 1 ? `${pageIndex + 1} of ${pageCount}` : '';
 }
 
+/**
+ * Removes characters XML cannot carry.
+ *
+ * This is what made PowerPoint refuse the file. XML 1.0 permits tab, newline
+ * and carriage return and nothing else below 0x20, and pptxgenjs writes text
+ * into the slide verbatim — so one stray byte in a pasted description produced
+ * a deck that would only open as a repair.
+ *
+ * They arrive constantly without anybody typing one: Word writes 0x0B for a
+ * Shift+Enter line break, 0x0C for a page break, and both survive a copy and
+ * paste into a field. Lone surrogates come the same way from broken emoji.
+ *
+ * Replaced with a space rather than removed, so words either side do not run
+ * together into one.
+ */
+export function sanitizeRcaDeckText(value: unknown): string {
+  if (typeof value !== 'string') {
+    return '';
+  }
+
+  return value
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ')
+    // Half of a surrogate pair on its own is not a character at all.
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, ' ')
+    .replace(/(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '$1 ')
+    .replace(/[\uFFFE\uFFFF]/g, ' ');
+}
+
 /** Trims a value for a slide, on a word boundary rather than mid-word. */
 export function clipRcaDeckValue(value: string, maxLength: number): string {
-  const text = (value || '').replace(/\s+/g, ' ').trim();
+  const text = sanitizeRcaDeckText(value).replace(/\s+/g, ' ').trim();
 
   if (text.length <= maxLength) {
     return text;

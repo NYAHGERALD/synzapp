@@ -134,4 +134,57 @@ describe('the RCA deck as a file', () => {
 
     expect(media).toHaveLength(0);
   }, 30_000);
+
+  it('writes no character that XML cannot carry, wherever it came from', async () => {
+    /**
+     * The fault that made PowerPoint offer only to repair the file.
+     *
+     * XML 1.0 permits tab, newline and carriage return and nothing else below
+     * 0x20, and pptxgenjs writes text verbatim. Word puts 0x0B in for every
+     * Shift+Enter line break, so a description pasted from a document carried
+     * them into every deck.
+     *
+     * Planted in every position a string can reach a slide from.
+     */
+    const vt = String.fromCharCode(11);
+    const nul = String.fromCharCode(0);
+    const ff = String.fromCharCode(12);
+    const { default: pptxgen } = await import('pptxgenjs');
+    const JSZip = (await import('jszip')).default;
+    const pptx = new pptxgen();
+    const payload = makePayload({
+      displayId: `RCA${vt}1`,
+      incidentTitle: `Title${vt}broken${nul}here`,
+      projectTitle: `Project${ff}name`,
+      status: `Open${vt}`,
+      sections: [{
+        title: `1.${vt} Incident`,
+        subtitle: `Scope${nul}`,
+        nodes: [{
+          id: 'n1',
+          status: `Investigation${vt}`,
+          title: `Node${ff}title`,
+          type: `INCIDENT${vt}`,
+          evidence: [{ fileName: `photo${vt}.jpg`, fileUrl: 'u', key: 'k1', uploadedAt: '' }],
+          fields: [
+            { label: `Label${vt}`, value: `short${nul}value` },
+            { label: 'Long', value: `${'x'.repeat(200)}${vt}${'y'.repeat(60)}` }
+          ]
+        }]
+      }]
+    });
+
+    await buildRcaDeck(pptx, payload, new Map([['k1', 'u']]), async () => null);
+
+    const zip = await JSZip.loadAsync(await pptx.write({ outputType: 'nodebuffer' }) as Buffer);
+    const illegal = /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/;
+
+    for (const name of Object.keys(zip.files)) {
+      if (!name.endsWith('.xml') || zip.files[name].dir) {
+        continue;
+      }
+
+      expect(illegal.test(await zip.files[name].async('string'))).toBe(false);
+    }
+  }, 30_000);
 });
