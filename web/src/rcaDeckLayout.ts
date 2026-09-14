@@ -120,6 +120,49 @@ export function planRcaDeckFieldPages(
 }
 
 /**
+ * How much of a title a slide heading can hold.
+ *
+ * A heading is a heading. Incident Details takes its title from the incident
+ * description, so a node title can be a full paragraph — set at heading size it
+ * wrapped to six lines and ran straight through the fields underneath. Clipped
+ * to roughly two lines; the full text is in the fields below either way.
+ */
+export const RCA_DECK_TITLE_LENGTH = 118;
+
+/**
+ * A field that only repeats what the heading already says.
+ *
+ * An Ishikawa category node carries one field holding its own name, so it
+ * earned a slide reading "Measurement" twice and nothing else.
+ */
+export function isRcaDeckRedundantField(field: RcaDeckField, title: string): boolean {
+  const value = (field.value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const heading = (title || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+  return !value || (Boolean(heading) && value === heading);
+}
+
+/** What is left once the repetition is taken out. */
+export function getRcaDeckMeaningfulFields(fields: RcaDeckField[], title: string): RcaDeckField[] {
+  return fields.filter((field) => !isRcaDeckRedundantField(field, title));
+}
+
+/**
+ * A node with nothing of its own to show.
+ *
+ * These get a line on a roundup slide rather than a slide each. Twenty nodes
+ * carrying only a name produced twenty near-empty slides in a deck somebody has
+ * to stand up and present.
+ */
+export function isRcaDeckThinNode(node: {
+  evidence: unknown[];
+  fields: RcaDeckField[];
+  title: string;
+}): boolean {
+  return !node.evidence.length && !getRcaDeckMeaningfulFields(node.fields, node.title).length;
+}
+
+/**
  * Said as "2 of 3" rather than "continued".
  *
  * Somebody flicking back through a deck in a meeting needs to know how much of

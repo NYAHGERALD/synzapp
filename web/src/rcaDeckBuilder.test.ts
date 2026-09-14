@@ -187,4 +187,74 @@ describe('the RCA deck as a file', () => {
       expect(illegal.test(await zip.files[name].async('string'))).toBe(false);
     }
   }, 30_000);
+
+  it('does not give a slide to a node that only repeats its own name', async () => {
+    /**
+     * A Fishbone category carries one field holding its own title, so it earned
+     * a slide reading "Measurement" twice and nothing else. Twenty of those is
+     * twenty near-empty slides in a deck somebody has to present.
+     */
+    const { default: pptxgen } = await import('pptxgenjs');
+    const JSZip = (await import('jszip')).default;
+    const pptx = new pptxgen();
+    const bare = (name: string) => ({
+      evidence: [],
+      fields: [{ label: 'Canvas label', value: name }],
+      id: name,
+      status: '',
+      title: name,
+      type: 'ISHIKAWA_CATEGORY'
+    });
+
+    await buildRcaDeck(
+      pptx,
+      makePayload({ sections: [{ nodes: [bare('Measurement'), bare('Machine'), bare('Method')], subtitle: '', title: '6. Fishbone' }] }),
+      new Map(),
+      async () => null
+    );
+
+    const zip = await JSZip.loadAsync(await pptx.write({ outputType: 'nodebuffer' }) as Buffer);
+    const slides = Object.keys(zip.files).filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name));
+
+    // Cover, at a glance, divider, and one roundup — not one per bare node.
+    expect(slides).toHaveLength(4);
+
+    const roundup = await zip.files['ppt/slides/slide4.xml'].async('string');
+
+    expect(roundup).toContain('Also in this section');
+    expect(roundup).toContain('Measurement');
+    expect(roundup).toContain('Method');
+  }, 30_000);
+
+  it('keeps a paragraph title from running over the fields below it', async () => {
+    /**
+     * Incident Details takes its title from the incident description, so a node
+     * title can be a full paragraph. At heading size it wrapped to six lines
+     * and ran straight through the fields underneath.
+     */
+    const { default: pptxgen } = await import('pptxgenjs');
+    const JSZip = (await import('jszip')).default;
+    const pptx = new pptxgen();
+    const paragraph = 'Finished tortilla output from Line 3 was posted against the production order used for dough batches. The pallet placard carried a hand-written production-order number taken from the dough job card rather than the tortilla job card.';
+
+    await buildRcaDeck(
+      pptx,
+      makePayload({
+        sections: [{
+          nodes: [{ evidence: [], fields: [{ label: 'Where', value: 'DC-2' }], id: 'n', status: '', title: paragraph, type: 'INCIDENT_DETAILS' }],
+          subtitle: '',
+          title: '2. Incident details'
+        }]
+      }),
+      new Map(),
+      async () => null
+    );
+
+    const zip = await JSZip.loadAsync(await pptx.write({ outputType: 'nodebuffer' }) as Buffer);
+    const slide = await zip.files['ppt/slides/slide4.xml'].async('string');
+    const heading = /<a:t>([^<]*Finished tortilla[^<]*)<\/a:t>/.exec(slide);
+
+    expect(heading).not.toBeNull();
+    expect((heading?.[1] || '').length).toBeLessThanOrEqual(120);
+  }, 30_000);
 });

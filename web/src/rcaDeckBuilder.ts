@@ -4,7 +4,10 @@ import type {
   RcaReportExportSection
 } from './rcaReportExportTypes';
 import {
+  RCA_DECK_TITLE_LENGTH,
   clipRcaDeckValue,
+  getRcaDeckMeaningfulFields,
+  isRcaDeckThinNode,
   sanitizeRcaDeckText,
   getRcaDeckContinuationLabel,
   isRcaDeckEmbeddableImage,
@@ -97,8 +100,15 @@ export async function buildRcaDeck(
   for (const [sectionIndex, section] of payload.sections.entries()) {
     buildRcaDeckDividerSlide(pptx, section, sectionIndex + 1, payload.sections.length);
 
-    for (const node of section.nodes) {
+    const substantialNodes = section.nodes.filter((node: RcaReportExportNode) => !isRcaDeckThinNode(node));
+    const thinNodes = section.nodes.filter((node: RcaReportExportNode) => isRcaDeckThinNode(node));
+
+    for (const node of substantialNodes) {
       await buildRcaDeckNodeSlides(pptx, section, node, previewUrls, resolveImage);
+    }
+
+    if (thinNodes.length) {
+      buildRcaDeckRoundupSlide(pptx, section, thinNodes);
     }
   }
 
@@ -203,11 +213,14 @@ async function buildRcaDeckNodeSlides(
   previewUrls: Map<string, string>,
   resolveImage: RcaDeckImageResolver
 ) {
+  // Fields that only repeat the heading are dropped before anything is laid
+  // out, so they cannot take up a row saying nothing.
+  const fields = getRcaDeckMeaningfulFields(node.fields, node.title);
   const hasEvidence = node.evidence.length > 0;
   // The strip and its label are reserved before anything is placed, rather
   // than hoped for afterwards.
   const fieldsBottom = hasEvidence ? RCA_DECK_EVIDENCE_TOP - 0.42 : RCA_DECK_FOOTER_Y - 0.36;
-  const pages = planRcaDeckFieldPages(node.fields, fieldsBottom - RCA_DECK_BODY_TOP);
+  const pages = planRcaDeckFieldPages(fields, fieldsBottom - RCA_DECK_BODY_TOP);
   const slidePages: Array<Array<ReturnType<typeof planRcaDeckFieldPages>[number][number]>> =
     pages.length ? pages : [[]];
 
@@ -216,7 +229,7 @@ async function buildRcaDeckNodeSlides(
 
     addRcaDeckSlideHeading(
       slide,
-      node.title || node.type,
+      clipRcaDeckValue(node.title || node.type, RCA_DECK_TITLE_LENGTH),
       [section.title, node.type, getRcaDeckContinuationLabel(pageIndex, slidePages.length)]
         .filter(Boolean)
         .join('   •   ')
@@ -307,6 +320,38 @@ async function addRcaDeckEvidenceStrip(
   if (node.evidence.length > shown.length) {
     slide.addText(`+${node.evidence.length - shown.length} more attached to this item`, { x: RCA_DECK_MARGIN + shown.length * (tileWidth + 0.28), y: stripY + 0.54, w: 2.6, h: 0.3, fontSize: 10, color: RCA_DECK.muted });
   }
+}
+
+/**
+ * The section's remaining items, listed rather than given a slide each.
+ *
+ * A node with no fields and no evidence still belongs in the record — a
+ * Fishbone category with nothing under it is itself a finding — but it does not
+ * warrant a slide showing its name twice.
+ */
+function buildRcaDeckRoundupSlide(pptx: any, section: RcaReportExportSection, nodes: RcaReportExportNode[]) {
+  const slide = pptx.addSlide({ masterName: 'SYNZAPP_RCA' });
+
+  addRcaDeckSlideHeading(slide, 'Also in this section', `${section.title}   •   ${nodes.length} item${nodes.length === 1 ? '' : 's'} with no detail recorded`);
+
+  const columnCount = nodes.length > 9 ? 2 : 1;
+  const rowsPerColumn = Math.ceil(nodes.length / columnCount);
+  const columnWidth = (RCA_DECK_WIDTH - 0.5) / columnCount;
+
+  nodes.forEach((node: RcaReportExportNode, index: number) => {
+    const column = Math.floor(index / rowsPerColumn);
+    const row = index - column * rowsPerColumn;
+    const x = RCA_DECK_MARGIN + column * (columnWidth + 0.5);
+    const y = RCA_DECK_BODY_TOP + row * 0.44;
+
+    slide.addText(
+      [
+        { text: `${sanitizeRcaDeckText(node.type)}   `, options: { bold: true, color: RCA_DECK.accent } },
+        { text: clipRcaDeckValue(node.title, 70) || '—', options: { color: RCA_DECK.ink } }
+      ],
+      { x, y, w: columnWidth, h: 0.36, fontSize: 12, fit: 'shrink' }
+    );
+  });
 }
 
 function addRcaDeckSlideHeading(slide: any, title: string, eyebrow: string) {
