@@ -16848,22 +16848,42 @@ function getInitialRcaReportModalGeometry(): {
   };
 }
 
+/**
+ * Keeps the report inside the canvas, wherever it is dragged.
+ *
+ * Bounded by the canvas rather than the window, which is the difference: the
+ * window includes the side panel and the app footer, and dragging over those was
+ * the fault. It is the same area the maximised view covers, so a modal cannot be
+ * moved somewhere maximising would not have put it.
+ *
+ * Falls back to the window only for the moment before the canvas is measured.
+ */
 function clampRcaReportModalPosition(
   position: { x: number; y: number },
-  size: { height: number; width: number }
+  size: { height: number; width: number },
+  bounds?: { height: number; left: number; top: number; width: number } | null
 ): { x: number; y: number } {
   if (typeof window === 'undefined') {
     return position;
   }
 
+  const area = bounds || {
+    height: window.innerHeight,
+    left: 0,
+    top: 0,
+    width: window.innerWidth
+  };
+  const minX = area.left + RCA_REPORT_MODAL_MARGIN;
+  const minY = area.top + RCA_REPORT_MODAL_MARGIN;
+
   return {
     x: Math.min(
-      Math.max(RCA_REPORT_MODAL_MARGIN, position.x),
-      Math.max(RCA_REPORT_MODAL_MARGIN, window.innerWidth - size.width - RCA_REPORT_MODAL_MARGIN)
+      Math.max(minX, position.x),
+      Math.max(minX, area.left + area.width - size.width - RCA_REPORT_MODAL_MARGIN)
     ),
     y: Math.min(
-      Math.max(RCA_REPORT_MODAL_MARGIN, position.y),
-      Math.max(RCA_REPORT_MODAL_MARGIN, window.innerHeight - size.height - RCA_REPORT_MODAL_MARGIN)
+      Math.max(minY, position.y),
+      Math.max(minY, area.top + area.height - size.height - RCA_REPORT_MODAL_MARGIN)
     )
   };
 }
@@ -17035,10 +17055,7 @@ function RcaIncidentReportModal({
       const nextX = dragStart.startX + event.clientX - dragStart.pointerX;
       const nextY = dragStart.startY + event.clientY - dragStart.pointerY;
 
-      setPosition({
-        x: Math.min(Math.max(16, nextX), Math.max(16, window.innerWidth - size.width - 16)),
-        y: Math.min(Math.max(16, nextY), Math.max(16, window.innerHeight - size.height - 16))
-      });
+      setPosition(clampRcaReportModalPosition({ x: nextX, y: nextY }, size, maximizedRect));
     }
 
     function handleMouseUp() {
@@ -17129,12 +17146,6 @@ function RcaIncidentReportModal({
         width: size.width
       };
   React.useLayoutEffect(() => {
-    if (!isMaximized) {
-      setMaximizedRect(null);
-
-      return undefined;
-    }
-
     const canvasArea = document.querySelector('[data-workspace-surface="true"]');
 
     if (!canvasArea) {
@@ -17145,13 +17156,17 @@ function RcaIncidentReportModal({
 
     const measure = () => {
       const area = canvasArea.getBoundingClientRect();
-
-      setMaximizedRect({
+      const nextRect = {
         height: area.height,
         left: area.left,
         top: area.top,
         width: area.width
-      });
+      };
+
+      setMaximizedRect(nextRect);
+      // The canvas shrinks when the side panel opens, and a modal already parked
+      // on that side would be left sitting underneath it.
+      setPosition((currentPosition) => clampRcaReportModalPosition(currentPosition, size, nextRect));
     };
 
     measure();
@@ -23142,13 +23157,25 @@ function RcaEvidencePhotoViewer({
 
       const nextX = dragStart.startX + event.clientX - dragStart.pointerX;
       const nextY = dragStart.startY + event.clientY - dragStart.pointerY;
-      const maxX = Math.max(16, window.innerWidth - 360);
-      const maxY = Math.max(16, window.innerHeight - 220);
-      const minY = appHeaderClearance + 12;
+      /**
+       * Bounded by the canvas, the same area maximising covers.
+       *
+       * The margins keep a corner of the viewer reachable rather than fitting
+       * it whole: its size is a CSS min() the component never measures, so
+       * there is no exact width to subtract.
+       */
+      const area = maximizedRect || {
+        height: window.innerHeight,
+        left: 0,
+        top: appHeaderClearance,
+        width: window.innerWidth
+      };
+      const minX = area.left + 16;
+      const minY = area.top + 12;
 
       setPosition({
-        x: Math.min(Math.max(16, nextX), maxX),
-        y: Math.min(Math.max(minY, nextY), maxY)
+        x: Math.min(Math.max(minX, nextX), Math.max(minX, area.left + area.width - 360)),
+        y: Math.min(Math.max(minY, nextY), Math.max(minY, area.top + area.height - 220))
       });
     }
 
@@ -23166,12 +23193,6 @@ function RcaEvidencePhotoViewer({
   }, [isMaximized]);
 
   React.useLayoutEffect(() => {
-    if (!isMaximized) {
-      setMaximizedRect(null);
-
-      return undefined;
-    }
-
     const canvasArea = document.querySelector('[data-workspace-surface="true"]');
 
     if (!canvasArea) {
