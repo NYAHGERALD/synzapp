@@ -174,6 +174,7 @@ import { useAppLoading } from './appLoading';
 import { EvidenceLibraryWindow } from './EvidenceLibraryWindow';
 import { RcaAnswerText } from './RcaAnswerText';
 import { buildRcaDeck } from './rcaDeckBuilder';
+import { planRcaFishboneDeck } from './rcaFishboneDeckPlan';
 import type {
   RcaReportExportNode,
   RcaReportExportPayload
@@ -17230,11 +17231,32 @@ function RcaIncidentReportModal({
       startWidth: size.width
     };
   };
+  /**
+   * The same case, walked by Fishbone branch instead of grouped by node type.
+   *
+   * Only the deck wants this: a presentation follows the analysis, while the
+   * report and the spreadsheet are looked things up in. Built on demand rather
+   * than alongside, since most exports never need it.
+   */
+  const buildPresentationPayload = () => buildRcaReportExportPayload({
+    evidenceCount,
+    generatedAt,
+    incident,
+    incidentNode,
+    orderForPresentation: true,
+    reportNodes,
+    reportSections
+  });
+
   const handleExport = async (format: RcaReportExportFormat) => {
     setExportStatus(format);
 
     try {
-      await exportRcaReport(exportPayload, format, previewUrls);
+      await exportRcaReport(
+        format === 'powerpoint' ? buildPresentationPayload() : exportPayload,
+        format,
+        previewUrls
+      );
     } finally {
       setExportStatus(null);
     }
@@ -17478,14 +17500,25 @@ function RcaReportExportMenuItem({
   );
 }
 
+/**
+ * The same case, ordered for whichever it is going into.
+ *
+ * A deck is presented and a report is read, and they do not want the same
+ * order. `orderForPresentation` walks the canvas by Fishbone branch — each
+ * cause followed through its evidence, five whys, root cause and CAPA — which
+ * is how an investigation is explained. The report keeps its sections by node
+ * type, which is how one is looked things up in.
+ */
 function buildRcaReportExportPayload({
   evidenceCount,
   generatedAt,
   incident,
   incidentNode,
+  orderForPresentation,
   reportNodes,
   reportSections
 }: {
+  orderForPresentation?: boolean;
   evidenceCount: number;
   generatedAt: string;
   incident: RcaIncident;
@@ -17505,7 +17538,7 @@ function buildRcaReportExportPayload({
     incidentTitle,
     nodeCount: reportNodes.length,
     projectTitle: incident.title || 'Untitled RCA project',
-    sections: reportSections.map((section) => ({
+    sections: getRcaExportSections(reportNodes, reportSections, orderForPresentation).map((section) => ({
       nodes: section.nodes.map((node) => {
         const role = node.nodeType === 'WHY' ? getFiveWhysNodeRole(node) : null;
         const status = node.isRootCause ? 'Verified cause' : node.isSuspectedCause ? 'Suspect' : '';
@@ -27957,6 +27990,46 @@ function getConnectedRcaReportComponent(incidentNode: RcaNode, nodes: RcaNode[])
   }
 
   return nodes.filter((node) => reportNodeIds.has(node.id));
+}
+
+/**
+ * Sections in the order the destination wants them.
+ *
+ * Falls back to the report's own sections when a plan produces nothing, which
+ * happens on a canvas with no Fishbone branches at all — better the old
+ * grouping than an empty deck.
+ */
+function getRcaExportSections(
+  reportNodes: RcaNode[],
+  reportSections: RcaReportSection[],
+  orderForPresentation?: boolean
+): RcaReportSection[] {
+  if (!orderForPresentation) {
+    return reportSections;
+  }
+
+  const byId = new Map(reportNodes.map((node) => [node.id, node]));
+  const planned = planRcaFishboneDeck(reportNodes.map((node) => ({
+    id: node.id,
+    label: node.label,
+    linkedNodeIds: normalizeRcaLinkedNodeIds(node.linkedNodeIds),
+    nodeType: node.nodeType,
+    parentNodeId: node.parentNodeId || null,
+    role: getFiveWhysNodeRoleSafe(node),
+    status: node.status
+  })));
+  const sections = planned
+    .map((section) => ({
+      id: section.title,
+      nodes: section.nodeIds
+        .map((nodeId) => byId.get(nodeId))
+        .filter((node): node is RcaNode => Boolean(node)),
+      subtitle: section.subtitle,
+      title: section.title
+    }))
+    .filter((section) => section.nodes.length);
+
+  return sections.length ? sections : reportSections;
 }
 
 function buildRcaIncidentReportSections(reportNodes: RcaNode[]): RcaReportSection[] {
