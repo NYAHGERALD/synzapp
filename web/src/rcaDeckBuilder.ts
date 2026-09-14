@@ -98,7 +98,7 @@ export async function buildRcaDeck(
   buildRcaDeckOverviewSlide(pptx, payload);
 
   for (const [sectionIndex, section] of payload.sections.entries()) {
-    buildRcaDeckDividerSlide(pptx, section, sectionIndex + 1, payload.sections.length);
+    buildRcaDeckDividerSlide(pptx, section, sectionIndex + 1, payload.sections.length, payload.sections);
 
     const substantialNodes = section.nodes.filter((node: RcaReportExportNode) => !isRcaDeckThinNode(node));
     const thinNodes = section.nodes.filter((node: RcaReportExportNode) => isRcaDeckThinNode(node));
@@ -181,14 +181,74 @@ function buildRcaDeckOverviewSlide(pptx: any, payload: RcaReportExportPayload) {
   });
 }
 
-function buildRcaDeckDividerSlide(pptx: any, section: RcaReportExportSection, position: number, total: number) {
+/**
+ * A section divider, with the analysis drawn as a run of chevrons.
+ *
+ * A deck read in a meeting is navigated by people who did not build it, and a
+ * chevron row answers the question they actually ask — how far through are we,
+ * and what is still coming. The one for this section is filled; the rest are
+ * outlines.
+ */
+function buildRcaDeckDividerSlide(
+  pptx: any,
+  section: RcaReportExportSection,
+  position: number,
+  total: number,
+  allSections: RcaReportExportSection[]
+) {
   const slide = pptx.addSlide({ masterName: 'SYNZAPP_RCA' });
 
-  slide.background = { color: RCA_DECK.panel };
-  slide.addText(`${String(position).padStart(2, '0')} / ${String(total).padStart(2, '0')}`, { x: RCA_DECK_MARGIN, y: 2.75, w: 4, h: 0.32, fontSize: 12, bold: true, color: RCA_DECK.accent, charSpacing: 2 });
-  slide.addText(sanitizeRcaDeckText(section.title), { x: RCA_DECK_MARGIN, y: 3.18, w: RCA_DECK_WIDTH, h: 0.9, fontSize: 30, bold: true, color: RCA_DECK.ink, fit: 'shrink' });
-  slide.addText(sanitizeRcaDeckText(section.subtitle), { x: RCA_DECK_MARGIN, y: 4.08, w: RCA_DECK_WIDTH * 0.72, h: 0.6, fontSize: 14, color: RCA_DECK.slate });
-  slide.addShape('rect', { x: RCA_DECK_MARGIN, y: 4.82, w: 2.1, h: 0.035, fill: { color: RCA_DECK.accent } });
+  slide.background = { color: RCA_DECK.ink };
+  slide.addShape('rect', { x: 0, y: 0, w: 0.14, h: 7.5, fill: { color: RCA_DECK.accent } });
+  slide.addText(`${String(position).padStart(2, '0')} / ${String(total).padStart(2, '0')}`, { x: RCA_DECK_MARGIN, y: 2.32, w: 4, h: 0.32, fontSize: 12, bold: true, color: '7DD3FC', charSpacing: 2 });
+  slide.addText(sanitizeRcaDeckText(section.title), { x: RCA_DECK_MARGIN, y: 2.74, w: RCA_DECK_WIDTH, h: 0.94, fontSize: 30, bold: true, color: RCA_DECK.white, fit: 'shrink' });
+  slide.addText(sanitizeRcaDeckText(section.subtitle), { x: RCA_DECK_MARGIN, y: 3.72, w: RCA_DECK_WIDTH * 0.7, h: 0.6, fontSize: 14, color: 'CBD5E1' });
+  slide.addText(`${section.nodes.length} item${section.nodes.length === 1 ? '' : 's'}`, { x: RCA_DECK_MARGIN, y: 4.36, w: 3, h: 0.3, fontSize: 12, color: '7DD3FC' });
+
+  addRcaDeckProgressChevrons(slide, allSections, position, 5.3);
+}
+
+/** The run of chevrons, with the section being entered filled in. */
+function addRcaDeckProgressChevrons(
+  slide: any,
+  sections: RcaReportExportSection[],
+  position: number,
+  y: number
+) {
+  // Beyond eight the chevrons are too narrow to carry a word, so the row is
+  // dropped rather than shown as a line of slivers.
+  if (sections.length > 8) {
+    return;
+  }
+
+  const gap = 0.06;
+  const width = (RCA_DECK_WIDTH - gap * (sections.length - 1)) / sections.length;
+
+  sections.forEach((section, index) => {
+    const isCurrent = index + 1 === position;
+    const isDone = index + 1 < position;
+
+    slide.addShape('chevron', {
+      x: RCA_DECK_MARGIN + index * (width + gap),
+      y,
+      w: width,
+      h: 0.54,
+      fill: { color: isCurrent ? RCA_DECK.accent : isDone ? '1E3A5F' : '172033' },
+      line: { color: isCurrent ? RCA_DECK.accent : '334155', width: 1 }
+    });
+    slide.addText(clipRcaDeckValue(section.title, 26), {
+      x: RCA_DECK_MARGIN + index * (width + gap) + 0.12,
+      y,
+      w: width - 0.24,
+      h: 0.54,
+      fontSize: 9,
+      bold: isCurrent,
+      color: isCurrent ? RCA_DECK.white : '94A3B8',
+      align: 'center',
+      valign: 'middle',
+      fit: 'shrink'
+    });
+  });
 }
 
 /**
@@ -241,27 +301,14 @@ async function buildRcaDeckNodeSlides(
     }
 
     let y = RCA_DECK_BODY_TOP;
-    const columnWidth = (RCA_DECK_WIDTH - 0.5) / 2;
+    const columnWidth = (RCA_DECK_WIDTH - 0.36) / 2;
 
     rows.forEach((row) => {
       row.fields.forEach((field, columnIndex) => {
         const width = row.isWide ? RCA_DECK_WIDTH : columnWidth;
-        const x = RCA_DECK_MARGIN + (row.isWide ? 0 : columnIndex * (columnWidth + 0.5));
+        const x = RCA_DECK_MARGIN + (row.isWide ? 0 : columnIndex * (columnWidth + 0.36));
 
-        slide.addText(sanitizeRcaDeckText(field.label).toUpperCase(), { x, y, w: width, h: 0.2, fontSize: 9, bold: true, color: RCA_DECK.muted, charSpacing: 1.2 });
-        slide.addText(clipRcaDeckValue(field.value, row.isWide ? 420 : 140) || '—', {
-          x,
-          y: y + 0.24,
-          // Kept inside the row it was measured for, so nothing can reach the
-          // row below it.
-          w: width,
-          h: row.height - 0.3,
-          fontSize: row.isWide ? 12 : 13,
-          color: RCA_DECK.ink,
-          lineSpacingMultiple: 1.1,
-          valign: 'top',
-          fit: 'shrink'
-        });
+        addRcaDeckFieldCard(slide, field, x, y, width, row.height - 0.14, row.isWide);
       });
 
       y += row.height;
@@ -342,19 +389,76 @@ function buildRcaDeckRoundupSlide(pptx: any, section: RcaReportExportSection, no
     const column = Math.floor(index / rowsPerColumn);
     const row = index - column * rowsPerColumn;
     const x = RCA_DECK_MARGIN + column * (columnWidth + 0.5);
-    const y = RCA_DECK_BODY_TOP + row * 0.44;
+    const y = RCA_DECK_BODY_TOP + row * 0.54;
 
+    // The same card as a field, so the deck has one idea of what an item is.
+    slide.addShape('roundRect', { x, y, w: columnWidth, h: 0.46, rectRadius: 0.05, fill: { color: RCA_DECK.panel }, line: { color: RCA_DECK.border, width: 1 } });
+    slide.addShape('rect', { x: x + 0.02, y: y + 0.08, w: 0.05, h: 0.3, fill: { color: RCA_DECK.accent } });
     slide.addText(
       [
         { text: `${sanitizeRcaDeckText(node.type)}   `, options: { bold: true, color: RCA_DECK.accent } },
-        { text: clipRcaDeckValue(node.title, 70) || '—', options: { color: RCA_DECK.ink } }
+        { text: clipRcaDeckValue(node.title, 64) || '—', options: { color: RCA_DECK.ink } }
       ],
-      { x, y, w: columnWidth, h: 0.36, fontSize: 12, fit: 'shrink' }
+      { x: x + 0.22, y, w: columnWidth - 0.4, h: 0.46, fontSize: 11, valign: 'middle', fit: 'shrink' }
     );
   });
 }
 
+/**
+ * One field, as a card.
+ *
+ * Loose text on white gave every slide the same flat weight, so nothing looked
+ * like a unit and a long value bled into whatever sat beside it. The panel puts
+ * a boundary round each value, and the spine down its left edge is what makes a
+ * column of them scan as a list rather than a wall.
+ */
+function addRcaDeckFieldCard(
+  slide: any,
+  field: { label: string; value: string },
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  isWide: boolean
+) {
+  slide.addShape('roundRect', {
+    x,
+    y,
+    w: width,
+    h: height,
+    rectRadius: 0.05,
+    fill: { color: RCA_DECK.panel },
+    line: { color: RCA_DECK.border, width: 1 }
+  });
+  // The spine. Square against the card's rounded corner, inset so the curve
+  // still reads.
+  slide.addShape('rect', { x: x + 0.02, y: y + 0.1, w: 0.05, h: height - 0.2, fill: { color: RCA_DECK.accent } });
+  slide.addText(sanitizeRcaDeckText(field.label).toUpperCase(), {
+    x: x + 0.22,
+    y: y + 0.13,
+    w: width - 0.44,
+    h: 0.2,
+    fontSize: 9,
+    bold: true,
+    color: RCA_DECK.muted,
+    charSpacing: 1.2
+  });
+  slide.addText(clipRcaDeckValue(field.value, isWide ? 420 : 140) || '—', {
+    x: x + 0.22,
+    y: y + 0.36,
+    w: width - 0.44,
+    h: height - 0.5,
+    fontSize: isWide ? 12 : 13,
+    color: RCA_DECK.ink,
+    lineSpacingMultiple: 1.1,
+    valign: 'top',
+    fit: 'shrink'
+  });
+}
+
 function addRcaDeckSlideHeading(slide: any, title: string, eyebrow: string) {
+  // The cover's edge, carried onto every slide so the deck reads as one thing.
+  slide.addShape('rect', { x: 0, y: 0, w: 0.14, h: 7.5, fill: { color: RCA_DECK.accent } });
   slide.addText(sanitizeRcaDeckText(eyebrow).toUpperCase(), { x: RCA_DECK_MARGIN, y: 0.5, w: RCA_DECK_WIDTH - 1.8, h: 0.24, fontSize: 9, bold: true, color: RCA_DECK.accent, charSpacing: 1.6 });
   slide.addText(sanitizeRcaDeckText(title), { x: RCA_DECK_MARGIN, y: 0.8, w: RCA_DECK_WIDTH - 1.8, h: 0.62, fontSize: 21, bold: true, color: RCA_DECK.ink, fit: 'shrink', valign: 'top' });
   slide.addShape('rect', { x: RCA_DECK_MARGIN, y: 1.48, w: RCA_DECK_WIDTH, h: 0.012, fill: { color: RCA_DECK.border } });

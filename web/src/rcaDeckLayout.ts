@@ -26,11 +26,11 @@ export interface RcaDeckRow {
   isWide: boolean;
 }
 
-/** Inches. A pair of short fields side by side, label above value. */
-export const RCA_DECK_SHORT_ROW_HEIGHT = 0.88;
+/** Inches. A pair of short field cards side by side, with room to breathe. */
+export const RCA_DECK_SHORT_ROW_HEIGHT = 1.02;
 
 /** A value that needs the full width gets more room for the extra lines. */
-export const RCA_DECK_WIDE_ROW_HEIGHT = 1.34;
+export const RCA_DECK_WIDE_ROW_HEIGHT = 1.56;
 
 /**
  * Long enough to read badly in a half-width column.
