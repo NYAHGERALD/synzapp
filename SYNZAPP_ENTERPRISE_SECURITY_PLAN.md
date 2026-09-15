@@ -716,7 +716,7 @@ on the OpenAI account. Flip `companyAiEnabled` to false for new tenants so AI is
 a deliberate choice. Write the sub-processor disclosure: which features call
 OpenAI, what content leaves, what is retained and for how long.
 
-### 5.3 A compliance export is an unencrypted zip behind a 24-hour bearer link
+### 5.3 A compliance export is an unencrypted zip behind a 24-hour bearer link — PART DONE
 
 Built as a plain JSZip with decrypted message bodies and media
 (`complianceExportService.ts:296, 304, 632, 659`), written to
@@ -726,11 +726,19 @@ is a bearer credential that bypasses Storage rules entirely. The gating itself i
 sound (`requireComplianceAdmin`, `complianceAccess.ts:30-32`) — only the link is
 the problem.
 
-**Fix.** Cut the TTL to an hour, or stream the download through an authenticated
-API route. Encrypting the zip to a key the requesting admin already holds is
-better still.
+**Shipped, the link.** The TTL is an hour rather than a day. That is the window
+to *start* a download, not to finish one, so a large bundle is unaffected — and
+twenty-four hours of a bearer credential sitting in browser history, proxy logs
+and whatever the link was pasted into is what made the exposure.
 
-### 5.4 Export bundles carry no integrity digest
+**Still open, the zip itself.** It is still unencrypted. Encrypting it to a key
+the requesting admin already holds is the real answer and it is a bigger change:
+somebody has to be able to open it at the other end, which is a key-handling
+question rather than a code one. The gating was always sound —
+`requireComplianceAdmin` decides who may ask — so what remains is the shape of
+the answer, not who gets it.
+
+### 5.4 Export bundles carry no integrity digest — DONE
 
 `complianceExportManifest.ts:59-81` defines the manifest with no hash field, and
 `createHash` appears nowhere in `complianceExportService.ts`. The same codebase
@@ -740,8 +748,17 @@ digest is what makes a dispute settleable". An eDiscovery bundle whose contents
 cannot be verified after handover is worth much less in the proceeding it was
 produced for.
 
-**Fix.** SHA-256 every file as it is added to the zip, record the digest per
-entry, and add a manifest-level digest. A few lines, given the pattern exists.
+**Shipped, and over the whole bundle rather than per file.** The archive is
+digested as it is streamed to Storage — one pass over bytes that were passing
+anyway, not a second download of something that may be gigabytes — and the digest
+is stored on the export record and handed back **with the download link**, since
+a digest nobody is given is a digest nobody checks.
+
+**Per-file digests were the plan's suggestion and are not possible as described.**
+Media is handed to the zip as a stream and drained later, long after the manifest
+has been serialised, so a per-file digest could not reach the manifest without
+buffering entire videos in memory. The bundle digest is also the one a receiver
+actually checks: it answers "is the file I hold the file you produced".
 
 ### 5.5 Offboarding a customer leaves decrypted copies in the bucket forever — DONE
 

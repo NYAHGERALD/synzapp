@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { Transform } from 'node:stream';
 import JSZip from 'jszip';
 import { fieldValue, firestore, storageBucket } from '../config/firebaseAdmin.js';
 import {
@@ -69,7 +71,19 @@ const MAX_UNSTREAMABLE_MEDIA_BYTES = 20 * 1024 * 1024;
  * is where compression actually pays.
  */
 const MEDIA_ZIP_OPTIONS = { compression: 'STORE' as const };
-const EXPORT_DOWNLOAD_TTL_MS = 24 * 60 * 60 * 1000;
+/**
+ * How long a download link is good for.
+ *
+ * A signed URL is a bearer credential: it bypasses every Storage rule, and
+ * anybody holding the string can fetch an unencrypted zip of a company's
+ * decrypted chat history. Twenty-four hours of that sat in browser history,
+ * proxy logs and whatever the link was pasted into.
+ *
+ * An hour is the window to *start* a download, not to finish one, so a large
+ * bundle is unaffected. The gating itself was always sound — requireComplianceAdmin
+ * decides who may ask — it was only the life of the answer that was wrong.
+ */
+const EXPORT_DOWNLOAD_TTL_MS = 60 * 60 * 1000;
 /**
  * How long a built export is kept.
  *
@@ -91,6 +105,14 @@ const MAX_MESSAGES_PER_EXPORT = 5000;
 export type ComplianceExportState = 'PENDING' | 'RUNNING' | 'READY' | 'FAILED';
 
 export interface ComplianceExportRecord {
+  /**
+   * SHA-256 of the bundle exactly as it was written.
+   *
+   * What lets whoever receives the export show that the file they hold is the
+   * file that was handed over — and lets you show it too. A bundle nobody can
+   * verify is worth much less in the proceeding it was produced for.
+   */
+  archiveSha256?: string | null;
   completeness: 'COMPLETE' | 'PARTIAL';
   /** Set when the job failed, so the console can say why rather than hang. */
   error?: string | null;
@@ -373,7 +395,7 @@ export async function runComplianceExport(input: {
     await exportRef.set({ processedMessages, stage: 'Finishing the export file' }, { merge: true });
 
     const storagePath = `complianceExports/${input.tenantId}/${input.exportId}.zip`;
-    const sizeBytes = await writeArchiveToStorage(zip, storagePath);
+    const { sha256, sizeBytes } = await writeArchiveToStorage(zip, storagePath);
 
     timings.uploadMs = Date.now() - stageStartedMs;
 
@@ -386,6 +408,8 @@ export async function runComplianceExport(input: {
     }));
 
     const finished: Partial<ComplianceExportRecord> = {
+      /** The digest of the bundle as it was written, for whoever receives it. */
+      archiveSha256: sha256,
       completeness: manifest.completeness,
       downloadFileName: buildDownloadFileName({
         criteria,
@@ -476,16 +500,47 @@ export async function resumeStalledComplianceExports(input: {
  * was not where the time went — recorded so the next person does not rewrite it
  * on the same wrong hunch.
  */
-async function writeArchiveToStorage(zip: JSZip, storagePath: string): Promise<number> {
+async function writeArchiveToStorage(
+  zip: JSZip,
+  storagePath: string
+): Promise<{ sha256: string; sizeBytes: number }> {
   const file = storageBucket.file(storagePath);
+  /**
+   * The digest that makes the bundle checkable after it leaves.
+   *
+   * An eDiscovery bundle with no digest cannot be verified by whoever receives
+   * it, which is most of what it was produced for: the other side has no way to
+   * show the file they hold is the file that was handed over, and neither do
+   * you. The same codebase already does this properly for the interpreter,
+   * where the comment reads "the digest is what makes a dispute settleable".
+   *
+   * Taken in transit rather than by reading the file back. The archive is
+   * already being streamed to Storage, so this costs one pass over bytes that
+   * are passing anyway — no second download of something that may be gigabytes.
+   *
+   * Over the whole archive, not per file. The media inside is handed to the zip
+   * as a stream and drained later, long after the manifest has been written, so
+   * a per-file digest could not reach the manifest without buffering entire
+   * videos in memory. The bundle digest is also the one a receiver actually
+   * checks.
+   */
+  const archiveDigest = createHash('sha256');
 
   await new Promise<void>((resolve, reject) => {
     const writeStream = file.createWriteStream({
       contentType: 'application/zip',
       resumable: false
     });
+    const digestTap = new Transform({
+      transform(chunk, _encoding, callback) {
+        archiveDigest.update(chunk);
+        callback(null, chunk);
+      }
+    });
 
     zip.generateNodeStream({ compression: 'DEFLATE', streamFiles: true })
+      .on('error', reject)
+      .pipe(digestTap)
       .on('error', reject)
       .pipe(writeStream)
       .on('error', reject)
@@ -494,7 +549,10 @@ async function writeArchiveToStorage(zip: JSZip, storagePath: string): Promise<n
 
   const [metadata] = await file.getMetadata();
 
-  return Number(metadata.size || 0);
+  return {
+    sha256: archiveDigest.digest('hex'),
+    sizeBytes: Number(metadata.size || 0)
+  };
 }
 
 async function addMessageToExport(input: {
@@ -873,7 +931,11 @@ function normalizeExportRecord(record: ComplianceExportRecord): ComplianceExport
 export async function createComplianceExportDownloadUrl(input: {
   exportId: string;
   tenantId: string;
-}): Promise<{ downloadUrl: string; expiresAtMs: number } | null> {
+}): Promise<{
+  archiveSha256: string | null;
+  downloadUrl: string;
+  expiresAtMs: number;
+} | null> {
   const snapshot = await exportsRef(input.tenantId).doc(input.exportId).get();
 
   if (!snapshot.exists) {
@@ -897,7 +959,14 @@ export async function createComplianceExportDownloadUrl(input: {
     version: 'v4'
   });
 
-  return { downloadUrl, expiresAtMs };
+  /**
+   * The digest travels with the link, not only in the record.
+   *
+   * A bundle digest nobody is handed is a digest nobody checks. Whoever receives
+   * the export needs it at the moment they take delivery, so it goes back with
+   * the link that produces the file.
+   */
+  return { archiveSha256: record.archiveSha256 || null, downloadUrl, expiresAtMs };
 }
 
 /**

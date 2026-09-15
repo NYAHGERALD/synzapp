@@ -724,7 +724,13 @@ complianceRouter.get('/exports/:exportId/download', verifyAppCheck, async (req, 
       uid: context.uid
     });
 
-    res.json({ downloadUrl: link.downloadUrl, expiresAt: new Date(link.expiresAtMs).toISOString() });
+    res.json({
+      // Handed over with the link, so whoever takes delivery can check the file
+      // they hold is the file that was produced.
+      archiveSha256: link.archiveSha256,
+      downloadUrl: link.downloadUrl,
+      expiresAt: new Date(link.expiresAtMs).toISOString()
+    });
   } catch (error) {
     next(error);
   }
