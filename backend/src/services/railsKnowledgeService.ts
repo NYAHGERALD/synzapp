@@ -1,4 +1,5 @@
 import { DecodedIdToken } from 'firebase-admin/auth';
+import { fencePromptData } from './promptText.js';
 import { env } from '../config/env.js';
 import { assertRateLimit } from '../middleware/rateLimit.js';
 import {
@@ -170,15 +171,24 @@ async function requestOpenAiRailsGuidance(question: string, context: string): Pr
           },
           {
             content: [
-              `RAILS context:\n${context}`,
+              fencePromptData('RAILS context', context),
               `User question:\n${question}`
             ].join('\n\n'),
             role: 'user'
           }
         ],
         max_output_tokens: 750,
-        model: env.openAiModel,
-        temperature: 0.2
+        model: env.openAiModel
+        /**
+         * No `temperature`.
+         *
+         * The configured model rejects it outright — "Unsupported parameter:
+         * 'temperature' is not supported with this model" — so every request
+         * returned 400 and every answer users saw was the deterministic
+         * fallback. The same defect was found and fixed in
+         * `rcaKnowledgeService`; this copy of it was still live. Style is set by
+         * the system prompt.
+         */
       }),
       headers: {
         Authorization: `Bearer ${env.openAiApiKey}`,

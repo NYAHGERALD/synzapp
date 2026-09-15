@@ -1480,7 +1480,7 @@ anything but a signal between two participants of a live call, and the frame cap
 takes the worst case from 100 MiB to 512 KiB. A tighter guess at a legitimate
 WebRTC SDP size risks breaking calls for a marginal gain over that.
 
-### 8.4 Prompt injection: real, and there is a tool the model can call
+### 8.4 Prompt injection: real, and there is a tool the model can call — DONE
 
 Seventeen OpenAI call sites. RAILS and RCA keep instructions in a system entry
 but concatenate customer context into the user turn unfenced. The interpreter is
@@ -1504,10 +1504,49 @@ into TTS, which is where a single injection becomes persistent.
 anywhere, and there is no `dangerouslySetInnerHTML` or `.innerHTML` in backend,
 web or mobile. So injected output cannot become script.
 
-**Fix.** Fence customer text rather than concatenating it; keep the meeting name
-out of instruction channels entirely and put it in a data field; constrain the
-name's charset; treat model output as untrusted at the parse boundary rather than
-falling back to speaking the raw body.
+**Shipped, by sanitising what enters the prompts rather than restructuring them.**
+
+That choice is the substance of the fix, not a shortcut. Rewriting the realtime
+interpreter's instructions would change how it translates, and nothing in a test
+suite hears the result — a silent regression in translation quality is a worse
+outcome than the injection it would prevent. So the structure is untouched and
+what flows into it is cleaned.
+
+`promptText.ts` removes what lets text escape the shape it was placed in: control
+characters and newlines, quotes that can close a quoted region, backticks. A
+double quote becomes a typographic one, which reads identically in a name.
+Applied at all five model-facing uses of the meeting name — realtime session
+instructions twice, the text-to-speech context, the transcription prompt and the
+approved-knowledge facts — and to the transcript slices quoted inside instruction
+strings.
+
+**It deliberately does not filter by wording.** Matching phrases like "ignore the
+above" misses what nobody thought of and mangles a legitimate meeting name that
+contains them. Structure is the defence; content filtering is a comfort. A test
+asserts that a name reading "ignore previous instructions" passes through
+untouched, because it is harmless once it cannot escape the value it sits in.
+
+**RAILS and RCA context is fenced**, with an explicit boundary and a sentence
+saying which side is evidence. Content cannot close its own fence.
+
+**Model output is bounded where it could not be parsed.** On a parse failure the
+raw body was spoken and stored — and a naturalized segment is later re-fed into
+text-to-speech, so anything that steered the model once would be read back on
+every replay. Refusing outright would trade a slightly-off reading for silence in
+a live conversation, which is the wrong trade; it is cleaned and capped instead.
+
+**A separate bug found while doing this, and worth its own line.**
+`railsKnowledgeService` still sent `temperature: 0.2` to a model that rejects it
+outright — "Unsupported parameter" — so **every RAILS AI request was returning
+400 and every answer users saw was the deterministic fallback**. The identical
+defect was found and fixed in `rcaKnowledgeService` earlier; this copy was still
+live. Removed, with a test asserting neither service sends it again.
+
+**Still open, and not a code change:** the declared tool
+`lookup_backend_approved_knowledge` is read-only, rate limited and audited, which
+is what keeps it out of blocker territory. It should stay that way — the moment a
+tool the model can call is given a side effect, everything above becomes load
+bearing in a way it is not today.
 
 ### 8.5 Upload size limits are declared and never measured — PART DONE
 

@@ -1,4 +1,5 @@
 import { buildRcaAiContext, type RcaAiContextNode } from './rcaAiContext.js';
+import { fencePromptData } from './promptText.js';
 import { DecodedIdToken } from 'firebase-admin/auth';
 import { env } from '../config/env.js';
 import { assertRateLimit } from '../middleware/rateLimit.js';
@@ -314,7 +315,10 @@ async function requestOpenAiRcaGuidanceStream(
         input: [
           { content: RCA_KNOWLEDGE_SYSTEM_PROMPT, role: 'system' },
           {
-            content: [`RCA context:\n${context}`, `User question:\n${question}`].join('\n\n'),
+            content: [
+              fencePromptData('RCA context', context),
+              `User question:\n${question}`
+            ].join('\n\n'),
             role: 'user'
           }
         ],
