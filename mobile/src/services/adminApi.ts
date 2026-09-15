@@ -262,6 +262,8 @@ interface InviteEmployeeContactsInput {
   }>;
   departmentId: string;
   idToken: string;
+  /** Sent only when it was asked for; the backend never infers it. */
+  inviteAsOrgAdmin?: boolean;
   roleId: string;
 }
 
@@ -478,6 +480,7 @@ export async function inviteEmployeeContacts(
     body: JSON.stringify({
       contacts: input.contacts,
       departmentId: input.departmentId,
+      inviteAsOrgAdmin: Boolean(input.inviteAsOrgAdmin),
       roleId: input.roleId
     }),
     method: 'POST'

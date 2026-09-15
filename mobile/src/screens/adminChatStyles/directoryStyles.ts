@@ -120,6 +120,16 @@ export const directoryStyles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 8
   },
+  inviteDraftAdminRow: {
+    alignItems: 'center',
+    borderRadius: 13,
+    flexDirection: 'row',
+    gap: 12,
+    justifyContent: 'space-between',
+    minHeight: 58,
+    paddingHorizontal: 10,
+    paddingVertical: 8
+  },
   inviteDraftAvatar: {
     alignItems: 'center',
     borderRadius: 23,

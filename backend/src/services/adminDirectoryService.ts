@@ -1,4 +1,5 @@
 import { DecodedIdToken } from 'firebase-admin/auth';
+import { isReservedTenantRoleName } from './orgAdminInvitePolicy.js';
 import { fieldValue, firestore } from '../config/firebaseAdmin.js';
 import { buildAuthSession } from './authSessionService.js';
 import {
@@ -154,6 +155,14 @@ export async function createRole(
 ): Promise<TenantRoleResponse> {
   const context = await requireOrgAdmin(decodedToken, 'roles.manage');
   const name = input.name.trim();
+
+  // A role name is a label, but RAILS reads one as authority when the stored
+  // role is missing, so "Org Admin" would be treated as an organization admin
+  // there. Refused at the point the name is chosen.
+  if (isReservedTenantRoleName(name)) {
+    throw validationError('That role name is reserved. Choose a different name.');
+  }
+
   const description = input.description?.trim() || null;
   const slug = slugifyName(name);
   const roleId = `role_${slug}`;
@@ -299,5 +308,11 @@ function authorizationError(message: string): Error {
 function conflictError(message: string): Error {
   const error = new Error(message);
   error.name = 'ConflictError';
+  return error;
+}
+
+function validationError(message: string): Error {
+  const error = new Error(message);
+  error.name = 'ValidationError';
   return error;
 }

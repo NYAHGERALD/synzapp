@@ -113,6 +113,7 @@ const inviteEmployeesBodySchema = z.object({
     .min(1)
     .max(25),
   departmentId: z.string().trim().min(2).max(120),
+  inviteAsOrgAdmin: z.boolean().optional(),
   roleId: z.string().trim().min(2).max(120)
 });
 
@@ -1224,8 +1225,15 @@ adminRouter.get('/employees/:approvedPhoneId/photo', verifyAppCheck, async (req,
 });
 
 adminRouter.post('/employees/invite', verifyAppCheck, async (req, res, next) => {
+  // Hoisted so a refusal can be attributed. A refused attempt to grant
+  // organization admin is exactly the event a tenant needs to see, and an audit
+  // record with no uid and no tenant never reaches their console at all.
+  let auditToken: Awaited<ReturnType<typeof getDecodedToken>> | null = null;
+
   try {
     const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+
+    auditToken = decodedToken;
     await requireActiveRegisteredDevice(req, decodedToken);
     const body = inviteEmployeesBodySchema.parse(req.body);
     const employees = await inviteEmployeeContacts(decodedToken, body);
@@ -1235,21 +1243,39 @@ adminRouter.post('/employees/invite', verifyAppCheck, async (req, res, next) => 
       metadata: {
         departmentId: body.departmentId,
         employeeCount: employees.length,
+        // The role actually granted, not only the one that was asked for. The
+        // two used to differ silently, so the log read "invited as Forklift
+        // Operator" for somebody who had just been made an organization admin.
+        grantedPermissions: employees[0]?.permissions || [],
+        grantedRole: employees[0]?.role || 'EMPLOYEE',
+        grantedRoleName: employees[0]?.roleName || null,
+        // Who received it. A count cannot answer "who was made an admin", and
+        // every sibling employee route already names its subject.
+        invitedApprovedPhoneIds: employees.map((employee) => employee.approvedPhoneId),
+        invitedPhonesMasked: employees.map((employee) => employee.phoneMasked),
+        orgAdminGrantRequested: Boolean(body.inviteAsOrgAdmin),
         roleId: body.roleId
       },
       req,
       status: 'SUCCESS',
       tenantId: employees[0]?.tenantId,
       uid: decodedToken.uid
-    });
+      // The invite has already committed. A failure writing the record of it
+      // must not reach the catch below and report the grant as refused.
+    }).catch(() => undefined);
 
     res.status(201).json({ employees });
   } catch (error) {
     await writeAuditEvent({
       action: 'EMPLOYEE_INVITES_CREATED',
+      metadata: {
+        orgAdminGrantRequested: Boolean((req.body as { inviteAsOrgAdmin?: unknown } | undefined)?.inviteAsOrgAdmin)
+      },
       reason: error instanceof Error ? error.message : 'Employee invite failed',
       req,
-      status: 'FAILED'
+      status: 'FAILED',
+      tenantId: auditToken?.tenantId as string | undefined,
+      uid: auditToken?.uid
     }).catch(() => undefined);
 
     next(error);

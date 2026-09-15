@@ -1,6 +1,12 @@
 import Feather from '@expo/vector-icons/Feather';
 import { Pressable, Text, View } from 'react-native';
+import { AppSwitch } from '../ui/AppSwitch';
 import { TenantDepartment, TenantRole } from '../../services/adminApi';
+import {
+  ORG_ADMIN_INVITE_LABEL,
+  ORG_ADMIN_ROLE_NAME,
+  describeOrgAdminInviteHint
+} from '../../services/orgAdminInviteGrant';
 import { formatManualInvitePhoneNumberInput } from '../../components/calls/CallKeypadModal';
 import { getInitials } from '../../components/messages/MessageThread';
 import { styles } from '../../screens/adminChatStyles';
@@ -22,24 +28,35 @@ export interface InviteContactDraft {
 export interface InviteDraft {
   contacts: InviteContactDraft[];
   department: TenantDepartment;
+  /**
+   * Asked for on purpose. This used to be decided by the department's name, so
+   * an invite into anything called "Human Resources" handed over full
+   * organization admin without the sender ever being told.
+   */
+  inviteAsOrgAdmin?: boolean;
   mode: InviteMode;
   role: TenantRole;
 }
 
 export function InviteDraftPanel({
+  canOfferOrgAdmin,
   draft,
   isPickingContact,
   isSavingInvite,
   onAddContact,
   onCancel,
-  onSend
+  onSend,
+  onToggleOrgAdmin
 }: {
+  /** Only somebody who can actually grant admin is shown the switch. */
+  canOfferOrgAdmin: boolean;
   draft: InviteDraft;
   isPickingContact: boolean;
   isSavingInvite: boolean;
   onAddContact: () => void;
   onCancel: () => void;
   onSend: () => void;
+  onToggleOrgAdmin: (value: boolean) => void;
 }) {
   const appTheme = useAppTheme();
   const contactCount = draft.contacts.length;
@@ -64,7 +81,15 @@ export function InviteDraftPanel({
               : 'Ready to invite'}
           </Text>
           <Text style={[styles.chatPreview, { color: appTheme.colors.muted }]}>
-            {draft.department.name} - {draft.role.name}
+            {/*
+              * With the switch on the server discards the selected role, so
+              * showing it here would be the same kind of lie the switch exists
+              * to remove: the panel saying one thing while the grant does
+              * another.
+              */}
+            {draft.department.name} - {draft.inviteAsOrgAdmin
+              ? ORG_ADMIN_ROLE_NAME
+              : draft.role.name}
           </Text>
         </View>
         <Pressable
@@ -84,6 +109,35 @@ export function InviteDraftPanel({
       {draft.contacts.map((contact) => (
         <InviteDraftContactRow contact={contact} key={contact.phoneNumber} />
       ))}
+
+      {canOfferOrgAdmin ? (
+        <Pressable
+          accessibilityRole="switch"
+          accessibilityState={{ checked: Boolean(draft.inviteAsOrgAdmin), disabled: actionDisabled }}
+          disabled={actionDisabled}
+          onPress={() => onToggleOrgAdmin(!draft.inviteAsOrgAdmin)}
+          style={({ pressed }) => [
+            styles.inviteDraftAdminRow,
+            { backgroundColor: appTheme.colors.surface },
+            pressed && !actionDisabled && styles.pressed,
+            actionDisabled && styles.disabled
+          ]}
+        >
+          <View style={styles.chatText}>
+            <Text style={[styles.chatTitle, { color: appTheme.colors.ink }]}>
+              {ORG_ADMIN_INVITE_LABEL}
+            </Text>
+            <Text style={[styles.chatPreview, { color: appTheme.colors.muted }]}>
+              {describeOrgAdminInviteHint()}
+            </Text>
+          </View>
+          <AppSwitch
+            disabled={actionDisabled}
+            onValueChange={onToggleOrgAdmin}
+            value={Boolean(draft.inviteAsOrgAdmin)}
+          />
+        </Pressable>
+      ) : null}
 
       <View style={styles.inviteDraftActions}>
         {isBatchMode ? (

@@ -309,6 +309,10 @@ import { EmployeesTab } from '../components/directory/EmployeesTab';
 import { LSW_WORKSPACE_TABS, LswWorkspaceTabMenu } from '../components/lsw/LswWorkspaceTabMenu';
 import { DirectContactDetailsModal } from '../components/contacts/DirectContactDetailsModal';
 import { InviteContactDraft, InviteDraft, InviteDraftPanel, InviteMode, formatPhoneNumberForInviteDisplay } from '../components/invites/InviteDraftPanel';
+import {
+  canOfferOrgAdminInvite,
+  describeOrgAdminInviteConfirmation
+} from '../services/orgAdminInviteGrant';
 import { ManualInviteModal } from '../components/invites/ManualInviteModal';
 import { NewChatModal } from '../components/chatList/NewChatModal';
 import { MessageListModal, MessageListModalMode } from '../components/chatList/MessageListModal';
@@ -1134,6 +1138,14 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
   const currentUid = verifiedAdmin.session.user.uid;
   const canInviteEmployees = hasPermission(permissions, 'users.invite');
   const canManageUsers = hasPermission(permissions, 'users.manage');
+  // Mirrors the backend rule. A department admin holds users.invite and is
+  // refused there, and so is any department but Human Resources, so offering
+  // the switch in either case would only produce an error nobody can act on.
+  const canOfferOrgAdmin = canOfferOrgAdminInvite({
+    departmentId: inviteDraft?.department.departmentId || null,
+    permissions,
+    role: userProfile?.role || null
+  });
   const canManageDirectory = hasPermission(permissions, 'departments.manage') && hasPermission(permissions, 'roles.manage');
   const canManageCompanyProfile = hasPermission(permissions, 'tenant.update');
   const canManageGroups = hasPermission(permissions, 'groups.manage') || hasPermission(permissions, 'groups.create');
@@ -13811,20 +13823,48 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
       return;
     }
 
+    if (!inviteDraft.inviteAsOrgAdmin) {
+      await sendInviteDraft(inviteDraft);
+      return;
+    }
+
+    // Handing somebody the access you hold yourself is confirmed before it is
+    // sent, in words that say what they will be able to do. It used to happen
+    // with no question asked at all, decided by a department's name.
+    const confirmation = describeOrgAdminInviteConfirmation({
+      contactCount: inviteDraft.contacts.length,
+      departmentName: inviteDraft.department.name
+    });
+    const draftToSend = inviteDraft;
+
+    Alert.alert(confirmation.title, confirmation.body, [
+      { style: 'cancel', text: confirmation.cancelLabel },
+      {
+        onPress: () => {
+          void sendInviteDraft(draftToSend);
+        },
+        style: 'destructive',
+        text: confirmation.confirmLabel
+      }
+    ]);
+  }
+
+  async function sendInviteDraft(draft: InviteDraft) {
     setError(null);
     setIsInvitingEmployees(true);
 
     try {
       const idToken = await getIdToken();
       const invitedEmployees = await inviteEmployeeContacts({
-        contacts: inviteDraft.contacts,
-        departmentId: inviteDraft.department.departmentId,
+        contacts: draft.contacts,
+        departmentId: draft.department.departmentId,
         idToken,
-        roleId: inviteDraft.role.roleId
+        inviteAsOrgAdmin: Boolean(draft.inviteAsOrgAdmin),
+        roleId: draft.role.roleId
       });
       const invitedPhoneDisplayByEmployeeId = buildInvitedEmployeePhoneDisplayMap(
         invitedEmployees,
-        inviteDraft.contacts
+        draft.contacts
       );
 
       setApprovedEmployees((currentEmployees) =>
@@ -13844,8 +13884,8 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
           ? `${getApprovedEmployeeDisplayLabel(
               invitedEmployees[0],
               invitedPhoneDisplayByEmployeeId[invitedEmployees[0].approvedPhoneId]
-            )} is approved for ${inviteDraft.department.name}.`
-          : `${invitedEmployees.length} employees are approved for ${inviteDraft.department.name}.`
+            )} is approved for ${draft.department.name}.`
+          : `${invitedEmployees.length} employees are approved for ${draft.department.name}.`
       );
     } catch (nextError) {
       setError(getErrorMessage(nextError, 'Unable to send employee invites.'));
@@ -14318,6 +14358,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
             // never includes them, which is why an empty one is not the same
             // thing as a company with nobody in it.
             isDepartmentScoped={userProfile?.role === 'DEPT_ADMIN'}
+            canOfferOrgAdmin={canOfferOrgAdmin}
             inviteDraft={inviteDraft}
             isLoading={isLoadingEmployees}
             isUpdatingLifecycle={isUpdatingEmployeeLifecycle}
@@ -14333,6 +14374,11 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
               void handleSendInviteDraft();
             }}
             onSelectEmployee={handleSelectEmployeeLifecycle}
+            onToggleInviteOrgAdmin={(value) => {
+              setInviteDraft((currentDraft) => (
+                currentDraft ? { ...currentDraft, inviteAsOrgAdmin: value } : currentDraft
+              ));
+            }}
             profilePhotoHeaders={profilePhotoHeaders}
           />
         </View>

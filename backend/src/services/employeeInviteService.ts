@@ -11,8 +11,10 @@ import {
   isActiveTenantSession
 } from './authorizationPolicy.js';
 import { buildAuthSession } from './authSessionService.js';
-import { ORG_ADMIN_PERMISSIONS } from './permissionCatalog.js';
-import { isHumanResourcesDepartment } from './tenantDefaults.js';
+import {
+  canGrantOrgAdminOnInvite,
+  resolveInviteRoleGrant
+} from './orgAdminInvitePolicy.js';
 
 interface TenantAdminContext {
   permissions: string[];
@@ -30,6 +32,13 @@ interface InviteEmployeeContactInput {
 interface InviteEmployeesInput {
   contacts: InviteEmployeeContactInput[];
   departmentId: string;
+  /**
+   * Asked for explicitly, never inferred. This used to be decided by whether
+   * the chosen department was named "Human Resources", which meant the grant
+   * happened silently and a department admin of HR could make organization
+   * admins without limit. See `orgAdminInvitePolicy.ts`.
+   */
+  inviteAsOrgAdmin?: boolean;
   roleId: string;
 }
 
@@ -223,6 +232,23 @@ export async function inviteEmployeeContacts(
     throw authorizationError('Department admins can invite employees only to their department.');
   }
 
+  const grantOrgAdmin = Boolean(input.inviteAsOrgAdmin);
+
+  if (grantOrgAdmin) {
+    const grantDecision = canGrantOrgAdminOnInvite({
+      callerPermissions: context.permissions,
+      callerRole: context.role,
+      callerScopeDepartmentId: context.scopeDepartmentId,
+      departmentId: input.departmentId
+    });
+
+    if (!grantDecision.allowed) {
+      throw authorizationError(
+        grantDecision.reason || 'You do not have permission to invite an organization admin.'
+      );
+    }
+  }
+
   const organizationRef = firestore.collection('organizations').doc(context.tenantId);
   const departmentRef = organizationRef.collection('departments').doc(input.departmentId);
   const roleRef = organizationRef.collection('roles').doc(input.roleId);
@@ -257,13 +283,15 @@ export async function inviteEmployeeContacts(
     }
 
     departmentName = department.name || 'Department';
-    const isHumanResourcesInvite = isHumanResourcesDepartment({
-      departmentId: input.departmentId,
-      name: departmentName
+    const roleGrant = resolveInviteRoleGrant({
+      grantOrgAdmin,
+      tenantRoleName: tenantRole.name,
+      tenantRolePermissions: tenantRole.permissions
     });
-    inviteRole = isHumanResourcesInvite ? 'ORG_ADMIN' : 'EMPLOYEE';
-    roleName = isHumanResourcesInvite ? 'Organization Admin' : tenantRole.name || 'Role';
-    rolePermissions = isHumanResourcesInvite ? ORG_ADMIN_PERMISSIONS : tenantRole.permissions || [];
+
+    inviteRole = roleGrant.role;
+    roleName = roleGrant.roleName;
+    rolePermissions = roleGrant.permissions;
 
     const globalDirectoryRefs = contacts.map((contact) =>
       firestore.collection('approvedPhoneDirectory').doc(contact.phoneHash)

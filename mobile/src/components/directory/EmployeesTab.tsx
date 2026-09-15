@@ -15,6 +15,7 @@ import { useAppTheme } from '../../theme/AppThemeProvider';
 export function EmployeesTab({
   canInviteEmployees,
   canManageUsers,
+  canOfferOrgAdmin,
   departmentName,
   employees,
   isDepartmentScoped,
@@ -29,10 +30,12 @@ export function EmployeesTab({
   onReactivateDeletedEmployee,
   onSelectEmployee,
   onSendDraft,
+  onToggleInviteOrgAdmin,
   profilePhotoHeaders
 }: {
   canInviteEmployees: boolean;
   canManageUsers: boolean;
+  canOfferOrgAdmin: boolean;
   departmentName: string | null;
   employees: EmployeeListItem[];
   /** A department admin only ever sees their own department, minus themselves. */
@@ -48,6 +51,7 @@ export function EmployeesTab({
   onReactivateDeletedEmployee: (employee: EmployeeListItem) => void;
   onSelectEmployee: (employee: EmployeeListItem) => void;
   onSendDraft: () => void;
+  onToggleInviteOrgAdmin: (value: boolean) => void;
   profilePhotoHeaders?: Record<string, string>;
 }) {
   const appTheme = useAppTheme();
@@ -61,12 +65,14 @@ export function EmployeesTab({
     <View style={styles.fixedListTab}>
       {inviteDraft ? (
         <InviteDraftPanel
+          canOfferOrgAdmin={canOfferOrgAdmin}
           draft={inviteDraft}
           isPickingContact={isPickingContact}
           isSavingInvite={isSavingInvite}
           onAddContact={onAddContact}
           onCancel={onCancelDraft}
           onSend={onSendDraft}
+          onToggleOrgAdmin={onToggleInviteOrgAdmin}
         />
       ) : null}
 
