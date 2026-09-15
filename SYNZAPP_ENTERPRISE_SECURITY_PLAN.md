@@ -1404,7 +1404,7 @@ session can be reopened by sending a status. And in the interpreter,
 New → Triaged → In Progress → Verification → Approved → Closed with per-stage
 blockers, and is wired at three call sites rather than merely defined.
 
-### 8.3 Three WebSockets validate nothing and bypass every middleware
+### 8.3 Three WebSockets validate nothing and bypass every middleware — PART DONE
 
 `rcaRealtimeService.ts:397-420`, `chatRealtimeService.ts:188-206` and
 `callRealtimeService.ts:184-202` all `JSON.parse` a frame, type-assert on
@@ -1422,8 +1422,38 @@ them.
 verbatim to another user's socket with no shape or size check, so an oversized
 frame is amplified to a peer rather than merely costing this server.
 
-**Fix.** Parse with the schema that already exists before calling the writers;
-pass `maxPayload` to all three servers.
+**Shipped: the frames are bounded and the canvas validates.** All three servers
+carry `maxPayload` now — 512 KiB, deliberately generous, because a limit that
+breaks a real message is a limit somebody raises back to infinity. RCA node input
+alone allows eighty detail fields of 1200 characters. It is still two hundred
+times smaller than the default it replaces.
+
+The canvas socket parses `message.input` with the same schema the HTTP route
+uses, on both create and update.
+
+**Two things that surfaced while fixing it.**
+
+Applying the schema would have *broken* detail fields. `nodeBodySchema` had no
+`detailFields` key, and zod strips unknown keys — so that field only ever worked
+because the socket validated nothing, and validating it naively would have
+deleted it silently. The schema now carries it, bounded to what
+`normalizeNodeDetailFields` already enforces, so both doors finally agree.
+
+Importing the schema from the route would have been a **circular import** —
+`rcaRoutes` already imports the realtime service. The schemas moved into
+`rcaNodeInputSchema.ts`, which both sides depend on and neither is depended upon
+by.
+
+**Still open: the middleware bypass.** The upgrade is handled in `server.ts`
+outside the Express chain, so `enforceDeviceBinding` and `verifyAppCheck` still
+do not run on any socket. Chat authenticates the token *and* the device inside
+its own `authenticate` frame, so it is not unguarded — but that is a per-socket
+implementation rather than the guarantee the HTTP side has, and it should be one.
+
+**Not done, deliberately: a second bound on `relaySignal`.** It already refuses
+anything but a signal between two participants of a live call, and the frame cap
+takes the worst case from 100 MiB to 512 KiB. A tighter guess at a legitimate
+WebRTC SDP size risks breaking calls for a marginal gain over that.
 
 ### 8.4 Prompt injection: real, and there is a tool the model can call
 

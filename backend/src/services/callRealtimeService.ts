@@ -1,4 +1,5 @@
 import { Server } from 'node:http';
+import { REALTIME_MAX_PAYLOAD_BYTES } from './realtimeLimits.js';
 import { WebSocket, WebSocketServer } from 'ws';
 import { DecodedIdToken } from 'firebase-admin/auth';
 import { adminAuth } from '../config/firebaseAdmin.js';
@@ -82,7 +83,13 @@ const callTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 const connectionsByUid = new Map<string, Set<CallRealtimeConnection>>();
 
 export function attachCallRealtimeServer(server: Server): void {
-  const realtimeServer = new WebSocketServer({ noServer: true });
+  const realtimeServer = new WebSocketServer({
+    // Bounded. The ws default is 100 MiB per frame, against an 8 MB limit on
+    // the HTTP side, and this socket bypasses the Express middleware chain
+    // entirely. See realtimeLimits.ts for what each socket actually carries.
+    maxPayload: REALTIME_MAX_PAYLOAD_BYTES,
+    noServer: true
+  });
 
   server.on('upgrade', (request, socket, head) => {
     if ((request as { __synzappRealtimeHandled?: boolean }).__synzappRealtimeHandled) {

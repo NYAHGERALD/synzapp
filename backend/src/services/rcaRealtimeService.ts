@@ -1,4 +1,6 @@
 import { Server } from 'node:http';
+import { nodeBodySchema } from './rcaNodeInputSchema.js';
+import { REALTIME_MAX_PAYLOAD_BYTES } from './realtimeLimits.js';
 import { WebSocket, WebSocketServer } from 'ws';
 import * as Y from 'yjs';
 import { DecodedIdToken } from 'firebase-admin/auth';
@@ -124,7 +126,13 @@ const nodeTextDocs = new Map<string, Y.Doc>();
 const nodeTextPersistTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 export function attachRcaRealtimeServer(server: Server): void {
-  const realtimeServer = new WebSocketServer({ noServer: true });
+  const realtimeServer = new WebSocketServer({
+    // Bounded. The ws default is 100 MiB per frame, against an 8 MB limit on
+    // the HTTP side, and this socket bypasses the Express middleware chain
+    // entirely. See realtimeLimits.ts for what each socket actually carries.
+    maxPayload: REALTIME_MAX_PAYLOAD_BYTES,
+    noServer: true
+  });
 
   server.on('upgrade', (request, socket, head) => {
     if ((request as { __synzappRealtimeHandled?: boolean }).__synzappRealtimeHandled) {
@@ -507,7 +515,16 @@ class RcaRealtimeConnection {
         this.decodedToken,
         message.incidentId || '',
         message.sessionId || '',
-        message.input || {}
+        /**
+         * The same schema the HTTP route applies.
+         *
+         * `parseMessage` only ever checked `type`, so everything else arrived
+         * unexamined — and this is the door the web client prefers whenever the
+         * canvas socket is up. Every bound the route enforces (240-character
+         * labels, 24 pieces of evidence, coordinates inside ±100,000) simply did
+         * not exist here.
+         */
+        nodeBodySchema.parse(message.input || {})
       );
 
       this.broadcastToRoom({
@@ -729,7 +746,8 @@ class RcaRealtimeConnection {
         message.incidentId || '',
         message.sessionId || '',
         message.nodeId || '',
-        message.input || {}
+        // Validated the same way as createNode above.
+        nodeBodySchema.parse(message.input || {})
       );
 
       this.broadcastToRoom({
