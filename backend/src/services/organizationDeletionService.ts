@@ -218,6 +218,21 @@ export async function deleteOrganizationForTenantOwner(
 
   await recursiveDelete(context.organizationRef);
 
+  /**
+   * The other half of a tenant, which lived somewhere else entirely.
+   *
+   * Legal holds, disposition items, export records and retention policies are
+   * kept under `tenants/{tenantId}`, not under `organizations/{tenantId}`, and
+   * nothing in this flow ever touched them. Deleting an organization left that
+   * document tree standing in full.
+   *
+   * After the organization, deliberately. `assertTenantDeletableUnderHolds` has
+   * already refused this deletion if any hold is in force, so what is removed
+   * here is the record of holds that are over — and if anything above failed,
+   * the holds are still there to be read.
+   */
+  await recursiveDelete(firestore.collection('tenants').doc(context.tenantId));
+
   return {
     deleted: true,
     revokedUserCount: userIds.size,
@@ -300,9 +315,31 @@ async function deleteGlobalDirectoryRecords(input: {
 }
 
 async function deleteTenantStorage(tenantId: string): Promise<void> {
-  await storageBucket.deleteFiles({
-    prefix: `organizations/${tenantId}/`
-  }).catch(() => undefined);
+  await Promise.all([
+    storageBucket.deleteFiles({
+      prefix: `organizations/${tenantId}/`
+    }).catch(() => undefined),
+    /**
+     * Compliance exports, which only this prefix reaches.
+     *
+     * An export bundle is a plain zip of decrypted message bodies and files, up
+     * to four gigabytes of it, written to `complianceExports/{tenantId}/` — a
+     * different prefix from everything else a tenant owns. Deleting an
+     * organization removed `organizations/{tenantId}/` and left those behind.
+     *
+     * And nothing would ever have come back for them. Their thirty day purge
+     * runs only from the nightly retention sweep, which enumerates tenants with
+     * `organizations.listDocuments()` — and by then the organization document is
+     * gone, so the tenant is not in that list and never will be. A readable
+     * archive of somebody's chat history, with no owner and no expiry, for ever.
+     *
+     * "What happens to our data when we leave" is a standard questionnaire
+     * item, and that was the honest answer.
+     */
+    storageBucket.deleteFiles({
+      prefix: `complianceExports/${tenantId}/`
+    }).catch(() => undefined)
+  ]);
 }
 
 async function recursiveDelete(ref: DocumentReference): Promise<void> {

@@ -743,7 +743,7 @@ produced for.
 **Fix.** SHA-256 every file as it is added to the zip, record the digest per
 entry, and add a manifest-level digest. A few lines, given the pattern exists.
 
-### 5.5 Offboarding a customer leaves decrypted copies in the bucket forever
+### 5.5 Offboarding a customer leaves decrypted copies in the bucket forever — DONE
 
 `organizationDeletionService.ts:302-306` deletes only the
 `organizations/{tenantId}/` Storage prefix. Export bundles live under
@@ -757,10 +757,32 @@ holds, disposition items, export records, settings — is never deleted at all.
 
 "What happens to our data when we leave?" is a standard questionnaire item.
 
-**Fix.** Before `recursiveDelete`: delete the `complianceExports/{tenantId}/`
-prefix, recursively delete `tenants/{tenantId}`, and delete the tenant's
-root-collection audit documents. Add a standalone orphan sweep that lists Storage
-prefixes and `tenants/` docs with no matching `organizations/` document.
+**Shipped.** Offboarding now removes the `complianceExports/{tenantId}/` Storage
+prefix and recursively deletes `tenants/{tenantId}` — legal holds, disposition
+items, export records and retention policies, none of which this flow had ever
+touched.
+
+The tenant tree goes **after** the organization, deliberately.
+`assertTenantDeletableUnderHolds` has already refused the deletion if any hold is
+in force, so what is removed is the record of holds that are over; and if
+anything earlier failed, the holds are still there to be read. A guard test pins
+that ordering, because reversing it would destroy the records that decide whether
+the deletion was allowed.
+
+**A read-only report for the tenants already gone**, `npm run tenants:orphans`.
+It lists `tenants/` documents and export prefixes with no organization, and the
+**size** of each — because "three orphan prefixes" reads as tidying and "eleven
+gigabytes of readable chat history belonging to companies that left" does not.
+
+**Deliberately a report, not a sweep.** Deleting everything with no matching
+organization is a one-line query and the wrong thing: a transient read failure
+would then destroy a live customer's archive, and there is no undoing that.
+
+**One thing the plan asked for that I did not do.** It also said to delete the
+tenant's root-collection audit documents. I left them, because 6.11 is an open
+question about what that collection is *for* — it is written on every event,
+read by nothing, and disposed of nowhere. Deleting records while unsure why they
+exist is the wrong order to settle that in. It stays with 6.11.
 
 ### 5.6 No data subject access or erasure path for an individual
 
