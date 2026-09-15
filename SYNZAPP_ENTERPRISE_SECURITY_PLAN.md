@@ -1534,7 +1534,7 @@ requires the client to send a matching header, so turning it on would break ever
 mobile build already in people's hands. It needs a coordinated client release,
 and the measurement above closes the hole in the meantime.
 
-### 8.6 A client-controlled document id overwrites another person's transcript
+### 8.6 A client-controlled document id overwrites another person's transcript — DONE
 
 Found by the verifier, not by any of the three audits.
 `interpreterService.ts:1199-1203` builds `segmentId = itr_${versionId}` from the
@@ -1547,6 +1547,16 @@ So any invited participant can overwrite another participant's stored transcript
 segment in a live meeting. The translation path beside it uses a server-generated
 random id (`:1289`) and is safe — the pattern was understood and simply not
 applied here.
+
+**Shipped.** The write now reads the existing segment's owner first and refuses
+if it belongs to somebody else, inside a transaction — the check is only worth
+anything if nothing can land between reading the owner and writing.
+
+**Worth naming: the merge made it worse than an overwrite.** Because the write
+used `merge: true` and the payload carries `createdByUid`, replacing somebody
+else's segment also replaced the record of whose it was. The segment changed
+hands silently, and afterwards nothing said it had ever belonged to anybody
+else.
 
 ### 8.7 Formula injection in the two backend CSV builders — DONE
 

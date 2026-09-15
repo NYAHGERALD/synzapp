@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { canWriteTranscriptSegment } from './transcriptSegmentOwnership.js';
 import { DecodedIdToken } from 'firebase-admin/auth';
 import { env } from '../config/env.js';
 import { fieldValue, firestore, storageBucket } from '../config/firebaseAdmin.js';
@@ -1221,8 +1222,39 @@ export async function addInterpreterTranscriptSegment(
     versionId
   });
 
-  await context.organizationRef.collection(INTERPRETER_MEETINGS_COLLECTION).doc(meetingId)
-    .collection(TRANSCRIPT_COLLECTION).doc(segmentId).set(segment, { merge: true });
+  const segmentRef = context.organizationRef
+    .collection(INTERPRETER_MEETINGS_COLLECTION).doc(meetingId)
+    .collection(TRANSCRIPT_COLLECTION).doc(segmentId);
+
+  /**
+   * A segment belongs to whoever recorded it.
+   *
+   * The document id is built from a `versionId` the caller sends, and this wrote
+   * with `merge: true` and no ownership check — so any invited participant could
+   * address another participant's segment and replace its text. The merge also
+   * overwrote `createdByUid`, so the record changed hands silently and nothing
+   * afterwards said it had ever belonged to anybody else. The mobile app pins a
+   * well-known literal as one of its version ids, so the id did not even have to
+   * be guessed.
+   *
+   * In a transaction because the check is only worth anything if nothing can
+   * land between reading the owner and writing.
+   */
+  await firestore.runTransaction(async (transaction) => {
+    const existing = await transaction.get(segmentRef);
+    const decision = canWriteTranscriptSegment({
+      callerUid: context.uid,
+      existingOwnerUid: existing.exists
+        ? String((existing.data() || {}).createdByUid || '')
+        : null
+    });
+
+    if (!decision.allowed) {
+      throw validationError(decision.reason || 'That transcript segment cannot be changed.');
+    }
+
+    transaction.set(segmentRef, segment, { merge: true });
+  });
   const transcriptRecord = normalizeInterpreterTranscriptRecord(segment);
   const preferredAudioLanguageCode =
     input.preferredAudioLanguageCode ||
