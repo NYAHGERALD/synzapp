@@ -1376,7 +1376,7 @@ several Google origins at runtime that no static read of the source reveals. It
 needs a browser pass against staging before it goes on, and the attack is closed
 three other ways in the meantime.
 
-### 8.2 RCA closure is enforced only by the interface
+### 8.2 RCA closure is enforced only by the interface — DONE
 
 The entire twenty-field Approval and Closure review exists in
 `RcaWorkspace.tsx`. `PATCH /api/rca/incidents/:id` with `{"status":"CLOSED"}`
@@ -1398,6 +1398,31 @@ session can be reopened by sending a status. And in the interpreter,
 `startInterpreterMeeting` and `endInterpreterMeeting`
 (`interpreterService.ts:1080-1136`) write the status unconditionally, while
 `deleteInterpreterMeeting` immediately below them checks properly.
+
+**Shipped, and the policy was not invented.** I had recorded this as needing a
+quality-system decision on which of the twenty fields are mandatory. That was
+over-cautious: the product already declares the list, in
+`RCA_APPROVAL_CLOSURE_REQUIRED_FIELDS` in the web workspace. Mirroring it server
+side enforces what the interface has always claimed rather than deciding anything
+new — and a test reads the web source and compares, because the danger with a
+mirrored list is that it quietly stops being one.
+
+`updateRcaIncident` now refuses a CLOSED status until the Approval and Closure
+node exists and its review is complete, naming **every** missing field rather
+than the first, because somebody told one at a time fills the form in twenty
+round trips. An RCA with no review node at all is refused too: closing one that
+never had the review is the case this exists to stop, not an exemption from it.
+
+**And the related hole beside it.** `updateRcaSession` ran neither editability
+guard, while every other session mutation runs `assertSessionIsEditable` first —
+and `normalizeSessionStatus` maps anything unrecognised to ACTIVE, so a closed
+session could be reopened by sending a status at all, let alone the right one. It
+checks now.
+
+**Still open from this finding:** the interpreter's `startInterpreterMeeting` and
+`endInterpreterMeeting` write their status unconditionally, while
+`deleteInterpreterMeeting` immediately below them checks properly. Same shape,
+different module.
 
 **RAILS is the counter-example and the pattern to copy.**
 `validateRailsStatusTransition` (`railsService.ts:4292`) genuinely enforces

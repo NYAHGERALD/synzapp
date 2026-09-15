@@ -1,4 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import {
+  describeClosureRefusal,
+  getMissingClosureFields
+} from './rcaClosurePolicy.js';
 import { normalizeEvidenceContentType as normalizeAllowedEvidenceContentType } from './evidenceContentType.js';
 import { DecodedIdToken } from 'firebase-admin/auth';
 import { fieldValue, firestore, storageBucket } from '../config/firebaseAdmin.js';
@@ -1018,7 +1022,26 @@ export async function updateRcaIncident(
   }
 
   if (input.status !== undefined) {
-    update.status = normalizeIncidentStatus(input.status);
+    const nextStatus = normalizeIncidentStatus(input.status);
+
+    /**
+     * Closure is a governed act, not a field.
+     *
+     * This used to coerce the string and write it, so a PATCH carrying
+     * `{"status":"CLOSED"}` closed an investigation with nothing filled in — the
+     * entire twenty-field Approval and Closure review lived in the browser. And
+     * a fabricated closure is permanent: the freeze a few lines above means the
+     * record cannot be corrected through any ordinary route afterwards.
+     *
+     * The requirements are the ones the interface has always stated; see
+     * `rcaClosurePolicy.ts`, which mirrors them and has a test that fails if the
+     * two lists ever drift apart.
+     */
+    if (nextStatus === 'CLOSED') {
+      await assertIncidentReadyToClose(incidentRef);
+    }
+
+    update.status = nextStatus;
   }
 
   await incidentRef.set(update, { merge: true });
@@ -1131,6 +1154,17 @@ export async function updateRcaSession(
   input: RcaSessionInput
 ): Promise<RcaSession> {
   const { sessionRef, sessionRecord } = await getAuthorizedSession(decodedToken, incidentId, sessionId);
+
+  /**
+   * A closed session stays closed.
+   *
+   * This checked neither, while every other mutation on a session runs through
+   * `assertSessionIsEditable` first — and `normalizeSessionStatus` maps anything
+   * it does not recognise to ACTIVE, so a closed session could be reopened by
+   * sending a status at all, let alone the right one.
+   */
+  assertSessionIsEditable(sessionRecord);
+
   const nowIso = new Date().toISOString();
   const update: Record<string, unknown> = {
     updatedAt: fieldValue.serverTimestamp(),
@@ -3023,4 +3057,39 @@ function notFoundError(message: string): Error {
 function isMissingStorageBucketError(error: unknown): boolean {
   return error instanceof Error &&
     /bucket|storage|not found|does not exist|could not load the default credentials/i.test(error.message);
+}
+
+/**
+ * Refuses a closure until the Approval and Closure review is actually complete.
+ *
+ * The review lives on a node rather than on the incident, so this looks across
+ * the incident's sessions for it. A missing node is refused too: closing an RCA
+ * that never had the review is the case this exists to stop, not an exemption
+ * from it.
+ */
+async function assertIncidentReadyToClose(
+  incidentRef: FirebaseFirestore.DocumentReference
+): Promise<void> {
+  const sessions = await incidentRef.collection(RCA_SESSIONS_COLLECTION).get();
+  const nodeSnapshots = await Promise.all(
+    sessions.docs.map((session) => session.ref.collection(RCA_NODES_COLLECTION).get())
+  );
+  const closureNode = nodeSnapshots
+    .flatMap((snapshot) => snapshot.docs)
+    .map((doc) => doc.data() as RcaNodeRecord)
+    .find((record) => record.status !== 'DELETED' &&
+      normalizeNodeType(record.nodeType) === 'WHY' &&
+      normalizeFiveWhysRole(record.fiveWhysRole) === 'APPROVAL_CLOSURE');
+
+  if (!closureNode) {
+    throw validationError(
+      'Add the Approval and Closure review to this RCA before closing it.'
+    );
+  }
+
+  const missing = getMissingClosureFields(closureNode.detailFields);
+
+  if (missing.length) {
+    throw validationError(describeClosureRefusal(missing));
+  }
 }
