@@ -326,15 +326,26 @@ else — no installation id, no last seen time, no revocation reason.
 The no-expiry mobile decision in the section above is only defensible once this
 step is done. Until then a long-lived session is a liability, not a trade.
 
-### 2.1 Revoking a device does not revoke its tokens
+### 2.1 Revoking a device does not revoke its tokens — DONE
 
 `revokeTenantDevice` writes REVOKED records and calls `createDeviceWipeCommand`
 (`adminDeviceService.ts:85-166`) but never calls `adminAuth.revokeRefreshTokens`
 — `adminAuth` is not even imported into the file (`:2`). The phone keeps working
 and only stops if the app voluntarily obeys a wipe order it has to ask for.
 
-**Fix.** Call `adminAuth.revokeRefreshTokens(targetUid)` inside
-`revokeTenantDevice`.
+**Shipped.** `revokeTenantDevice` now calls
+`adminAuth.revokeRefreshTokens(targetUid)` before the seat release and the wipe
+order, because it is the only step that does not depend on the lost device
+cooperating.
+
+Firebase revokes per user rather than per device, so this signs the owner out
+everywhere. That is the right trade for this action: an administrator revoking a
+device is dealing with a phone they no longer control, and leaving their other
+sessions alive for convenience would defeat the point.
+
+Note what this does **not** fix: eleven of thirteen routers still never check the
+device, so the record being REVOKED still means little on its own. 2.2 is what
+makes that true.
 
 ### 2.2 Device binding is enforced on two routers of thirteen
 

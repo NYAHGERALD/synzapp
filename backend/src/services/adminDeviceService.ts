@@ -1,5 +1,5 @@
 import { DecodedIdToken } from 'firebase-admin/auth';
-import { fieldValue, firestore } from '../config/firebaseAdmin.js';
+import { adminAuth, fieldValue, firestore } from '../config/firebaseAdmin.js';
 import { SynzappRole } from '../types/auth.js';
 import { buildAuthSession } from './authSessionService.js';
 import { createDeviceWipeCommand } from './companyDataWipeService.js';
@@ -142,6 +142,27 @@ export async function revokeTenantDevice(
   if (!refreshedDeviceSnapshot.exists) {
     throw notFoundError('Device was not found.');
   }
+
+  /**
+   * Cut the credential, not just the record.
+   *
+   * Marking a device REVOKED and asking it to wipe stopped nothing on its own.
+   * The wipe is a request the app has to fetch and obey, and device binding is
+   * checked by two routers out of thirteen — so a stolen phone kept full RAILS,
+   * LSW, RCA, interpreter and compliance access until somebody reinstalled the
+   * app on it. "Describe how you revoke access from a lost device" is a standard
+   * control, and that was the honest answer.
+   *
+   * Firebase revokes per user rather than per device, so this signs the owner
+   * out everywhere. That is the right trade for this action specifically: an
+   * administrator revoking a device is dealing with a phone they no longer
+   * control, and leaving their other sessions alive to be convenient would
+   * defeat the point. They sign in again on a device they still hold.
+   *
+   * It comes first, before the seat release and the wipe order, because it is
+   * the only step that does not depend on the lost device cooperating.
+   */
+  await adminAuth.revokeRefreshTokens(targetUid);
 
   // The owner's next phone must not be asked to sign out one an administrator
   // has already revoked.
