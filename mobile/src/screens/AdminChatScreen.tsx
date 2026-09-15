@@ -83,6 +83,7 @@ import {
   getCompanyKeyResults,
   getTenantAiPolicy,
   inviteEmployeeContacts,
+  updateEmployeeOrgAdminRole,
   KeyResultGroup,
   KeyResultMetric,
   KeyResultUnit,
@@ -13016,6 +13017,33 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
       return;
     }
 
+    if (option.action === 'REMOVE_ORG_ADMIN') {
+      // Stepping down needs a role to land on, so the picker comes first.
+      void handleRemoveOrgAdminAccess(employee, option);
+      return;
+    }
+
+    if (option.action === 'ASSIGN_ORG_ADMIN') {
+      Alert.alert(
+        option.confirmTitle,
+        option.confirmMessage(employee.name),
+        [
+          {
+            style: 'cancel',
+            text: 'Cancel'
+          },
+          {
+            onPress: () => {
+              void saveOrgAdminRole(employee, option, true);
+            },
+            style: 'destructive',
+            text: option.confirmButton
+          }
+        ]
+      );
+      return;
+    }
+
     Alert.alert(
       option.confirmTitle,
       option.confirmMessage(employee.name),
@@ -13066,6 +13094,89 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
       Alert.alert(option.successTitle, option.successMessage(employee.name));
     } catch (nextError) {
       setError(getErrorMessage(nextError, 'Unable to update employee access.'));
+    } finally {
+      setIsUpdatingEmployeeLifecycle(false);
+    }
+  }
+
+  async function handleRemoveOrgAdminAccess(
+    employee: EmployeeListItem,
+    option: EmployeeActionOption
+  ) {
+    if (isUpdatingEmployeeLifecycle) {
+      return;
+    }
+
+    setError(null);
+
+    try {
+      const directoryRecords = roles.length
+        ? { departments, roles }
+        : await loadDirectoryRecords();
+      const activeRoles = directoryRecords.roles.filter((role) => role.status === 'ACTIVE');
+
+      if (!activeRoles.length) {
+        Alert.alert('Roles', 'Create at least one role before removing admin access.');
+        return;
+      }
+
+      const selectedRole = await selectScreenOption(
+        'Role after stepping down',
+        activeRoles,
+        (role) => role.name
+      );
+
+      if (!selectedRole) {
+        return;
+      }
+
+      Alert.alert(
+        option.confirmTitle,
+        `${option.confirmMessage(employee.name)} They will be a ${selectedRole.name}.`,
+        [
+          {
+            style: 'cancel',
+            text: 'Cancel'
+          },
+          {
+            onPress: () => {
+              void saveOrgAdminRole(employee, option, false, selectedRole);
+            },
+            style: 'destructive',
+            text: option.confirmButton
+          }
+        ]
+      );
+    } catch (nextError) {
+      setError(getErrorMessage(nextError, 'Unable to load roles.'));
+    }
+  }
+
+  async function saveOrgAdminRole(
+    employee: EmployeeListItem,
+    option: EmployeeActionOption,
+    grantOrgAdmin: boolean,
+    role?: TenantRole
+  ) {
+    setError(null);
+    setIsUpdatingEmployeeLifecycle(true);
+
+    try {
+      const idToken = await getIdToken();
+      const updatedEmployee = await updateEmployeeOrgAdminRole({
+        approvedPhoneId: employee.id,
+        grantOrgAdmin,
+        idToken,
+        roleId: role?.roleId
+      });
+
+      setApprovedEmployees((currentEmployees) =>
+        sortApprovedEmployees(upsertApprovedEmployees(currentEmployees, [updatedEmployee]))
+      );
+      void loadChatContacts(false);
+      Alert.alert(option.successTitle, option.successMessage(employee.name));
+    } catch (nextError) {
+      setError(getErrorMessage(nextError, 'Unable to change admin access.'));
     } finally {
       setIsUpdatingEmployeeLifecycle(false);
     }

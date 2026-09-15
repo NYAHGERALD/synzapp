@@ -459,7 +459,7 @@ least-privilege IAM, Cloud Audit Logs for data access with alerting, and ideally
 Access Approval or a break-glass procedure with customer notification. It has to
 exist before the question can be answered honestly.
 
-### 4.7 An organization admin cannot be demoted or removed — do this next
+### 4.7 An organization admin cannot be demoted or removed — DONE
 
 Every service that could take admin away refuses any approved-phone record whose
 role is `ORG_ADMIN`. `isEmployeeManagedRole`
@@ -488,15 +488,39 @@ A third consequence: the invite writes a permanent record into the **global**
 `approvedPhoneDirectory` for a phone the caller does not control, and with no
 revoke path nobody can ever remove it — including the person who created it.
 
-**Fix.** A system-role change is a new operation, not a tweak to an existing one,
-which is why it was not folded into 1.1. It needs: a route and service that moves
-`ORG_ADMIN` back to `EMPLOYEE` across `approvedPhones`, `approvedPhoneDirectory`,
-the tenant user document, `identityDirectory` and custom claims; a guard that the
-last active organization admin cannot be removed, counted inside the transaction;
-a guard against demoting yourself; and the matching mobile affordance. It should
-also handle promotion of an existing employee, and let `REMOVE_INVITE` clear both
-approved-phone records for an unclaimed admin invite. This is what 4.3's
-admin-succession item needs too, so build them together.
+**Shipped.** `PATCH /employees/:approvedPhoneId/org-admin` moves a record either
+way, writing `approvedPhones`, the global `approvedPhoneDirectory`, the tenant
+user document, `identityDirectory` and custom claims.
+
+The design point worth keeping: **nothing in `employeeLifecycleService` was
+touched.** Demotion turns the record back into an `EMPLOYEE`, after which every
+existing lifecycle action applies to it unchanged. A working service was left
+alone and the role stopped hiding people from it.
+
+`canChangeOrgAdminRole` holds the rules, with no Firebase import so they are
+tested:
+
+- You cannot change your own access, checked before anything else. An admin who
+  can demote themselves strands a company by accident; one who can promote
+  themselves has been checked by nobody.
+- The last active organization admin cannot be demoted. The count is read inside
+  the same transaction as the write, so two admins cannot demote each other at
+  once and leave nobody.
+- Status gates the way **up** only. Taking authority away is never the dangerous
+  direction, and a record in an unexpected state is exactly the one somebody
+  needs to fix — a status check there would recreate this very trap.
+
+Mobile now offers an organization admin exactly one action, "Remove admin
+access", because every other action in that sheet was refused by the server; and
+the swipe gesture is withdrawn for them, since it looked up a lifecycle option
+that no longer exists and would have revealed a button that silently did nothing.
+Demotion opens the role picker first — somebody stepping down has to land on a
+real role.
+
+**Still open, and it belongs to 4.3:** an organization whose only admin leaves
+has no succession path. Demotion is refused for the last admin precisely to
+prevent that state, which means the founding admin cannot hand over and go. That
+needs an owner-transfer operation, not a role change.
 
 ### 4.8 RAILS still derives authority from a role name
 

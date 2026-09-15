@@ -190,6 +190,98 @@ export function isReservedTenantRoleName(name: string): boolean {
   return RESERVED_TENANT_ROLE_NAMES.includes(normalized);
 }
 
+/**
+ * Changing somebody's organization-admin status after the invite.
+ *
+ * Both directions were missing, and they are the same missing operation seen
+ * from two ends. There was no way to take admin away — every lifecycle service
+ * refuses a record whose role is already `ORG_ADMIN`, so a "revoked" admin kept
+ * everything — and no way to give it to somebody who already works here, because
+ * the invite refuses a phone that already has a record. A company promoting a
+ * long-serving employee would have had to delete their account first.
+ *
+ * Authority to make the change is not decided here. `requireUserAdmin` in
+ * `employeeRoleAssignmentService` already demands an active `ORG_ADMIN` holding
+ * `users.manage`, read from the session rather than from a claim. This decides
+ * the other half: whether *this target* may be changed *this way*.
+ */
+export type OrgAdminRoleChange = 'PROMOTE' | 'DEMOTE';
+
+export interface OrgAdminRoleChangeInput {
+  actorUid: string;
+  currentRole?: SynzappRole | null;
+  /**
+   * Active organization admins other than the target.
+   *
+   * Demoting the last one leaves a company nobody can administer — no invites,
+   * no offboarding, no compliance console, and no way back because promoting
+   * somebody requires an admin to do it. The count is taken inside the same
+   * transaction as the write, so two admins cannot demote each other at once.
+   */
+  otherActiveOrgAdmins: number;
+  status?: string | null;
+  targetUid?: string | null;
+}
+
+export function canChangeOrgAdminRole(
+  change: OrgAdminRoleChange,
+  input: OrgAdminRoleChangeInput
+): OrgAdminGrantDecision {
+  // Before anything else, so no rule below can be read as permitting it.
+  if (hasText(input.targetUid) && input.targetUid === input.actorUid) {
+    return {
+      allowed: false,
+      reason: 'You cannot change your own access. Ask another organization admin.'
+    };
+  }
+
+  if (change === 'PROMOTE') {
+    /**
+     * Status gates the way up only. Somebody deactivated, archived or deleted is
+     * on their way out, and making them an administrator on the way is not
+     * something anybody means to do.
+     */
+    if (input.status !== 'ACTIVE' && input.status !== 'INVITED') {
+      return {
+        allowed: false,
+        reason: 'Only an active or invited person can be made an organization admin.'
+      };
+    }
+
+    if (input.currentRole === 'ORG_ADMIN') {
+      return { allowed: false, reason: 'They are already an organization admin.' };
+    }
+
+    if (input.currentRole !== 'EMPLOYEE' && input.currentRole !== 'DEPT_ADMIN') {
+      return { allowed: false, reason: 'This person cannot be made an organization admin.' };
+    }
+
+    return { allowed: true, reason: null };
+  }
+
+  /**
+   * Nothing about the way down is gated on status, deliberately.
+   *
+   * Taking authority away is never the dangerous direction, and a record in an
+   * unexpected state is exactly the one somebody needs to be able to fix. A
+   * status check here would recreate the trap this operation exists to remove:
+   * an admin the product can see and cannot touch.
+   */
+
+  if (input.currentRole !== 'ORG_ADMIN') {
+    return { allowed: false, reason: 'They are not an organization admin.' };
+  }
+
+  if (input.otherActiveOrgAdmins < 1) {
+    return {
+      allowed: false,
+      reason: 'This is the last organization admin. Make somebody else an admin first.'
+    };
+  }
+
+  return { allowed: true, reason: null };
+}
+
 function hasText(value: string | null | undefined): boolean {
   return typeof value === 'string' && value.trim().length > 0;
 }

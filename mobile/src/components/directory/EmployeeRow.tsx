@@ -1,4 +1,9 @@
 import Feather from '@expo/vector-icons/Feather';
+import {
+  OrgAdminRoleAction,
+  buildOrgAdminRoleOption,
+  shouldOfferEmployeeLifecycleActions
+} from '../../services/orgAdminRoleActions';
 import React, { useEffect, useMemo, useRef } from 'react';
 import { Animated, PanResponder, Pressable, Text, View } from 'react-native';
 import { CHAT_ROW_LEFT_ACTION_WIDTH, CHAT_ROW_SWIPE_TRIGGER, styles } from '../../screens/adminChatStyles';
@@ -27,7 +32,11 @@ export interface EmployeeListItem {
   statusValue: string;
 }
 
-export type EmployeeAction = EmployeeLifecycleAction | 'ASSIGN_DEPT_ADMIN' | 'REMOVE_DEPT_ADMIN' | 'CHANGE_ROLE';
+export type EmployeeAction = EmployeeLifecycleAction
+  | 'ASSIGN_DEPT_ADMIN'
+  | 'REMOVE_DEPT_ADMIN'
+  | 'CHANGE_ROLE'
+  | OrgAdminRoleAction;
 
 export interface EmployeeActionOption {
   action: EmployeeAction;
@@ -60,8 +69,18 @@ export function EmployeeRow({
   const appTheme = useAppTheme();
   const hasActions = canManageUsers && getEmployeeActionOptions(employee).length > 0;
   const statusValue = employee.statusValue.toUpperCase();
-  const canSwipeReactivate = hasActions && !isUpdatingLifecycle && statusValue === 'DELETED';
+  /**
+   * Never for an organization admin. Their one action is stepping down, and the
+   * swipe actions look up a lifecycle option by name — for an admin there is
+   * none, so the gesture would reveal a button that silently does nothing.
+   */
+  const canSwipeLifecycle = shouldOfferEmployeeLifecycleActions(employee.baseRole);
+  const canSwipeReactivate = hasActions &&
+    canSwipeLifecycle &&
+    !isUpdatingLifecycle &&
+    statusValue === 'DELETED';
   const canSwipeRemove = hasActions &&
+    canSwipeLifecycle &&
     !isUpdatingLifecycle &&
     (statusValue === 'DELETED' || statusValue === 'INVITED');
   const canSwipe = canSwipeReactivate || canSwipeRemove;
@@ -343,12 +362,38 @@ export function getEmployeeActionOptions(employee: EmployeeListItem): EmployeeAc
     successTitle: 'Invite removed'
   };
 
+  /**
+   * An organization admin gets one action and no others. Every remaining action
+   * in this list is refused by the server for an ORG_ADMIN record, so offering
+   * them produced a menu where nothing worked.
+   */
+  const orgAdminOption = buildOrgAdminRoleOption({
+    baseRole: employee.baseRole,
+    status
+  });
+
+  if (!shouldOfferEmployeeLifecycleActions(employee.baseRole)) {
+    return orgAdminOption ? [orgAdminOption] : [];
+  }
+
   if (status === 'ACTIVE') {
-    return [changeRoleOption, departmentAdminOption, deactivateOption, archiveOption, deleteOption];
+    return [
+      changeRoleOption,
+      departmentAdminOption,
+      ...(orgAdminOption ? [orgAdminOption] : []),
+      deactivateOption,
+      archiveOption,
+      deleteOption
+    ];
   }
 
   if (status === 'INVITED') {
-    return [changeRoleOption, departmentAdminOption, removeInviteOption];
+    return [
+      changeRoleOption,
+      departmentAdminOption,
+      ...(orgAdminOption ? [orgAdminOption] : []),
+      removeInviteOption
+    ];
   }
 
   if (status === 'DEACTIVATED' || status === 'SUSPENDED') {

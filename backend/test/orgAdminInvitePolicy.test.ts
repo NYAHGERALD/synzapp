@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   ORG_ADMIN_DEPARTMENT_ID,
+  canChangeOrgAdminRole,
   isReservedTenantRoleName,
   ORG_ADMIN_GRANT_PERMISSION,
   ORG_ADMIN_ROLE_NAME,
@@ -243,5 +244,140 @@ describe('role names that would be read as authority', () => {
     assert.equal(isReservedTenantRoleName('Forklift Operator'), false);
     assert.equal(isReservedTenantRoleName('Shift Lead'), false);
     assert.equal(isReservedTenantRoleName('HR Administrator'), false);
+  });
+});
+
+const PROMOTABLE = {
+  actorUid: 'admin-1',
+  currentRole: 'EMPLOYEE' as const,
+  otherActiveOrgAdmins: 1,
+  status: 'ACTIVE',
+  targetUid: 'employee-1'
+};
+
+const DEMOTABLE = {
+  actorUid: 'admin-1',
+  currentRole: 'ORG_ADMIN' as const,
+  otherActiveOrgAdmins: 1,
+  status: 'ACTIVE',
+  targetUid: 'admin-2'
+};
+
+describe('promoting somebody to organization admin', () => {
+  it('allows an active employee to be promoted', () => {
+    const decision = canChangeOrgAdminRole('PROMOTE', PROMOTABLE);
+
+    assert.equal(decision.allowed, true);
+  });
+
+  it('allows a department admin to be promoted', () => {
+    const decision = canChangeOrgAdminRole('PROMOTE', {
+      ...PROMOTABLE,
+      currentRole: 'DEPT_ADMIN'
+    });
+
+    assert.equal(decision.allowed, true);
+  });
+
+  it('allows an invited person who has not signed in yet', () => {
+    const decision = canChangeOrgAdminRole('PROMOTE', { ...PROMOTABLE, status: 'INVITED' });
+
+    assert.equal(decision.allowed, true);
+  });
+
+  it('refuses somebody who already holds it', () => {
+    const decision = canChangeOrgAdminRole('PROMOTE', {
+      ...PROMOTABLE,
+      currentRole: 'ORG_ADMIN'
+    });
+
+    assert.equal(decision.allowed, false);
+  });
+
+  it('refuses a deactivated or deleted person', () => {
+    ['DEACTIVATED', 'DELETED', 'ARCHIVED'].forEach((status) => {
+      assert.equal(canChangeOrgAdminRole('PROMOTE', { ...PROMOTABLE, status }).allowed, false);
+    });
+  });
+});
+
+describe('taking organization admin away', () => {
+  it('allows demoting an admin while another one remains', () => {
+    const decision = canChangeOrgAdminRole('DEMOTE', DEMOTABLE);
+
+    assert.equal(decision.allowed, true);
+  });
+
+  it('refuses the last organization admin', () => {
+    /**
+     * Demoting the last one leaves a company nobody can administer, and no way
+     * back: promoting somebody requires an admin to do it.
+     */
+    const decision = canChangeOrgAdminRole('DEMOTE', {
+      ...DEMOTABLE,
+      otherActiveOrgAdmins: 0
+    });
+
+    assert.equal(decision.allowed, false);
+    assert.match(decision.reason || '', /last organization admin/i);
+  });
+
+  it('refuses somebody who is not an admin', () => {
+    const decision = canChangeOrgAdminRole('DEMOTE', {
+      ...DEMOTABLE,
+      currentRole: 'EMPLOYEE'
+    });
+
+    assert.equal(decision.allowed, false);
+  });
+
+  it('is not blocked by an unusual status, because taking away is never the dangerous way', () => {
+    /**
+     * A status check here would recreate the very trap this operation exists to
+     * remove: an admin record the product can see and cannot touch. A record in
+     * an unexpected state is the one somebody most needs to fix.
+     */
+    ['DEACTIVATED', 'ARCHIVED', 'DELETED', 'SUSPENDED'].forEach((status) => {
+      assert.equal(canChangeOrgAdminRole('DEMOTE', { ...DEMOTABLE, status }).allowed, true);
+    });
+  });
+});
+
+describe('changing your own access', () => {
+  it('refuses demoting yourself, before any other rule is consulted', () => {
+    /**
+     * Checked first on purpose. An admin who can demote themselves can strand a
+     * company by accident, and an admin who can promote themselves has not been
+     * checked by anybody.
+     */
+    const decision = canChangeOrgAdminRole('DEMOTE', {
+      ...DEMOTABLE,
+      otherActiveOrgAdmins: 5,
+      targetUid: 'admin-1'
+    });
+
+    assert.equal(decision.allowed, false);
+    assert.match(decision.reason || '', /your own/i);
+  });
+
+  it('refuses promoting yourself', () => {
+    const decision = canChangeOrgAdminRole('PROMOTE', {
+      ...PROMOTABLE,
+      targetUid: 'admin-1'
+    });
+
+    assert.equal(decision.allowed, false);
+  });
+
+  it('still applies when the target has not signed in and has no uid', () => {
+    // An unclaimed invite has no uid at all, so the self check must not turn
+    // two absent values into a match.
+    const decision = canChangeOrgAdminRole('PROMOTE', {
+      ...PROMOTABLE,
+      actorUid: '',
+      targetUid: null
+    });
+
+    assert.equal(decision.allowed, true);
   });
 });

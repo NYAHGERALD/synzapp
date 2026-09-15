@@ -532,6 +532,34 @@ export async function updateEmployeeRole(input: {
   return normalizeApprovedEmployee(body.employee);
 }
 
+/**
+ * Gives somebody organization admin, or takes it away.
+ *
+ * Taking it away needs a role to land on: the person stays an employee, so they
+ * have to have an ordinary role afterwards.
+ */
+export async function updateEmployeeOrgAdminRole(input: {
+  approvedPhoneId: string;
+  grantOrgAdmin: boolean;
+  idToken: string;
+  roleId?: string;
+}): Promise<ApprovedEmployee> {
+  const response = await adminFetch(
+    `/api/admin/employees/${encodeURIComponent(input.approvedPhoneId)}/org-admin`,
+    input.idToken,
+    {
+      body: JSON.stringify({
+        grantOrgAdmin: input.grantOrgAdmin,
+        ...(input.roleId ? { roleId: input.roleId } : {})
+      }),
+      method: 'PATCH'
+    }
+  );
+  const body = await response.json() as { employee: ApprovedEmployee };
+
+  return normalizeApprovedEmployee(body.employee);
+}
+
 export async function updateEmployeeDepartmentAdminAssignment(input: {
   approvedPhoneId: string;
   enabled: boolean;

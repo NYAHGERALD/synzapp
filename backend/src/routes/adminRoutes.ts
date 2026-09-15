@@ -87,7 +87,10 @@ import {
   updateEmployeeLifecycle
 } from '../services/employeeLifecycleService.js';
 import { updateEmployeeDepartmentAdminAssignment } from '../services/employeeDepartmentAdminService.js';
-import { updateEmployeeCompanyRole } from '../services/employeeRoleAssignmentService.js';
+import {
+  updateEmployeeCompanyRole,
+  updateEmployeeOrgAdminRole
+} from '../services/employeeRoleAssignmentService.js';
 import { verifyActiveRegisteredDevice } from '../services/deviceIdentityService.js';
 import { writeAuditEvent } from '../services/auditService.js';
 
@@ -136,6 +139,12 @@ const employeeLifecycleBodySchema = z.object({
 
 const employeeRoleAssignmentBodySchema = z.object({
   roleId: z.string().trim().min(2).max(120)
+});
+
+const employeeOrgAdminBodySchema = z.object({
+  grantOrgAdmin: z.boolean(),
+  // Required when taking admin away: somebody has to land on an ordinary role.
+  roleId: z.string().trim().min(2).max(120).optional()
 });
 
 const rolePermissionsBodySchema = z.object({
@@ -1367,6 +1376,70 @@ adminRouter.patch('/employees/:approvedPhoneId/role', verifyAppCheck, async (req
       reason: error instanceof Error ? error.message : 'Employee role update failed',
       req,
       status: 'FAILED'
+    }).catch(() => undefined);
+
+    next(error);
+  }
+});
+
+adminRouter.patch('/employees/:approvedPhoneId/org-admin', verifyAppCheck, async (req, res, next) => {
+  // Hoisted so a refusal can be attributed. An attempt to hand out or take away
+  // organization admin is precisely what a tenant needs to see in their own log.
+  let auditToken: Awaited<ReturnType<typeof getDecodedToken>> | null = null;
+
+  try {
+    const decodedToken = await getDecodedToken(req.header('Authorization') || '');
+
+    auditToken = decodedToken;
+    await requireActiveRegisteredDevice(req, decodedToken);
+
+    const approvedPhoneId = Array.isArray(req.params.approvedPhoneId)
+      ? req.params.approvedPhoneId[0] || ''
+      : req.params.approvedPhoneId || '';
+    const body = employeeOrgAdminBodySchema.parse(req.body);
+    const result = await updateEmployeeOrgAdminRole(decodedToken, approvedPhoneId, {
+      grantOrgAdmin: body.grantOrgAdmin,
+      roleId: body.roleId
+    });
+
+    await writeAuditEvent({
+      action: 'EMPLOYEE_ORG_ADMIN_CHANGED',
+      metadata: {
+        approvedPhoneId: result.employee.approvedPhoneId,
+        employeeUid: result.employeeUid,
+        // The role and permissions actually held afterwards, so the trail can be
+        // read without knowing what the request asked for.
+        grantedPermissions: result.employee.permissions,
+        grantedRole: result.employee.role,
+        grantedRoleName: result.employee.roleName,
+        orgAdminGranted: body.grantOrgAdmin,
+        phoneMasked: result.employee.phoneMasked,
+        status: result.employee.status
+      },
+      req,
+      status: 'SUCCESS',
+      tenantId: result.tenantId,
+      uid: decodedToken.uid
+    }).catch((error) => {
+      console.error('[SynzappOrgAdmin] could not write the role change audit event', {
+        error,
+        tenantId: result.tenantId,
+        uid: decodedToken.uid
+      });
+    });
+
+    res.json({ employee: result.employee });
+  } catch (error) {
+    await writeAuditEvent({
+      action: 'EMPLOYEE_ORG_ADMIN_CHANGED',
+      metadata: {
+        orgAdminGranted: Boolean((req.body as { grantOrgAdmin?: unknown } | undefined)?.grantOrgAdmin)
+      },
+      reason: error instanceof Error ? error.message : 'Organization admin change failed',
+      req,
+      status: 'FAILED',
+      tenantId: auditToken?.tenantId as string | undefined,
+      uid: auditToken?.uid
     }).catch(() => undefined);
 
     next(error);
