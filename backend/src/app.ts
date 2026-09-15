@@ -3,6 +3,7 @@ import express, { ErrorRequestHandler } from 'express';
 import helmet from 'helmet';
 import { env } from './config/env.js';
 import { parseCorsOrigins } from './config/envGuards.js';
+import { enforceDeviceBinding } from './middleware/deviceBinding.js';
 import { adminRouter } from './routes/adminRoutes.js';
 import { actionRouter } from './routes/actionRoutes.js';
 import { announcementRouter } from './routes/announcementRoutes.js';
@@ -53,6 +54,15 @@ export function createSynzappApp() {
 
     res.status(status.ok ? 200 : 503).json(status);
   });
+
+  /**
+   * Before every router, so a revoked phone is refused whatever it asks for.
+   *
+   * Device binding was written into two route files and missing from eleven.
+   * Lifting it here rather than adding it to each router also keeps it out of
+   * RAILS, LSW, RCA and the interpreter, which are shipped and not edited.
+   */
+  app.use(enforceDeviceBinding);
 
   app.use('/api/auth', authRouter);
   app.use('/api/admin', adminRouter);

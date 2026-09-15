@@ -9,6 +9,50 @@ const backendRoot = resolve(testDir, '..');
 const adminRoutes = readFileSync(resolve(backendRoot, 'src', 'routes', 'adminRoutes.ts'), 'utf8');
 const profileRoutes = readFileSync(resolve(backendRoot, 'src', 'routes', 'profileRoutes.ts'), 'utf8');
 const authRoutes = readFileSync(resolve(backendRoot, 'src', 'routes', 'authRoutes.ts'), 'utf8');
+const appSource = readFileSync(resolve(backendRoot, 'src', 'app.ts'), 'utf8');
+
+describe('device binding reaches every router', () => {
+  /**
+   * It used to reach two of thirteen. railsRoutes, lswRoutes, rcaRoutes,
+   * interpreterRoutes, complianceRoutes, actionRoutes and announcementRoutes
+   * asked only for a valid token, so a phone an administrator had revoked went
+   * on working across most of the product — and this test asserted only the
+   * three routers that already passed, so nothing caught it.
+   */
+  it('mounts the check globally rather than router by router', () => {
+    assert.match(
+      appSource,
+      /app\.use\(enforceDeviceBinding\)/,
+      'enforceDeviceBinding must be mounted for every router, not added route by route.'
+    );
+  });
+
+  it('mounts it before the first router, so nothing is reached without it', () => {
+    const guardIndex = appSource.indexOf('app.use(enforceDeviceBinding)');
+    const firstRouterIndex = appSource.indexOf("app.use('/api/");
+
+    assert.ok(guardIndex > 0, 'Expected the device binding guard to be mounted.');
+    assert.ok(
+      guardIndex < firstRouterIndex,
+      'The device binding guard must run before any router is mounted.'
+    );
+  });
+
+  it('keeps the browser working, because the web app registers no device', () => {
+    /**
+     * Requiring a registered device everywhere would take the web app down: it
+     * calls lsw, rails and rca constantly and sends no device header at all.
+     * The rule is that a device id which IS presented must be real.
+     */
+    const rules = readFileSync(
+      resolve(backendRoot, 'src', 'middleware', 'deviceBindingRules.ts'),
+      'utf8'
+    );
+
+    assert.match(rules, /readPresentedDeviceId/);
+    assert.match(rules, /isDeviceBindingExempt/);
+  });
+});
 
 describe('API route guard coverage foundation', () => {
   it('requires App Check, Firebase session, and active device on every admin route', () => {

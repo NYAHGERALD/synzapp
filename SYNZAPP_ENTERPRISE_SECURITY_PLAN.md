@@ -347,7 +347,7 @@ Note what this does **not** fix: eleven of thirteen routers still never check th
 device, so the record being REVOKED still means little on its own. 2.2 is what
 makes that true.
 
-### 2.2 Device binding is enforced on two routers of thirteen
+### 2.2 Device binding is enforced on two routers of thirteen — DONE, differently
 
 Only `adminRoutes` and `profileRoutes` carry `requireActiveRegisteredDevice`.
 `railsRoutes`, `lswRoutes`, `rcaRoutes`, `interpreterRoutes`, `complianceRoutes`,
@@ -356,9 +356,34 @@ Only `adminRoutes` and `profileRoutes` carry `requireActiveRegisteredDevice`.
 that already pass (`test/apiRouteGuardCoverage.test.ts:9-11`), so the gap is
 invisible to CI.
 
-**Fix.** Lift device binding into shared middleware applied to every
-authenticated router, and extend `apiRouteGuardCoverage.test.ts` to assert it
-across all of them so it cannot reopen.
+**The fix as written here would have taken the web app down.** It assumed the
+browser could carry a device. It cannot — the web app registers no device and
+sends no device header at all — and web is not a minor surface: it calls `lsw` 44
+times, `rails` 31 and `rca` 21, plus compliance, staff and admin. Requiring a
+registered device on every router would have broken all of it.
+
+**Shipped, inverted.** The rule is now that **a device id which is presented must
+be real**. A request carrying `X-Synzapp-Device-Id` is claiming to be a
+registered phone, and that claim is checked on all thirteen routers instead of
+two, so a revoked device is refused the moment its app asks for anything. A
+request with no device id is a browser session and is left to the route's own
+authorisation, exactly as before — it costs the web app nothing, because the
+check returns before any token work.
+
+Mounted once in `app.ts` ahead of every router, which also keeps it out of RAILS,
+LSW, RCA and the interpreter, none of which are edited. Two paths are exempt and
+tested: sign-in, and the request that registers the device — onboarding sends a
+locally generated id before anything exists, so without that exemption nobody
+could sign in on a new phone. A malformed id is refused rather than ignored,
+since ignoring it would let a caller skip the check by sending rubbish.
+
+`apiRouteGuardCoverage.test.ts` now asserts the guard is mounted globally and
+ahead of the first router; the assertion fails against the previous `app.ts`.
+
+**Said plainly, what it does not do:** somebody who steals a phone and crafts
+requests without the header still passes on the token alone. Revoking refresh
+tokens in 2.1 is what bounds that, to the life of the token rather than to
+whether the app cooperates. Neither is sufficient alone.
 
 ### 2.3 Sign-out revokes nothing, and no session has a lifetime
 
