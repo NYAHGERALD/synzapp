@@ -21,8 +21,19 @@ import {
 /** Small on purpose: this runs beside live traffic and must never dominate it. */
 const DISPOSAL_BATCH_SIZE = 200;
 
+/**
+ * How long one tenant's disposal may take.
+ *
+ * This runs beside live traffic. A tenant with a large backlog gets as much of
+ * it as this allows and the rest tomorrow, rather than holding the nightly pass
+ * open while every other tenant waits behind it.
+ */
+const DISPOSAL_TIME_BUDGET_MS = 20_000;
+
 export interface AuditDisposalResult {
   disposed: number;
+  /** True when the budget ended the pass with disposable events still waiting. */
+  ranOutOfTime?: boolean;
   /** True when a preservation obligation stopped this pass entirely. */
   heldBack?: boolean;
   retentionDays: number;
@@ -94,45 +105,78 @@ export async function disposeExpiredAuditEvents(input: {
     return { ...result, heldBack: true };
   }
 
-  // Oldest first, and only a batch of them. Anything still inside its period
-  // ends the pass, because everything after it is newer still.
-  const page = await firestore
+  const auditLogsRef = firestore
     .collection('organizations').doc(input.tenantId)
-    .collection('auditLogs')
-    .orderBy('createdAt', 'asc')
-    .limit(DISPOSAL_BATCH_SIZE)
-    .get()
-    .catch(() => null);
+    .collection('auditLogs');
 
-  if (!page || page.empty) {
-    return result;
-  }
+  /**
+   * Pages until the tenant is caught up, or until the budget runs out.
+   *
+   * One page of two hundred per tenant per night meant a tenant generating more
+   * expired events than that each day never caught up — the backlog grew for
+   * ever and the retention period the product states was simply not enforced.
+   * Nothing showed it: the run reported two hundred disposed every night and
+   * looked like it was working.
+   *
+   * The budget is what keeps this from becoming the opposite problem. This runs
+   * beside live traffic, so a tenant with an enormous backlog gets as much of it
+   * as the budget allows and the rest tomorrow, rather than holding the nightly
+   * pass open while every other tenant waits.
+   */
+  const deadlineMs = nowMs + DISPOSAL_TIME_BUDGET_MS;
+  let cursor: FirebaseFirestore.QueryDocumentSnapshot | null = null;
 
-  const batch = firestore.batch();
-  let pending = 0;
 
-  for (const doc of page.docs) {
-    const createdAt = doc.data().createdAt as { toMillis?: () => number } | undefined;
+  while (Date.now() < deadlineMs) {
+    const ordered = auditLogsRef.orderBy('createdAt', 'asc').limit(DISPOSAL_BATCH_SIZE);
+    const query: FirebaseFirestore.Query = cursor ? ordered.startAfter(cursor) : ordered;
+    const page: FirebaseFirestore.QuerySnapshot | null = await query.get().catch(() => null);
 
-    result.scanned += 1;
-
-    if (!isAuditEventDisposable({
-      createdAtMs: typeof createdAt?.toMillis === 'function' ? createdAt.toMillis() : 0,
-      nowMs,
-      retentionDays
-    })) {
-      // Sorted oldest first, so nothing after this is old enough either.
-      break;
+    if (!page || page.empty) {
+      return result;
     }
 
-    batch.delete(doc.ref);
-    pending += 1;
-    result.disposed += 1;
+    const batch = firestore.batch();
+    let pending = 0;
+    let reachedLiveEvents = false;
+
+    for (const doc of page.docs) {
+      const createdAt = doc.data().createdAt as { toMillis?: () => number } | undefined;
+
+      result.scanned += 1;
+
+      if (!isAuditEventDisposable({
+        createdAtMs: typeof createdAt?.toMillis === 'function' ? createdAt.toMillis() : 0,
+        nowMs,
+        retentionDays
+      })) {
+        // Sorted oldest first, so nothing after this is old enough either.
+        reachedLiveEvents = true;
+        break;
+      }
+
+      batch.delete(doc.ref);
+      pending += 1;
+      result.disposed += 1;
+    }
+
+    if (pending > 0) {
+      await batch.commit();
+    }
+
+    if (reachedLiveEvents || page.docs.length < DISPOSAL_BATCH_SIZE) {
+      return result;
+    }
+
+    cursor = page.docs[page.docs.length - 1];
   }
 
-  if (pending > 0) {
-    await batch.commit();
-  }
+  /**
+   * Out of time with work still to do. Said out loud rather than returned as a
+   * number that looks like completion, because "disposed two hundred" and
+   * "disposed two hundred and there are thousands left" are different facts.
+   */
+  result.ranOutOfTime = true;
 
   return result;
 }

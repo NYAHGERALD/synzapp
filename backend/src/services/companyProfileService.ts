@@ -1,4 +1,6 @@
 import { DecodedIdToken } from 'firebase-admin/auth';
+import { describeEnforcedRetention } from './enforcedRetentionSummary.js';
+import { listRetentionPolicies } from './retentionPolicyService.js';
 import { fieldValue, firestore, storageBucket } from '../config/firebaseAdmin.js';
 import { buildAuthSession } from './authSessionService.js';
 
@@ -85,10 +87,24 @@ export async function getCompanyProfile(
     throw notFoundError('Company profile was not found.');
   }
 
-  return mapCompanyProfile(
+  const profile = mapCompanyProfile(
     organizationSnapshot.data() as OrganizationRecord,
     organizationSnapshot.id
   );
+
+  /**
+   * Derived from the policies that actually run, not from a stored label.
+   *
+   * Read separately and tolerantly: a profile screen must still open if the
+   * policy read fails, and "Not configured" is the safe thing to say when we
+   * cannot tell — it understates rather than promising something.
+   */
+  const policies = await listRetentionPolicies(context.tenantId).catch(() => []);
+
+  return {
+    ...profile,
+    retentionPolicy: describeEnforcedRetention(policies)
+  };
 }
 
 export async function updateCompanyProfile(
@@ -308,7 +324,15 @@ function mapCompanyProfile(
     companyName: record.companyName || '',
     companySlug: record.companySlug || '',
     createdAt: dateLikeToIso(record.createdAt),
-    retentionPolicy: record.retentionPolicy || 'Not set',
+    /**
+     * Filled in by the caller from the policies that actually run.
+     *
+     * It used to read `record.retentionPolicy`, a field stamped '3_YEARS' on
+     * every organization at creation and read by no part of the retention
+     * engine — so every customer was shown a three year commitment the system
+     * did not enforce.
+     */
+    retentionPolicy: 'Not configured',
     securityMode: record.securityMode || 'Not set',
     status: record.status || 'ACTIVE',
     tenantId: record.tenantId || fallbackTenantId,

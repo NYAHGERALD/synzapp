@@ -151,7 +151,11 @@ export async function createOrgAdminProfile(
       createdBy: uid,
       orgAdminName: displayName,
       orgAdminPhoneLast4: phoneLast4,
-      retentionPolicy: '3_YEARS',
+      // No retention label is stamped any more. This one said '3_YEARS' on every
+      // organization ever created and no part of the retention engine read it,
+      // so the product stated a commitment it did not enforce. What the profile
+      // shows is now derived from the policies that actually run.
+
       securityMode: 'ENTERPRISE_CONTROLLED',
       status: 'ACTIVE',
       tenantId,

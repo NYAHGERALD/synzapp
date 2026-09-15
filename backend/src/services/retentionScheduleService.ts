@@ -31,6 +31,14 @@ export interface TenantRunResult {
   announcementBodiesDisposed: number;
   /** Audit events aged out. The only way one ever leaves the system. */
   auditEventsDisposed: number;
+  /** True when a legal hold stopped the audit pass entirely. */
+  auditEventsHeldBack?: boolean;
+  /** True when the budget ended the audit pass with events still waiting. */
+  auditDisposalRanOutOfTime?: boolean;
+  /** True when no record retention period has ever been set for this tenant. */
+  bodiesNotConfigured?: boolean;
+  /** True when this pass reached the end of the tenant rather than a page of it. */
+  completedFullScan?: boolean;
   /** Disposals a legal hold refused. The system working, not failing. */
   bodiesHeldBack: number;
   error: string | null;
@@ -76,6 +84,16 @@ export async function runTenantRetention(tenantId: string): Promise<TenantRunRes
     result.evaluated = evaluation.examined;
     result.queued = evaluation.queued;
     result.withheld = evaluation.withheld;
+    /**
+     * Whether the tenant was covered, or only a page of it.
+     *
+     * The scan used to read the same first five hundred conversations every
+     * night, so a large tenant had a permanent tail nothing ever looked at —
+     * while the run reported five hundred examined and looked healthy. The pass
+     * resumes now, and this is how a reader can tell the difference between
+     * "all of it" and "as much as fits".
+     */
+    result.completedFullScan = evaluation.completedFullScan;
 
     // Destruction only touches batches an administrator already approved, and
     // only for tenants that have switched it on.
@@ -99,7 +117,11 @@ export async function runTenantRetention(tenantId: string): Promise<TenantRunRes
     // shredder's per-tenant switch: an organization that has not turned on
     // destruction of its own records still does not get to keep an audit trail
     // for ever, and this is the only thing that removes one.
-    result.auditEventsDisposed = (await disposeExpiredAuditEvents({ tenantId })).disposed;
+    const auditDisposal = await disposeExpiredAuditEvents({ tenantId });
+
+    result.auditEventsDisposed = auditDisposal.disposed;
+    result.auditEventsHeldBack = auditDisposal.heldBack;
+    result.auditDisposalRanOutOfTime = auditDisposal.ranOutOfTime;
 
     // Actions and announcements finally age out too. Both removal functions
     // have existed for a while with nothing calling them, so a tenant's
@@ -110,6 +132,15 @@ export async function runTenantRetention(tenantId: string): Promise<TenantRunRes
     result.actionBodiesDisposed = bodies.actionsDisposed;
     result.announcementBodiesDisposed = bodies.announcementsDisposed;
     result.bodiesHeldBack = bodies.heldBack;
+    /**
+     * Carried up rather than left as three zeros.
+     *
+     * Nothing writes `recordRetentionDays`, so this returns early every run and
+     * an all-zero result is indistinguishable from a tenant with nothing
+     * overdue. Saying it out loud is what turns "looks fine" into a question
+     * somebody can answer.
+     */
+    result.bodiesNotConfigured = bodies.notConfigured;
   } catch (error) {
     result.error = error instanceof Error ? error.message : 'Retention run failed.';
   }

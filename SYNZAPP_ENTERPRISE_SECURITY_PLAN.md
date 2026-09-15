@@ -883,7 +883,7 @@ per-IP rate limits, so a caller sending a different fabricated first entry each
 request got a fresh bucket every time — the limits could be walked straight
 past.
 
-### 6.7 The whole retention configuration is dead code
+### 6.7 The whole retention configuration is dead code — PART DONE
 
 `auditDisposalService.ts:58-63` reads `recordRetentionDays` and
 `auditRetentionDays` from the organization document;
@@ -895,13 +895,22 @@ records it describes" (`auditRetentionRules.ts:88-91`) can never fire; and
 `disposeExpiredRecordBodies` returns early on every run, so action and
 announcement bodies are never aged out at all.
 
-**Fix.** Add an audit retention control to the compliance console that writes
-`auditRetentionDays` within the published bounds, and derive
-`recordRetentionDays` from the tenant's active policies. Until then make
-`disposeExpiredRecordBodies` report an explicit NOT_CONFIGURED state rather than
-a zero that looks like success.
+**Shipped, the honest half.** `disposeExpiredRecordBodies` now returns
+`notConfigured`, carried up into the nightly run record. Nothing writes
+`recordRetentionDays`, so this path has returned early on every run there has
+ever been — and three zeros read exactly like a tenant with nothing overdue. A
+control that has never once run looked identical to a control with nothing to do.
 
-### 6.8 Retention only ever examines the same first 500 conversations
+**Deliberately not guessing a period.** Deriving `recordRetentionDays` from the
+chat retention policies was the plan's suggestion and it is the wrong move: those
+policies name conversations and people, and actions and announcements are neither.
+Inferring a deletion period for one record type from a policy written for another
+is the one mistake that cannot be undone.
+
+**Still open:** the console control that lets a tenant set these periods. It is a
+web console change and a staff-console bounds question, not a service fix.
+
+### 6.8 Retention only ever examines the same first 500 conversations — DONE
 
 `retentionEvaluatorService.ts:46` sets `MAX_CONVERSATIONS_PER_RUN = 500`;
 `:90-92` runs `.limit(500).get()` with no `orderBy` and no `startAfter`.
@@ -909,11 +918,17 @@ Firestore's default order is by document name, so every nightly run re-reads the
 identical first 500 documents. Any tenant larger than that has a permanent tail
 that is never evaluated, never queued and never deleted.
 
-**Fix.** Persist a per-tenant cursor on the tenant settings doc, order by
-`__name__`, and resume from it each run so the scan wraps the whole collection
-over successive nights.
+**Shipped.** The pass orders by document id, resumes from a stored cursor and
+wraps to the beginning on reaching the end, so a large tenant is covered over
+several nights instead of never. The cursor is written **after** the pass, so a
+run that fails part way re-examines rather than skipping past.
 
-### 6.9 The product displays a retention commitment it does not implement
+`completedFullScan` is carried into the run record, because "we reached the end of
+this tenant" is the only honest way to say a policy has been applied to all of it
+— and it is the question an auditor asks. Before this, the run reported five
+hundred examined every night and looked healthy while the tail was never touched.
+
+### 6.9 The product displays a retention commitment it does not implement — DONE
 
 `orgAdminProfileService.ts:154` stamps every new organization with
 `retentionPolicy: '3_YEARS'`. `companyProfileService.ts:311` returns it and
@@ -921,11 +936,18 @@ over successive nights.
 Retention row. Nothing in any retention service reads that field — they read the
 `retentionPolicies` subcollection and `recordRetentionDays`.
 
-**Fix.** Delete the field and the UI row, or make the screen read the tenant's
-actual active policies. Do not ship a screen stating a retention period the
-system does not enforce.
+**Shipped.** New organizations are no longer stamped with a retention label at
+all, and the company profile derives its line from the policies that actually run
+— the period when one is live, a count when several are, and "Not configured"
+when none is.
 
-### 6.10 Audit disposal is capped at 200 events per tenant per night
+"Not configured" is the point. It is the true answer, and it is the one that
+sends somebody to go and set a policy up, which the old fiction actively
+prevented because it looked done. Several policies are never reduced to a single
+period: they cover different people, conversations and content types, and a
+number invented from them would be the same lie in a new form.
+
+### 6.10 Audit disposal is capped at 200 events per tenant per night — DONE
 
 `auditDisposalService.ts:21` sets `DISPOSAL_BATCH_SIZE = 200`; `:78-83` fetches
 one page; `:104` breaks on the first non-disposable document;
@@ -933,8 +955,14 @@ one page; `:104` breaks on the first non-disposable document;
 generating more than 200 expired events a day accumulates indefinitely, so the
 stated retention period is not actually enforced.
 
-**Fix.** Loop within the run until a page contains a non-expired event, with a
-wall-clock budget so it cannot dominate live traffic.
+**Shipped.** Disposal pages until the tenant is caught up or a wall-clock budget
+runs out, and reports `ranOutOfTime` when the budget ended a pass with events
+still waiting — so "disposed two hundred" and "disposed two hundred with
+thousands left" stop looking like the same fact.
+
+The budget matters as much as the loop: this runs beside live traffic, so a
+tenant with an enormous backlog gets what fits and the rest tomorrow rather than
+holding the nightly pass open while every other tenant waits behind it.
 
 ### 6.11 The root `auditLogs` collection is a permanent cross-tenant PII store
 

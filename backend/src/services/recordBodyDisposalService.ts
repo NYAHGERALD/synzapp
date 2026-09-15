@@ -35,6 +35,16 @@ export interface RecordBodyDisposalResult {
   actionsDisposed: number;
   announcementsDisposed: number;
   heldBack: number;
+  /**
+   * True when no period has been set, so nothing could be disposed of.
+   *
+   * Reported rather than inferred from the zeros. `recordRetentionDays` is read
+   * here and written nowhere in the codebase, so this path has returned early on
+   * every run there has ever been — and a result of all zeros reads exactly like
+   * a tenant with nothing overdue. A control that has never once run looked
+   * identical to a control with nothing to do.
+   */
+  notConfigured: boolean;
   retentionDays: number;
 }
 
@@ -58,13 +68,21 @@ export async function disposeExpiredRecordBodies(input: {
     actionsDisposed: 0,
     announcementsDisposed: 0,
     heldBack: 0,
+    notConfigured: false,
     retentionDays: retentionDays ?? 0
   };
 
-  // No published period means nothing is overdue. A tenant that has not set one
-  // up must not have its records emptied on a default.
+  /**
+   * No published period means nothing is overdue. A tenant that has not set one
+   * up must not have its records emptied on a default — deleting on a guess is
+   * the one mistake this cannot come back from.
+   *
+   * But it says so now. Nothing anywhere writes `recordRetentionDays`, so this
+   * has returned early on every run since it was written, and the all-zero
+   * result was indistinguishable from a tenant with nothing to dispose of.
+   */
   if (!retentionDays || retentionDays <= 0) {
-    return result;
+    return { ...result, notConfigured: true };
   }
 
   result.actionsDisposed = await disposeCollection({
