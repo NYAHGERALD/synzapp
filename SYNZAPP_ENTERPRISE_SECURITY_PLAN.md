@@ -1079,16 +1079,41 @@ The budget matters as much as the loop: this runs beside live traffic, so a
 tenant with an enormous backlog gets what fits and the rest tomorrow rather than
 holding the nightly pass open while every other tenant waits behind it.
 
-### 6.11 The root `auditLogs` collection is a permanent cross-tenant PII store
+### 6.11 The root `auditLogs` collection is a permanent cross-tenant PII store — DONE
 
 `auditService.ts:31` writes every event there with `uid`, `phoneMasked`,
 `ipAddress` and full metadata. Grep finds that one write site — no read path, no
 delete path. `auditDisposalService` disposes only the tenant subcollection, and
 `recursiveDelete` on organization deletion does not touch it.
 
-**Fix.** Decide what it is for. If it is a tamper-evidence second copy, make that
-explicit, put it behind a locked log bucket and document it in the DPA. If it is
-vestigial, stop writing and purge what is there.
+**Decided: it is neither, and it is both halves of the question at once.**
+
+It was **not** working as a tamper-evidence second copy, and could not have been.
+Since 6.17 both writes share one batch, so they land together or not at all — the
+second copy cannot survive the original. Duplicating every uid, masked phone
+number, IP address and metadata blob bought nothing.
+
+It is **not** vestigial either. A handful of events genuinely have no tenant to
+file them under: somebody probing an endpoint with no credential, or a caller
+whose token cannot be read at all. Those matter, and after 6.1 resolves a tenant
+wherever one exists, they are the only things left with nowhere else to go.
+
+**So it is now exactly that, and nothing else.** The root copy is written only in
+the `else` branch — when there is no tenant — and a nightly sweep ages those
+events out on their own short period, which is configuration rather than a number
+in code and belongs in the staff console when there is a surface for it. The
+sweep runs once per run rather than once per tenant, because these events belong
+to no tenant, and what it removed is recorded so it is not silent.
+
+No legal hold check on that sweep, and that is correct rather than an omission: a
+hold belongs to a tenant and these events have none. Anything attributable is
+written to its tenant instead, where holds do apply.
+
+**What is not done:** the events already in there. Every event ever written, from
+every customer including offboarded ones, is still present and will now age out
+over the configured period rather than being purged at once — which is the
+cautious order, since the sweep deletes from the oldest end and can be watched on
+its first runs before it reaches anything recent.
 
 ### 6.12 The archive search audit omits who was searched and what for — DONE
 

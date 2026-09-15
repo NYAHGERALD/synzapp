@@ -72,8 +72,6 @@ export async function writeAuditEvent(input: AuditEventInput): Promise<void> {
    */
   const batch = firestore.batch();
 
-  batch.create(firestore.collection('auditLogs').doc(), baseEvent);
-
   if (attributed.tenantId) {
     batch.create(
       firestore
@@ -83,6 +81,26 @@ export async function writeAuditEvent(input: AuditEventInput): Promise<void> {
         .doc(),
       baseEvent
     );
+  } else {
+    /**
+     * The root collection is where an event goes when it belongs to nobody.
+     *
+     * Every event used to be written here as well as to its tenant, which made
+     * this a permanent cross-tenant store of uids, masked phone numbers, IP
+     * addresses and metadata — with no reader anywhere, nothing that disposed of
+     * it, and no removal when a customer was offboarded.
+     *
+     * It was not serving as a durable second copy either: both writes share one
+     * batch, so they land together or not at all. Duplicating personal data buys
+     * nothing when the copy cannot survive the original.
+     *
+     * What it *is* for is the handful of events with no tenant to file them
+     * under — somebody probing an endpoint with no credential, or one whose
+     * token cannot be read at all. Those still matter, and they have nowhere
+     * else to go, so they come here and are aged out by
+     * `disposeUnattributedAuditEvents`.
+     */
+    batch.create(firestore.collection('auditLogs').doc(), baseEvent);
   }
 
   try {

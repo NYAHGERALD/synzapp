@@ -98,6 +98,20 @@ export const env = {
    * alerting on the AUDIT_WRITE_FAILED marker, or a silent gap replaces a loud
    * lie and nobody notices either.
    */
+  /**
+   * How long an audit event with no tenant is kept.
+   *
+   * These are the events that belong to nobody — a probe against an endpoint
+   * with no credential, or a caller whose token cannot be read at all. They live
+   * in the root collection, which nothing reads, so the period is short and
+   * separate from a tenant's own retention: the point is that somebody can look
+   * at a probe while it is still relevant, not that a record of it is kept for
+   * years.
+   *
+   * Configuration rather than a number in code, and it belongs in the Synzapp
+   * staff console once there is a surface for it.
+   */
+  unattributedAuditRetentionDays: numberFromEnv('SYNZAPP_UNATTRIBUTED_AUDIT_RETENTION_DAYS', 90),
   auditWriteFailureMode: process.env.SYNZAPP_AUDIT_WRITE_FAILURE_MODE === 'continue'
     ? 'continue' as const
     : 'throw' as const,

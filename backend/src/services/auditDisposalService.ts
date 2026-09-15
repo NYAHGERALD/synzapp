@@ -1,3 +1,4 @@
+import { env } from '../config/env.js';
 import { firestore } from '../config/firebaseAdmin.js';
 import { listActiveLegalHolds } from './legalHoldService.js';
 import {
@@ -176,6 +177,84 @@ export async function disposeExpiredAuditEvents(input: {
    * number that looks like completion, because "disposed two hundred" and
    * "disposed two hundred and there are thousands left" are different facts.
    */
+  result.ranOutOfTime = true;
+
+  return result;
+}
+
+
+/**
+ * Ages out the events that belong to no tenant.
+ *
+ * The root collection had no disposal at all, so every unattributed event ever
+ * written was still there — and before the write was narrowed, that was *every*
+ * event, from every customer, including ones long offboarded.
+ *
+ * Nothing reads this collection, which is why the period is short and its own.
+ * It exists so that a probe against an endpoint with no credential leaves a
+ * trace somebody can look at while it is still relevant, not so that a record of
+ * it is kept for years.
+ *
+ * No legal hold check, and that is correct rather than an omission: a hold
+ * belongs to a tenant and these events have none. An event that can be
+ * attributed is written to its tenant instead, where the hold does apply.
+ */
+export async function disposeUnattributedAuditEvents(input: {
+  nowMs?: number;
+} = {}): Promise<{ disposed: number; ranOutOfTime: boolean; retentionDays: number }> {
+  const nowMs = input.nowMs ?? Date.now();
+  const retentionDays = env.unattributedAuditRetentionDays;
+  const result = { disposed: 0, ranOutOfTime: false, retentionDays };
+  const deadlineMs = nowMs + DISPOSAL_TIME_BUDGET_MS;
+  const auditLogsRef = firestore.collection('auditLogs');
+
+  while (Date.now() < deadlineMs) {
+    const page: FirebaseFirestore.QuerySnapshot | null = await auditLogsRef
+      .orderBy('createdAt', 'asc')
+      .limit(DISPOSAL_BATCH_SIZE)
+      .get()
+      .catch(() => null);
+
+    if (!page || page.empty) {
+      return result;
+    }
+
+    const batch = firestore.batch();
+    let pending = 0;
+    let reachedLiveEvents = false;
+
+    for (const doc of page.docs) {
+      const createdAt = doc.data().createdAt as { toMillis?: () => number } | undefined;
+
+      if (!isAuditEventDisposable({
+        createdAtMs: typeof createdAt?.toMillis === 'function' ? createdAt.toMillis() : 0,
+        nowMs,
+        retentionDays
+      })) {
+        // Oldest first, so nothing after this is old enough either.
+        reachedLiveEvents = true;
+        break;
+      }
+
+      batch.delete(doc.ref);
+      pending += 1;
+      result.disposed += 1;
+    }
+
+    if (pending > 0) {
+      await batch.commit();
+    }
+
+    /**
+     * No cursor, deliberately. Each pass deletes from the oldest end, so the
+     * next page is genuinely new work — paging past what was just removed would
+     * skip records rather than revisit them.
+     */
+    if (reachedLiveEvents || pending === 0) {
+      return result;
+    }
+  }
+
   result.ranOutOfTime = true;
 
   return result;

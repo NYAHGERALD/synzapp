@@ -1,4 +1,7 @@
-import { disposeExpiredAuditEvents } from './auditDisposalService.js';
+import {
+  disposeExpiredAuditEvents,
+  disposeUnattributedAuditEvents
+} from './auditDisposalService.js';
 import { disposeExpiredRecordBodies } from './recordBodyDisposalService.js';
 import { fieldValue, firestore } from '../config/firebaseAdmin.js';
 import { evaluateTenantRetention } from './retentionEvaluatorService.js';
@@ -59,6 +62,8 @@ export interface RetentionRunSummary {
   startedAtMs: number;
   tenantsFailed: number;
   tenantsRun: number;
+  /** Events belonging to no tenant, aged out of the root collection. */
+  unattributedAuditEventsDisposed: number;
 }
 
 /** Runs retention for one tenant. Never throws; failures are reported. */
@@ -168,12 +173,23 @@ export async function runScheduledRetention(): Promise<RetentionRunSummary> {
     results.push(await runTenantRetention(organization.id));
   }
 
+  /**
+   * Once per run, not once per tenant: these events belong to no tenant, which
+   * is the whole reason they are in a root collection.
+   */
+  const unattributed = await disposeUnattributedAuditEvents().catch((error) => {
+    console.error('[SynzappRetention] could not dispose unattributed audit events', { error });
+
+    return null;
+  });
+
   const summary: RetentionRunSummary = {
     finishedAtMs: Date.now(),
     results,
     startedAtMs,
     tenantsFailed: results.filter((result) => result.error).length,
-    tenantsRun: results.length
+    tenantsRun: results.length,
+    unattributedAuditEventsDisposed: unattributed?.disposed ?? 0
   };
 
   await recordRetentionRun(summary);
@@ -204,7 +220,8 @@ async function recordRetentionRun(summary: RetentionRunSummary): Promise<void> {
       queued: summary.results.reduce((total, result) => total + result.queued, 0),
       startedAtMs: summary.startedAtMs,
       tenantsFailed: summary.tenantsFailed,
-      tenantsRun: summary.tenantsRun
+      tenantsRun: summary.tenantsRun,
+      unattributedAuditEventsDisposed: summary.unattributedAuditEventsDisposed
     })
     .catch(() => undefined);
 }
