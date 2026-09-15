@@ -196,7 +196,16 @@ export function AuditConsole() {
                     <td>{event.createdAtMs ? new Date(event.createdAtMs).toLocaleString() : '—'}</td>
                     <td>{event.action}</td>
                     <td>{event.status}</td>
-                    <td>{event.actorUid || '—'}</td>
+                    {/*
+                      * A name, falling back to the identifier.
+                      *
+                      * This showed the raw uid, so the console read as a list of
+                      * 28-character strings and nobody could tell who had done
+                      * anything without looking each one up by hand.
+                      */}
+                    <td title={event.actorUid || undefined}>
+                      {event.actorName || event.actorUid || '—'}
+                    </td>
                     <td>{event.reason || describeMetadata(event.metadata)}</td>
                   </tr>
                 ))}

@@ -539,10 +539,27 @@ complianceRouter.post('/search', verifyAppCheck, async (req, res, next) => {
     await writeAuditEvent({
       action: 'COMPLIANCE_ARCHIVE_SEARCHED',
       metadata: {
+        /**
+         * Who was searched, and what for.
+         *
+         * This recorded a count. The docblock above promises "the question that
+         * was asked" and says a search nobody can account for later is
+         * indistinguishable from a fishing expedition through colleagues'
+         * messages — and a count is exactly that: it says somebody read three
+         * people's mail without saying whose, or why.
+         *
+         * Plaintext, because this log is already admin-only and a hash cannot
+         * be read back by the person reviewing it. An admin reading one named
+         * colleague's private messages must be attributable to that colleague
+         * by name.
+         */
+        conversationIds: body.conversationIds || [],
         custodianCount: body.custodianUids?.length || 0,
+        custodianUids: body.custodianUids || [],
         fromMs: body.fromMs ?? null,
         holdId: body.holdId ?? null,
         hits: result.hits.length,
+        searchText: body.text ?? null,
         toMs: body.toMs ?? null
       },
       req,
@@ -612,9 +629,20 @@ complianceRouter.post('/exports', verifyAppCheck, async (req, res, next) => {
     await writeAuditEvent({
       action: 'COMPLIANCE_EXPORT_REQUESTED',
       metadata: {
+        /**
+         * Named here too, and for a sharper reason than the search.
+         *
+         * `purgeExpiredComplianceExports` deletes the export record thirty days
+         * after it is built, so once that happens there is no record anywhere of
+         * whose messages an export contained. The audit event is the only thing
+         * that outlives it.
+         */
+        conversationIds: body.conversationIds || [],
         custodianCount: body.custodianUids?.length || 0,
+        custodianUids: body.custodianUids || [],
         exportId: record.id,
-        holdId: body.holdId ?? null
+        holdId: body.holdId ?? null,
+        searchText: body.text ?? null
       },
       req,
       status: 'SUCCESS',

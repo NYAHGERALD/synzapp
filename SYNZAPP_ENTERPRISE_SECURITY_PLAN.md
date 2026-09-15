@@ -1028,7 +1028,7 @@ delete path. `auditDisposalService` disposes only the tenant subcollection, and
 explicit, put it behind a locked log bucket and document it in the DPA. If it is
 vestigial, stop writing and purge what is there.
 
-### 6.12 The archive search audit omits who was searched and what for
+### 6.12 The archive search audit omits who was searched and what for — DONE
 
 `complianceRoutes.ts:457-462` states "every search is written to the audit log
 with the question that was asked… A search nobody can account for later is
@@ -1039,20 +1039,35 @@ omission. Since `purgeExpiredComplianceExports` deletes the export record after
 30 days, after a month there is no record anywhere of whose messages an export
 contained.
 
-**Fix.** Record `custodianUids` and the search text. An admin reading one named
-colleague's private messages must be attributable to that colleague by name.
+**Shipped.** Both the search and the export now record `custodianUids`,
+`conversationIds` and the search text itself, in plaintext — the log is already
+admin-only, and a hash cannot be read back by the person reviewing it.
 
-### 6.13 Reading and exporting the audit log is itself not audited
+The export matters more than the search, for a reason the finding names:
+`purgeExpiredComplianceExports` deletes the export record thirty days after it is
+built, so after that the audit event is the only thing left anywhere that says
+whose messages an export contained.
+
+### 6.13 Reading and exporting the audit log is itself not audited — PART DONE
 
 `adminRoutes.ts:516-532` (`GET /audit-events`) writes no audit event.
 `AuditConsole.tsx:90-122` loops until the cursor runs out and assembles the whole
 log client-side, with no server-side record that an export happened.
 
-**Fix.** Write `AUDIT_LOG_VIEWED` on the read route and `AUDIT_LOG_EXPORTED`
-carrying the filters and row count. Move CSV assembly server-side and audit it
-there.
+**Shipped, the read.** `GET /audit-events` writes `AUDIT_LOG_VIEWED` on success
+and on failure, carrying the filters — because a page fetch with no filters and
+one narrowed to a single person are very different acts, and both used to be
+recorded as nothing at all. The write is guarded: the read has already happened
+and the caller is entitled to it, so failing to record it must not turn a
+permitted read into an error.
 
-### 6.14 The audit console and auditor CSV show raw Firebase UIDs
+**Still open, the export.** The CSV is still assembled in the browser by paging
+the API until the cursor runs out, so there is no single act to record. Moving
+assembly server-side is the fix and it is a new endpoint, not a line — recorded
+rather than half-done, because an `AUDIT_LOG_EXPORTED` event written by the
+client would be a claim rather than a record.
+
+### 6.14 The audit console and auditor CSV show raw Firebase UIDs — DONE
 
 `AuditConsole.tsx:199` renders `event.actorUid`; `auditExport.ts:39` writes it
 into the "Actor" column; `auditQueryService.ts:126` maps `uid` straight through.
@@ -1060,8 +1075,16 @@ The tenant already has a name directory — `listCompliancePeople`, used at
 `complianceRoutes.ts:677`. An auditor currently receives a file of 28-character
 identifiers.
 
-**Fix.** Join against the people directory in `listAuditEvents` and add a display
-name column to both the console and the CSV, keeping the UID alongside.
+**Shipped.** `listAuditEvents` resolves names once per page from the people
+directory the tenant already has, and both the console and the auditor's CSV show
+the name with the identifier beside it — the console as a tooltip, the CSV as its
+own column, because two people can share a name and only the identifier settles
+which one acted.
+
+Read tolerantly: a page still opens if the directory read fails, and a row with
+no name falls back to the uid, which is what every row showed before. This is the
+same defect already found and fixed once for archive search, where somebody's
+messages "appeared in search results under a raw identifier".
 
 ### 6.15 The audit console's filtered views will fail at runtime — DONE
 

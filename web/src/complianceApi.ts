@@ -575,6 +575,8 @@ export function getConsoleAction(actionId: string): Promise<{
 
 export interface ConsoleAuditEvent {
   action: string;
+  /** The person's name when the directory has one; the uid stays beside it. */
+  actorName: string | null;
   actorUid: string | null;
   createdAtMs: number;
   eventId: string;

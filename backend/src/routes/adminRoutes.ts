@@ -536,8 +536,46 @@ adminRouter.get('/audit-events', verifyAppCheck, async (req, res, next) => {
       toMs: query.toMs ?? null
     });
 
+    /**
+     * Reading the audit log is itself an auditable act.
+     *
+     * It was not recorded at all, which leaves the one control that watches
+     * everybody unwatched: an administrator could read every action any
+     * colleague had taken, repeatedly, and nothing anywhere would say so. An
+     * auditor asks who reads this log, and the honest answer was nobody knows.
+     *
+     * The filters are recorded because they are the question that was asked.
+     * A page fetch with no filters and a page fetch narrowed to one person are
+     * very different acts and used to be indistinguishable — they were both
+     * nothing.
+     */
+    await writeAuditEvent({
+      action: 'AUDIT_LOG_VIEWED',
+      metadata: {
+        actions: query.actions || null,
+        fromMs: query.fromMs ?? null,
+        paged: Boolean(query.startAfterId),
+        returned: page.events?.length ?? 0,
+        toMs: query.toMs ?? null
+      },
+      req,
+      status: 'SUCCESS',
+      uid: decodedToken.uid
+    }).catch((error) => {
+      // The read has already happened and the caller is entitled to it. A
+      // failure to record must not turn a permitted read into an error.
+      console.error('[SynzappAudit] could not record an audit log read', { error });
+    });
+
     res.json(page);
   } catch (error) {
+    await writeAuditEvent({
+      action: 'AUDIT_LOG_VIEWED',
+      reason: error instanceof Error ? error.message : 'Audit log read failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
     next(error);
   }
 });

@@ -1,4 +1,5 @@
 import type { DecodedIdToken } from 'firebase-admin/auth';
+import { listCompliancePeople } from './complianceDirectoryService.js';
 import { firestore } from '../config/firebaseAdmin.js';
 import { buildAuditQueryWindow, type AuditQueryFilters } from './auditQueryFilters.js';
 import { buildAuthSession } from './authSessionService.js';
@@ -24,6 +25,19 @@ const AUDIT_PAGE_SIZE = 100;
 
 export interface AuditEventRecord {
   action: string;
+  /**
+   * The name the actor is known by, when the directory has one.
+   *
+   * The console and the auditor's CSV showed a raw Firebase uid, so an auditor
+   * received a file of 28-character identifiers and no way to turn them into
+   * people. The same problem was already found and fixed once for archive
+   * search, where somebody's messages "appeared in search results under a raw
+   * identifier".
+   *
+   * The uid stays alongside it. A name is what a person reads; the uid is what
+   * makes two people with the same name distinguishable.
+   */
+  actorName: string | null;
   actorUid: string | null;
   createdAtMs: number;
   eventId: string;
@@ -109,10 +123,41 @@ export async function listAuditEvents(
   const rows = snapshot.docs.map((doc) => toAuditEventRecord(doc.id, doc.data()));
   const events = rows.slice(0, AUDIT_PAGE_SIZE);
 
+  /**
+   * Names resolved once for the page, not once per row.
+   *
+   * Read tolerantly: an audit page must still open if the directory read fails.
+   * A row with no name falls back to its uid, which is what every row showed
+   * before this.
+   */
+  const namesByUid = await readActorNames(tenantId, events);
+
   return {
-    events,
+    events: events.map((event) => ({
+      ...event,
+      actorName: event.actorUid ? namesByUid.get(event.actorUid) || null : null
+    })),
     nextCursor: rows.length > AUDIT_PAGE_SIZE ? events[events.length - 1].eventId : null
   };
+}
+
+async function readActorNames(
+  tenantId: string,
+  events: AuditEventRecord[]
+): Promise<Map<string, string>> {
+  const wanted = new Set(events.map((event) => event.actorUid).filter(Boolean) as string[]);
+
+  if (!wanted.size) {
+    return new Map();
+  }
+
+  const people = await listCompliancePeople(tenantId).catch(() => []);
+
+  return new Map(
+    people
+      .filter((person) => wanted.has(person.uid) && person.displayName)
+      .map((person) => [person.uid, person.displayName])
+  );
 }
 
 function toAuditEventRecord(eventId: string, raw: Record<string, unknown>): AuditEventRecord {
@@ -120,6 +165,7 @@ function toAuditEventRecord(eventId: string, raw: Record<string, unknown>): Audi
 
   return {
     action: String(raw.action || ''),
+    actorName: null,
     actorUid: (raw.uid as string) || null,
     // A serverTimestamp is still null for the instant between the write landing
     // and the server stamping it. Zero rather than a crash, and it sorts last.

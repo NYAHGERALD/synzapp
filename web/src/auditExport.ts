@@ -14,7 +14,16 @@ const COLUMNS = [
   'Time (UTC)',
   'Event',
   'Outcome',
+  /**
+   * A name and an identifier, in that order.
+   *
+   * This was the raw Firebase uid alone, so an auditor received a file of
+   * 28-character strings and no way to turn any of them into a person. The uid
+   * stays in its own column because two people can share a name and only the
+   * identifier settles which one acted.
+   */
   'Actor',
+  'Actor ID',
   'Reason',
   'Details',
   'IP address'
@@ -36,6 +45,7 @@ export function buildAuditCsv(events: ConsoleAuditEvent[]): string {
       toCsvCell(event.createdAtMs ? new Date(event.createdAtMs).toISOString() : ''),
       toCsvCell(event.action),
       toCsvCell(event.status),
+      toCsvCell(event.actorName || event.actorUid || ''),
       toCsvCell(event.actorUid || ''),
       toCsvCell(event.reason || ''),
       toCsvCell(describeMetadata(event.metadata)),
