@@ -71,6 +71,12 @@ Ordering is by danger, not by severity label. Step 1 is exploitable today by
 anyone with a normal employee login. Step 7 is paperwork that blocks a signature
 but harms nobody.
 
+**Step 9 is different from the rest and is marked so.** Everything in steps 1 to
+8 could be closed by changing code. The five items in step 9 need a mobile
+release or a decision about how the company operates — which is why they had
+stalled: an item needing an answer, filed beside items needing a commit, reads as
+work nobody has got to rather than a question nobody has answered.
+
 Two things live outside this file and are referenced, not duplicated:
 [SYNZAPP_API_EDGE_SECURITY_PLAN.md](SYNZAPP_API_EDGE_SECURITY_PLAN.md) for the
 load balancer and Cloud Armor decision, and `backend/infra/README.md` for the
@@ -1640,6 +1646,190 @@ in this plan.
   decodes `%2F` into a literal slash and Firestore accepts it, but the tenant
   segment always comes from the session, so the worst case is a same-tenant
   redirect and a 500.
+
+## Step 9 — The gaps that need a release or a decision
+
+Everything in steps 1 to 8 could be closed by changing code and running tests.
+These five cannot. Two need a mobile build and a staged rollout; three need
+somebody to decide something about how the company operates before there is
+anything to write.
+
+They are grouped here rather than left scattered because that is what has been
+stalling them: an item that needs a decision, filed next to items that need a
+commit, reads as work nobody has got to yet rather than as a question nobody has
+answered.
+
+### 9.1 App Check on the mobile app
+
+**Where this stands.** App Check is unenforced on every Firebase service and
+`SYNZAPP_REQUIRE_APP_CHECK` is false on Cloud Run. The middleware **fails open**,
+so every route decorated with `verifyAppCheck` is currently unprotected. The plan
+originally called this a config flip. It is not: **only the web app attaches a
+token.** `web/src/firebase.ts` initialises App Check with ReCaptcha Enterprise and
+sends `X-Firebase-AppCheck`; a search of `mobile/src` finds the string only inside
+an error-message regex. Turning enforcement on today would reject every request
+the phone makes.
+
+**What makes it a build.** Mobile uses the native Firebase SDK —
+`@react-native-firebase/app` and `/auth` are Expo plugins in `app.json` — so App
+Check is `@react-native-firebase/app-check`, a native dependency. Android needs
+Play Integrity, iOS needs DeviceCheck or App Attest, both registered against
+`com.synzapp.mobile` in the Firebase console.
+
+**The part that is more work than it looks.** There is no single place to attach
+the header. Twelve service files call the API, and `chatApi.ts` alone makes
+twenty-four `fetch` calls. `adminApi.ts` has a tidy `adminFetch` wrapper and the
+rest do not. Attaching App Check means first giving mobile one shared request
+function the way `adminFetch` already is for admin routes — which is worth doing
+on its own merits, and is the actual size of this task.
+
+**Sequence, and none of it can be reordered.**
+
+1. Add the shared request wrapper in mobile and move every call onto it. No
+   behaviour change; ship and confirm nothing regressed.
+2. Add the App Check SDK, register Play Integrity and DeviceCheck, attach the
+   header in that one wrapper. Ship. Tokens are now sent and ignored.
+3. Watch the App Check metrics page until unverified traffic from
+   `com.synzapp.mobile` is effectively zero. **This is the gate.** It cannot be
+   hurried, because it is measuring how many people have not updated yet.
+4. Set `SYNZAPP_REQUIRE_APP_CHECK=true` on Cloud Run, then move each Firebase
+   service to ENFORCED one at a time.
+
+**What breaks if this is rushed.** Step 4 before step 3 locks out every phone
+still running an older build — which is every phone, until people update. The
+boot guard added in 1.6 deliberately only *warns* about App Check for this
+reason: making it fatal would leave a choice between a server that will not start
+and an app that cannot reach it.
+
+### 9.2 The mobile PIN and biometric unlock
+
+**Where this stands.** The decision layer is built and tested —
+`appLockPolicy.ts` (PIN rules, the failure ladder, when the lock is asked for)
+and `appLockCredential.ts` (a salted iterated digest, constant-time comparison, a
+stored round count so the cost can be raised later). Twenty-five tests. What is
+missing is everything a person touches.
+
+**What remains.**
+
+- **Storage.** The credential record into `SecureStore`, beside the existing
+  device identity. No new pattern needed.
+- **Setup.** A screen during onboarding, and in settings for people who already
+  have an account. Two entries, confirmed against each other.
+- **The lock screen.** Shown on cold start and on return from background past the
+  grace period, per `isAppLockRequired`.
+- **Biometric unlock.** `expo-local-authentication`, a native dependency, so this
+  is the half that needs a rebuild. Face ID or fingerprint unlocks *in place of*
+  the PIN, never as a way around a lockout.
+- **Recovery.** The part most likely to be got wrong. A forgotten PIN must mean
+  signing in again from scratch — SMS verification and a fresh local database. It
+  must not mean a bypass, and it must not mean support can clear it, because a
+  PIN support can clear is a PIN an attacker can ask support to clear.
+
+**What the lock is and is not.** Recorded in 3.1 and worth repeating here: six
+digits is a million possibilities and the app has no slow key derivation
+available, so this protects an unlocked, unattended handset — the realistic
+threat on a shift floor. It is not protection against somebody who has extracted
+the keystore, and the security pack should not say it is.
+
+### 9.3 Dual control and separation of duties — a decision
+
+**What is true today.** The founding administrator is written with the full
+`ORG_ADMIN_PERMISSIONS` array, which holds `users.manage`, `security.manage`,
+`audit.read` and `roles.manage` together. No service reduces an organization
+admin. No dual-control or second-approver machinery exists anywhere in the
+backend. SOC 2 CC6.3 and ISO 27001 A.5.15 both name this.
+
+**The decision is not whether, it is where.** Three questions, and the answers
+determine the code:
+
+1. **Which actions need a second person?** The candidates, in the order I would
+   rank them: compliance search and export (reading a named colleague's private
+   messages), bulk deactivation, retention policy change, and granting
+   organization admin.
+2. **Is the permission set splittable?** Today an organization admin holds
+   everything. Splitting security and compliance away from user administration is
+   what lets a second approver be a genuinely different person rather than the
+   same person twice.
+3. **What happens in a company with two admins?** A second-approver rule that
+   cannot be satisfied is a rule people work around. It needs a defined answer
+   for small tenants — most likely that the requirement is a tenant setting,
+   which puts it in the staff console.
+
+**My recommendation.** Start with compliance export alone. It is the single
+action where "one administrator, acting alone, read a named colleague's private
+messages" is the sentence you do not want in an audit finding. It is also the one
+with a natural second party, because somebody already had to raise the legal
+hold. Prove the machinery there and extend it.
+
+### 9.4 Tenant verification — a decision
+
+**What is true today.** Anyone with a verified phone number can create an
+organization and become its administrator. `orgAdminProfileService` mints a
+tenant id on the spot and writes the caller as ORG_ADMIN with every permission.
+There is no domain check, no contract, and no distinction between a trial and a
+customer.
+
+**Why it matters more than it looks.** It is not only the obvious — somebody
+squatting a company name. It is that the product has no concept of a *verified*
+tenant, so nothing downstream can depend on one. Company email verification
+(3.3), SSO (7.1) and SCIM all need a tenant that has been established as real
+before they mean anything.
+
+**The decision.** What makes a tenant real? The options, and they compose:
+
+- **Domain verification.** A DNS record or an email at the domain. Self-service,
+  weakest, and enough to stop casual squatting.
+- **A contract.** Synzapp staff mark a tenant as a customer in the staff console.
+  Strongest, manual, and correct for an enterprise sale.
+- **Both, as tiers.** A self-service trial tenant that is clearly labelled as one,
+  which staff promote. This is what most products settle on.
+
+**My recommendation.** Tiers, with the promotion in the staff console — it
+matches the standing rule that decisions affecting tenants belong there, and it
+is the only option that lets an enterprise feature say "verified customers only"
+and mean it.
+
+**And a related gap that should be decided at the same time:** there is no
+admin-succession path. An organization whose only admin leaves is stranded,
+because 4.7 deliberately refuses to demote the last one. Owner transfer and
+tenant verification are the same conversation about who a tenant belongs to.
+
+### 9.5 Staff management — a decision, then a small build
+
+**What is true today.** `upsertStaffMember` exists, handles status, and **has no
+caller**. Staff are added by running `backend/scripts/addStaffMember.mjs` against
+production with project credentials. There is no suspend and no remove, so
+offboarding a Synzapp employee is a manual database edit. Staff-list changes are
+the only staff action with no audit record, and the staff console has no App
+Check on any of its fifteen routes and no device binding.
+
+**The decision is narrow, which is why this one should move first.** Either staff
+management belongs in the product, or it belongs in a runbook. What it cannot
+remain is neither — a dead function and a script, with no record of who was
+granted access to customer data or when.
+
+**My recommendation, and it is the cheapest item in this step.** Wire the
+function up: `POST /staff/team` and `POST /staff/team/:uid/status` behind
+`requireStaffAdmin`, both writing audit events. Roughly two hours, because
+`upsertStaffMember` already does the work. Keep the script for the first bootstrap
+entry only — something has to create the first administrator, and a route that
+can do it without one is a permanent hole kept open for one day's use.
+
+Then two things that are not code: hardware-key MFA required and documented on
+the staff Workspace accounts, and App Check on the staff console.
+
+**Why this one first.** Every other item in this step protects a customer from
+somebody outside. This one is the answer to "who at Synzapp can reach our data,
+and how would you know" — which is the question an enterprise buyer asks about
+*you*, and the one where the current answer is a script and a shrug.
+
+### What this step does not contain
+
+SSO and SCIM (7.1), SOC 2, the penetration test and the DPA (7.2) are procurement
+and remain where they are. The GCP configuration workstream (4.6) — least
+privilege IAM, data access logging, Access Approval — is also out of scope here
+because it is infrastructure rather than product, but it belongs in the same
+conversation as 9.5: both answer the same buyer question.
 
 ## Step 7 — Procurement
 
