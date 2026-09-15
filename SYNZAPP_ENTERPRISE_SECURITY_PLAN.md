@@ -565,7 +565,7 @@ Keep the script for the first bootstrap entry only. Require App Check on the
 staff console, and require and document hardware-key MFA on the staff Workspace
 accounts.
 
-### 4.5 One static shared secret authorises cross-tenant destruction
+### 4.5 One static shared secret authorises cross-tenant destruction — PART DONE
 
 `complianceRoutes.ts:427-456` (`/retention/scheduled-run`, runs retention across
 every tenant) and `:600-632` (`/exports/:exportId/run`, packages an export for
@@ -573,9 +573,32 @@ any `tenantId` in the body) authorise on `X-Synzapp-Scheduler-Secret`. The
 comparison is constant-time and fails closed if unset (`:746-755`, `:429-435`) —
 that part is right. There is no rotation path and no audit event when it is used.
 
-**Fix.** Move to Cloud Run service-to-service OIDC identity tokens. Failing that:
-rotate on a schedule, use a distinct secret per job, and write an audit event on
-every invocation naming the tenant affected.
+**Two things were missing rather than wrong.** The comparison was already
+constant-time and already failed closed when unset, which is the part most people
+get wrong.
+
+**Shipped: it can be rotated.** The secret is read as a list, newest first, so
+the new value and the old one are both accepted while callers catch up. A single
+value made rotation a flag day — the moment the new secret is set, anything still
+sending the old one fails — which is how a static secret becomes a permanent one.
+Which value matched is reported on every call, so "rotation is finished" is
+something somebody can know rather than assume.
+
+**Shipped: its use is recorded.** `SCHEDULER_JOB_INVOKED` is written on every
+invocation and on every refusal, naming the job, and the tenant on the export
+worker — that route packages a readable archive of whatever tenant the body
+names, so which tenant somebody was reaching for is the interesting part of a
+refused attempt. Nothing was written before, in either direction: cross-tenant
+destruction ran with no trace of who asked, and somebody guessing at the header
+left none either.
+
+The comparison was also duplicated in `complianceRoutes` and `schedulerRoutes`,
+so a change to one never reached the other. It lives in one tested module now.
+
+**Still open: the identity.** OIDC service-to-service tokens remain the right
+answer, and a distinct secret per job is still worth doing. Both are
+infrastructure changes — who calls the job has to be configured to present an
+identity — rather than code, so neither is done here.
 
 ### 4.6 Nothing addresses your engineers' access through the Cloud console
 

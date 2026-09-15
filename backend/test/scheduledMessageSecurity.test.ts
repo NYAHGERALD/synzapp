@@ -106,13 +106,29 @@ describe('the release job cannot be triggered by whoever finds the URL', () => {
   });
 
   it('compares it in constant time', () => {
-    // A plain !== on a secret leaks it through how long the comparison takes.
-    assert.match(schedulerRoutes, /timingSafeEqual/);
+    /**
+     * A plain !== on a secret leaks it through how long the comparison takes.
+     * The comparison moved into middleware/schedulerSecret.ts, which is also
+     * what lets the secret be rotated — it was duplicated here and in
+     * complianceRoutes, so a change to one never reached the other.
+     */
+    assert.match(schedulerRoutes, /checkSchedulerSecret/);
     assert.doesNotMatch(schedulerRoutes, /provided === expected|providedSecret === expectedSecret/);
   });
 
   it('fails closed when no secret is configured', () => {
-    assert.match(schedulerRoutes, /if \(!expectedSecret\)[\s\S]{0,160}503/);
+    // An unprotected job that sends other people's messages is worse than a job
+    // that does not run: the second is noticed and the first is not.
+    assert.match(schedulerRoutes, /NOT_CONFIGURED[\s\S]{0,200}503/);
+  });
+
+  it('records every invocation, refused or not', () => {
+    /**
+     * Somebody guessing at this header is trying to make the service send other
+     * people's messages, and that attempt used to leave nothing behind at all.
+     */
+    assert.match(schedulerRoutes, /SCHEDULER_JOB_INVOKED/);
+    assert.match(schedulerRoutes, /status: 'DENIED'/);
   });
 
   it('stays off the routers that every app route is guarded on', () => {

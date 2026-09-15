@@ -1,4 +1,8 @@
 import { timingSafeEqual } from 'node:crypto';
+import {
+  checkSchedulerSecret,
+  readSchedulerSecrets
+} from '../middleware/schedulerSecret.js';
 import { getDecodedTokenFromHeader as getDecodedToken } from '../middleware/requestAuth.js';
 import { Router } from 'express';
 import { z } from 'zod';
@@ -482,21 +486,47 @@ complianceRouter.post('/retention/shred', verifyAppCheck, async (req, res, next)
  */
 complianceRouter.post('/retention/scheduled-run', async (req, res, next) => {
   try {
-    const expectedSecret = (process.env.SYNZAPP_RETENTION_SCHEDULER_SECRET || '').trim();
+    const decision = checkSchedulerSecret(
+      req.header('X-Synzapp-Scheduler-Secret') || '',
+      readSchedulerSecrets(process.env.SYNZAPP_RETENTION_SCHEDULER_SECRET)
+    );
 
-    if (!expectedSecret) {
-      res.status(503).json({ error: 'The retention scheduler is not configured.' });
+    if (!decision.allowed) {
+      /**
+       * Recorded even when refused, and especially then. Somebody guessing at
+       * this header is trying to run retention across every tenant, and that
+       * attempt used to leave nothing at all behind.
+       */
+      await writeAuditEvent({
+        action: 'SCHEDULER_JOB_INVOKED',
+        metadata: { job: 'RETENTION_SCHEDULED_RUN', outcome: decision.reason },
+        reason: decision.reason || undefined,
+        req,
+        status: 'DENIED'
+      }).catch(() => undefined);
+
+      res.status(decision.reason === 'NOT_CONFIGURED' ? 503 : 401).json({
+        error: decision.reason === 'NOT_CONFIGURED'
+          ? 'The retention scheduler is not configured.'
+          : 'Not authorised.'
+      });
 
       return;
     }
 
-    const providedSecret = (req.header('X-Synzapp-Scheduler-Secret') || '').trim();
-
-    if (!matchesSchedulerSecret(providedSecret, expectedSecret)) {
-      res.status(401).json({ error: 'Not authorised.' });
-
-      return;
-    }
+    /**
+     * And when it succeeds. This authorises destruction across every tenant, and
+     * nothing anywhere said it had run or who asked.
+     *
+     * `secretUsed` is what makes a rotation finishable: while anything still
+     * sends the previous value, every call says so.
+     */
+    await writeAuditEvent({
+      action: 'SCHEDULER_JOB_INVOKED',
+      metadata: { job: 'RETENTION_SCHEDULED_RUN', secretUsed: decision.matched },
+      req,
+      status: 'SUCCESS'
+    }).catch(() => undefined);
 
     const summary = await runScheduledRetention();
 
@@ -697,30 +727,50 @@ complianceRouter.get('/exports/:exportId', verifyAppCheck, async (req, res, next
  */
 complianceRouter.post('/exports/:exportId/run', async (req, res, next) => {
   try {
-    const expectedSecret = (process.env.SYNZAPP_RETENTION_SCHEDULER_SECRET || '').trim();
-
-    if (!expectedSecret) {
-      res.status(503).json({ error: 'The export worker is not configured.' });
-
-      return;
-    }
-
-    const providedSecret = (req.header('X-Synzapp-Scheduler-Secret') || '').trim();
-
-    if (!matchesSchedulerSecret(providedSecret, expectedSecret)) {
-      res.status(401).json({ error: 'Not authorised.' });
-
-      return;
-    }
-
+    const decision = checkSchedulerSecret(
+      req.header('X-Synzapp-Scheduler-Secret') || '',
+      readSchedulerSecrets(process.env.SYNZAPP_RETENTION_SCHEDULER_SECRET)
+    );
     const tenantId = String((req.body || {}).tenantId || '');
     const exportId = String(req.params.exportId || '');
+
+    if (!decision.allowed) {
+      /**
+       * The tenant is recorded on a refusal too. This route packages a readable
+       * archive of whatever tenant the body names, so which tenant somebody was
+       * reaching for is the interesting part of the attempt.
+       */
+      await writeAuditEvent({
+        action: 'SCHEDULER_JOB_INVOKED',
+        metadata: { exportId, job: 'COMPLIANCE_EXPORT_RUN', outcome: decision.reason },
+        reason: decision.reason || undefined,
+        req,
+        status: 'DENIED',
+        tenantId: tenantId || undefined
+      }).catch(() => undefined);
+
+      res.status(decision.reason === 'NOT_CONFIGURED' ? 503 : 401).json({
+        error: decision.reason === 'NOT_CONFIGURED'
+          ? 'The export worker is not configured.'
+          : 'Not authorised.'
+      });
+
+      return;
+    }
 
     if (!tenantId || !exportId) {
       res.status(400).json({ error: 'tenantId and exportId are required.' });
 
       return;
     }
+
+    await writeAuditEvent({
+      action: 'SCHEDULER_JOB_INVOKED',
+      metadata: { exportId, job: 'COMPLIANCE_EXPORT_RUN', secretUsed: decision.matched },
+      req,
+      status: 'SUCCESS',
+      tenantId
+    }).catch(() => undefined);
 
     const record = await runComplianceExport({ exportId, tenantId });
 
@@ -847,16 +897,9 @@ async function triggerExportWorker(input: { exportId: string; tenantId: string }
  * Compares the scheduler secret without leaking its length or content through
  * how long the comparison takes.
  */
-function matchesSchedulerSecret(provided: string, expected: string): boolean {
-  const providedBytes = Buffer.from(provided, 'utf8');
-  const expectedBytes = Buffer.from(expected, 'utf8');
-
-  if (providedBytes.length !== expectedBytes.length) {
-    return false;
-  }
-
-  return timingSafeEqual(providedBytes, expectedBytes);
-}
+// The comparison moved to middleware/schedulerSecret.ts, which supports a
+// rotation in progress and reports which value matched. It was duplicated here
+// and in schedulerRoutes.ts, so a change to one never reached the other.
 
 /**
  * What a rule would do, before it is allowed to do anything.

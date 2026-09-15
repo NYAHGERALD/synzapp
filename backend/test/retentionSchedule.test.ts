@@ -49,16 +49,29 @@ describe('the scheduled endpoint is protected', () => {
   it('requires a shared secret', () => {
     // Anyone finding this URL could otherwise trigger destruction everywhere.
     assert.match(handler, /X-Synzapp-Scheduler-Secret/);
-    assert.match(handler, /matchesSchedulerSecret\(providedSecret, expectedSecret\)/);
-    // Compared in constant time: a plain !== on a secret leaks it through how
-    // long the comparison takes.
-    assert.match(handler, /timingSafeEqual/);
+    assert.match(handler, /checkSchedulerSecret/);
   });
 
   it('refuses to run when the secret is not configured', () => {
-    // A missing secret must fail closed, not run unprotected.
-    assert.match(handler, /if \(!expectedSecret\)/);
+    // A missing secret must fail closed, not run unprotected. The decision now
+    // says which it was, so the route can answer 503 for unconfigured and 401
+    // for wrong rather than conflating them.
+    assert.match(handler, /NOT_CONFIGURED/);
     assert.match(handler, /503/);
+  });
+
+  it('records the invocation, refused or not', () => {
+    /**
+     * This authorises destruction across every tenant and nothing said it had
+     * run, or who asked. Somebody guessing at the header left no trace either.
+     */
+    assert.match(handler, /SCHEDULER_JOB_INVOKED/);
+    assert.match(handler, /status: 'DENIED'/);
+  });
+
+  it('reports which secret was used, so a rotation can be finished', () => {
+    // While anything still sends the previous value, every call says so.
+    assert.match(handler, /secretUsed: decision\.matched/);
   });
 });
 
