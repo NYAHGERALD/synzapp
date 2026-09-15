@@ -107,9 +107,19 @@ describe('confirming an organization admin invite', () => {
 
     expect(confirmation.body).toContain('removing people');
     expect(confirmation.body).toContain('audit log');
-    // The two nobody expects from the words "organization admin".
-    expect(confirmation.body).toContain('deleting the whole organization');
+    // The ones nobody expects from the words "organization admin".
     expect(confirmation.body).toContain('legal holds');
+    expect(confirmation.body).toContain('how long the company keeps its records');
+  });
+
+  it('does not claim they can delete the organization, because they cannot', () => {
+    // organizationDeletionService refuses anybody but the founding account. A
+    // warning that overstates in the alarming direction is one people learn to
+    // tap past.
+    const confirmation = describeOrgAdminInviteConfirmation({ contactCount: 1 });
+
+    expect(confirmation.body).not.toContain('deleting the whole organization');
+    expect(describeOrgAdminInviteHint()).not.toContain('delete the organization');
   });
 
   it('says plainly that the grant cannot be taken back yet', () => {

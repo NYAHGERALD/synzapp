@@ -815,6 +815,16 @@ async function getCurrentUserContext(decodedToken: DecodedIdToken) {
     throw authorizationError('Your profile is not active.');
   }
 
+  /**
+   * Paired with `ORG_ADMIN_DEPARTMENT_ID` in `orgAdminInvitePolicy.ts`, which
+   * refuses to invite an organization admin into any other department.
+   *
+   * The two ends have to move together. This relocates an organization admin
+   * into Human Resources; the block below rewrites the department back from the
+   * approved-phone record. Relax either side alone and an admin placed anywhere
+   * else never settles — four Firestore writes and a fresh set of custom claims
+   * on every profile request, forever.
+   */
   if (user.role === 'ORG_ADMIN' && user.departmentId !== HUMAN_RESOURCES_DEPARTMENT_ID) {
     await ensureOrgAdminHumanResourcesMembership(tenantId, decodedToken.uid);
     user = {

@@ -456,7 +456,11 @@ async function requireOrgAdmin(
   if (canOrgAdminUseRequestedPermission) {
     return {
       permissions,
-      role: 'ORG_ADMIN',
+      // The session's own role, not the literal 'ORG_ADMIN'. Restating what the
+      // branch already implies would make the policy's check tautological, and
+      // a policy that cannot fail is one nobody maintains. This way it reads
+      // the thing the session actually says.
+      role,
       scopeDepartmentId: null,
       tenantId: activeTenantId,
       uid: decodedToken.uid

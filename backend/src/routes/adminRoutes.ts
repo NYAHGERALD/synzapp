@@ -1261,8 +1261,15 @@ adminRouter.post('/employees/invite', verifyAppCheck, async (req, res, next) => 
       tenantId: employees[0]?.tenantId,
       uid: decodedToken.uid
       // The invite has already committed. A failure writing the record of it
-      // must not reach the catch below and report the grant as refused.
-    }).catch(() => undefined);
+      // must not reach the catch below and report the grant as refused — but it
+      // must not disappear either, or a grant lands with no record anywhere.
+    }).catch((error) => {
+      console.error('[SynzappInvite] could not write the invite audit event', {
+        error,
+        tenantId: employees[0]?.tenantId,
+        uid: decodedToken.uid
+      });
+    });
 
     res.status(201).json({ employees });
   } catch (error) {

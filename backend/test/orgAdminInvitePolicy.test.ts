@@ -224,6 +224,15 @@ describe('role names that would be read as authority', () => {
     assert.equal(isReservedTenantRoleName('Dept Admin'), true);
   });
 
+  it('refuses system admin, the one nothing in the product assigns', () => {
+    /**
+     * `normalizeRailsTenantRole` maps it to SYSTEM_ADMIN, which passes the same
+     * RAILS checks an organization admin passes. A list that stopped at the
+     * org-admin names would leave the highest of them open.
+     */
+    assert.equal(isReservedTenantRoleName('System Admin'), true);
+  });
+
   it('normalises punctuation, spacing and case the way RAILS does', () => {
     assert.equal(isReservedTenantRoleName('  ORG-ADMIN  '), true);
     assert.equal(isReservedTenantRoleName('org_admin'), true);

@@ -131,8 +131,21 @@ do. `npm run admins:review` lists existing admins across all three stores.
   refuses the five names it recognises. The RAILS-side derivation is still there
   and is listed at 4.7 below.
 
-**Accepted risks, recorded deliberately:** there is no second approver (4.2), and
-an invited admin cannot yet be demoted (4.7 — do this next).
+**Accepted risks, recorded deliberately:**
+
+- There is no second approver — one admin acting alone creates a peer (4.2).
+- An invited admin cannot be demoted, and an existing employee cannot be
+  promoted (4.7 — do this next).
+- Nobody is notified when an admin is created. The only record is an audit entry
+  behind a permission most people do not hold.
+- The switch is reachable only from the Human Resources department, chosen two
+  prompts earlier, so the one remaining route to a second admin is not obvious.
+- An older installed mobile build that still invites into HR now silently
+  creates a plain employee. It returns 201 and looks right. Mobile is the only
+  client, so this resolves as builds roll forward, but it is silent while it
+  lasts.
+- The web app has no invite UI at all, so there is no web control to add. That
+  is a fact about the product, not an omission in this change.
 
 ### 1.2 Firestore rules let every employee read all RCA data
 
@@ -465,13 +478,25 @@ It is also the reason 1.1 carries an accepted risk rather than a clean close. Th
 confirmation says so in as many words — "This cannot be undone from the app yet"
 — which is honest, but honesty is not a control.
 
+**And there is no way in, either.** The only route to ORG_ADMIN is a fresh
+invite, and `inviteEmployeeContacts` refuses any phone that already has a tenant
+user, an approved-phone record or a directory entry. So a company promoting a
+long-serving employee cannot: the account has to be destroyed and re-created.
+Promotion and demotion are the same missing operation seen from two ends.
+
+A third consequence: the invite writes a permanent record into the **global**
+`approvedPhoneDirectory` for a phone the caller does not control, and with no
+revoke path nobody can ever remove it — including the person who created it.
+
 **Fix.** A system-role change is a new operation, not a tweak to an existing one,
 which is why it was not folded into 1.1. It needs: a route and service that moves
 `ORG_ADMIN` back to `EMPLOYEE` across `approvedPhones`, `approvedPhoneDirectory`,
 the tenant user document, `identityDirectory` and custom claims; a guard that the
 last active organization admin cannot be removed, counted inside the transaction;
-a guard against demoting yourself; and the matching mobile affordance. This is
-also what 4.3's admin-succession item needs, so build them together.
+a guard against demoting yourself; and the matching mobile affordance. It should
+also handle promotion of an existing employee, and let `REMOVE_INVITE` clear both
+approved-phone records for an unclaimed admin invite. This is what 4.3's
+admin-succession item needs too, so build them together.
 
 ### 4.8 RAILS still derives authority from a role name
 

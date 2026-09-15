@@ -67,7 +67,7 @@ export const ORG_ADMIN_ROLE_NAME = 'Organization Admin';
 
 /** What sits under the switch, so the choice is understood before it is made. */
 export function describeOrgAdminInviteHint(): string {
-  return 'They will be able to invite and remove people, change roles, read the audit log and delete the organization.';
+  return 'They will be able to invite and remove people, change roles, read the audit log and change what the company keeps.';
 }
 
 export interface OrgAdminInviteConfirmation {
@@ -97,12 +97,18 @@ export function describeOrgAdminInviteConfirmation(input: {
 
   return {
     /**
-     * Names the two nobody expects — deleting the whole organization, and
-     * placing a legal hold — because "organization admin" sounds like a title
-     * rather than a set of powers. The last line is the honest part: there is
-     * no way to take this back from inside the app yet.
+     * Names the ones nobody expects from the words "organization admin":
+     * placing a legal hold and changing how long the company keeps its records.
+     *
+     * Deliberately does NOT claim they can delete the organization. They cannot
+     * — `organizationDeletionService` refuses anybody but the founding account.
+     * A warning that overstates in the alarming direction is one people learn to
+     * tap past, which costs more than it buys.
+     *
+     * The last line is the honest part: there is no way to take this back from
+     * inside the app yet.
      */
-    body: `${who} ${verb} the same access you do: inviting and removing people, changing roles, reading the audit log, placing legal holds, and deleting the whole organization.${placement} This cannot be undone from the app yet.`,
+    body: `${who} ${verb} the same access you do: inviting and removing people, changing roles, reading the audit log, placing legal holds, and changing how long the company keeps its records.${placement} This cannot be undone from the app yet.`,
     cancelLabel: 'Cancel',
     confirmLabel: input.contactCount === 1 ? 'Invite as admin' : 'Invite as admins',
     title: input.contactCount === 1

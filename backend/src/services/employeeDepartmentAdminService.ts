@@ -9,7 +9,8 @@ import { buildAuthSession } from './authSessionService.js';
 import type { ApprovedEmployeeResponse } from './employeeInviteService.js';
 import {
   DEPARTMENT_ADMIN_DEFAULT_PERMISSIONS,
-  mergePermissions
+  mergePermissions,
+  normalizeRolePermissions
 } from './permissionCatalog.js';
 
 interface TenantAdminContext {
@@ -300,7 +301,10 @@ function getCompanyRolePermissions(role?: TenantRoleRecord): string[] {
     return [];
   }
 
-  return role.permissions || [];
+  // Filtered the same way the invite and role-assignment paths filter it, so a
+  // role document that ever drifted outside the catalogue cannot reach anybody's
+  // custom claims through this third route.
+  return normalizeRolePermissions(role.permissions || []);
 }
 
 function mapAssignedEmployee(

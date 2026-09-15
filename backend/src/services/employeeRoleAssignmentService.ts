@@ -7,7 +7,7 @@ import {
 import { SynzappRole } from '../types/auth.js';
 import { buildAuthSession } from './authSessionService.js';
 import type { ApprovedEmployeeResponse } from './employeeInviteService.js';
-import { mergePermissions } from './permissionCatalog.js';
+import { mergePermissions, normalizeRolePermissions } from './permissionCatalog.js';
 
 interface TenantAdminContext {
   permissions: string[];
@@ -118,7 +118,11 @@ export async function updateEmployeeCompanyRole(
 
     employeeUid = approvedPhone.employeeUid || approvedPhone.claimedByUid || null;
     employeeRole = currentRole;
-    const rolePermissions = tenantRole.permissions || [];
+    // Filtered the same way the invite path filters it. A role document is
+    // catalogue-checked when it is saved, so anything outside the catalogue got
+    // there some other way, and this is the other route by which it would reach
+    // somebody's custom claims.
+    const rolePermissions = normalizeRolePermissions(tenantRole.permissions || []);
     const departmentAdminPermissions = currentRole === 'DEPT_ADMIN'
       ? approvedPhone.departmentAdminPermissions || []
       : [];

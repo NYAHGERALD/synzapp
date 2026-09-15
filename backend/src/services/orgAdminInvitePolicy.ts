@@ -178,7 +178,10 @@ const RESERVED_TENANT_ROLE_NAMES = [
   'org admin',
   'tenant admin',
   'department admin',
-  'dept admin'
+  'dept admin',
+  // SYSTEM_ADMIN is the one worth noticing: nothing in the product assigns it,
+  // yet it carries the same RAILS authority as an organization admin.
+  'system admin'
 ];
 
 export function isReservedTenantRoleName(name: string): boolean {
