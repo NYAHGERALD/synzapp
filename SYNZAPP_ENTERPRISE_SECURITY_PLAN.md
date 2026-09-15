@@ -803,7 +803,7 @@ failure-path write. Add DENIED events to `complianceRoutes` for
 `requireComplianceAdmin` rejections and scheduler-secret mismatches. A shared
 error-handler hook stops it regressing.
 
-### 6.2 A legal hold does not protect the audit log
+### 6.2 A legal hold does not protect the audit log — DONE
 
 `retentionScheduleService.ts:102` calls `disposeExpiredAuditEvents` inside
 `runTenantRetention`. `auditDisposalService.ts:1-6` never imports or calls
@@ -814,10 +814,8 @@ obligation, the nightly job keeps deleting the events proving who accessed and
 altered the preserved material. Any buyer with in-house counsel will read that as
 spoliation exposure.
 
-**Fix.** Call `listActiveLegalHolds(tenantId)` at the top of
-`disposeExpiredAuditEvents` and return immediately with a `heldBack` count when
-any hold is active. Audit events are the one class that should never age out
-under a hold — they are the evidence about the evidence.
+**Shipped.** `disposeExpiredAuditEvents` reads `listActiveLegalHolds` first and
+returns with `heldBack: true` when any hold is in force, removing nothing.
 
 ### 6.3 Three of the six modules produce no tenant audit trail at all
 
@@ -855,7 +853,7 @@ endpoint. Separately mirror events to Cloud Logging with a locked bucket, or to 
 BigQuery sink the app's service account cannot delete from. The chain gives
 tamper-evidence; the sink gives tamper-resistance.
 
-### 6.5 The invite audit records a role that was discarded
+### 6.5 The invite audit records a role that was discarded — DONE (with 1.1)
 
 `adminRoutes.ts:1233-1244` writes `EMPLOYEE_INVITES_CREATED` with
 `roleId: body.roleId` — the role the admin selected, which
@@ -867,7 +865,7 @@ trail does not merely omit the promotion, it misstates it.
 (already in the response object at `:396-397`) and log those alongside the
 requested `roleId`. One hour.
 
-### 6.6 The audit log's IP address is attacker-controlled
+### 6.6 The audit log's IP address is attacker-controlled — DONE
 
 `middleware/rateLimit.ts:77-85` `getClientIp` returns the **first** entry of
 `X-Forwarded-For`. On Cloud Run the platform *appends* the real peer address, so
@@ -875,8 +873,15 @@ the first entry is whatever the client sent. `auditService.ts:20` stores it
 verbatim and `auditExport.ts:42` writes it into the auditor CSV. `trust proxy` is
 not configured in `app.ts`, so the `req.ip` fallback is unreliable too.
 
-**Fix.** Take the second-to-last entry, or set `app.set('trust proxy', <hops>)`
-and use `req.ip`. Until then, do not present the IP column as evidence.
+**Shipped**, in `clientIp.ts`, pure and tested — the address is read from the end
+of the forwarded list where the platform writes, not the beginning where the
+caller does. The hop count is a named constant, because a load balancer in front
+of Cloud Run (see the edge plan) makes it two.
+
+**It closed a second hole nobody had counted.** `getClientIp` also keys the
+per-IP rate limits, so a caller sending a different fabricated first entry each
+request got a fresh bucket every time — the limits could be walked straight
+past.
 
 ### 6.7 The whole retention configuration is dead code
 
@@ -977,54 +982,63 @@ identifiers.
 **Fix.** Join against the people directory in `listAuditEvents` and add a display
 name column to both the console and the CSV, keeping the UID alongside.
 
-### 6.15 The audit console's filtered views will fail at runtime
+### 6.15 The audit console's filtered views will fail at runtime — DONE
 
 `auditQueryService.ts:81-94` combines `orderBy('createdAt','desc')` with
 `where('action','in',[...])` and `createdAt` range filters, requiring a composite
 index on (action ASC, createdAt DESC). `firestore.indexes.json` holds 8 indexes
 across `actions`, `pushTokens` and `tenantAiUsageEvents` only.
 
-**Fix.** Add the composite index (collection group `auditLogs`) and deploy it.
-Verify against the emulator so it cannot recur.
+**Shipped.** The `(action ASC, createdAt DESC)` index is in
+`firestore.indexes.json`, with a test asserting it stays there. It still has to
+be deployed before the console's filtered views work.
 
-### 6.16 Record body disposal reports every error as a legal hold
+### 6.16 Record body disposal reports every error as a legal hold — DONE
 
 `recordBodyDisposalService.ts:126-133` is a bare `catch` incrementing
 `heldBack`, with the comment "A legal hold, almost always." A permissions error,
 a Firestore outage and a code bug all report as the counter the design treats as
 "the system working, not breaking".
 
-**Fix.** Catch the named `legalHoldError` thrown by `actionService.ts:1244`
-specifically, count that as `heldBack`, and let anything else surface as a
-genuine failure in the run result.
+**Shipped.** `legalHoldError` now carries a `code`, and disposal counts only
+that as held back; anything else is thrown. A code rather than the error's name
+or its wording, because matching prose is the mistake this codebase has made
+before — a revoked device once never recognised itself because the message had
+changed.
 
-### 6.17 Audit writes are not atomic with the change they describe
+### 6.17 Audit writes are not atomic with the change they describe — PART DONE
 
 `auditService.ts:31-39` performs two sequential `.add()` calls outside a batch,
 so the root copy can land while the tenant copy fails. Callers audit after the
 mutation has committed (`adminRoutes.ts:931`, `complianceRoutes.ts:159`), so a
 crash in between leaves the change with no record.
 
-**Fix.** Use a `firestore.batch()` for the two writes. Where the mutation is
-already transactional, write the event inside the same transaction.
+**Shipped, the first half.** Both copies of an event now go in one batch, so the
+root copy can no longer land while the tenant copy fails.
 
-### 6.18 The audit correlation id is client-supplied
+**Still open:** the audit event is still written after the mutation it describes
+has committed, so a crash between them leaves the change with no record. Putting
+the write inside each caller's transaction is a change at every call site, not
+here.
+
+### 6.18 The audit correlation id is client-supplied — DONE
 
 `auditService.ts:24` takes `X-Request-Id` verbatim with no validation and no
 server-side fallback, so it can be forged or deliberately collided.
 
-**Fix.** Generate a server-side request id in middleware and store that; keep the
-client value in metadata as a separate, clearly-labelled field.
+**Shipped.** `requestId` is generated with `randomUUID`; what the caller sent is
+kept beside it as `clientRequestId`, clearly theirs.
 
-### 6.19 Releasing a legal hold never checks the hold exists
+### 6.19 Releasing a legal hold never checks the hold exists — DONE
 
 `legalHoldService.ts:105-110` calls `.doc(input.holdId).set({...}, {merge:true})`
 with no prior `get()`. A bad id creates a phantom released hold, which
 `isHoldActive` then treats as released-with-delay, and
 `complianceRoutes.ts:246-254` audits as a successful release.
 
-**Fix.** Read the document first and throw 404 when it does not exist, the way
-`approveDispositionItem` already does (`dispositionService.ts:129-131`).
+**Shipped.** The hold is read first and a missing one is a 404, so a mistyped id
+can no longer create a phantom released hold that `isHoldActive` reads as real
+and the route audits as a success.
 
 ---
 

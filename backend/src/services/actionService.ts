@@ -1402,11 +1402,21 @@ function notFoundError(message: string): Error {
 }
 
 /** Refused because a court may want it. Reported as a conflict, not a failure. */
+export const LEGAL_HOLD_ERROR_CODE = 'LEGAL_HOLD';
+
 function legalHoldError(message: string): Error {
   const error = new Error(message);
   error.name = 'ConflictError';
 
-  return error;
+  /**
+   * A code, not a name or a wording.
+   *
+   * Record body disposal needs to tell a hold doing its job from a genuine
+   * failure, and it cannot do that from `ConflictError` alone. Matching the
+   * message instead is the mistake this codebase has made before, where a
+   * revoked device never recognised itself because the prose had changed.
+   */
+  return Object.assign(error, { code: LEGAL_HOLD_ERROR_CODE });
 }
 
 function validationError(message: string): Error {

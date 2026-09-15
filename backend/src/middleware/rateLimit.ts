@@ -1,4 +1,5 @@
 import { NextFunction, Request, Response } from 'express';
+import { readForwardedClientIp } from './clientIp.js';
 import { consumeDurableRateLimit } from './durableRateLimit.js';
 import { getRetryAfterSeconds } from './rateLimitWindow.js';
 
@@ -75,13 +76,11 @@ export function assertRateLimit(key: string, windowMs: number, max: number) {
 }
 
 export function getClientIp(req: Request): string {
-  const forwardedFor = req.headers['x-forwarded-for'];
+  // From the end of the list, where the platform writes, not the beginning,
+  // where the caller does. See clientIp.ts for what that was costing.
+  const forwarded = readForwardedClientIp(req.headers['x-forwarded-for']);
 
-  if (typeof forwardedFor === 'string' && forwardedFor.trim()) {
-    return forwardedFor.split(',')[0].trim();
-  }
-
-  return req.ip || req.socket.remoteAddress || 'unknown';
+  return forwarded || req.ip || req.socket.remoteAddress || 'unknown';
 }
 
 function consumeRateLimit(key: string, windowMs: number, max: number) {

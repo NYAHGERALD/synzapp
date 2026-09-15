@@ -1,4 +1,5 @@
 import { firestore } from '../config/firebaseAdmin.js';
+import { listActiveLegalHolds } from './legalHoldService.js';
 import {
   isAuditEventDisposable,
   resolveAuditRetentionDays,
@@ -22,6 +23,8 @@ const DISPOSAL_BATCH_SIZE = 200;
 
 export interface AuditDisposalResult {
   disposed: number;
+  /** True when a preservation obligation stopped this pass entirely. */
+  heldBack?: boolean;
   retentionDays: number;
   scanned: number;
 }
@@ -72,6 +75,24 @@ export async function disposeExpiredAuditEvents(input: {
   const settings = await readTenantAuditRetention(input.tenantId);
   const { days: retentionDays } = resolveAuditRetentionDays(settings);
   const result: AuditDisposalResult = { disposed: 0, retentionDays, scanned: 0 };
+
+  /**
+   * Nothing ages out while the tenant is under a preservation obligation.
+   *
+   * This was the one destruction path that did not ask. Every other one
+   * re-checks holds before it removes anything, but the nightly audit pass went
+   * on deleting through a legal hold — destroying the record of who accessed and
+   * altered the very material being preserved.
+   *
+   * Audit events are the one class that should never age out under a hold. They
+   * are the evidence about the evidence, and a hold that does not cover them
+   * leaves exactly the gap a spoliation argument is made of.
+   */
+  const activeHolds = await listActiveLegalHolds(input.tenantId, nowMs);
+
+  if (activeHolds.length) {
+    return { ...result, heldBack: true };
+  }
 
   // Oldest first, and only a batch of them. Anything still inside its period
   // ends the pass, because everything after it is newer still.

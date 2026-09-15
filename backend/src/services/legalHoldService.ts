@@ -101,8 +101,27 @@ export async function releaseLegalHold(input: {
 }): Promise<{ delayUntilMs: number }> {
   const nowMs = Date.now();
   const delayUntilMs = nowMs + HOLD_RELEASE_DELAY_MS;
+  const holdRef = holdsRef(input.tenantId).doc(input.holdId);
+  const existing = await holdRef.get();
 
-  await holdsRef(input.tenantId).doc(input.holdId).set({
+  /**
+   * The hold has to exist before it can be released.
+   *
+   * A merge write created one out of nothing, so a mistyped id produced a
+   * phantom document that `isHoldActive` then read as released-with-delay — and
+   * the route audited it as a successful release. Somebody could believe they
+   * had lifted a hold that was still in force, or that a hold existed where none
+   * ever had. `approveDispositionItem` already reads first for the same reason.
+   */
+  if (!existing.exists) {
+    const error = new Error('That legal hold was not found.');
+
+    error.name = 'NotFoundError';
+
+    throw error;
+  }
+
+  await holdRef.set({
     delayUntilMs,
     releasedAtMs: nowMs,
     releasedByUid: input.actorUid,

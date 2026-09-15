@@ -1,4 +1,5 @@
 import { firestore } from '../config/firebaseAdmin.js';
+import { LEGAL_HOLD_ERROR_CODE } from './actionService.js';
 import { removeActionBody } from './actionService.js';
 import { removeAnnouncementBody } from './announcementService.js';
 import { isPastRetentionPeriod } from './retentionAge.js';
@@ -23,6 +24,12 @@ import { isPastRetentionPeriod } from './retentionAge.js';
 
 /** Small on purpose: this runs beside live traffic. */
 const DISPOSAL_BATCH_SIZE = 100;
+
+function isLegalHoldError(error: unknown): boolean {
+  return Boolean(error) &&
+    typeof error === 'object' &&
+    (error as { code?: unknown }).code === LEGAL_HOLD_ERROR_CODE;
+}
 
 export interface RecordBodyDisposalResult {
   actionsDisposed: number;
@@ -126,10 +133,23 @@ async function disposeCollection(input: {
     try {
       await input.dispose(doc.id);
       disposed += 1;
-    } catch {
-      // A legal hold, almost always. Counted rather than logged as a failure:
-      // a hold doing its job is the system working, not breaking.
-      input.result.heldBack += 1;
+    } catch (error) {
+      /**
+       * Only an actual hold counts as held back.
+       *
+       * This used to be a bare catch with the comment "a legal hold, almost
+       * always" — so a permissions error, a Firestore outage and a plain bug all
+       * reported as the counter the design treats as the system working rather
+       * than breaking. A disposal that silently fails every night looked
+       * identical to one correctly blocked, which is the opposite of what a
+       * record-keeping control is for.
+       */
+      if (isLegalHoldError(error)) {
+        input.result.heldBack += 1;
+        continue;
+      }
+
+      throw error;
     }
   }
 
