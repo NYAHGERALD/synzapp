@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { normalizeEvidenceContentType as normalizeAllowedEvidenceContentType } from './evidenceContentType.js';
 import { DecodedIdToken } from 'firebase-admin/auth';
 import { fieldValue, firestore, storageBucket } from '../config/firebaseAdmin.js';
 import { SynzappRole } from '../types/auth.js';
@@ -2547,15 +2548,16 @@ function parseRcaEvidenceDataUrl(dataUrl: string, declaredContentType: string): 
   };
 }
 
+/**
+ * An allowlist rather than a shape check.
+ *
+ * The old pattern admitted anything under `text/`, including `text/html`, which
+ * was served back with an inline disposition and reissued by the web app as a
+ * blob URL on its own origin — so an uploaded file ran as the colleague viewing
+ * it. See `evidenceContentType.ts`.
+ */
 function normalizeEvidenceContentType(contentType: string): string {
-  const safeContentType = contentType.trim().toLowerCase();
-  const normalizedContentType = safeContentType === 'image/jpg' ? 'image/jpeg' : safeContentType;
-
-  if (/^(image|video|audio|application|text)\/[a-z0-9.+-]+$/.test(normalizedContentType)) {
-    return normalizedContentType;
-  }
-
-  return 'application/octet-stream';
+  return normalizeAllowedEvidenceContentType(contentType);
 }
 
 function normalizeRcaEvidenceId(evidenceId: string): string {

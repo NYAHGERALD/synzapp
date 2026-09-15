@@ -451,7 +451,12 @@ rcaRouter.get('/incidents/:incidentId/sessions/:sessionId/evidence/:evidenceId',
     const evidenceFile = await getRcaEvidenceFile(decodedToken, incidentId, sessionId, evidenceId);
 
     res.setHeader('Cache-Control', 'private, max-age=3600');
-    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(evidenceFile.fileName)}"`);
+    /**
+     * Downloaded, never rendered. `inline` asks the browser to display the file,
+     * which for anything it can parse means running it on this origin.
+     */
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(evidenceFile.fileName)}"`);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.type(evidenceFile.contentType).send(evidenceFile.payload);
   } catch (error) {
     next(error);

@@ -1,4 +1,5 @@
 import React from 'react';
+import { downloadBlobFile } from './downloadBlobFile';
 import { createPortal } from 'react-dom';
 import {
   AlertTriangle,
@@ -520,9 +521,17 @@ export function EvidenceLibraryWindow({
 
     try {
       const blob = await downloadRailsEvidenceBlob(item.fileUrl);
-      const objectUrl = URL.createObjectURL(blob);
-      window.open(objectUrl, '_blank', 'noopener,noreferrer');
-      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+
+      /**
+       * Saved, not opened.
+       *
+       * This used to be createObjectURL followed by window.open. A blob
+       * document runs on **this** origin and inherits this page's
+       * Content-Security-Policy, so an uploaded file the server described
+       * as text/html became a page executing as whoever opened it — across
+       * a library shared by the whole tenant.
+       */
+      downloadBlobFile(blob, item.fileName || item.label || 'evidence');
     } catch (error) {
       setErrorMessage(getErrorMessage(error));
     }

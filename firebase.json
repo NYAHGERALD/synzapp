@@ -57,6 +57,10 @@
             {
               "key": "Strict-Transport-Security",
               "value": "max-age=31536000; includeSubDomains"
+            },
+            {
+              "key": "Content-Security-Policy",
+              "value": "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
             }
           ]
         },
@@ -119,6 +123,10 @@
             {
               "key": "X-Robots-Tag",
               "value": "noindex, nofollow"
+            },
+            {
+              "key": "Content-Security-Policy",
+              "value": "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
             }
           ]
         },

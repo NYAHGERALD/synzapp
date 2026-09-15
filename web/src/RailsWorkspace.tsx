@@ -1,4 +1,5 @@
 import React from 'react';
+import { downloadBlobFile } from './downloadBlobFile';
 import { createPortal } from 'react-dom';
 import * as Popover from '@radix-ui/react-popover';
 import { DayPicker } from 'react-day-picker';
@@ -2081,9 +2082,17 @@ export function RailsWorkspace() {
 
     try {
       const blob = await downloadRailsEvidenceBlob(evidence.fileUrl);
-      const url = URL.createObjectURL(blob);
-      window.open(url, '_blank', 'noopener,noreferrer');
-      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+
+      /**
+       * Saved, not opened.
+       *
+       * This used to be createObjectURL followed by window.open. A blob
+       * document runs on **this** origin and inherits this page's
+       * Content-Security-Policy, so an uploaded file the server described
+       * as text/html became a page executing as whoever opened it — across
+       * a library shared by the whole tenant.
+       */
+      downloadBlobFile(blob, evidence.fileName || evidence.label || 'evidence');
     } catch (error) {
       setErrorMessage(getErrorMessage(error));
     }
@@ -2096,9 +2105,10 @@ export function RailsWorkspace() {
 
     try {
       const blob = await downloadRailsEvidenceBlob(version.fileUrl);
-      const url = URL.createObjectURL(blob);
-      window.open(url, '_blank', 'noopener,noreferrer');
-      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+
+      // Saved, not opened, for the same reason as the evidence above: a blob
+      // document runs on this origin.
+      downloadBlobFile(blob, version.fileName || 'standardization-document');
     } catch (error) {
       setErrorMessage(getErrorMessage(error));
     }

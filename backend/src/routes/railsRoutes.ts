@@ -640,7 +640,16 @@ railsRouter.get('/evidence-library/:evidenceId', verifyAppCheck, async (req, res
     const evidenceFile = await getRailsEvidenceLibraryFile(decodedToken, evidenceId);
 
     res.setHeader('Content-Type', evidenceFile.contentType);
-    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(evidenceFile.fileName)}"`);
+    /**
+     * Downloaded, never rendered.
+     *
+     * `inline` asks the browser to display the file, which for anything it can
+     * parse means running it on this origin. The content type is allowlisted
+     * now, so this is the second of two locks rather than the only one — and a
+     * PDF can carry script of its own even when the type is honest.
+     */
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(evidenceFile.fileName)}"`);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.send(evidenceFile.payload);
   } catch (error) {
     next(error);
@@ -681,7 +690,16 @@ railsRouter.get('/items/:itemId/evidence/:evidenceId', verifyAppCheck, async (re
     const evidenceFile = await getRailsEvidenceFile(decodedToken, itemId, evidenceId);
 
     res.setHeader('Content-Type', evidenceFile.contentType);
-    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(evidenceFile.fileName)}"`);
+    /**
+     * Downloaded, never rendered.
+     *
+     * `inline` asks the browser to display the file, which for anything it can
+     * parse means running it on this origin. The content type is allowlisted
+     * now, so this is the second of two locks rather than the only one — and a
+     * PDF can carry script of its own even when the type is honest.
+     */
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(evidenceFile.fileName)}"`);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.send(evidenceFile.payload);
   } catch (error) {
     next(error);
@@ -696,7 +714,16 @@ railsRouter.get('/items/:itemId/standardization-documents/:versionId', verifyApp
     const versionFile = await getRailsStandardizationDocumentVersionFile(decodedToken, itemId, versionId);
 
     res.setHeader('Content-Type', versionFile.contentType);
-    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(versionFile.fileName)}"`);
+    /**
+     * Downloaded, never rendered.
+     *
+     * `inline` asks the browser to display the file, which for anything it can
+     * parse means running it on this origin. The content type is allowlisted
+     * now, so this is the second of two locks rather than the only one — and a
+     * PDF can carry script of its own even when the type is honest.
+     */
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(versionFile.fileName)}"`);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.send(versionFile.payload);
   } catch (error) {
     next(error);

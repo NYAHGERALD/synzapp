@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { normalizeEvidenceContentType as normalizeAllowedEvidenceContentType } from './evidenceContentType.js';
 import { DecodedIdToken } from 'firebase-admin/auth';
 import { fieldValue, firestore, storageBucket } from '../config/firebaseAdmin.js';
 import { SynzappRole } from '../types/auth.js';
@@ -2531,11 +2532,16 @@ async function claimPendingEvidenceUpload(
   };
 }
 
-/** Kept narrow: it is baked into a signed URL the browser must match exactly. */
+/**
+ * Kept narrow: it is baked into a signed URL the browser must match exactly.
+ *
+ * An allowlist rather than a shape check. The shape check admitted `text/html`,
+ * which was echoed back as the response content type and reissued by the web app
+ * as a blob URL on its own origin — so an uploaded file ran as the colleague
+ * viewing it, across a tenant-wide library. See `evidenceContentType.ts`.
+ */
 function sanitizeEvidenceContentType(contentType: string): string {
-  const safe = (contentType || '').trim().toLowerCase();
-
-  return /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(safe) ? safe : 'application/octet-stream';
+  return normalizeAllowedEvidenceContentType(contentType);
 }
 
 export async function addRailsEvidenceLibrary(

@@ -1327,7 +1327,7 @@ out.
 Audited across three dimensions and then adversarially verified; the verifier
 refuted two claims and found two things all three audits had walked past.
 
-### 8.1 Evidence content type becomes script in a colleague's browser — FIX FIRST
+### 8.1 Evidence content type becomes script in a colleague's browser — DONE
 
 `sanitizeEvidenceContentType` (`railsService.ts:2535-2539`) shape-checks only
 `type/subtype`, and RCA's `normalizeEvidenceContentType`
@@ -1347,10 +1347,34 @@ another logged-in employee. It subsumes the rest: script running as a viewer can
 close an RCA, reopen a session, end a live meeting and overwrite transcript
 segments on that person's behalf, with their token.
 
-**Fix.** A render-safe allowlist instead of a shape regex in both normalizers;
-`Content-Disposition: attachment` on both routes; stop the `createObjectURL` plus
-`window.open` pattern in the two web components. Add a CSP to the web app. None
-of it changes shipped-module logic.
+**Shipped, in four layers, because one lock on this is not enough.**
+
+1. **An allowlist, not a shape.** `evidenceContentType.ts` is a pure, tested
+   module both services now delegate to. The two entries worth naming are the
+   two deliberately absent: `text/html`, and `image/svg+xml` — which looks like
+   a picture and is a script host. A test asserts the allowlist can never admit
+   anything the module itself calls renderable, so the two lists cannot drift.
+2. **Served as an attachment, never inline** — with `nosniff`. A PDF can carry
+   script of its own even when the type is honest.
+3. **Saved rather than opened.** The web components used `createObjectURL`
+   followed by `window.open`; a blob document runs on *this* origin and inherits
+   *this* page's CSP. They download now, so no document is created at all.
+4. **A Content-Security-Policy** on both hosting targets, which had none.
+
+**Three things this turned up that the audit had not.** The finding named one
+RAILS route; there are **three** inline evidence routes in `railsRoutes.ts`, and
+an assertion caught that a single replacement would have fixed one and left two.
+The web side likewise had a **third** blob opener, for standardization document
+versions. And the two remaining `createObjectURL` calls are thumbnails bound to
+an `<img src>`, which executes nothing — left alone deliberately.
+
+**The CSP is conservative and that is a decision, not an oversight.**
+`object-src`, `base-uri`, `frame-ancestors` and `form-action` are set. A
+`script-src` policy is what would stop blob script on its own, and it is also
+what breaks a live console if it is wrong — Firebase Auth and App Check reach
+several Google origins at runtime that no static read of the source reveals. It
+needs a browser pass against staging before it goes on, and the attack is closed
+three other ways in the meantime.
 
 ### 8.2 RCA closure is enforced only by the interface
 
