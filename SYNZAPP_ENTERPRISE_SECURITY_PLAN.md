@@ -83,7 +83,7 @@ policy that is written but not applied.
 Live in production, reachable with an ordinary employee account, and none of it
 needs a sophisticated attacker. This is the step that gets done first.
 
-### 1.1 The HR department is an org-admin factory
+### 1.1 The HR department is an org-admin factory — DONE (commit 655108a)
 
 Any department **named** "Human Resources" mints full organization admins, and a
 department admin scoped to HR can mint unlimited ones for the whole tenant.
@@ -105,11 +105,34 @@ The escalation: `inviteEmployeeContacts` is gated by
 the dept admin's own. A DEPT_ADMIN of HR therefore creates full ORG_ADMINs. The
 UI never warns — grep for "Human Resources" across `web/src` returns nothing.
 
-**Fix.** Delete the special case. Replace it with an explicit `inviteAsOrgAdmin`
-flag that requires the caller to genuinely hold ORG_ADMIN (the real role, not the
-DEPT_ADMIN fallback branch), plus a confirmation step in the invite UI. Then
-audit existing data: query `approvedPhoneDirectory` for `role == 'ORG_ADMIN'`
-across every tenant and confirm each was intended. Half a day including UI.
+**Shipped.** The grant is asked for, never inferred. `orgAdminInvitePolicy.ts`
+holds the decision with no Firebase import, so it is unit tested: a genuine
+ORG_ADMIN (no department scope — which a department admin always carries),
+holding `users.manage` rather than the weaker `users.invite` that opens the
+endpoint, inviting into Human Resources **by id**. The audit records the role and
+permissions actually granted and names who received them; a refused grant now
+carries the uid and tenant so the attempt reaches the tenant's own log.
+`isHumanResourcesDepartment` is narrowed to an id, its name clause commented
+rather than deleted. Mobile gained a switch — shown only where the server would
+accept it — and a destructive confirmation naming what the person will be able to
+do. `npm run admins:review` lists existing admins across all three stores.
+
+**Two things the mapping turned up that were not in the original finding:**
+
+- An organization admin invited anywhere but Human Resources never settles.
+  `userProfileService.ts:818` moves them into HR on every profile request while
+  the approved-phone record puts them back, costing a Firestore write and fresh
+  custom claims forever. That is why the department is constrained rather than
+  free.
+- `railsService.ts:6366-6377` turns a role **name** into `ORG_ADMIN` when the
+  stored role is missing, and `createRole` accepted any name — so a tenant role
+  called "Org Admin" decided who may approve a high-risk RAILS loop. The same
+  defect one level down. RAILS is shipped and untouched, so `createRole` now
+  refuses the five names it recognises. The RAILS-side derivation is still there
+  and is listed at 4.7 below.
+
+**Accepted risks, recorded deliberately:** there is no second approver (4.2), and
+an invited admin cannot yet be demoted (4.7 — do this next).
 
 ### 1.2 Firestore rules let every employee read all RCA data
 
@@ -422,6 +445,51 @@ all".
 least-privilege IAM, Cloud Audit Logs for data access with alerting, and ideally
 Access Approval or a break-glass procedure with customer notification. It has to
 exist before the question can be answered honestly.
+
+### 4.7 An organization admin cannot be demoted or removed — do this next
+
+Every service that could take admin away refuses any approved-phone record whose
+role is `ORG_ADMIN`. `isEmployeeManagedRole`
+(`employeeLifecycleService.ts:592-594`) returns true only for `EMPLOYEE`,
+`DEPT_ADMIN` or no role, and the guard at `:105-110` throws "Employee was not
+found." in front of every lifecycle action — deactivate, suspend, delete,
+permanent delete, reactivate, anonymise. `updateEmployeeCompanyRole`
+(`employeeRoleAssignmentService.ts:101-106`) refuses the same records, and in any
+case only changes the tenant role, never the system role.
+
+Until 1.1 this bit only the rare account escalated by accident through HR. Now
+that creating an admin is a deliberate button, it is the normal case: an admin
+invites a peer, sees them in the list, and every management action on them fails.
+
+It is also the reason 1.1 carries an accepted risk rather than a clean close. The
+confirmation says so in as many words — "This cannot be undone from the app yet"
+— which is honest, but honesty is not a control.
+
+**Fix.** A system-role change is a new operation, not a tweak to an existing one,
+which is why it was not folded into 1.1. It needs: a route and service that moves
+`ORG_ADMIN` back to `EMPLOYEE` across `approvedPhones`, `approvedPhoneDirectory`,
+the tenant user document, `identityDirectory` and custom claims; a guard that the
+last active organization admin cannot be removed, counted inside the transaction;
+a guard against demoting yourself; and the matching mobile affordance. This is
+also what 4.3's admin-succession item needs, so build them together.
+
+### 4.8 RAILS still derives authority from a role name
+
+`normalizeRailsTenantRole` (`railsService.ts:6366-6377`) maps the normalised
+strings "organization admin", "org admin" and "tenant admin" to `ORG_ADMIN`, and
+"department admin" / "dept admin" to `DEPT_ADMIN`, whenever the stored role is
+absent or unrecognised. It gates high-risk RAILS approval (`:5086-5090`) and
+org-wide reviewer routing (`:5143-5156`).
+
+Latent today, because every write path sets a real role. The door that fed it is
+now shut at `createRole`, so no new role can carry those names — but existing
+tenant roles were never checked, and the derivation itself remains.
+
+**Fix.** Two parts. Run a read-only sweep for existing tenant roles whose name
+normalises to one of the five, since those pre-date the guard. Then delete the
+name-to-role fallback in `railsService` — authority must never come from a
+display string. That second part edits a shipped module and needs explicit
+sign-off.
 
 ---
 
