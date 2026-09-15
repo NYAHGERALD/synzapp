@@ -1,3 +1,4 @@
+import { toCsvCell } from './csvCell.js';
 /**
  * The manifest that ships inside every eDiscovery export.
  *
@@ -228,13 +229,12 @@ export function formatManifestCsv(
   return rows.map((row) => row.map(escapeCsvCell).join(',')).join('\r\n');
 }
 
+/**
+ * A manifest cell can hold a sentence with commas, quotes and newlines in it,
+ * and it can hold a display name somebody chose. The first shifts every column
+ * after it; the second is executed by Excel when the file is opened. This
+ * manifest goes to auditors and into eDiscovery bundles, so both matter.
+ */
 function escapeCsvCell(value: string): string {
-  // A manifest cell can hold a sentence with commas, quotes and newlines in it.
-  // Left unescaped, one such cell shifts every column after it and the index
-  // silently misreports which message is missing.
-  if (/[",\r\n]/.test(value)) {
-    return `"${value.replace(/"/g, '""')}"`;
-  }
-
-  return value;
+  return toCsvCell(value);
 }

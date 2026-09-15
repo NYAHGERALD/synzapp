@@ -20,7 +20,9 @@ import type {
  * apostrophe stops it being read as one.
  */
 export function toCsvCell(value: string): string {
-  const dangerous = /^[=+\-@]/.test(value) ? `'${value}` : value;
+  // Tab and carriage return too: some spreadsheets strip them before deciding
+  // whether the cell is a formula, so the character after them is what counts.
+  const dangerous = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
 
   return `"${dangerous.replace(/"/g, '""')}"`;
 }

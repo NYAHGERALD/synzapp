@@ -50,6 +50,8 @@ interface ChatMediaRecord {
   liveRefCount?: number | null;
   chatType?: ChatMediaScope;
   contentType?: string;
+  /** The limit this upload was granted against, so completion can measure it. */
+  maxEncryptedSizeBytes?: number;
   encryptedSizeBytes?: number;
   expiresAtMs?: number | null;
   fileName?: string;
@@ -160,6 +162,11 @@ export async function createEncryptedChatMediaUploadSession(
     contentType,
     createdAt: fieldValue.serverTimestamp(),
     encryptedSizeBytes,
+    /**
+     * The limit this upload was granted against, kept so completion can measure
+     * the object rather than trusting the number the client declared.
+     */
+    maxEncryptedSizeBytes,
     expiresAtMs,
     fileName,
     groupId: context.chatType === 'GROUP' ? context.chatId : null,
@@ -224,10 +231,43 @@ export async function markEncryptedChatMediaUploaded(
     await composeUploadedMediaParts(record.partPaths, record.storagePath);
   }
 
-  const [exists] = await storageBucket.file(record.storagePath).exists();
+  const uploadedFile = storageBucket.file(record.storagePath);
+  const [exists] = await uploadedFile.exists();
 
   if (!exists) {
     throw validationError('Encrypted media upload has not finished yet.');
+  }
+
+  /**
+   * Measured, not taken on trust.
+   *
+   * The size limit was checked once, at request time, against a number the
+   * client sent — and the signed write URL carries no size range, so nothing
+   * ever compared it to the object that actually arrived. A caller could declare
+   * a megabyte and upload as much as they liked.
+   *
+   * RAILS already does this correctly for evidence; this is the same check.
+   * Over the limit and already in the bucket means it is removed rather than
+   * left to be paid for by a company that never agreed to hold it.
+   */
+  const [uploadedMetadata] = await uploadedFile.getMetadata();
+  const uploadedSizeBytes = Number(uploadedMetadata.size || 0);
+  const allowedEncryptedBytes = Number(record.maxEncryptedSizeBytes) > 0
+    ? Number(record.maxEncryptedSizeBytes)
+    // Records written before the limit was stored still get checked, against
+    // the ceiling for their kind.
+    : (CHAT_MEDIA_LIMITS[record.kind as ChatMediaKind] || 0) +
+      CHAT_MEDIA_ENCRYPTION_OVERHEAD_ALLOWANCE_BYTES;
+
+  if (allowedEncryptedBytes > 0 && uploadedSizeBytes > allowedEncryptedBytes) {
+    await uploadedFile.delete().catch(() => undefined);
+
+    throw validationError(
+      getMediaTooLargeMessage(
+        record.kind as ChatMediaKind,
+        allowedEncryptedBytes - CHAT_MEDIA_ENCRYPTION_OVERHEAD_ALLOWANCE_BYTES
+      )
+    );
   }
 
   const update: {

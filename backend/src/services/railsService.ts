@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { toCsvCell } from './csvCell.js';
 import { normalizeEvidenceContentType as normalizeAllowedEvidenceContentType } from './evidenceContentType.js';
 import { DecodedIdToken } from 'firebase-admin/auth';
 import { fieldValue, firestore, storageBucket } from '../config/firebaseAdmin.js';
@@ -3770,14 +3771,12 @@ function buildRailsCsv(items: RailsItem[]): string {
     .join('\n');
 }
 
+/**
+ * A RAILS export carries titles, owner names and free-text reasons somebody
+ * typed. Quoted for structure and defused for formulas; see csvCell.ts.
+ */
 function csvCell(value: string): string {
-  const normalized = value.replace(/\r?\n/g, ' ').trim();
-
-  if (/[",]/.test(normalized)) {
-    return `"${normalized.replace(/"/g, '""')}"`;
-  }
-
-  return normalized;
+  return toCsvCell(value);
 }
 
 function mapRailsEvidence(itemId: string, evidence: RailsEvidence[]): RailsEvidence[] {

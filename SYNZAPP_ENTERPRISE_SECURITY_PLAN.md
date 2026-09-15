@@ -1509,7 +1509,7 @@ out of instruction channels entirely and put it in a data field; constrain the
 name's charset; treat model output as untrusted at the parse boundary rather than
 falling back to speaking the raw body.
 
-### 8.5 Upload size limits are declared and never measured
+### 8.5 Upload size limits are declared and never measured — PART DONE
 
 `getSignedStorageUrl` (`chatMediaService.ts:398-412`) passes no
 `extensionHeaders`, so the write URL carries no `x-goog-content-length-range` and
@@ -1519,6 +1519,20 @@ is a number the client sent.
 
 **RAILS does this correctly** at `railsService.ts:2512-2521`, with a real
 `getMetadata()` size comparison — so the fix is to copy the sibling.
+
+**Shipped: the object is measured when the upload completes.** The limit the
+upload was granted against is stored on the pending record, and completion reads
+the real size and deletes anything over it — already in the bucket means already
+being paid for by a company that never agreed to hold it. Records written before
+the limit was stored are checked against the ceiling for their kind rather than
+skipped.
+
+**Not done, and deliberately: binding the signed URL to a size range.**
+`x-goog-content-length-range` in `extensionHeaders` would have GCS refuse an
+oversized upload outright rather than after the fact, which is better. It also
+requires the client to send a matching header, so turning it on would break every
+mobile build already in people's hands. It needs a coordinated client release,
+and the measurement above closes the hole in the meantime.
 
 ### 8.6 A client-controlled document id overwrites another person's transcript
 
@@ -1534,7 +1548,7 @@ segment in a live meeting. The translation path beside it uses a server-generate
 random id (`:1289`) and is safe — the pattern was understood and simply not
 applied here.
 
-### 8.7 Formula injection in the two backend CSV builders
+### 8.7 Formula injection in the two backend CSV builders — DONE
 
 `complianceExportManifest.ts:231-238` and `railsService.ts:3767-3774` quote a
 cell only when it contains `"`, `,` or a newline. A cell beginning `=`, `+`, `-`
@@ -1545,6 +1559,18 @@ RAILS export.
 **The three web builders already do this correctly**
 (`web/src/announcementExport.ts:22-26`, copied by `auditExport.ts` and
 `actionExport.ts`), so the backend simply never picked it up.
+
+**Shipped.** One tested module, `csvCell.ts`, used by both backend builders. It
+also covers a leading tab and carriage return, which some spreadsheets strip
+before deciding whether a cell is a formula — and the web escaper was updated to
+match, so the two cannot differ.
+
+**One deliberate behaviour change.** Every cell is quoted now, not only the ones
+that structurally need it. The web exports always did that and the backend was
+the outlier; a cell quoted only sometimes is one where defusing a formula changes
+whether the quoting rule fires, and two rules interacting is what nobody notices
+until an export is wrong. Two existing manifest tests asserted the unquoted shape
+and were updated, with the reason recorded in them.
 
 ### 8.8 What was checked and found sound
 

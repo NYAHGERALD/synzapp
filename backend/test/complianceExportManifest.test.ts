@@ -121,7 +121,14 @@ describe('formatManifestCsv', () => {
     const csv = formatManifestCsv(build([entry(), entry({ envelopeId: 'env-2' })]));
 
     assert.equal(csv.split('\r\n').length, 3);
-    assert.match(csv, /^Sent \(UTC\),Conversation,/);
+    /**
+     * Every cell is quoted now, not only the ones that structurally need it.
+     * The web exports have always done that, and the backend was the outlier —
+     * a cell quoted only sometimes is one where defusing a formula changes
+     * whether the quoting rule fires, and the two decisions interacting is what
+     * nobody notices until an export is wrong.
+     */
+    assert.match(csv, /^"Sent \(UTC\)","Conversation",/);
   });
 
   it('marks an excluded message as not included and gives the reason', () => {
@@ -129,7 +136,7 @@ describe('formatManifestCsv', () => {
       entry({ excludedReason: 'NOT_ARCHIVED', messageFilePath: null })
     ]));
 
-    assert.match(csv, /,No,/);
+    assert.match(csv, /,"No",/);
     assert.match(csv, /cannot be corrected/i);
   });
 
