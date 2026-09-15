@@ -1312,6 +1312,181 @@ and the route audits as a success.
 
 ---
 
+## Step 8 — Input, injection and trust boundaries
+
+Added 15 September 2026, after three questions that the original assessment never
+asked: is form input sanitised, is there prompt injection defence, and are
+controls enforced in the backend rather than the interface.
+
+**They were genuine blind spots.** A search of the original 54 findings returns
+nothing on prompt injection, nothing on output encoding, and nothing on
+client-side-only enforcement. Thirty-six closed items did not touch any of it. A
+plan that looks comprehensive is exactly what stops anyone asking what it left
+out.
+
+Audited across three dimensions and then adversarially verified; the verifier
+refuted two claims and found two things all three audits had walked past.
+
+### 8.1 Evidence content type becomes script in a colleague's browser — FIX FIRST
+
+`sanitizeEvidenceContentType` (`railsService.ts:2535-2539`) shape-checks only
+`type/subtype`, and RCA's `normalizeEvidenceContentType`
+(`rcaService.ts:2549-2559`) explicitly permits `text/...`. Both are echoed back as
+the response content type with `Content-Disposition: inline`
+(`railsRoutes.ts:641-643`, `rcaRoutes.ts:453-454`), and the web app then reissues
+the bytes as a `blob:` URL **on its own origin**
+(`RailsWorkspace.tsx:2084-2085`, `EvidenceLibraryWindow.tsx:522-523`).
+
+Nothing blunts it. A blob document inherits the CSP of the page that created it,
+and the web app has no Content-Security-Policy at all — not in `firebase.json`,
+not in `index.html`, nowhere. The evidence library is tenant-wide rather than
+per-item (`railsService.ts:2783-2799`), so one uploader reaches every viewer.
+
+This is the only finding on the list that gives an attacker script execution as
+another logged-in employee. It subsumes the rest: script running as a viewer can
+close an RCA, reopen a session, end a live meeting and overwrite transcript
+segments on that person's behalf, with their token.
+
+**Fix.** A render-safe allowlist instead of a shape regex in both normalizers;
+`Content-Disposition: attachment` on both routes; stop the `createObjectURL` plus
+`window.open` pattern in the two web components. Add a CSP to the web app. None
+of it changes shipped-module logic.
+
+### 8.2 RCA closure is enforced only by the interface
+
+The entire twenty-field Approval and Closure review exists in
+`RcaWorkspace.tsx`. `PATCH /api/rca/incidents/:id` with `{"status":"CLOSED"}`
+closes an RCA with nothing filled in: `rcaRoutes.ts:78-83` accepts the status and
+`rcaService.ts:1019-1021` is the whole handling. `normalizeIncidentStatus` only
+coerces.
+
+And closure is permanent — the post-closure freeze at `rcaService.ts:991-993` is
+real — so a fabricated closure cannot be undone. In food manufacturing that
+record is regulatory evidence.
+
+The actor must already be a participant on the canvas, so this is insider record
+tampering rather than a tenant-wide primitive. It is still a blocker.
+
+Related, same module: `updateRcaSession` (`rcaService.ts:1126-1157`) calls
+neither `assertSessionIsEditable` nor `assertIncidentIsEditable`, and
+`normalizeSessionStatus` maps anything unrecognised to ACTIVE — so a closed
+session can be reopened by sending a status. And in the interpreter,
+`startInterpreterMeeting` and `endInterpreterMeeting`
+(`interpreterService.ts:1080-1136`) write the status unconditionally, while
+`deleteInterpreterMeeting` immediately below them checks properly.
+
+**RAILS is the counter-example and the pattern to copy.**
+`validateRailsStatusTransition` (`railsService.ts:4292`) genuinely enforces
+New → Triaged → In Progress → Verification → Approved → Closed with per-stage
+blockers, and is wired at three call sites rather than merely defined.
+
+### 8.3 Three WebSockets validate nothing and bypass every middleware
+
+`rcaRealtimeService.ts:397-420`, `chatRealtimeService.ts:188-206` and
+`callRealtimeService.ts:184-202` all `JSON.parse` a frame, type-assert on
+`message.type`, and return it. RCA then hands `message.input` straight to the
+same `createRcaNode` and `updateRcaNode` the HTTP routes validate with
+`nodeBodySchema`.
+
+All three construct `WebSocketServer` with only `{ noServer: true }`, so the
+`ws` default payload cap of 100 MiB applies — against `express.json({ limit:
+'8mb' })` on the HTTP side. And the upgrade is handled in `server.ts` outside the
+Express chain, so `enforceDeviceBinding` and `verifyAppCheck` never run on any of
+them.
+
+`relaySignal` (`callRealtimeService.ts:328-353`) forwards `message.payload`
+verbatim to another user's socket with no shape or size check, so an oversized
+frame is amplified to a peer rather than merely costing this server.
+
+**Fix.** Parse with the schema that already exists before calling the writers;
+pass `maxPayload` to all three servers.
+
+### 8.4 Prompt injection: real, and there is a tool the model can call
+
+Seventeen OpenAI call sites. RAILS and RCA keep instructions in a system entry
+but concatenate customer context into the user turn unfenced. The interpreter is
+worse: the **meeting name** — a bare `z.string().trim().min(2).max(140)`,
+settable by any tenant user for up to fifty invitees — is placed last in the
+realtime session `instructions` (`interpreterService.ts:2872, 2898`), in the TTS
+`instructions` (`:2114, :4705, :4870`) and in the transcription prompt
+(`:2716`). Raw transcript slices go into TTS `instructions` inside unescaped
+quotes (`:2119, :2122`, and a third site at `:2112-2114` the audit missed).
+
+There is one declared tool, `lookup_backend_approved_knowledge` (`:2813, :2926`),
+whose invocation the model decides and the phone executes as an authenticated
+POST. It is currently read-only, rate limited and audited — which is what keeps
+this serious rather than a blocker.
+
+Model output is parsed as JSON and, on parse failure, the raw body is spoken and
+stored (`:5149-5178`). Summaries and segment translations are stored and re-fed
+into TTS, which is where a single injection becomes persistent.
+
+**One genuine relief:** nothing renders model output as HTML or markdown
+anywhere, and there is no `dangerouslySetInnerHTML` or `.innerHTML` in backend,
+web or mobile. So injected output cannot become script.
+
+**Fix.** Fence customer text rather than concatenating it; keep the meeting name
+out of instruction channels entirely and put it in a data field; constrain the
+name's charset; treat model output as untrusted at the parse boundary rather than
+falling back to speaking the raw body.
+
+### 8.5 Upload size limits are declared and never measured
+
+`getSignedStorageUrl` (`chatMediaService.ts:398-412`) passes no
+`extensionHeaders`, so the write URL carries no `x-goog-content-length-range` and
+has no cap at all. Completion checks only `.exists()`
+(`chatMediaService.ts:227-231`, `actionService.ts:1548-1562`). The declared size
+is a number the client sent.
+
+**RAILS does this correctly** at `railsService.ts:2512-2521`, with a real
+`getMetadata()` size comparison — so the fix is to copy the sibling.
+
+### 8.6 A client-controlled document id overwrites another person's transcript
+
+Found by the verifier, not by any of the three audits.
+`interpreterService.ts:1199-1203` builds `segmentId = itr_${versionId}` from the
+client's own `versionId` and writes `.doc(segmentId).set(segment, { merge: true })`
+at `:1225-1226` with no check that the existing document's `createdByUid` matches
+the caller. The mobile app pins a well-known literal `'saved-transcripts'` as one
+version id.
+
+So any invited participant can overwrite another participant's stored transcript
+segment in a live meeting. The translation path beside it uses a server-generated
+random id (`:1289`) and is safe — the pattern was understood and simply not
+applied here.
+
+### 8.7 Formula injection in the two backend CSV builders
+
+`complianceExportManifest.ts:231-238` and `railsService.ts:3767-3774` quote a
+cell only when it contains `"`, `,` or a newline. A cell beginning `=`, `+`, `-`
+or `@` is executed by Excel when the file is opened, and both carry user-typed
+free text — display names in the eDiscovery manifest, titles and reasons in the
+RAILS export.
+
+**The three web builders already do this correctly**
+(`web/src/announcementExport.ts:22-26`, copied by `auditExport.ts` and
+`actionExport.ts`), so the backend simply never picked it up.
+
+### 8.8 What was checked and found sound
+
+Recorded so it is not re-audited, and because some of it corrects an assumption
+in this plan.
+
+- **Input validation is genuinely good.** Of 316 route handlers, exactly one
+  mutating route reads `req.body` without a zod parse (`complianceRoutes.ts:734`).
+  Every `z.array` carries a `.max()`; every `z.string()` carries a `.max()`, a
+  `.regex()` or `.datetime()`.
+- **A non-strict `z.object` strips unknown keys, it does not accept them.** This
+  was assumed to be a risk and is not. There is no `.passthrough()`,
+  `.catchall()`, `z.any()` or `z.unknown()` anywhere in routes or services, so no
+  unknown key can reach Firestore through a spread of a parsed body.
+- **No output is rendered unescaped.** No `dangerouslySetInnerHTML`, no
+  `.innerHTML`, and the compliance transcript escapes every interpolation.
+- **Route parameters reaching `.doc()` are not a cross-tenant risk.** Express
+  decodes `%2F` into a literal slash and Firestore accepts it, but the tenant
+  segment always comes from the session, so the worst case is a same-tenant
+  redirect and a 500.
+
 ## Step 7 — Procurement
 
 ### 7.1 SSO and SCIM
