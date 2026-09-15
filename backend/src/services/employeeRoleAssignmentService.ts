@@ -274,6 +274,16 @@ export async function updateEmployeeOrgAdminRole(
     throw validationError('Employee was not found.');
   }
 
+  if (input.grantOrgAdmin && safeRoleId) {
+    /**
+     * An organization admin does not hold a tenant role's permissions, so a
+     * roleId here would be written and never used. Refused rather than ignored:
+     * silently dropping part of a request is how a caller ends up believing
+     * something applied when it did not.
+     */
+    throw validationError('An organization admin does not take a company role.');
+  }
+
   if (!input.grantOrgAdmin && !safeRoleId) {
     throw validationError('Choose the role this person will have instead.');
   }
@@ -284,22 +294,11 @@ export async function updateEmployeeOrgAdminRole(
   const claimsVersion = Date.now();
   let employeeUid: string | null = null;
   let nextRole: SynzappRole = 'EMPLOYEE';
+  let claimsStatus = 'ACTIVE';
   let effectivePermissions: string[] = [];
 
   await firestore.runTransaction(async (transaction) => {
-    /**
-     * Every read first. A single equality filter on purpose: combining it with
-     * a status filter would need a composite index, and an index missing in
-     * production is how an admin console ends up failing at the moment somebody
-     * needs it. Organization admins are few, so the status is checked here.
-     */
-    const [approvedPhoneSnapshot, roleSnapshot, orgAdminSnapshot] = await Promise.all([
-      transaction.get(approvedPhoneRef),
-      roleRef ? transaction.get(roleRef) : Promise.resolve(null),
-      transaction.get(
-        organizationRef.collection('approvedPhones').where('role', '==', 'ORG_ADMIN')
-      )
-    ]);
+    const approvedPhoneSnapshot = await transaction.get(approvedPhoneRef);
 
     if (!approvedPhoneSnapshot.exists) {
       throw notFoundError('Employee was not found.');
@@ -313,10 +312,33 @@ export async function updateEmployeeOrgAdminRole(
 
     const currentRole = approvedPhone.role || 'EMPLOYEE';
     const targetUid = approvedPhone.employeeUid || approvedPhone.claimedByUid || null;
-    const otherActiveOrgAdmins = orgAdminSnapshot.docs.filter((doc) => {
-      const record = doc.data() as ApprovedEmployeeRecord;
+    const userRef = targetUid ? organizationRef.collection('users').doc(targetUid) : null;
 
-      return doc.id !== safeApprovedPhoneId && record.status === 'ACTIVE';
+    /**
+     * The remaining reads together, before any write.
+     *
+     * The admin count comes from `users`, not from `approvedPhones`. The
+     * founding administrator of a tenant has no approved-phone record at all —
+     * `orgAdminProfileService` writes the organization, the user document and
+     * the identity directory and nothing else — so counting approved phones
+     * misses the one admin almost every company has. A founder who invited a
+     * second admin could then never demote them: the count would say zero
+     * others remained while the founder sat right there.
+     *
+     * A single equality filter, with the status checked in code, so no
+     * composite index is needed. An index missing in production is how an admin
+     * console fails at the moment somebody needs it.
+     */
+    const [roleSnapshot, userSnapshot, orgAdminSnapshot] = await Promise.all([
+      roleRef ? transaction.get(roleRef) : Promise.resolve(null),
+      userRef ? transaction.get(userRef) : Promise.resolve(null),
+      transaction.get(organizationRef.collection('users').where('role', '==', 'ORG_ADMIN'))
+    ]);
+
+    const otherActiveOrgAdmins = orgAdminSnapshot.docs.filter((adminDoc) => {
+      const record = adminDoc.data() as TenantUserRecord;
+
+      return adminDoc.id !== targetUid && record.status === 'ACTIVE';
     }).length;
 
     const decision = canChangeOrgAdminRole(input.grantOrgAdmin ? 'PROMOTE' : 'DEMOTE', {
@@ -331,26 +353,44 @@ export async function updateEmployeeOrgAdminRole(
       throw validationError(decision.reason || 'This access cannot be changed.');
     }
 
+    // The same check the sibling role change makes, and for the same reason:
+    // nothing outside this tenant's own collection should be written on the
+    // strength of a uid that has not been confirmed to belong to it.
+    if (userRef) {
+      const user = userSnapshot?.data() as TenantUserRecord | undefined;
+
+      if (!userSnapshot?.exists || !user || user.tenantId !== context.tenantId) {
+        throw notFoundError('Employee profile was not found.');
+      }
+    }
+
     employeeUid = targetUid;
+    claimsStatus = approvedPhone.status === 'ACTIVE' ? 'ACTIVE' : (approvedPhone.status || 'ACTIVE');
 
     const phoneHash = approvedPhone.phoneHash || safeApprovedPhoneId;
     const globalApprovedPhoneRef = firestore.collection('approvedPhoneDirectory').doc(phoneHash);
     let roleName: string;
-    let departmentUpdate: Record<string, unknown> = {};
+    let departmentUpdate: Record<string, unknown>;
 
     if (input.grantOrgAdmin) {
       nextRole = 'ORG_ADMIN';
       effectivePermissions = [...ORG_ADMIN_PERMISSIONS];
       roleName = ORG_ADMIN_ROLE_NAME;
       /**
-       * The same placement the invite enforces, and for the same reason:
-       * `userProfileService` moves every organization admin into Human
-       * Resources on each profile request, so an admin left anywhere else is
-       * rewritten on every request, forever.
+       * The same placement the invite enforces: `userProfileService` moves every
+       * organization admin into Human Resources on each profile request, so an
+       * admin left anywhere else is rewritten on every request, forever.
+       *
+       * Where they came from is recorded, because otherwise admin access is a
+       * one-way door for department membership — somebody promoted out of
+       * Maintenance and later stepped down would be parked in Human Resources
+       * permanently, with no endpoint anywhere that moves an employee back.
        */
       departmentUpdate = {
         departmentId: ORG_ADMIN_DEPARTMENT_ID,
-        departmentName: HUMAN_RESOURCES_DEPARTMENT_NAME
+        departmentName: HUMAN_RESOURCES_DEPARTMENT_NAME,
+        previousDepartmentId: approvedPhone.departmentId || null,
+        previousDepartmentName: approvedPhone.departmentName || null
       };
     } else {
       const tenantRole = roleSnapshot?.data() as TenantRoleRecord | undefined;
@@ -363,37 +403,47 @@ export async function updateEmployeeOrgAdminRole(
       nextRole = 'EMPLOYEE';
       effectivePermissions = normalizeRolePermissions(tenantRole.permissions || []);
       roleName = tenantRole.name || 'Role';
-    }
 
-    const userRef = employeeUid
-      ? organizationRef.collection('users').doc(employeeUid)
-      : null;
-    const identityRef = employeeUid
-      ? firestore.collection('identityDirectory').doc(employeeUid)
-      : null;
+      const previousDepartmentId = (approvedPhone as { previousDepartmentId?: string | null })
+        .previousDepartmentId;
+      const previousDepartmentName = (approvedPhone as { previousDepartmentName?: string | null })
+        .previousDepartmentName;
+
+      departmentUpdate = previousDepartmentId
+        ? {
+            departmentId: previousDepartmentId,
+            departmentName: previousDepartmentName || 'Department',
+            previousDepartmentId: fieldValue.delete(),
+            previousDepartmentName: fieldValue.delete()
+          }
+        : {
+            previousDepartmentId: fieldValue.delete(),
+            previousDepartmentName: fieldValue.delete()
+          };
+    }
 
     const sharedUpdate = {
       ...departmentUpdate,
       // An organization admin holds nothing department-scoped, and somebody
       // stepping down keeps nothing from the job they are leaving.
+      departmentAdmin: false,
       departmentAdminPermissions: [],
       permissions: effectivePermissions,
       role: nextRole,
       roleName,
+      ...(safeRoleId ? { roleId: safeRoleId } : {}),
       roleUpdatedAt: fieldValue.serverTimestamp(),
       roleUpdatedBy: context.uid,
       updatedAt: fieldValue.serverTimestamp()
     };
 
-    transaction.set(
-      approvedPhoneRef,
-      safeRoleId ? { ...sharedUpdate, roleId: safeRoleId } : sharedUpdate,
-      { merge: true }
-    );
+    transaction.set(approvedPhoneRef, sharedUpdate, { merge: true });
     transaction.set(
       globalApprovedPhoneRef,
       {
         ...departmentUpdate,
+        departmentAdmin: false,
+        departmentAdminPermissions: [],
         permissions: effectivePermissions,
         role: nextRole,
         ...(safeRoleId ? { roleId: safeRoleId } : {}),
@@ -404,19 +454,21 @@ export async function updateEmployeeOrgAdminRole(
       { merge: true }
     );
 
-    if (!userRef || !identityRef) {
+    if (!userRef || !employeeUid) {
       return;
     }
 
     transaction.set(userRef, sharedUpdate, { merge: true });
     transaction.set(
-      identityRef,
+      firestore.collection('identityDirectory').doc(employeeUid),
       {
         ...departmentUpdate,
         claimsVersion,
+        departmentAdmin: false,
         departmentAdminPermissions: [],
         permissions: effectivePermissions,
         role: nextRole,
+        ...(safeRoleId ? { roleId: safeRoleId } : {}),
         roleUpdatedAt: fieldValue.serverTimestamp(),
         roleUpdatedBy: context.uid,
         updatedAt: fieldValue.serverTimestamp()
@@ -426,13 +478,43 @@ export async function updateEmployeeOrgAdminRole(
   });
 
   if (employeeUid) {
-    await adminAuth.setCustomUserClaims(employeeUid, {
-      claimsVersion,
-      permissions: effectivePermissions,
-      role: nextRole,
-      status: 'ACTIVE',
-      tenantId: context.tenantId
-    });
+    /**
+     * Claims carry the authority Firestore rules read, so a demotion that only
+     * rewrites documents leaves the old role live in the token for up to an
+     * hour. Revoking forces the client back through a fresh verification and
+     * the new claims apply at once — the same thing every other path that takes
+     * authority away already does.
+     *
+     * Only on the way down. Promotion adds access, so waiting for the ordinary
+     * refresh costs nobody anything, and revoking would sign somebody out for
+     * being given more.
+     */
+    if (!input.grantOrgAdmin) {
+      await adminAuth.revokeRefreshTokens(employeeUid);
+    }
+
+    try {
+      await adminAuth.setCustomUserClaims(employeeUid, {
+        claimsVersion,
+        permissions: effectivePermissions,
+        role: nextRole,
+        status: claimsStatus,
+        tenantId: context.tenantId
+      });
+    } catch (error) {
+      /**
+       * The documents are the authority and they have already committed.
+       * `userProfileService` rewrites claims from the approved-phone record on
+       * the person's next profile request, so this heals itself — but it must
+       * not be silent, and it must not turn a change that happened into an
+       * error that says it did not.
+       */
+      console.error('[SynzappOrgAdmin] could not sync custom claims after a role change', {
+        error,
+        employeeUid,
+        tenantId: context.tenantId
+      });
+    }
   }
 
   const refreshedSnapshot = await approvedPhoneRef.get();

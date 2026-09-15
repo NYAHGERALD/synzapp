@@ -209,74 +209,33 @@ service cloud.firestore {
         allow read, write: if false;
       }
 
-      match /rcaIncidents/{incidentId} {
-        allow get, list: if requesterProfileIsActive(tenantId) &&
-          resource.data.tenantId == tenantId;
-        allow create: if requesterProfileIsActive(tenantId) &&
-          hasTenantPayload(tenantId);
-        allow update: if requesterProfileIsActive(tenantId) &&
-          resource.data.tenantId == tenantId &&
-          hasTenantPayload(tenantId) &&
-          resource.data.status != 'CLOSED';
-        allow delete: if false;
-
-        match /rcaSessions/{sessionId} {
-          allow get, list: if requesterProfileIsActive(tenantId) &&
-            resource.data.tenantId == tenantId;
-          allow create: if requesterProfileIsActive(tenantId) &&
-            hasTenantPayload(tenantId) &&
-            request.resource.data.incidentId == incidentId;
-          allow update: if requesterProfileIsActive(tenantId) &&
-            resource.data.tenantId == tenantId &&
-            hasTenantPayload(tenantId) &&
-            resource.data.status != 'CLOSED';
-          allow delete: if false;
-
-          match /nodes/{nodeId} {
-            allow get, list: if requesterProfileIsActive(tenantId) &&
-              resource.data.tenantId == tenantId;
-            allow create: if requesterProfileIsActive(tenantId) &&
-              hasTenantPayload(tenantId) &&
-              isRcaSessionOpen(tenantId, incidentId, sessionId);
-            allow update: if requesterProfileIsActive(tenantId) &&
-              resource.data.tenantId == tenantId &&
-              hasTenantPayload(tenantId) &&
-              isRcaSessionOpen(tenantId, incidentId, sessionId);
-            allow delete: if false;
-          }
-
-          match /presence/{presenceId} {
-            allow get, list: if requesterProfileIsActive(tenantId);
-            allow create, update: if requesterProfileIsActive(tenantId) &&
-              hasTenantPayload(tenantId) &&
-              request.resource.data.uid == request.auth.uid &&
-              isRcaSessionOpen(tenantId, incidentId, sessionId);
-            allow delete: if requesterProfileIsActive(tenantId) &&
-              resource.data.tenantId == tenantId &&
-              resource.data.uid == request.auth.uid;
-          }
-
-          match /capaActions/{capaId} {
-            allow get, list: if requesterProfileIsActive(tenantId) &&
-              resource.data.tenantId == tenantId;
-            allow create, update: if requesterProfileIsActive(tenantId) &&
-              hasTenantPayload(tenantId) &&
-              isRcaSessionOpen(tenantId, incidentId, sessionId);
-            allow delete: if false;
-          }
-
-          match /auditSignatures/{signatureId} {
-            allow get, list: if requesterProfileIsActive(tenantId) &&
-              resource.data.tenantId == tenantId;
-            allow create, update, delete: if false;
-          }
-        }
-
-        match /evidenceLogs/{evidenceId} {
-          allow get, list: if requesterProfileIsActive(tenantId) &&
-            resource.data.tenantId == tenantId;
-          allow create, update, delete: if false;
-        }
+      /**
+       * Everything about a root cause analysis, denied to clients.
+       *
+       * These rules used to let any active employee read and write every
+       * incident, session, node, CAPA action, audit signature and evidence log
+       * in their company. The backend is far narrower — `canAccessRcaIncident`
+       * requires the caller to have created the incident or be named in
+       * `participantUids` — so an ordinary employee could bypass the
+       * participant model entirely with their own ID token and the Firestore
+       * REST API.
+       *
+       * The data is exactly what the codebase elsewhere refuses to send to a
+       * third party: who was involved, whether anyone was injured, who reported
+       * it, lot numbers and shift records. An injury investigation readable by
+       * the whole plant floor.
+       *
+       * Writes were worse. The only content check was that the *existing*
+       * document was not CLOSED, so `createdByUid`, `participantUids`,
+       * `rootCause` and `status` were all client-settable — while the backend
+       * refuses to reopen a closed RCA outside a governed workflow. In food
+       * manufacturing that record is regulatory evidence.
+       *
+       * A recursive wildcard rather than a rule per collection, so a
+       * subcollection added later cannot be left open by omission.
+       */
+      match /rcaIncidents/{document=**} {
+        allow read, write: if false;
       }
 
       match /auditLogs/{auditLogId} {

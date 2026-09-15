@@ -20,6 +20,8 @@ import { useAppTheme } from '../../theme/AppThemeProvider';
 export interface EmployeeListItem {
   baseRole: string;
   department: string;
+  /** Null until they have signed in; an invite has no account behind it yet. */
+  employeeUid?: string | null;
   id: string;
   initials: string;
   isPhoneOnly: boolean;
@@ -56,7 +58,8 @@ export function EmployeeRow({
   onPermanentlyRemoveDeleted,
   onReactivateDeleted,
   onSelect,
-  profilePhotoHeaders
+  profilePhotoHeaders,
+  viewerUid
 }: {
   canManageUsers: boolean;
   employee: EmployeeListItem;
@@ -65,9 +68,11 @@ export function EmployeeRow({
   onReactivateDeleted: () => void;
   onSelect: () => void;
   profilePhotoHeaders?: Record<string, string>;
+  /** So a row can tell it belongs to the person looking at it. */
+  viewerUid?: string | null;
 }) {
   const appTheme = useAppTheme();
-  const hasActions = canManageUsers && getEmployeeActionOptions(employee).length > 0;
+  const hasActions = canManageUsers && getEmployeeActionOptions(employee, viewerUid).length > 0;
   const statusValue = employee.statusValue.toUpperCase();
   /**
    * Never for an organization admin. Their one action is stepping down, and the
@@ -262,7 +267,10 @@ export function EmployeeRow({
   );
 }
 
-export function getEmployeeActionOptions(employee: EmployeeListItem): EmployeeActionOption[] {
+export function getEmployeeActionOptions(
+  employee: EmployeeListItem,
+  viewerUid?: string | null
+): EmployeeActionOption[] {
   const status = employee.statusValue.toUpperCase();
   const changeRoleOption: EmployeeActionOption = {
     action: 'CHANGE_ROLE',
@@ -369,7 +377,9 @@ export function getEmployeeActionOptions(employee: EmployeeListItem): EmployeeAc
    */
   const orgAdminOption = buildOrgAdminRoleOption({
     baseRole: employee.baseRole,
-    status
+    status,
+    targetUid: employee.employeeUid,
+    viewerUid
   });
 
   if (!shouldOfferEmployeeLifecycleActions(employee.baseRole)) {

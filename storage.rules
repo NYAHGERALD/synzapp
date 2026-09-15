@@ -49,11 +49,16 @@ service firebase.storage {
       allow read, write: if false;
     }
 
+    // An orphan path, and an open door.
+    //
+    // No real RCA evidence has ever lived here: the backend writes to
+    // organizations/{tenantId}/rca/{incidentId}/sessions/{sessionId}/evidence/
+    // through the Admin SDK, and serves it back only behind an authorised
+    // route. What this rule actually granted was an unlimited, unaudited 50 MB
+    // upload path into the customer's bucket, with no content-type check, that
+    // no retention job knows about and nothing ever deletes.
     match /organizations/{tenantId}/rcaIncidents/{incidentId}/evidence/{fileName} {
-      allow read: if isActiveTenant(tenantId);
-      allow create: if isActiveTenant(tenantId) &&
-        request.resource.size < 50 * 1024 * 1024;
-      allow update, delete: if false;
+      allow read, write: if false;
     }
 
     match /organizations/{tenantId}/railsItems/{railsItemId}/evidence/{fileName} {

@@ -42,8 +42,19 @@ export function isOrgAdminEmployee(baseRole?: string | null): boolean {
 export function buildOrgAdminRoleOption(input: {
   baseRole?: string | null;
   status?: string | null;
+  targetUid?: string | null;
+  viewerUid?: string | null;
 }): OrgAdminRoleActionOption | null {
   const status = (input.status || '').toUpperCase();
+
+  /**
+   * Never on your own row. The server refuses it — an admin who can demote
+   * themselves strands a company by accident — so offering it would walk
+   * somebody through a role picker and a confirmation to reach an error.
+   */
+  if (input.viewerUid && input.targetUid && input.viewerUid === input.targetUid) {
+    return null;
+  }
 
   if (isOrgAdminEmployee(input.baseRole)) {
     return {

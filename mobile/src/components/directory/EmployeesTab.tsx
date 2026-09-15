@@ -31,7 +31,8 @@ export function EmployeesTab({
   onSelectEmployee,
   onSendDraft,
   onToggleInviteOrgAdmin,
-  profilePhotoHeaders
+  profilePhotoHeaders,
+  viewerUid
 }: {
   canInviteEmployees: boolean;
   canManageUsers: boolean;
@@ -53,6 +54,7 @@ export function EmployeesTab({
   onSendDraft: () => void;
   onToggleInviteOrgAdmin: (value: boolean) => void;
   profilePhotoHeaders?: Record<string, string>;
+  viewerUid?: string | null;
 }) {
   const appTheme = useAppTheme();
   const emptyState = describeEmployeesEmptyState({
@@ -113,6 +115,7 @@ export function EmployeesTab({
             onReactivateDeleted={() => onReactivateDeletedEmployee(employee)}
             onSelect={() => onSelectEmployee(employee)}
             profilePhotoHeaders={profilePhotoHeaders}
+            viewerUid={viewerUid}
           />
         )}
         showsVerticalScrollIndicator={false}

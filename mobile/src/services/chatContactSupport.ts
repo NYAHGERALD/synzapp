@@ -50,7 +50,10 @@ export function isDestructiveEmployeeAction(action: EmployeeAction): boolean {
   return action === 'DELETE' ||
     action === 'ANONYMIZE' ||
     action === 'PERMANENT_DELETE' ||
-    action === 'REMOVE_INVITE';
+    action === 'REMOVE_INVITE' ||
+    // Taking admin access away is the one that reads as removal. Giving it is
+    // consequential but it is not the red button people are looking for.
+    action === 'REMOVE_ORG_ADMIN';
 }
 
 export async function cacheApprovedEmployeePhotos(
@@ -109,6 +112,7 @@ export function mapApprovedEmployeeToListItem(
   return {
     baseRole,
     department: employee.departmentName,
+    employeeUid: employee.employeeUid,
     id: employee.approvedPhoneId,
     initials: getInitials(name),
     isPhoneOnly: !hasRealDisplayName,

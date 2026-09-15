@@ -147,7 +147,7 @@ do. `npm run admins:review` lists existing admins across all three stores.
 - The web app has no invite UI at all, so there is no web control to add. That
   is a fact about the product, not an omission in this change.
 
-### 1.2 Firestore rules let every employee read all RCA data
+### 1.2 Firestore rules let every employee read all RCA data — DONE
 
 `firestore.rules:213-214` grants `get, list` on `rcaIncidents` to any active
 tenant member with only a `tenantId` match as a condition. The same repeats for
@@ -163,12 +163,16 @@ sensitive to send to a third party — `rcaAiContext.ts:5-13` names
 records. An injury investigation readable by the whole plant floor is an HR and
 GDPR problem, demonstrable in a pen test with nothing but a normal login.
 
-**Fix.** Set all six blocks to `allow read, write: if false`, matching what
-`firestore.rules:176-210` already does for files, announcements, work orders,
-action plans, RAILS items and notification events. No client uses the Firestore
-SDK, so nothing breaks.
+**Shipped.** Replaced with a single recursive deny,
+`match /rcaIncidents/{document=**}`, so a subcollection added later cannot be
+left open by omission. Verified first that no client can reach Firestore at all:
+mobile and web import only `firebase/app`, `firebase/app-check` and
+`firebase/auth`.
 
-### 1.3 The same rules allow client writes to RCA records
+Seven emulator tests now cover it, and they were run against the **old** rules to
+confirm they fail there — six of the seven did.
+
+### 1.3 The same rules allow client writes to RCA records — DONE
 
 `firestore.rules:215-220`, `226-232`, `238-244` and `259-265` allow create and
 update to any active tenant member. The only content check is that the
@@ -189,7 +193,7 @@ silently, with no audit entry.
 gate on participant membership and validate the changed field set in the rule,
 not just the prior status.
 
-### 1.4 Storage rules trust the token alone, and one rule is an open upload path
+### 1.4 Storage rules trust the token alone, and one rule is an open upload path — PART DONE
 
 Two defects in the same place.
 
@@ -212,13 +216,18 @@ cannot see refresh-token revocation — so `revokeRefreshTokens` in
 `employeeLifecycleService.ts:230` does not help, and a just-deactivated employee
 keeps direct Storage access for up to an hour.
 
-**Fix.** `allow read, write: if false` on the orphan rule, matching the RAILS
-evidence rule directly below it at `:59-61`, then `firebase deploy --only
-storage`. Five minutes; no client uses the Storage SDK. Then list the bucket
-under that prefix to confirm nothing has already been dumped there. For the
-structural half, deny client Storage access outright and serve everything through
-the short-lived signed URLs the backend already issues for action attachments
-(`storage.rules:42-50`) — that is the pattern every other path uses.
+**Shipped, the orphan half.** The rule is now `allow read, write: if false`,
+matching the RAILS evidence rule directly below it, with an emulator test that
+fails against the old rule. Still to do once deployed: list the bucket under that
+prefix to confirm nothing was dumped there while it was open.
+
+**Still open, the structural half.** `isActiveTenant` reads only the token, so a
+just-deactivated employee keeps direct Storage access until it expires. The
+answer is to deny client Storage access outright and serve everything through the
+short-lived signed URLs the backend already issues for action attachments
+(`storage.rules:42-50`). That touches the three paths clients still read — the
+company logo, profile photos and a person's own chat backup — so it is its own
+change.
 
 ### 1.5 App Check is unenforced everywhere, which is what makes the above reachable
 
@@ -516,6 +525,19 @@ the swipe gesture is withdrawn for them, since it looked up a lifecycle option
 that no longer exists and would have revealed a button that silently did nothing.
 Demotion opens the role picker first — somebody stepping down has to land on a
 real role.
+
+**What the adversarial review caught, all fixed:** the last-admin count was taken
+from `approvedPhones`, which does not contain the founding administrator at all —
+`orgAdminProfileService` writes the organization, the user document and the
+identity directory and nothing else. A founder who invited a second admin could
+never have demoted them: the count said nobody else remained while the founder
+sat right there. It counts live `users` now. Demotion also did not revoke refresh
+tokens, so the old role stayed live in the token for up to an hour and
+`firestore.rules` reads authority straight out of it; the claims write hardcoded
+`status: 'ACTIVE'`, which on a blocked record would have forged an active
+session; promotion never validated a supplied `roleId`; the tenant user document
+was written without being read; and promotion moved somebody into Human Resources
+with no record of where they came from, so demotion left them parked there.
 
 **Still open, and it belongs to 4.3:** an organization whose only admin leaves
 has no succession path. Demotion is refused for the last admin precisely to

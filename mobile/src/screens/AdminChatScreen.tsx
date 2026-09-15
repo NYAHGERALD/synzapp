@@ -12940,7 +12940,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
       return;
     }
 
-    const options = getEmployeeActionOptions(employee);
+    const options = getEmployeeActionOptions(employee, currentUid);
 
     if (!options.length) {
       Alert.alert('Employee actions', 'No lifecycle actions are available for this employee.');
@@ -13036,7 +13036,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
             onPress: () => {
               void saveOrgAdminRole(employee, option, true);
             },
-            style: 'destructive',
+            style: isDestructiveEmployeeAction(option.action) ? 'destructive' : 'default',
             text: option.confirmButton
           }
         ]
@@ -14491,6 +14491,7 @@ export function AdminChatScreen({ onOrganizationDeleted, onReady, onSessionInval
               ));
             }}
             profilePhotoHeaders={profilePhotoHeaders}
+            viewerUid={currentUid}
           />
         </View>
       ) : activeTab === 'Actions' ? (

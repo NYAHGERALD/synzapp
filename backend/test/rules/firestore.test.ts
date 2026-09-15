@@ -117,6 +117,76 @@ describe('Firestore emulator tenant rules', () => {
       tenantId: 'tenant_a'
     }));
   });
+  /**
+   * A root cause analysis holds who was involved, whether anybody was injured,
+   * who reported it and which lot and shift it happened on. These rules used to
+   * hand all of it to every employee in the company, and let them rewrite it.
+   */
+  it('denies an employee reading an RCA incident they are not part of', async () => {
+    const db = employeeContext('user_a', 'tenant_a').firestore();
+
+    await assertFails(getDoc(doc(db, 'organizations/tenant_a/rcaIncidents/incident_1')));
+  });
+
+  it('denies listing every RCA incident in the company', async () => {
+    const db = employeeContext('user_a', 'tenant_a').firestore();
+
+    await assertFails(getDocs(collection(db, 'organizations/tenant_a/rcaIncidents')));
+  });
+
+  it('denies reading RCA sessions, nodes, CAPA actions and evidence logs', async () => {
+    const db = employeeContext('user_a', 'tenant_a').firestore();
+    const paths = [
+      'organizations/tenant_a/rcaIncidents/incident_1/rcaSessions/session_1',
+      'organizations/tenant_a/rcaIncidents/incident_1/rcaSessions/session_1/nodes/node_1',
+      'organizations/tenant_a/rcaIncidents/incident_1/rcaSessions/session_1/capaActions/capa_1',
+      'organizations/tenant_a/rcaIncidents/incident_1/evidenceLogs/evidence_1'
+    ];
+
+    for (const path of paths) {
+      await assertFails(getDoc(doc(db, path)));
+    }
+  });
+
+  it('denies an employee altering an RCA incident', async () => {
+    /**
+     * The old rule checked only that the existing document was not CLOSED, so
+     * rootCause, status, createdByUid and participantUids were all settable by
+     * anybody — while the backend refuses to reopen a closed RCA outside a
+     * governed workflow. That record is regulatory evidence.
+     */
+    const db = employeeContext('user_a', 'tenant_a').firestore();
+
+    await assertFails(setDoc(doc(db, 'organizations/tenant_a/rcaIncidents/incident_1'), {
+      participantUids: ['user_a'],
+      rootCause: 'Somebody else did it',
+      status: 'CLOSED',
+      tenantId: 'tenant_a'
+    }));
+  });
+
+  it('denies creating an RCA incident from a client', async () => {
+    const db = employeeContext('user_a', 'tenant_a').firestore();
+
+    await assertFails(setDoc(doc(db, 'organizations/tenant_a/rcaIncidents/incident_2'), {
+      createdByUid: 'user_a',
+      status: 'OPEN',
+      tenantId: 'tenant_a'
+    }));
+  });
+
+  it('denies writing an RCA node, CAPA action and presence record', async () => {
+    const db = employeeContext('user_a', 'tenant_a').firestore();
+    const paths = [
+      'organizations/tenant_a/rcaIncidents/incident_1/rcaSessions/session_1/nodes/node_2',
+      'organizations/tenant_a/rcaIncidents/incident_1/rcaSessions/session_1/capaActions/capa_2',
+      'organizations/tenant_a/rcaIncidents/incident_1/rcaSessions/session_1/presence/user_a'
+    ];
+
+    for (const path of paths) {
+      await assertFails(setDoc(doc(db, path), { tenantId: 'tenant_a', uid: 'user_a' }));
+    }
+  });
 });
 
 function employeeContext(uid: string, tenantId: string) {
@@ -200,5 +270,36 @@ async function seedFirestore() {
       tenantId: 'tenant_a',
       type: 'RAILS_LOOP_ASSIGNED'
     });
+    /**
+     * An incident user_a has nothing to do with. The backend would refuse them:
+     * they neither created it nor appear in participantUids.
+     */
+    await setDoc(doc(db, 'organizations/tenant_a/rcaIncidents/incident_1'), {
+      createdByUid: 'user_c',
+      participantUids: ['user_c'],
+      reportedBy: 'Line supervisor',
+      status: 'OPEN',
+      tenantId: 'tenant_a',
+      title: 'Hand injury on the wrapper',
+      wasAnyoneInjured: true,
+      whoWasInvolved: 'Night shift packer'
+    });
+    await setDoc(doc(db, 'organizations/tenant_a/rcaIncidents/incident_1/rcaSessions/session_1'), {
+      incidentId: 'incident_1',
+      status: 'OPEN',
+      tenantId: 'tenant_a'
+    });
+    await setDoc(
+      doc(db, 'organizations/tenant_a/rcaIncidents/incident_1/rcaSessions/session_1/nodes/node_1'),
+      { label: 'Guard removed', sessionId: 'session_1', tenantId: 'tenant_a' }
+    );
+    await setDoc(
+      doc(db, 'organizations/tenant_a/rcaIncidents/incident_1/rcaSessions/session_1/capaActions/capa_1'),
+      { description: 'Refit the guard', sessionId: 'session_1', tenantId: 'tenant_a' }
+    );
+    await setDoc(
+      doc(db, 'organizations/tenant_a/rcaIncidents/incident_1/evidenceLogs/evidence_1'),
+      { fileName: 'wrapper.jpg', tenantId: 'tenant_a' }
+    );
   });
 }

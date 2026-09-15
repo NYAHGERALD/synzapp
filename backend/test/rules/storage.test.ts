@@ -52,6 +52,20 @@ describe('Storage emulator tenant rules', () => {
     await assertFails(getBytes(ref(storage, 'organizations/tenant_a/users/user_b/chat-backups/latest.synzappbackup')));
   });
 
+  /**
+   * The rule that used to sit here read like RCA evidence and was not: the
+   * backend keeps evidence under organizations/{tenantId}/rca/... instead. What
+   * it actually granted was an unlimited, unaudited 50 MB upload into the
+   * customer's bucket that no retention job knows about.
+   */
+  it('denies the orphan RCA evidence path, for reads and uploads alike', async () => {
+    const storage = employeeContext('user_a', 'tenant_a').storage();
+    const path = 'organizations/tenant_a/rcaIncidents/incident_1/evidence/anything.bin';
+
+    await assertFails(getBytes(ref(storage, path)));
+    await assertFails(uploadBytes(ref(storage, path), new Uint8Array([1, 2, 3])));
+  });
+
   it('blocks client writes to backend-owned storage paths', async () => {
     const storage = employeeContext('user_a', 'tenant_a').storage();
 

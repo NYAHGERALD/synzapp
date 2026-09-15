@@ -58,6 +58,42 @@ describe('what the employee sheet offers', () => {
   });
 });
 
+describe('your own row', () => {
+  it('offers nothing on the row belonging to the person looking at it', () => {
+    /**
+     * The server refuses a self change — an admin who can demote themselves
+     * strands a company by accident — so offering it would walk somebody
+     * through a role picker and a destructive confirmation to reach an error.
+     */
+    expect(buildOrgAdminRoleOption({
+      baseRole: 'ORG_ADMIN',
+      status: 'ACTIVE',
+      targetUid: 'user_1',
+      viewerUid: 'user_1'
+    })).toBeNull();
+  });
+
+  it('still offers it on somebody else', () => {
+    expect(buildOrgAdminRoleOption({
+      baseRole: 'ORG_ADMIN',
+      status: 'ACTIVE',
+      targetUid: 'user_2',
+      viewerUid: 'user_1'
+    })?.action).toBe('REMOVE_ORG_ADMIN');
+  });
+
+  it('does not treat two missing uids as the same person', () => {
+    // An unclaimed invite has no uid at all, and neither does a viewer whose
+    // profile has not loaded. Matching those would hide a real action.
+    expect(buildOrgAdminRoleOption({
+      baseRole: 'EMPLOYEE',
+      status: 'INVITED',
+      targetUid: null,
+      viewerUid: null
+    })?.action).toBe('ASSIGN_ORG_ADMIN');
+  });
+});
+
 describe('the wording of the two actions', () => {
   it('says what stepping down leaves untouched', () => {
     // Removing admin is not removing the person, and somebody hesitating over
