@@ -1,4 +1,5 @@
 import { Request, Router } from 'express';
+import { getVerifiedDevice } from '../middleware/deviceBinding.js';
 import { getDecodedTokenFromHeader as getDecodedToken } from '../middleware/requestAuth.js';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import { z } from 'zod';
@@ -2347,8 +2348,12 @@ profileRouter.post('/org-admin', verifyAppCheck, async (req, res, next) => {
 
 async function requireActiveRegisteredDevice(req: Request, decodedToken: DecodedIdToken) {
   const deviceId = getDeviceIdFromHeader(req);
+  // Already proved by enforceDeviceBinding for this request. Each check stamps
+  // lastSeenAt on two documents, so checking twice doubled the writes on the
+  // busiest authenticated path in the product.
+  const alreadyVerified = getVerifiedDevice(req, deviceId);
 
-  return verifyActiveRegisteredDevice(decodedToken, deviceId);
+  return alreadyVerified || verifyActiveRegisteredDevice(decodedToken, deviceId);
 }
 
 /** For the wipe endpoints only: a device this account owns, revoked or not. */

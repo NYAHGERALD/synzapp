@@ -1006,7 +1006,7 @@ or its wording, because matching prose is the mistake this codebase has made
 before — a revoked device once never recognised itself because the message had
 changed.
 
-### 6.17 Audit writes are not atomic with the change they describe — PART DONE
+### 6.17 Audit writes are not atomic with the change they describe — REFRAMED
 
 `auditService.ts:31-39` performs two sequential `.add()` calls outside a batch,
 so the root copy can land while the tenant copy fails. Callers audit after the
@@ -1016,10 +1016,89 @@ crash in between leaves the change with no record.
 **Shipped, the first half.** Both copies of an event now go in one batch, so the
 root copy can no longer land while the tenant copy fails.
 
-**Still open:** the audit event is still written after the mutation it describes
-has committed, so a crash between them leaves the change with no record. Putting
-the write inside each caller's transaction is a change at every call site, not
-here.
+**The second half was examined properly and the finding is aimed at the wrong
+thing.** Three designs were put up and judged against the real code. What came
+back:
+
+**The proposed fix is impossible on the routes that matter most, not merely
+expensive.** `PATCH /employees/:id/role` commits a Firestore transaction
+(`employeeRoleAssignmentService.ts:219`) and then calls
+`adminAuth.setCustomUserClaims` — Firebase Auth, not Firestore. Two commit
+points, one of them outside the database, so no Firestore transaction can ever
+span that mutation. Recorded here so nobody re-opens it as an unexplored option.
+
+**A worse failure sits in the same file and needs no crash at all.** 86 of the 93
+success-path call sites await the audit write unguarded, after the mutation has
+committed. One Firestore hiccup throws, lands in the route's catch, and that
+catch writes a second event marked FAILED — for a change that succeeded — while
+the caller gets a 500 for work that was done. The log is then confidently wrong,
+which is worse than a log with a hole in it.
+
+**Shipped for that:** the commit is wrapped, the event is written to Cloud
+Logging under an `AUDIT_WRITE_FAILED` marker either way, and what happens next is
+`SYNZAPP_AUDIT_WRITE_FAILURE_MODE`. It defaults to `throw`, which is exactly
+today's behaviour everywhere, so the deploy is behaviour-neutral. Cloud Logging
+is append-only and outside every tenant's reach, so this is also the nearest
+thing to the external sink 6.4 wants, at no Firestore cost.
+
+**The one operational step left, and it must come first:** alert on the
+`AUDIT_WRITE_FAILED` marker, *then* flip the flag to `continue`. Flipping it
+first replaces a loud lie with a silent gap and nobody notices either. That is
+the single biggest way this goes wrong.
+
+**Also shipped:** a per-request correlation id
+(`middleware/auditContext.ts`). Every event from one request now carries the
+same id — including the SUCCESS and FAILED pair above, which described one moment
+and had nothing tying them together.
+
+**Still open, honestly.** None of this closes the window. A crash between a
+mutation and its audit write still loses the event on any route without a
+write-ahead intent. The write-ahead itself is deliberately deferred until the
+failure marker has been watched for a week, because its value depends on how
+often this actually fires — and because it should start on five privileged routes
+rather than twenty.
+
+### 6.20 The server had no graceful shutdown — DONE
+
+No `SIGTERM`, `SIGINT` or `server.close` anywhere in `backend/src`;
+`server.ts` was a bare `listen`. Node exited the instant Cloud Run sent SIGTERM,
+which it does on every revision swap and every scale-down, so requests being
+served at that moment simply stopped mid-work.
+
+This is not only a dropped request. **It is the dominant cause of the failure
+behind 6.17** — a mutation commits, the process dies before the audit event is
+written, and the change exists with no record. A deploy, not a crash, is what
+usually opens that window.
+
+**Shipped.** New connections stop, in-flight requests get a bounded grace period,
+and the process leaves on its own terms. The realtime servers hold sockets open
+indefinitely, so waiting for every connection would hang until SIGKILL and undo
+the point; the grace period is bounded for that reason.
+
+### 6.21 The device check ran twice per request — DONE
+
+Introduced by 2.2, and found by the review of 6.17 rather than by me.
+`verifyActiveRegisteredDevice` is not a read: it stamps `lastSeenAt` on two
+documents every time it runs. Once the guard was mounted globally, every route
+that also checked a device paid four writes where it used to pay two — on the
+busiest authenticated path in the product, where the audit batch is only 2 of 11
+writes.
+
+**Shipped.** The middleware keeps what it verified on the request, and the route
+guards reuse it rather than proving the same device again. The security check is
+unchanged; it simply happens once.
+
+### 6.22 Ninety-eight mutating routes write no audit event at all
+
+Larger than 6.17, with a probability of loss of 1. Eighty-seven are in the
+off-limits modules — `lswRoutes` 29, `railsRoutes` 22, `interpreterRoutes` 22,
+`rcaRoutes` 14 — and eleven are in `profileRoutes`. This overlaps 6.3 but is
+wider than it: 6.3 counted modules, this counts routes.
+
+`complianceRoutes` deserves its own line. All twelve of its audit calls are
+success-only, and `POST /holds` has a bare `next(error)` catch with no audit
+write of any kind — so a failure there leaves no record, not even a failed one.
+That is the real hole 6.17 was looking for.
 
 ### 6.18 The audit correlation id is client-supplied — DONE
 

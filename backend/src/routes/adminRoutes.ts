@@ -1,4 +1,5 @@
 import { Request, Router } from 'express';
+import { getVerifiedDevice } from '../middleware/deviceBinding.js';
 import { getDecodedTokenFromHeader as getDecodedToken } from '../middleware/requestAuth.js';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import { z } from 'zod';
@@ -1749,7 +1750,12 @@ async function requireActiveRegisteredDevice(req: Request, decodedToken: Decoded
     throw authorizationError('This device is not authorized.');
   }
 
-  return verifyActiveRegisteredDevice(decodedToken, parsedDeviceId.data);
+  // enforceDeviceBinding already proved this device for this request, and
+  // proving it again is not free: each check stamps lastSeenAt on two
+  // documents.
+  const alreadyVerified = getVerifiedDevice(req, parsedDeviceId.data);
+
+  return alreadyVerified || verifyActiveRegisteredDevice(decodedToken, parsedDeviceId.data);
 }
 
 function authorizationError(message: string): Error {

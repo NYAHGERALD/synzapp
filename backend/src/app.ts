@@ -3,6 +3,7 @@ import express, { ErrorRequestHandler } from 'express';
 import helmet from 'helmet';
 import { env } from './config/env.js';
 import { parseCorsOrigins } from './config/envGuards.js';
+import { attachAuditCorrelationId } from './middleware/auditContext.js';
 import { enforceDeviceBinding } from './middleware/deviceBinding.js';
 import { adminRouter } from './routes/adminRoutes.js';
 import { actionRouter } from './routes/actionRoutes.js';
@@ -63,6 +64,9 @@ export function createSynzappApp() {
    * RAILS, LSW, RCA and the interpreter, which are shipped and not edited.
    */
   app.use(enforceDeviceBinding);
+  // After the guard, so the guard's index stays ahead of the routers, and
+  // before any route can write an audit event.
+  app.use(attachAuditCorrelationId);
 
   app.use('/api/auth', authRouter);
   app.use('/api/admin', adminRouter);

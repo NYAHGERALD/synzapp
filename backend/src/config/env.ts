@@ -84,6 +84,23 @@ export const env = {
    * none at all, so enforcing it would reject every request from the phone.
    * `findProductionEnvWarnings` says so at boot rather than leaving it quiet.
    */
+  /**
+   * What happens when an audit event cannot be written.
+   *
+   * `throw` is today's behaviour everywhere and stays the default. The trouble
+   * with it is that the mutation has already committed by then, so the throw
+   * reaches the route's catch, which records a second event saying the change
+   * FAILED — and returns a 500 for work that was done. The log ends up
+   * confidently wrong.
+   *
+   * `continue` stops that: the failure is reported to Cloud Logging and the
+   * request succeeds, as it in fact did. Only flip it once something is
+   * alerting on the AUDIT_WRITE_FAILED marker, or a silent gap replaces a loud
+   * lie and nobody notices either.
+   */
+  auditWriteFailureMode: process.env.SYNZAPP_AUDIT_WRITE_FAILURE_MODE === 'continue'
+    ? 'continue' as const
+    : 'throw' as const,
   requireAppCheck: booleanFromEnv('SYNZAPP_REQUIRE_APP_CHECK'),
   authRateLimitWindowMs: numberFromEnv('AUTH_RATE_LIMIT_WINDOW_MS', 60_000),
   authRateLimitMax: numberFromEnv('AUTH_RATE_LIMIT_MAX', 20),
