@@ -385,7 +385,7 @@ requests without the header still passes on the token alone. Revoking refresh
 tokens in 2.1 is what bounds that, to the life of the token rather than to
 whether the app cooperates. Neither is sufficient alone.
 
-### 2.3 Sign-out revokes nothing, and no session has a lifetime
+### 2.3 Sign-out revokes nothing, and no session has a lifetime — SIGN-OUT DONE
 
 `POST /api/auth/logout` verifies the token, writes an audit event and returns
 `{ok:true}` (`authRoutes.ts:193-233`). No `revokeRefreshTokens` anywhere. No
@@ -397,12 +397,29 @@ explicitly revoked.
 This matters operationally in your verticals: warehouse and plant floors share
 tablets, and a signed-out shift worker's credential is still live.
 
-**Fix.** Revoke refresh tokens on logout. Add a tenant-configurable absolute
-lifetime and idle timeout enforced in `buildAuthSession` by comparing
-`decodedToken.auth_time` against a policy on the organization document — the
-machinery already exists in `isTokenOlderThan` (`authSessionService.ts:216-221`).
-Add step-up re-auth before privileged admin actions: employee deactivation,
-compliance export, retention change.
+**Shipped, the sign-out half.** `POST /auth/logout` now revokes the account's
+refresh tokens.
+
+**And it works immediately, which the finding understated.**
+`verifyFirebaseSession` passes `checkRevoked: true`
+(`authSessionService.ts:15`), so every later request is rejected the moment it
+arrives rather than whenever the token happens to expire. That also makes 2.1
+stronger than it was written: revoking a lost device cuts it off at once, not
+within the hour. A guard test asserts that second argument, because without it
+both revocations would be worth very little.
+
+Firebase revokes per account, not per device, so signing out ends every session
+that person has rather than only the one in front of them. That is the right
+trade for an explicit sign-out — somebody who meant to leave should not have to
+wonder which of their sessions actually ended — and it is recorded here so it is
+a decision rather than a surprise.
+
+**Still open, the lifetime half.** There is no idle timeout and no maximum
+session age. That belongs with 3.2, because the policy has to be configurable
+rather than a number chosen in code: the standing rule is that decisions
+affecting tenants live in the Synzapp staff console. Step-up re-authentication
+before privileged actions — deactivation, compliance export, retention change —
+is also still open.
 
 ### 2.4 The rate limiter is per-instance for everything except two routes
 

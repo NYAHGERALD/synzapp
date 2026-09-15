@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { adminAuth } from '../config/firebaseAdmin.js';
 import { env } from '../config/env.js';
 import { createRateLimiter } from '../middleware/rateLimit.js';
 import { verifyAppCheck } from '../middleware/appCheck.js';
@@ -206,11 +207,32 @@ authRouter.post('/logout', verifyAppCheck, async (req, res, next) => {
     const decodedToken = await verifyFirebaseSession(idToken);
     const session = await buildAuthSession(decodedToken);
 
+    /**
+     * Sign-out now ends the session on the server, not only in the app.
+     *
+     * It used to verify the token, write an audit line and return ok, leaving
+     * the credential live until it expired on its own. "Are sessions terminated
+     * on logout" is on every enterprise questionnaire, and it matters on a plant
+     * floor or in a warehouse where a tablet is shared between shifts: the
+     * worker who signed out was still signed in.
+     *
+     * This works immediately rather than at the next refresh, because
+     * `verifyFirebaseSession` passes `checkRevoked: true` — every later request
+     * is rejected the moment it arrives.
+     *
+     * Firebase revokes per account, not per device, so this signs the person out
+     * everywhere rather than only here. That is the right trade for an explicit
+     * sign-out: somebody who meant to leave a session should not have to wonder
+     * which of their sessions actually ended. Signing in again is one code.
+     */
+    await adminAuth.revokeRefreshTokens(decodedToken.uid);
+
     await writeAuditEvent({
       action: 'AUTH_LOGOUT',
       metadata: {
         access: session.access,
-        nextStep: session.nextStep
+        nextStep: session.nextStep,
+        sessionsRevoked: true
       },
       phoneMasked: session.user.phoneMasked,
       req,
