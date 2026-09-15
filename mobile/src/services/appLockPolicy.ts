@@ -27,7 +27,14 @@
  * No native import, so all of this can be tested.
  */
 
-/** Six, because that is what people expect and what Teams asks for. */
+/**
+ * Six.
+ *
+ * Not because Teams asks for six — it does not. Teams inherits its PIN from an
+ * Intune app protection policy, where the customer's IT administrator sets the
+ * minimum length and the default is four. Six is this product's own choice: a
+ * thousand times the search space of four, for one more digit.
+ */
 export const APP_LOCK_PIN_LENGTH = 6;
 
 /**
@@ -45,8 +52,14 @@ export const APP_LOCK_MAX_ATTEMPTS = 10;
  * How long the app may sit in the background before it locks again.
  *
  * Long enough to take a photo, answer a call or check a work order and come
- * back; short enough that a phone put down on a bench locks itself. Teams uses
- * about a minute for the same reason.
+ * back; short enough that a phone put down on a bench locks itself.
+ *
+ * **Deliberately far shorter than Teams.** Intune's equivalent — recheck access
+ * after N minutes of inactivity — defaults to around thirty minutes, which suits
+ * a laptop bag. It does not suit a tablet shared between shifts, which is the
+ * case this product has. A minute is the aggressive end of reasonable and is
+ * worth revisiting if people complain; the number to move is this one, and
+ * nothing else depends on it.
  */
 export const APP_LOCK_BACKGROUND_GRACE_MS = 60_000;
 
