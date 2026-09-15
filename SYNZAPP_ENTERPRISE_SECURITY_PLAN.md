@@ -493,7 +493,7 @@ step 7.1.
 
 ## Step 4 — Identity, privilege and Synzapp's own access
 
-### 4.1 SYSTEM_ADMIN is a fully-privileged role nothing assigns
+### 4.1 SYSTEM_ADMIN is a fully-privileged role nothing assigns — DONE
 
 Accepted as a valid session role (`authorizationPolicy.ts:190-197`) and granting
 org-wide authority across interpreter export and management
@@ -502,9 +502,27 @@ org-wide authority across interpreter export and management
 policy (`tenantAiPolicyService.ts:473`). No code assigns it — but one path
 derives it from a free-text role **name**.
 
-**Fix.** Delete the role, or give it a documented, audited provisioning path.
-Delete the role-name fallback in `railsService` either way: authority must never
-be derived from a display string.
+**Shipped, by refusing it rather than deleting it.** Deleting the role outright is
+not possible from here — RAILS, LSW, RCA and the interpreter all reference it and
+are shipped modules this work does not edit. So `isKnownRole` no longer admits
+it, and a session presenting SYSTEM_ADMIN cannot form an active tenant session at
+all. For anything reaching the product through an ordinary request, which is
+everything, that has the same effect as deleting it.
+
+**Refused, not downgraded.** Downgrading would let somebody in with less than
+they claimed and no sign anything was wrong. A role nobody grants should never
+appear, so its appearance is worth failing on.
+
+**It is a behaviour change, so it is checkable first.** `npm run admins:review`
+now reports any record carrying SYSTEM_ADMIN across users, approved phones and
+the global directory. It should return nothing; if it does not, those accounts
+lose access on the next deploy and somebody needs to know beforehand rather than
+after.
+
+**Still open, and it belongs to 4.8:** the role-name fallback in `railsService`
+that derives SYSTEM_ADMIN from the string "system admin". The door into it is
+shut — `createRole` refuses all five reserved names — but the derivation itself
+is inside a module this work does not edit.
 
 ### 4.2 No separation of duties, no dual control
 

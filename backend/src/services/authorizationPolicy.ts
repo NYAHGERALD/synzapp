@@ -187,12 +187,32 @@ function hasText(value: string | null | undefined): value is string {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
+/**
+ * The roles a tenant session may hold.
+ *
+ * SYSTEM_ADMIN is deliberately absent, and its absence is the point.
+ *
+ * It is a fully privileged role — accepted for interpreter export and
+ * management, RAILS approvals, LSW, AI policy, group chat, device management
+ * and more — and **nothing in the product assigns it**. No route, no service, no
+ * script. That combination is the worst of both: an authority nobody can grant
+ * through any reviewed path, and one that would be honoured everywhere the
+ * moment a record carried it, however it got there.
+ *
+ * Deleting the role outright is not possible from here: RAILS, LSW, RCA and the
+ * interpreter all reference it and are shipped modules this work does not edit.
+ * Refusing it at the session boundary has the same effect for anything that
+ * reaches the product through an ordinary request, which is everything.
+ *
+ * A session presenting it is refused rather than downgraded. Downgrading would
+ * let somebody in with less than they claimed and no sign anything was wrong;
+ * being refused is visible, and a role nobody grants should never appear.
+ */
 function isKnownRole(role: string | null | undefined): role is SynzappRole {
   return (
     role === 'ORG_ADMIN' ||
     role === 'DEPT_ADMIN' ||
-    role === 'EMPLOYEE' ||
-    role === 'SYSTEM_ADMIN'
+    role === 'EMPLOYEE'
   );
 }
 

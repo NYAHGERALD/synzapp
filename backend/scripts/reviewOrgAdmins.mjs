@@ -123,6 +123,30 @@ function groupByTenant(rows) {
   return byTenant;
 }
 
+/**
+ * Anything carrying SYSTEM_ADMIN.
+ *
+ * Nothing in the product assigns that role, and a session presenting it is now
+ * refused — so this should return nothing. If it does not, those accounts lose
+ * access on the next deploy and somebody needs to know before it happens rather
+ * than after.
+ */
+async function readSystemAdmins() {
+  const [users, approvedPhones, directory] = await Promise.all([
+    firestore.collectionGroup('users').where('role', '==', 'SYSTEM_ADMIN').get().catch(() => null),
+    firestore.collectionGroup('approvedPhones').where('role', '==', 'SYSTEM_ADMIN').get().catch(() => null),
+    firestore.collection('approvedPhoneDirectory').where('role', '==', 'SYSTEM_ADMIN').get().catch(() => null)
+  ]);
+
+  return [
+    ...(users?.docs || []).map((doc) => ({ path: doc.ref.path, source: 'users' })),
+    ...(approvedPhones?.docs || []).map((doc) => ({ path: doc.ref.path, source: 'approvedPhones' })),
+    ...(directory?.docs || []).map((doc) => ({ path: doc.ref.path, source: 'approvedPhoneDirectory' }))
+  ];
+}
+
+const systemAdmins = await readSystemAdmins();
+
 const [directoryAdmins, approvedPhoneAdmins, tenantUserAdmins] = await Promise.all([
   readDirectoryAdmins(),
   readApprovedPhoneAdmins(),
@@ -133,6 +157,7 @@ if (asJson) {
   console.log(JSON.stringify({
     approvedPhoneAdmins,
     directoryAdmins,
+    systemAdmins,
     tenantUserAdmins
   }, null, 2));
   process.exit(0);
@@ -166,3 +191,15 @@ console.log('');
 
 console.log('Confirm each one was intended. An admin whose roleName is an ordinary');
 console.log('job title was almost certainly escalated by the Human Resources rule.');
+console.log('');
+
+if (systemAdmins.length) {
+  console.log(`WARNING: ${systemAdmins.length} record(s) carry SYSTEM_ADMIN.`);
+  systemAdmins.forEach((record) => console.log(`  [${record.source}] ${record.path}`));
+  console.log('');
+  console.log('Nothing in the product assigns that role, and a session presenting it is');
+  console.log('now refused. These accounts will lose access on the next deploy. Work out');
+  console.log('how they came to hold it before deploying, not after.');
+} else {
+  console.log('No record carries SYSTEM_ADMIN, which is what should be true.');
+}

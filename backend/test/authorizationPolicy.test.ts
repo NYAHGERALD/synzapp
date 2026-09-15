@@ -102,3 +102,48 @@ describe('authorization policy foundation', () => {
     );
   });
 });
+
+describe('a role nobody can grant is a role nobody may hold', () => {
+  const activeSession = {
+    access: 'ACTIVE' as const,
+    permissions: [],
+    status: 'ACTIVE' as const,
+    tenantId: 'tenant_a'
+  };
+
+  it('refuses a session claiming SYSTEM_ADMIN', () => {
+    /**
+     * SYSTEM_ADMIN is accepted for interpreter export and management, RAILS
+     * approvals, LSW, AI policy, group chat and device management — and nothing
+     * in the product assigns it. No route, no service, no script. An authority
+     * nobody can grant through any reviewed path, honoured everywhere the moment
+     * a record carried it, however it got there.
+     */
+    assert.equal(
+      isActiveTenantSession({ ...activeSession, role: 'SYSTEM_ADMIN' as never }),
+      false
+    );
+  });
+
+  it('still admits the three roles the product actually grants', () => {
+    (['ORG_ADMIN', 'DEPT_ADMIN', 'EMPLOYEE'] as const).forEach((role) => {
+      assert.equal(isActiveTenantSession({ ...activeSession, role }), true);
+    });
+  });
+
+  it('refuses rather than quietly downgrading', () => {
+    /**
+     * Downgrading would let somebody in with less than they claimed and no sign
+     * anything was wrong. A role nobody grants should never appear, so its
+     * appearance is worth failing on.
+     */
+    assert.equal(
+      canAccessTenantResource({
+        ...activeSession,
+        resourceTenantId: 'tenant_a',
+        role: 'SYSTEM_ADMIN' as never
+      }),
+      false
+    );
+  });
+});
