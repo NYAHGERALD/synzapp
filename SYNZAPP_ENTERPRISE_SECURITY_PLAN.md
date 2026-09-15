@@ -437,17 +437,44 @@ configured limit multiplied by the instance count.
 
 This is the step that implements the decisions recorded at the top.
 
-### 3.1 Mobile: a six-digit PIN with biometric unlock
+### 3.1 Mobile: a six-digit PIN with biometric unlock — CORE DONE, screen and biometric to come
 
-The design point that matters: **the PIN has to gate the local chat database
-key**, not just draw a lock screen. A PIN that only hides the UI is defeated by
-reading the device's storage; a PIN that derives the key means a locked app has
-nothing readable in it.
+**The design point in the plan was half right, and the half that was wrong
+matters.** "The PIN has to gate the local chat database key" assumes the PIN can
+carry cryptographic weight. It cannot. Six digits is a million possibilities, and
+the app has no slow key derivation available — `expo-crypto` offers SHA-256 and
+random bytes, not scrypt or Argon2. Anybody holding the extracted keystore could
+try every PIN in moments. Building it that way would have produced something that
+reads as strong and is not.
 
-Needs `expo-local-authentication` (a native dependency, so a rebuild), PIN setup
-during onboarding, a re-auth screen on cold start and on return from background
-past a threshold, a lockout after repeated failures, and a recovery path that
-does not become a bypass.
+So the protection is arranged where it holds, and the threat it is actually for —
+an unlocked handset left on a bench for a few minutes — is served better by it:
+
+- **Guessing is online only.** The chat key stays in the hardware-backed
+  keystore behind the device lock. The PIN gates the running app and the key
+  material it holds in memory.
+- **Guessing is slow.** Nothing for the first three slips, then a wait doubling
+  from five seconds to a five-minute cap.
+- **Guessing is finite.** At ten failures the local chat database is destroyed.
+  That is what makes the limit mean something rather than a delay somebody sits
+  out. The messages are on the server and come back after a real sign-in; what
+  is destroyed is the copy on a phone somebody else is holding.
+
+**Shipped: the whole decision layer, tested.** `appLockPolicy.ts` holds PIN
+rules, the failure ladder and when the lock is asked for; `appLockCredential.ts`
+stores a salted, iterated digest and never the PIN, compares in constant time,
+and carries its round count so the cost can be raised later without locking
+anybody out.
+
+The round count was measured rather than guessed: 120,000 rounds cost 248ms on
+the development machine, 20,000 cost 48ms. A phone running Hermes is several
+times slower, so the larger figure would have put one to two seconds in front of
+every cold start — and a lock people turn off protects nothing. 20,000 it is.
+
+**Still to build:** the PIN screens, storage through `SecureStore`, biometric
+unlock via `expo-local-authentication`, wiring into app start and background, and
+a recovery path that does not become a bypass. `expo-local-authentication` is a
+native dependency, so that part needs a rebuild.
 
 ### 3.2 Web: idle timeout and absolute lifetime
 
