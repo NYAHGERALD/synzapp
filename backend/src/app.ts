@@ -2,6 +2,7 @@ import cors from 'cors';
 import express, { ErrorRequestHandler } from 'express';
 import helmet from 'helmet';
 import { env } from './config/env.js';
+import { parseCorsOrigins } from './config/envGuards.js';
 import { adminRouter } from './routes/adminRoutes.js';
 import { actionRouter } from './routes/actionRoutes.js';
 import { announcementRouter } from './routes/announcementRoutes.js';
@@ -26,7 +27,7 @@ export function createSynzappApp() {
   }));
   app.use(cors({
     exposedHeaders: ['Content-Disposition'],
-    origin: env.corsOrigin === '*' ? true : env.corsOrigin
+    origin: parseCorsOrigins(env.corsOrigin)
   }));
   /**
    * Sized for what the evidence limit actually costs on the wire.

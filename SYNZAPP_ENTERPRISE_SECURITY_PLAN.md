@@ -229,7 +229,7 @@ short-lived signed URLs the backend already issues for action attachments
 company logo, profile photos and a person's own chat backup — so it is its own
 change.
 
-### 1.5 App Check is unenforced everywhere, which is what makes the above reachable
+### 1.5 App Check is unenforced everywhere — BLOCKED, and bigger than a config flip
 
 The Firebase App Check API for project `synzapp-a7ee3` reports
 `enforcementMode: UNENFORCED` for `firebasestorage`, `firestore`,
@@ -243,13 +243,25 @@ App Check token straight through when the flag is false, and `env.ts:67` default
 it to false. Both deployment templates ship it off (`render.yaml:26-27`,
 `cloudrun.env.example.yaml:5`).
 
-**Fix.** Turn it on in staging, confirm the mobile and web clients attach tokens,
-then set `SYNZAPP_REQUIRE_APP_CHECK=true` on Cloud Run and move each Firebase
-service to `ENFORCED` one at a time, watching the App Check metrics page for
-unverified traffic between each. Half a day, mostly waiting on metrics. Change
-both templates so a fresh deploy is not born insecure.
+**This is not half a day, and the plan was wrong about why.** The step assumed
+both clients already attach tokens and only the flag was missing. They do not:
+**the mobile app attaches no App Check token at all.** Only `web/src/firebase.ts`
+initialises App Check and sends `X-Firebase-AppCheck`; a search of `mobile/src`
+finds the string only inside an error-message regex. Turning enforcement on today
+would reject every request the phone app makes.
 
-### 1.6 The phone secrets fall back to a placeholder published in the repository
+So the boot guard added in 1.6 **warns** about this rather than refusing to
+start. Making it fatal would leave exactly two options on the next deploy: a
+server that will not start, or an app that cannot reach it.
+
+**Fix, in order.** Add App Check to the mobile app — the SDK, Play Integrity on
+Android and DeviceCheck or App Attest on iOS, registered in the Firebase console
+— and attach the header in `adminApi`. Then enable it in staging, confirm both
+clients, then set `SYNZAPP_REQUIRE_APP_CHECK=true` and move each Firebase service
+to `ENFORCED` one at a time, watching the metrics page for unverified traffic
+between each. The mobile half is a native dependency and a rebuild, not a flag.
+
+### 1.6 The phone secrets fall back to a placeholder published in the repository — DONE
 
 `env.ts:30-31` falls back to the literal `'change-this-before-production'` for
 both `PHONE_HASH_SECRET` and `PHONE_ENCRYPTION_SECRET`, and
@@ -264,21 +276,37 @@ silent fallback, not the current value. `cloudrun.env.example.yaml` does not lis
 `PHONE_HASH_SECRET` at all, so the next deployment from that template boots with
 the published key and nothing complains.
 
-**Fix.** Throw at module load when `NODE_ENV` is production and either secret is
-missing, shorter than 32 characters, or equal to the placeholder — about 20
-lines, the pattern already exists at `staffAccessService.ts:76-80`. Remove the
-literal from `.env.example`. Add both to `cloudrun.env.example.yaml` as Secret
-Manager references.
+**Shipped.** `envGuards.ts` holds the rules, pure and tested; `server.ts` runs
+them at boot and exits when production configuration is unsafe. It reports every
+problem at once rather than the first, because one-at-a-time turns a
+misconfigured deploy into four deploys each ending in the same surprise. The
+check lives in `server.ts` rather than `app.ts` so tests and `createSynzappApp`
+are unaffected.
 
-### 1.7 CORS is a wildcard on the live service
+The literal is gone from `.env.example`, which now carries no value at all for
+either secret — a placeholder in an example file is a placeholder that reaches
+production. Both Cloud Run templates gained a header saying the secrets come from
+Secret Manager via `--set-secrets`, and naming the `SYNZAPP_STAFF_DOMAIN` trap:
+deploying with `--env-vars-file` replaces the live environment and drops it,
+locking every Synzapp staff account out.
+
+### 1.7 CORS is a wildcard on the live service — DONE in code, needs the deploy
 
 `CORS_ORIGIN=*` on the live Cloud Run service, matching
 `backend/cloudrun.env.yaml:2`, `render.yaml:22` and `.env.example:2`, consumed at
 `env.ts:26`.
 
-**Fix.** Pin it to the real web and admin origins. Fifteen minutes plus a deploy.
+**Shipped in code.** Both templates now name the four real origins. The middleware
+also had a second defect: it passed `env.corsOrigin` to `cors` as a single
+string, and `cors` reads a comma separated string as one long origin that matches
+nothing — so a service configured with two origins would have silently refused
+both. `parseCorsOrigins` splits it into a list, and the boot guard refuses `*` in
+production.
 
-### 1.8 Any employee can enumerate the company's device inventory and presence
+**Still needs the deploy** to take effect on the live service, which is `*`
+today.
+
+### 1.8 Any employee can enumerate the company's device inventory and presence — DONE
 
 `firestore.rules:171-174` allows `get, list` on `deviceKeys` to any active tenant
 member. Those documents hold more than the public keys peers need — the record at
@@ -286,9 +314,10 @@ member. Those documents hold more than the public keys peers need — the record
 `lastSeenAt`, `uid`, `status`, `revokedByUid` and `revocationReason`. One list
 call returns a live presence map of the whole company.
 
-**Fix.** Deny the collection to clients and serve public keys through the existing
-encryption-context endpoint, which already returns exactly the fields a sender
-needs (`encryptedMessageEnvelopeService.ts:61-68`).
+**Shipped.** Denied to clients entirely, with an emulator test. Senders still get
+what they need from the encryption-context endpoints in `profileRoutes`, which
+return exactly the six public fields of `EncryptionDevicePublicKey` and nothing
+else — no installation id, no last seen time, no revocation reason.
 
 ---
 

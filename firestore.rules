@@ -168,9 +168,21 @@ service cloud.firestore {
         }
       }
 
+      /**
+       * Denied to clients, including reads.
+       *
+       * These documents hold far more than the public keys a sender needs:
+       * `appInstallationId`, `platform`, `lastSeenAt`, `uid`, `status`,
+       * `revokedByUid` and `revocationReason`. A single list call returned a
+       * live inventory of every device in the company and who was using it,
+       * to any employee.
+       *
+       * The keys themselves still reach senders, through the encryption-context
+       * endpoints in `profileRoutes`, which return exactly the six public
+       * fields of `EncryptionDevicePublicKey` and nothing else.
+       */
       match /deviceKeys/{deviceId} {
-        allow get, list: if requesterProfileIsActive(tenantId);
-        allow create, update, delete: if false;
+        allow read, write: if false;
       }
 
       match /files/{fileId} {

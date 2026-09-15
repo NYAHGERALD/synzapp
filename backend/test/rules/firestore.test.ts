@@ -117,6 +117,19 @@ describe('Firestore emulator tenant rules', () => {
       tenantId: 'tenant_a'
     }));
   });
+  it('denies enumerating the company device inventory', async () => {
+    /**
+     * A device key document carries the installation id, platform, last seen
+     * time, owner and revocation reason, so one list call was a live inventory
+     * of every device in the company. Senders get the public keys they need
+     * from the encryption-context endpoints instead.
+     */
+    const db = employeeContext('user_a', 'tenant_a').firestore();
+
+    await assertFails(getDocs(collection(db, 'organizations/tenant_a/deviceKeys')));
+    await assertFails(getDoc(doc(db, 'organizations/tenant_a/deviceKeys/device_1')));
+  });
+
   /**
    * A root cause analysis holds who was involved, whether anybody was injured,
    * who reported it and which lot and shift it happened on. These rules used to
@@ -269,6 +282,15 @@ async function seedFirestore() {
       recipientUids: ['user_a'],
       tenantId: 'tenant_a',
       type: 'RAILS_LOOP_ASSIGNED'
+    });
+    await setDoc(doc(db, 'organizations/tenant_a/deviceKeys/device_1'), {
+      appInstallationId: 'install-abc',
+      identityPublicKey: 'pk',
+      lastSeenAt: 1,
+      platform: 'ios',
+      status: 'ACTIVE',
+      tenantId: 'tenant_a',
+      uid: 'user_c'
     });
     /**
      * An incident user_a has nothing to do with. The backend would refuse them:

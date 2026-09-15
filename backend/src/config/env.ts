@@ -21,12 +21,23 @@ function booleanFromEnv(name: string, fallback = false): boolean {
   return ['1', 'true', 'yes', 'on'].includes(value.toLowerCase());
 }
 
+const nodeEnv = process.env.NODE_ENV || 'development';
+
 export const env = {
+  nodeEnv,
   port: numberFromEnv('PORT', 4100),
   corsOrigin: process.env.CORS_ORIGIN || '*',
   firebaseProjectId: process.env.FIREBASE_PROJECT_ID,
   firebaseStorageBucket: process.env.FIREBASE_STORAGE_BUCKET,
   firebaseServiceAccountJson: process.env.FIREBASE_SERVICE_ACCOUNT_JSON,
+  /**
+   * The fallback is a development convenience and nothing more.
+   *
+   * `findProductionEnvProblems` refuses to start the server when either of
+   * these is missing, too short, or still this value, so the placeholder can no
+   * longer reach production quietly the way it could before. Local work keeps
+   * running without any configuration at all.
+   */
   phoneHashSecret: process.env.PHONE_HASH_SECRET || 'change-this-before-production',
   phoneEncryptionSecret: process.env.PHONE_ENCRYPTION_SECRET || process.env.PHONE_HASH_SECRET || 'change-this-before-production',
   openAiApiKey: process.env.OPENAI_API_KEY,
@@ -64,6 +75,15 @@ export const env = {
   interpreterReminderWorkerTenantBatchSize: numberFromEnv('INTERPRETER_REMINDER_WORKER_TENANT_BATCH_SIZE', 100),
   interpreterApprovedCurrentFacts: process.env.INTERPRETER_APPROVED_CURRENT_FACTS || '',
   interpreterCurrentUsPresident: process.env.INTERPRETER_CURRENT_US_PRESIDENT || '',
+  /**
+   * Still defaults to off, and that is not an endorsement.
+   *
+   * The middleware lets a request with no App Check token straight through when
+   * this is false, so every route decorated with it is unprotected. It cannot be
+   * flipped on yet: only the web app attaches a token, and the mobile app sends
+   * none at all, so enforcing it would reject every request from the phone.
+   * `findProductionEnvWarnings` says so at boot rather than leaving it quiet.
+   */
   requireAppCheck: booleanFromEnv('SYNZAPP_REQUIRE_APP_CHECK'),
   authRateLimitWindowMs: numberFromEnv('AUTH_RATE_LIMIT_WINDOW_MS', 60_000),
   authRateLimitMax: numberFromEnv('AUTH_RATE_LIMIT_MAX', 20),
