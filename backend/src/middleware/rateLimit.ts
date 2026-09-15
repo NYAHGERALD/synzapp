@@ -75,6 +75,42 @@ export function assertRateLimit(key: string, windowMs: number, max: number) {
   return result;
 }
 
+/**
+ * The same assertion, counted across every instance.
+ *
+ * `assertRateLimit` holds its counts in a module-level Map, so on Cloud Run the
+ * effective limit is whatever was configured multiplied by however many
+ * instances happen to be running — and it rises exactly when a service is under
+ * load, which is when a limit matters. A caller can also simply be routed to a
+ * fresh instance and start again.
+ *
+ * Kept separate rather than making `assertRateLimit` durable, because that
+ * function is synchronous and is called from the interpreter in a dozen places;
+ * turning it async would mean editing a shipped module this work does not touch.
+ *
+ * The local count is still consulted first. It is free, and somebody already
+ * over the limit on this instance is refused without a Firestore round trip —
+ * the shared count is only asked when the local one would have let them through.
+ */
+export async function assertDurableRateLimit(key: string, windowMs: number, max: number) {
+  const local = consumeRateLimit(key, windowMs, max);
+  const result = local.allowed
+    ? await consumeDurableRateLimit(key, windowMs, max)
+    : local;
+
+  if (!result.allowed) {
+    const retryAfterSeconds = Math.ceil((result.resetAt - Date.now()) / 1000);
+    const error = new Error(`Too many attempts. Try again in ${retryAfterSeconds} seconds.`);
+
+    error.name = 'RateLimitError';
+    (error as Error & { retryAfterSeconds?: number }).retryAfterSeconds = retryAfterSeconds;
+
+    throw error;
+  }
+
+  return result;
+}
+
 export function getClientIp(req: Request): string {
   // From the end of the list, where the platform writes, not the beginning,
   // where the caller does. See clientIp.ts for what that was costing.

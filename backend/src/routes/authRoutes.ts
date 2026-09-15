@@ -41,7 +41,7 @@ authRouter.post(
   async (req, res, next) => {
     try {
       const body = otpPreflightBodySchema.parse(req.body);
-      const result = assertOtpPreflight(body.phoneNumber);
+      const result = await assertOtpPreflight(body.phoneNumber);
 
       await writeAuditEvent({
         action: 'AUTH_OTP_PREFLIGHT',

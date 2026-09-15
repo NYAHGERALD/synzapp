@@ -1,7 +1,7 @@
 import { DecodedIdToken } from 'firebase-admin/auth';
 import { env } from '../config/env.js';
 import { adminAuth, firestore } from '../config/firebaseAdmin.js';
-import { assertRateLimit } from '../middleware/rateLimit.js';
+import { assertDurableRateLimit } from '../middleware/rateLimit.js';
 import {
   ApprovedPhoneRecord,
   AuthSessionResponse,
@@ -44,12 +44,25 @@ export async function buildAuthSession(
   const phoneHash = hashPhoneNumber(normalizedPhone);
 
   if (options.consumeRateLimit) {
-    assertRateLimit(
+    /**
+     * Counted across instances, not per instance.
+     *
+     * These guard how often one account or one phone number may establish a
+     * session. Held in a module-level Map they were multiplied by however many
+     * instances happened to be running — and that number rises under load,
+     * which is when the limit matters. Somebody could also simply be routed to
+     * a fresh instance and start again.
+     *
+     * Only this one caller asks for the count to be consumed, so the Firestore
+     * round trip lands on the session route alone rather than on every request
+     * that builds a session.
+     */
+    await assertDurableRateLimit(
       `session:uid:${decodedToken.uid}`,
       env.authRateLimitWindowMs,
       env.authRateLimitMax
     );
-    assertRateLimit(
+    await assertDurableRateLimit(
       `session:phone:${phoneHash}`,
       env.authRateLimitWindowMs,
       env.authRateLimitMax
@@ -133,10 +146,20 @@ export async function buildAuthSession(
   };
 }
 
-export function assertOtpPreflight(phoneNumber: string): { phoneMasked: string; retryAfterSeconds: number } {
+export async function assertOtpPreflight(
+  phoneNumber: string
+): Promise<{ phoneMasked: string; retryAfterSeconds: number }> {
   const normalizedPhone = normalizeE164Phone(phoneNumber);
   const phoneHash = hashPhoneNumber(normalizedPhone);
-  const result = assertRateLimit(
+  /**
+   * How often one phone number may be sent a code, counted across instances.
+   *
+   * The route's own limiter is keyed on the caller's address, so it does not
+   * stop the same number being targeted from many of them. This is the limit
+   * that does — and held per instance it rose with the instance count, which is
+   * to say it loosened precisely when somebody was hammering it.
+   */
+  const result = await assertDurableRateLimit(
     `otp:phone:${phoneHash}`,
     env.otpRateLimitWindowMs,
     env.otpRateLimitMax

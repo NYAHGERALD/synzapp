@@ -421,7 +421,7 @@ affecting tenants live in the Synzapp staff console. Step-up re-authentication
 before privileged actions — deactivation, compliance export, retention change —
 is also still open.
 
-### 2.4 The rate limiter is per-instance for everything except two routes
+### 2.4 The rate limiter is per-instance for everything except two routes — DONE
 
 `middleware/rateLimit.ts:26` holds buckets in a module-level Map. The durable
 Firestore counter built this session is consulted only when `options.durable` is
@@ -429,7 +429,28 @@ set (`:40-42`), which only the OTP preflight and session routes do
 (`authRoutes.ts:34, 75`). On Cloud Run the effective limit everywhere else is the
 configured limit multiplied by the instance count.
 
-**Fix.** Make the durable path the default for authentication-adjacent limits.
+**Shipped, and the finding was slightly out of date.** All three
+`createRateLimiter` sites — the OTP preflight, the session route and the public
+contact form — were already `durable: true`. What was still per-instance were the
+limits inside `authSessionService`: how often one account or one phone number may
+establish a session, and how often one phone number may be sent a code.
+
+That last one matters most. The route's own limiter is keyed on the caller's
+address, so it does not stop a single number being targeted from many of them.
+The per-phone limit is what does — and held per instance it rose with the
+instance count, which is to say it loosened precisely when somebody was
+hammering it.
+
+`assertDurableRateLimit` is a sibling rather than a replacement, deliberately.
+`assertRateLimit` is synchronous and is called from the interpreter in a dozen
+places; making it async would mean editing a shipped module this work does not
+touch. The free local count is still consulted first, so somebody already over
+the limit on this instance is refused without a Firestore round trip.
+
+**Residual, recorded rather than hidden:** the interpreter's own limits — create,
+export, realtime, transcript reading and the rest — remain per-instance for that
+same reason. They guard cost and abuse of a paid API rather than authentication,
+which is why this is a note and not a blocker, but it is still true.
 
 ---
 
