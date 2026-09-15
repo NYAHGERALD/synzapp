@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { env } from '../config/env.js';
-import { getAuditCorrelationId } from '../middleware/auditContext.js';
+import {
+  getAuditCorrelationId,
+  resolveAuditIdentity
+} from '../middleware/auditContext.js';
 import { Request } from 'express';
 import { fieldValue, firestore } from '../config/firebaseAdmin.js';
 import { getClientIp } from '../middleware/rateLimit.js';
@@ -17,6 +20,24 @@ interface AuditEventInput {
 }
 
 export async function writeAuditEvent(input: AuditEventInput): Promise<void> {
+  /**
+   * Attribution for the events that had none.
+   *
+   * 60 of the 64 failure-path writes passed neither a uid nor a tenant, so they
+   * reached only the root collection that no route reads — and the console a
+   * customer can open showed nothing but successes. A log with a 100% success
+   * rate reads as a broken control, not a clean one.
+   *
+   * Only when the caller did not say. A successful request always carries its
+   * tenant, so this costs the ordinary path nothing.
+   */
+  const attributed = input.tenantId
+    ? { tenantId: input.tenantId, uid: input.uid || null }
+    : await resolveAuditIdentity(input.req).then((identity) => ({
+        tenantId: identity.tenantId,
+        uid: input.uid || identity.uid
+      }));
+
   const baseEvent = {
     action: input.action,
     createdAt: fieldValue.serverTimestamp(),
@@ -37,8 +58,8 @@ export async function writeAuditEvent(input: AuditEventInput): Promise<void> {
     correlationId: getAuditCorrelationId(input.req),
     requestId: randomUUID(),
     status: input.status,
-    tenantId: input.tenantId || null,
-    uid: input.uid || null,
+    tenantId: attributed.tenantId || null,
+    uid: attributed.uid || null,
     userAgent: input.req.header('User-Agent') || null
   };
 
@@ -53,11 +74,11 @@ export async function writeAuditEvent(input: AuditEventInput): Promise<void> {
 
   batch.create(firestore.collection('auditLogs').doc(), baseEvent);
 
-  if (input.tenantId) {
+  if (attributed.tenantId) {
     batch.create(
       firestore
         .collection('organizations')
-        .doc(input.tenantId)
+        .doc(attributed.tenantId)
         .collection('auditLogs')
         .doc(),
       baseEvent
@@ -92,7 +113,7 @@ export async function writeAuditEvent(input: AuditEventInput): Promise<void> {
       ...baseEvent,
       createdAt: undefined,
       error,
-      tenantCopyIntended: Boolean(input.tenantId)
+      tenantCopyIntended: Boolean(attributed.tenantId)
     });
 
     if (env.auditWriteFailureMode === 'throw') {

@@ -167,6 +167,13 @@ complianceRouter.post('/retention/policies', verifyAppCheck, async (req, res, ne
 
     res.status(201).json({ policy });
   } catch (error) {
+    await writeAuditEvent({
+      action: 'RETENTION_POLICY_SAVED',
+      reason: error instanceof Error ? error.message : 'Request failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
     next(error);
   }
 });
@@ -197,6 +204,13 @@ complianceRouter.post('/retention/policies/:policyId/state', verifyAppCheck, asy
 
     res.json({ ok: true });
   } catch (error) {
+    await writeAuditEvent({
+      action: 'RETENTION_POLICY_STATE_CHANGED',
+      reason: error instanceof Error ? error.message : 'Request failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
     next(error);
   }
 });
@@ -225,6 +239,13 @@ complianceRouter.post('/holds', verifyAppCheck, async (req, res, next) => {
 
     res.status(201).json({ hold });
   } catch (error) {
+    await writeAuditEvent({
+      action: 'LEGAL_HOLD_APPLIED',
+      reason: error instanceof Error ? error.message : 'Request failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
     next(error);
   }
 });
@@ -256,6 +277,13 @@ complianceRouter.post('/holds/:holdId/release', verifyAppCheck, async (req, res,
 
     res.json({ delayUntil: new Date(delayUntilMs).toISOString() });
   } catch (error) {
+    await writeAuditEvent({
+      action: 'LEGAL_HOLD_RELEASED',
+      reason: error instanceof Error ? error.message : 'Request failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
     next(error);
   }
 });
@@ -285,6 +313,13 @@ complianceRouter.post('/disposition/:itemId/approve', verifyAppCheck, async (req
 
     res.json({ item });
   } catch (error) {
+    await writeAuditEvent({
+      action: 'DISPOSITION_APPROVED',
+      reason: error instanceof Error ? error.message : 'Request failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
     next(error);
   }
 });
@@ -316,6 +351,13 @@ complianceRouter.post('/disposition/:itemId/extend', verifyAppCheck, async (req,
 
     res.json({ ok: true });
   } catch (error) {
+    await writeAuditEvent({
+      action: 'DISPOSITION_EXTENDED',
+      reason: error instanceof Error ? error.message : 'Request failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
     next(error);
   }
 });
@@ -347,6 +389,13 @@ complianceRouter.post('/retention/evaluate', verifyAppCheck, async (req, res, ne
 
     res.json({ summary });
   } catch (error) {
+    await writeAuditEvent({
+      action: 'RETENTION_EVALUATED',
+      reason: error instanceof Error ? error.message : 'Request failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
     next(error);
   }
 });
@@ -410,6 +459,13 @@ complianceRouter.post('/retention/shred', verifyAppCheck, async (req, res, next)
 
     res.json({ summary });
   } catch (error) {
+    await writeAuditEvent({
+      action: 'RETENTION_SHREDDER_RUN',
+      reason: error instanceof Error ? error.message : 'Request failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
     next(error);
   }
 });
@@ -505,6 +561,13 @@ complianceRouter.post('/search', verifyAppCheck, async (req, res, next) => {
       truncated: result.truncated
     });
   } catch (error) {
+    await writeAuditEvent({
+      action: 'COMPLIANCE_ARCHIVE_SEARCHED',
+      reason: error instanceof Error ? error.message : 'Request failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
     next(error);
   }
 });
@@ -566,6 +629,13 @@ complianceRouter.post('/exports', verifyAppCheck, async (req, res, next) => {
     // picked up by the nightly sweep.
     void triggerExportWorker({ exportId: record.id, tenantId: context.tenantId });
   } catch (error) {
+    await writeAuditEvent({
+      action: 'COMPLIANCE_EXPORT_REQUESTED',
+      reason: error instanceof Error ? error.message : 'Request failed',
+      req,
+      status: 'FAILED'
+    }).catch(() => undefined);
+
     next(error);
   }
 });

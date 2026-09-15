@@ -783,7 +783,7 @@ block it. The pipeline exists; only the subject scoping is missing.
 The engine here is unusually complete, which makes these gaps costly: an auditor
 who finds one assumes the rest is decoration too.
 
-### 6.1 The tenant audit console cannot show a single failure
+### 6.1 The tenant audit console cannot show a single failure — DONE
 
 `writeAuditEvent` only writes the tenant-readable copy when `tenantId` is
 supplied (`auditService.ts:33-39`). Of the 64 DENIED/FAILED audit writes, **2**
@@ -798,10 +798,24 @@ SOC 2 CC7.2 and ISO 27001 A.8.15 both require failed attempts to be logged and
 reviewable. An auditor sampling a log with a 100% success rate reads it as a
 broken control.
 
-**Fix.** Resolve `tenantId` before the try block and pass it on every
-failure-path write. Add DENIED events to `complianceRoutes` for
-`requireComplianceAdmin` rejections and scheduler-secret mismatches. A shared
-error-handler hook stops it regressing.
+**Shipped, and not by editing sixty handlers.** 60 of the 64 failure-path writes
+passed neither a uid nor a tenant, so there was nothing to resolve *from* at the
+call site — the event was entirely unattributed. Instead `writeAuditEvent`
+resolves the identity itself when the caller did not supply a tenant, which is
+exactly the failure path. A request that succeeds already carries one, so the
+ordinary traffic pays nothing.
+
+**Signature only, deliberately.** `verifyIdToken(token, false)` proves who sent
+the request, which is what attribution asks. Checking revocation would answer a
+different question — may they do this — and would throw for exactly the caller
+most worth recording: somebody using a credential that has been taken away. A
+failure to attribute never becomes a second failure on top of the first.
+
+**And the compliance console now records refusals.** All twelve of its audit
+calls were success-only, with bare `next(error)` catches — so a non-admin
+attempting an archive search or a hold release left no trace anywhere, the
+precise thing that control exists to prevent. Ten mutating routes gained a
+failure event carrying the action they already declare.
 
 ### 6.2 A legal hold does not protect the audit log — DONE
 
